@@ -57,24 +57,14 @@ commit, and creates a `v<version>` tag. It never pushes.
 
 1. `test` runs for pull requests, `main`, tags, and manual dispatch.
 2. `release` runs only for a `v*` tag after tests pass. It verifies that the
-   tag matches `MARKETING_VERSION`, signs the app, builds a signed Installer
-   package, notarizes and staples it, generates SHA-256, and creates the
-   GitHub release.
+   tag matches `MARKETING_VERSION`, builds a macOS Installer package, generates
+   its SHA-256 digest, and creates the GitHub release.
 
-Configure these repository secrets before publishing:
-
-- `APPLICATION_CERTIFICATE_BASE64`
-- `INSTALLER_CERTIFICATE_BASE64`
-- `CERTIFICATE_PASSWORD`
-- `KEYCHAIN_PASSWORD`
-- `DEVELOPER_ID_APPLICATION`
-- `DEVELOPER_ID_INSTALLER`
-- `APPLE_ID`
-- `APPLE_TEAM_ID`
-- `APPLE_APP_PASSWORD`
-
-The certificate values are base64-encoded `.p12` files. Use the exact identity
-strings shown by `security find-identity -v`.
+The current pipeline creates an unsigned development installer because the
+repository has no Apple Developer signing identities or notarization
+credentials configured. Before public distribution, extend the release job
+with Developer ID Application and Installer signing, Apple notarization,
+stapling, and Gatekeeper verification.
 
 Publishing is intentionally manual and separate:
 
@@ -83,8 +73,8 @@ git push origin main
 git push origin v1.0.0
 ```
 
-Do not run those commands until the repository exists, secrets are configured,
-redistribution rights are resolved, and explicit push approval has been given.
+Do not run those commands until the repository exists, redistribution rights
+are resolved, and explicit push approval has been given.
 
 ## Update safety model
 
@@ -94,8 +84,9 @@ shows a command for the user to inspect and run. That command:
 1. creates a temporary directory;
 2. downloads `AccountDock.pkg` over HTTPS;
 3. compares it with `AccountDock.pkg.sha256`;
-4. checks the Installer signature with `pkgutil`;
-5. asks Gatekeeper to assess the package with `spctl`;
-6. invokes Apple's `installer`, which requests administrator authorization.
+4. invokes Apple's `installer`, which requests administrator authorization;
+5. registers AccountDock as a macOS login item.
 
-This keeps privileged installation explicit and leaves verification visible.
+This keeps privileged installation explicit and leaves checksum verification
+visible. A public release must additionally be Developer ID signed and
+notarized.
