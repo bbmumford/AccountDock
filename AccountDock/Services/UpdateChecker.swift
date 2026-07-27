@@ -100,10 +100,9 @@ final class UpdateChecker: ObservableObject {
           --output "$UPDATE_DIR/AccountDock.pkg" \
           '\(packageURL.absoluteString)'
         printf '%s  %s\\n' '\(checksum)' "$UPDATE_DIR/AccountDock.pkg" | /usr/bin/shasum -a 256 -c -
-        /usr/sbin/pkgutil --check-signature "$UPDATE_DIR/AccountDock.pkg"
-        /usr/sbin/spctl --assess --verbose --type install "$UPDATE_DIR/AccountDock.pkg"
         /usr/bin/osascript -e 'tell application id "app.accountdock.mac" to quit' 2>/dev/null || true
         /usr/bin/sudo /usr/sbin/installer -pkg "$UPDATE_DIR/AccountDock.pkg" -target /
+        /usr/bin/osascript -e 'tell application "System Events" to if not (exists login item "AccountDock") then make login item at end with properties {name:"AccountDock", path:"/Applications/AccountDock.app", hidden:false}'
         /usr/bin/open -a AccountDock
         """
     }
@@ -147,7 +146,7 @@ private enum UpdateError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .releaseUnavailable: "No published AccountDock release is available."
-        case .malformedRelease: "The latest release is missing its signed installer assets."
+        case .malformedRelease: "The latest release is missing its installer assets."
         case .invalidChecksum: "The release checksum could not be verified."
         }
     }

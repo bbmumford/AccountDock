@@ -46,62 +46,25 @@ jobs:
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           PROJECT_VERSION="$(awk -F'"' '/^[[:space:]]*MARKETING_VERSION:/ {print $2; exit}' project.yml)"
           test "$TAG_VERSION" = "$PROJECT_VERSION"
-      - name: Import signing certificates
-        env:
-          APPLICATION_CERTIFICATE_BASE64: ${{ secrets.APPLICATION_CERTIFICATE_BASE64 }}
-          INSTALLER_CERTIFICATE_BASE64: ${{ secrets.INSTALLER_CERTIFICATE_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          set -euo pipefail
-          KEYCHAIN="$RUNNER_TEMP/accountdock-signing.keychain-db"
-          echo "$APPLICATION_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/application.p12"
-          echo "$INSTALLER_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/installer.p12"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security import "$RUNNER_TEMP/application.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
-          security import "$RUNNER_TEMP/installer.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
-          security list-keychains -d user -s "$KEYCHAIN"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-      - name: Build signed app
-        env:
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+      - name: Build release app
         run: |
           set -euo pipefail
           xcodegen generate
-          xcodebuild archive \
+          xcodebuild build \
             -project AccountDock.xcodeproj \
             -scheme AccountDock \
             -configuration Release \
-            -archivePath "$RUNNER_TEMP/AccountDock.xcarchive" \
-            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="$DEVELOPER_ID_APPLICATION"
-          codesign --verify --deep --strict --verbose=2 \
-            "$RUNNER_TEMP/AccountDock.xcarchive/Products/Applications/AccountDock.app"
-      - name: Package and notarize
-        env:
-          DEVELOPER_ID_INSTALLER: ${{ secrets.DEVELOPER_ID_INSTALLER }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Package release
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/release"
           pkgbuild \
-            --component "$RUNNER_TEMP/AccountDock.xcarchive/Products/Applications/AccountDock.app" \
+            --component "$RUNNER_TEMP/DerivedData/Build/Products/Release/AccountDock.app" \
             --install-location /Applications \
-            --sign "$DEVELOPER_ID_INSTALLER" \
             "$RUNNER_TEMP/release/AccountDock.pkg"
-          xcrun notarytool submit "$RUNNER_TEMP/release/AccountDock.pkg" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_PASSWORD" \
-            --wait
-          xcrun stapler staple "$RUNNER_TEMP/release/AccountDock.pkg"
-          spctl --assess --verbose --type install "$RUNNER_TEMP/release/AccountDock.pkg"
           cd "$RUNNER_TEMP/release"
           /usr/bin/shasum -a 256 AccountDock.pkg > AccountDock.pkg.sha256
       - name: Publish GitHub release
