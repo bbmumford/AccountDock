@@ -1,0 +1,145 @@
+/* Navigation - Tab Bar */
+"Usage" = "Nutzung";
+"Costs" = "Kosten";
+"Accounts" = "Konten";
+
+/* Main Menu */
+"Double Usage Active" = "Doppelte Nutzung aktiv";
+"No account connected" = "Kein Konto verbunden";
+"Refresh" = "Aktualisieren";
+"Settings" = "Einstellungen";
+"Quit" = "Beenden";
+
+/* Settings - General */
+"General" = "Allgemein";
+"About" = "Über";
+"Appearance" = "Erscheinungsbild";
+"System" = "System";
+"Auto-refresh interval" = "Automatisches Aktualisierungsintervall";
+"15 seconds" = "15 Sekunden";
+"30 seconds" = "30 Sekunden";
+"1 minute" = "1 Minute";
+"5 minutes" = "5 Minuten";
+"10 minutes" = "10 Minuten";
+"Show account name in menu bar" = "Kontoname in der Menüleiste anzeigen";
+"Show full email address" = "Vollständige E-Mail-Adresse anzeigen";
+"Launch at login" = "Beim Anmelden starten";
+
+/* Language */
+"Language" = "Sprache";
+"Automatic" = "Automatisch";
+
+/* Settings - About */
+"Claude Code Account Switcher" = "Claude Code Kontowechsler";
+"Version %@" = "Version %@";
+"Checking..." = "Überprüfe...";
+"Check for Updates" = "Nach Updates suchen";
+"Easily switch between Claude Code accounts and monitor usage." = "Einfach zwischen Claude Code Konten wechseln und die Nutzung überwachen.";
+
+/* Usage Dashboard */
+"Loading usage data..." = "Nutzungsdaten werden geladen...";
+"Usage data unavailable" = "Nutzungsdaten nicht verfügbar";
+"Today's API-Equivalent Cost" = "Heutige API-äquivalente Kosten";
+"Today's Activity" = "Heutige Aktivität";
+"Turns" = "Runden";
+"Active" = "Aktiv";
+"Lines" = "Zeilen";
+"Messages you sent to Claude Code today" = "Nachrichten, die Sie heute an Claude Code gesendet haben";
+"Estimated total time Claude worked for you today. Parallel sessions stack. Idle gaps >10 min excluded. This is an approximation based on message timestamps, not exact." = "Geschätzte Gesamtzeit, die Claude heute für Sie gearbeitet hat. Parallele Sitzungen werden gestapelt. Leerlaufzeiten über 10 Min. werden ausgeschlossen. Dies ist eine Näherung basierend auf Nachrichtenzeitstempeln.";
+"Estimated lines of code written by Claude via Edit/Write tools" = "Geschätzte Codezeilen, die Claude über Edit/Write-Tools geschrieben hat";
+"Claude Opus 4 — most capable model, best for complex tasks" = "Claude Opus 4 — leistungsfähigstes Modell, optimal für komplexe Aufgaben";
+"Claude Sonnet 4 — balanced speed and capability" = "Claude Sonnet 4 — ausgewogene Geschwindigkeit und Leistung";
+"Claude Haiku 4 — fastest model, best for simple tasks" = "Claude Haiku 4 — schnellstes Modell, optimal für einfache Aufgaben";
+"Estimated API-equivalent cost of your Claude Code usage, for reference only." = "Geschätzte API-äquivalente Kosten Ihrer Claude Code-Nutzung, nur als Referenz.";
+"Token expired. Switch to this account in Claude Code to refresh." = "Token abgelaufen. Wechseln Sie in Claude Code zu diesem Konto, um es zu aktualisieren.";
+"Session" = "Sitzung";
+"Weekly" = "Wöchentlich";
+"Extra usage" = "Zusätzliche Nutzung";
+"On" = "An";
+"Off" = "Aus";
+"Resets in %@" = "Zurücksetzen in %@";
+
+/* Cost Detail */
+"Today" = "Heute";
+"Last 7 Days" = "Letzte 7 Tage";
+"Last 30 Days" = "Letzte 30 Tage";
+"Daily History" = "Tagesverlauf";
+"Total: %@" = "Gesamt: %@";
+"No cost data available" = "Keine Kostendaten verfügbar";
+"How We Calculate" = "Berechnungsmethode";
+"Cost is computed from Claude Code session logs (~/.claude/projects/), deduplicated by request ID." = "Die Kosten werden aus Claude Code Sitzungsprotokollen (~/.claude/projects/) berechnet, dedupliziert nach Anfrage-ID.";
+"Cache write = 5-min tier (1.25× base input). Cache read = 0.1× base input." = "Cache-Schreiben = 5-Min-Stufe (1,25× Basiseingabe). Cache-Lesen = 0,1× Basiseingabe.";
+"Official Pricing — platform.claude.com" = "Offizielle Preise — platform.claude.com";
+"Model" = "Modell";
+"Input" = "Eingabe";
+"Output" = "Ausgabe";
+"Cache W" = "Cache S";
+"Cache R" = "Cache L";
+"%lld sessions" = "%lld Sitzungen";
+"%@ tokens" = "%@ Token";
+
+/* Account Switcher */
+"No Accounts" = "Keine Konten";
+"Add your current Claude Code account to get started." = "Fügen Sie Ihr aktuelles Claude Code Konto hinzu, um zu beginnen.";
+"Custom label" = "Eigene Bezeichnung";
+"Edit label" = "Bezeichnung bearbeiten";
+"Switch" = "Wechseln";
+"Login New Account" = "Neues Konto anmelden";
+"Add Current Account" = "Aktuelles Konto hinzufügen";
+"Waiting for browser login..." = "Warten auf Browser-Anmeldung...";
+"Complete the login in your browser, then return here." = "Schließen Sie die Anmeldung im Browser ab und kehren Sie hierher zurück.";
+"This will capture the currently logged-in Claude Code account." = "Dies erfasst das derzeit angemeldete Claude Code Konto.";
+"Cancel" = "Abbrechen";
+"Add Account" = "Konto hinzufügen";
+"Re-authenticate (fix stale token)" = "Erneut authentifizieren (abgelaufenes Token reparieren)";
+"Remove account" = "Konto entfernen";
+
+/* Usage Chart */
+"No Data" = "Keine Daten";
+"Usage data will appear here" = "Nutzungsdaten werden hier angezeigt";
+
+/* Update Checker */
+"A new version of AccountDock is available!" = "Eine neue Version von AccountDock ist verfügbar!";
+"Version %@ is available. You are currently running version %@.\n\nWould you like to download it now?" = "Version %1$@ ist verfügbar. Sie verwenden derzeit Version %2$@.\n\nMöchten Sie sie jetzt herunterladen?";
+"Download & Install" = "Herunterladen & Installieren";
+"View Release" = "Release anzeigen";
+"Later" = "Später";
+"Update Check Failed" = "Update-Prüfung fehlgeschlagen";
+"OK" = "OK";
+
+/* AppState Errors */
+"Claude CLI not found" = "Claude CLI nicht gefunden";
+"Not logged in to Claude. Run 'claude auth login' first." = "Nicht bei Claude angemeldet. Führen Sie zuerst 'claude auth login' aus.";
+"Account already exists" = "Konto existiert bereits";
+"Could not capture auth token from keychain" = "Auth-Token konnte nicht aus dem Schlüsselbund gelesen werden";
+"Login did not complete" = "Anmeldung wurde nicht abgeschlossen";
+"Account already exists - credentials refreshed" = "Konto existiert bereits – Anmeldedaten aktualisiert";
+"Could not capture credentials" = "Anmeldedaten konnten nicht erfasst werden";
+"No stored credentials for %@. Use re-authenticate to fix." = "Keine gespeicherten Anmeldedaten für %@. Verwenden Sie Erneut authentifizieren zur Behebung.";
+"Logged in as %@, but expected %@. Credentials not updated." = "Angemeldet als %1$@, aber %2$@ erwartet. Anmeldedaten nicht aktualisiert.";
+"Token expired. Switch to refresh." = "Token abgelaufen. Wechseln zum Aktualisieren.";
+"Token expired. Switch to this account to refresh." = "Token abgelaufen. Zu diesem Konto wechseln zum Aktualisieren.";
+"API Rate Limited. Try again later." = "API-Anfragelimit erreicht. Bitte später erneut versuchen.";
+"Could not fetch usage: %@" = "Nutzung konnte nicht abgerufen werden: %@";
+
+/* Promo */
+"%@ - %@ (Weekdays) & Weekends" = "%1$@ - %2$@ (Wochentags) & Wochenenden";
+"Double limits: 2 PM - 8 AM ET & Weekends" = "Doppelte Limits: 14–8 Uhr ET & Wochenenden";
+
+/* Menu Bar */
+"Menu bar" = "Menüleiste";
+"Menu bar modules" = "Menüleisten-Module";
+"Drag to reorder, toggle to enable. Disabled modules sit at the bottom." = "Zum Sortieren ziehen, zum Aktivieren umschalten. Deaktivierte Module stehen unten.";
+"Preview" = "Vorschau";
+"Account name" = "Kontoname";
+"Session usage (5h)" = "Sitzungsnutzung (5h)";
+"Weekly usage (7d)" = "Wochennutzung (7d)";
+"Daily cost" = "Tageskosten";
+"Session reset countdown" = "Sitzungs-Reset Countdown";
+"Weekly reset countdown" = "Wochen-Reset Countdown";
+"Menu Bar" = "Menüleiste";
+"Account display" = "Kontoanzeige";
+"Session — usage vs time (5h)" = "Sitzung — Nutzung vs. Zeit (5 Std.)";
+"Weekly — usage vs time (7d)" = "Woche — Nutzung vs. Zeit (7 Tage)";
+"The vertical line marks time elapsed in the window; fill past it means you're using faster than the clock." = "Die vertikale Linie zeigt die verstrichene Zeit; Füllung darüber hinaus = schneller als die Uhr verbraucht.";
+"Claude Fable 5 — most powerful model, the new flagship tier" = "Claude Fable 5 — leistungsstärkstes Modell, die neue Flaggschiff-Klasse";

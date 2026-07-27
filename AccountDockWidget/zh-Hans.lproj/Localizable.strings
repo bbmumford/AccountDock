@@ -1,0 +1,21 @@
+/* Widget Configuration */
+"Monitor your Claude Code account usage, costs, and activity." = "监控 Claude Code 账户用量、费用和活动。";
+"AccountDock Rings" = "AccountDock 环形";
+"Session and weekly usage shown as circular progress rings." = "以环形进度显示会话和每周用量。";
+
+/* Widget Views */
+"Open AccountDock" = "打开 AccountDock";
+"to load data" = "以加载数据";
+"today" = "今日";
+"No accounts" = "无账户";
+"Error" = "错误";
+"Session" = "会话";
+"Weekly" = "每周";
+"Extra usage" = "额外用量";
+"On" = "开启";
+"Off" = "关闭";
+"ACTIVE" = "活跃";
+"Turns" = "对话";
+"Active" = "活跃";
+"Lines" = "行数";
+"Cost" = "费用";

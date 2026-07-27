@@ -1,0 +1,28 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserdata
+*.xcworkspace
+!*.xcodeproj/project.xcworkspace/
+xcuserdata/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# Misc
+*.swp
+*~
+
+# XcodeGen generated project
+AccountDock.xcodeproj/
+
+# Unused local legacy/duplicate artwork; the asset catalogue is authoritative.
+AccountDock/Resources/AppIcon.png
+AccountDock/Resources/MenuBarIcon.png

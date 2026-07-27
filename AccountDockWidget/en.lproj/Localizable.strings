@@ -1,0 +1,21 @@
+/* Widget Configuration */
+"Monitor your Claude Code account usage, costs, and activity." = "Monitor your Claude Code account usage, costs, and activity.";
+"AccountDock Rings" = "AccountDock Rings";
+"Session and weekly usage shown as circular progress rings." = "Session and weekly usage shown as circular progress rings.";
+
+/* Widget Views */
+"Open AccountDock" = "Open AccountDock";
+"to load data" = "to load data";
+"today" = "today";
+"No accounts" = "No accounts";
+"Error" = "Error";
+"Session" = "Session";
+"Weekly" = "Weekly";
+"Extra usage" = "Extra usage";
+"On" = "On";
+"Off" = "Off";
+"ACTIVE" = "ACTIVE";
+"Turns" = "Turns";
+"Active" = "Active";
+"Lines" = "Lines";
+"Cost" = "Cost";

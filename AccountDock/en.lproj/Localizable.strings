@@ -1,0 +1,148 @@
+/* Navigation - Tab Bar */
+"Usage" = "Usage";
+"Costs" = "Costs";
+"Accounts" = "Accounts";
+
+/* Main Menu */
+"Double Usage Active" = "Double Usage Active";
+"No account connected" = "No account connected";
+"Refresh" = "Refresh";
+"Settings" = "Settings";
+"Quit" = "Quit";
+
+/* Settings - General */
+"General" = "General";
+"About" = "About";
+"Appearance" = "Appearance";
+"System" = "System";
+"Auto-refresh interval" = "Auto-refresh interval";
+"15 seconds" = "15 seconds";
+"30 seconds" = "30 seconds";
+"1 minute" = "1 minute";
+"5 minutes" = "5 minutes";
+"10 minutes" = "10 minutes";
+"Show account name in menu bar" = "Show account name in menu bar";
+"Show full email address" = "Show full email address";
+"Launch at login" = "Launch at login";
+
+/* Language */
+"Language" = "Language";
+"Automatic" = "Automatic";
+
+/* Settings - About */
+"Claude Code Account Switcher" = "Claude Code Account Switcher";
+"Version %@" = "Version %@";
+"Checking..." = "Checking...";
+"Check for Updates" = "Check for Updates";
+"Easily switch between Claude Code accounts and monitor usage." = "Easily switch between Claude Code accounts and monitor usage.";
+
+/* Usage Dashboard */
+"Loading usage data..." = "Loading usage data...";
+"Usage data unavailable" = "Usage data unavailable";
+"Today's API-Equivalent Cost" = "Today's API-Equivalent Cost";
+"Today's Activity" = "Today's Activity";
+"Turns" = "Turns";
+"Active" = "Active";
+"Lines" = "Lines";
+"Messages you sent to Claude Code today" = "Messages you sent to Claude Code today";
+"Estimated total time Claude worked for you today. Parallel sessions stack. Idle gaps >10 min excluded. This is an approximation based on message timestamps, not exact." = "Estimated total time Claude worked for you today. Parallel sessions stack. Idle gaps >10 min excluded. This is an approximation based on message timestamps, not exact.";
+"Estimated lines of code written by Claude via Edit/Write tools" = "Estimated lines of code written by Claude via Edit/Write tools";
+"Claude Opus 4 — most capable model, best for complex tasks" = "Claude Opus 4 — most capable model, best for complex tasks";
+"Claude Sonnet 4 — balanced speed and capability" = "Claude Sonnet 4 — balanced speed and capability";
+"Claude Haiku 4 — fastest model, best for simple tasks" = "Claude Haiku 4 — fastest model, best for simple tasks";
+"Estimated API-equivalent cost of your Claude Code usage, for reference only." = "Estimated API-equivalent cost of your Claude Code usage, for reference only.";
+"Token expired. Switch to this account in Claude Code to refresh." = "Token expired. Switch to this account in Claude Code to refresh.";
+"Session" = "Session";
+"Weekly" = "Weekly";
+"Extra usage" = "Extra usage";
+"On" = "On";
+"Off" = "Off";
+"Resets in %@" = "Resets in %@";
+
+/* Cost Detail */
+"Today" = "Today";
+"Last 7 Days" = "Last 7 Days";
+"Last 30 Days" = "Last 30 Days";
+"Daily History" = "Daily History";
+"Total: %@" = "Total: %@";
+"No cost data available" = "No cost data available";
+"How We Calculate" = "How We Calculate";
+"Cost is computed from Claude Code session logs (~/.claude/projects/), deduplicated by request ID." = "Cost is computed from Claude Code session logs (~/.claude/projects/), deduplicated by request ID.";
+"Cache write = 5-min tier (1.25× base input). Cache read = 0.1× base input." = "Cache write = 5-min tier (1.25× base input). Cache read = 0.1× base input.";
+"Official Pricing — platform.claude.com" = "Official Pricing — platform.claude.com";
+"Model" = "Model";
+"Input" = "Input";
+"Output" = "Output";
+"Cache W" = "Cache W";
+"Cache R" = "Cache R";
+"%lld sessions" = "%lld sessions";
+"%@ tokens" = "%@ tokens";
+
+/* Account Switcher */
+"No Accounts" = "No Accounts";
+"Add your current Claude Code account to get started." = "Add your current Claude Code account to get started.";
+"Custom label" = "Custom label";
+"Edit label" = "Edit label";
+"Switch" = "Switch";
+"Login New Account" = "Login New Account";
+"Add Current Account" = "Add Current Account";
+"Waiting for browser login..." = "Waiting for browser login...";
+"Complete the login in your browser, then return here." = "Complete the login in your browser, then return here.";
+"This will capture the currently logged-in Claude Code account." = "This will capture the currently logged-in Claude Code account.";
+"Cancel" = "Cancel";
+"Add Account" = "Add Account";
+"Re-authenticate (fix stale token)" = "Re-authenticate (fix stale token)";
+"Remove account" = "Remove account";
+
+/* Usage Chart */
+"No Data" = "No Data";
+"Usage data will appear here" = "Usage data will appear here";
+
+/* Update Checker */
+"A new version of AccountDock is available!" = "A new version of AccountDock is available!";
+"Version %@ is available. You are currently running version %@.\n\nWould you like to download it now?" = "Version %@ is available. You are currently running version %@.\n\nWould you like to download it now?";
+"Download & Install" = "Download & Install";
+"View Release" = "View Release";
+"Later" = "Later";
+"Update Check Failed" = "Update Check Failed";
+"OK" = "OK";
+
+/* AppState Errors */
+"Claude CLI not found" = "Claude CLI not found";
+"Not logged in to Claude. Run 'claude auth login' first." = "Not logged in to Claude. Run 'claude auth login' first.";
+"Account already exists" = "Account already exists";
+"Could not capture auth token from keychain" = "Could not capture auth token from keychain";
+"Login did not complete" = "Login did not complete";
+"Account already exists - credentials refreshed" = "Account already exists - credentials refreshed";
+"Could not capture credentials" = "Could not capture credentials";
+"No stored credentials for %@. Use re-authenticate to fix." = "No stored credentials for %@. Use re-authenticate to fix.";
+"Logged in as %@, but expected %@. Credentials not updated." = "Logged in as %1$@, but expected %2$@. Credentials not updated.";
+"Token expired. Switch to refresh." = "Token expired. Switch to refresh.";
+"Token expired. Switch to this account to refresh." = "Token expired. Switch to this account to refresh.";
+"API Rate Limited. Try again later." = "API Rate Limited. Try again later.";
+"Could not fetch usage: %@" = "Could not fetch usage: %@";
+
+/* Promo */
+"%@ - %@ (Weekdays) & Weekends" = "%@ - %@ (Weekdays) & Weekends";
+"Double limits: 2 PM - 8 AM ET & Weekends" = "Double limits: 2 PM - 8 AM ET & Weekends";
+
+/* About */
+"More apps at xueshi.dev" = "More apps at xueshi.dev";
+
+/* Menu Bar */
+"Menu bar" = "Menu bar";
+"Menu bar modules" = "Menu bar modules";
+"Drag to reorder, toggle to enable. Disabled modules sit at the bottom." = "Drag to reorder, toggle to enable. Disabled modules sit at the bottom.";
+"Preview" = "Preview";
+"Account name" = "Account name";
+"Session usage (5h)" = "Session usage (5h)";
+"Weekly usage (7d)" = "Weekly usage (7d)";
+"Daily cost" = "Daily cost";
+"Session reset countdown" = "Session reset countdown";
+"Weekly reset countdown" = "Weekly reset countdown";
+"Menu Bar" = "Menu Bar";
+"Account display" = "Account display";
+"Session — usage vs time (5h)" = "Session — usage vs time (5h)";
+"Weekly — usage vs time (7d)" = "Weekly — usage vs time (7d)";
+"The vertical line marks time elapsed in the window; fill past it means you're using faster than the clock." = "The vertical line marks time elapsed in the window; fill past it means you're using faster than the clock.";
+"Claude Fable 5 — most powerful model, the new flagship tier" = "Claude Fable 5 — most powerful model, the new flagship tier";

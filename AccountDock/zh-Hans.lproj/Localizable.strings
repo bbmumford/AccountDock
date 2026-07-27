@@ -1,0 +1,145 @@
+/* Navigation - Tab Bar */
+"Usage" = "用量";
+"Costs" = "费用";
+"Accounts" = "账户";
+
+/* Main Menu */
+"Double Usage Active" = "双倍用量生效中";
+"No account connected" = "未连接账户";
+"Refresh" = "刷新";
+"Settings" = "设置";
+"Quit" = "退出";
+
+/* Settings - General */
+"General" = "通用";
+"About" = "关于";
+"Appearance" = "外观";
+"System" = "系统";
+"Auto-refresh interval" = "自动刷新间隔";
+"15 seconds" = "15 秒";
+"30 seconds" = "30 秒";
+"1 minute" = "1 分钟";
+"5 minutes" = "5 分钟";
+"10 minutes" = "10 分钟";
+"Show account name in menu bar" = "在菜单栏显示账户名称";
+"Show full email address" = "显示完整邮箱地址";
+"Launch at login" = "登录时启动";
+
+/* Language */
+"Language" = "语言";
+"Automatic" = "自动";
+
+/* Settings - About */
+"Claude Code Account Switcher" = "Claude Code 账户切换工具";
+"Version %@" = "版本 %@";
+"Checking..." = "检查中...";
+"Check for Updates" = "检查更新";
+"Easily switch between Claude Code accounts and monitor usage." = "轻松切换 Claude Code 账户并监控用量。";
+
+/* Usage Dashboard */
+"Loading usage data..." = "正在加载用量数据...";
+"Usage data unavailable" = "用量数据不可用";
+"Today's API-Equivalent Cost" = "今日 API 等效费用";
+"Today's Activity" = "今日活动";
+"Turns" = "对话";
+"Active" = "活跃";
+"Lines" = "行数";
+"Messages you sent to Claude Code today" = "今日发送给 Claude Code 的消息数";
+"Estimated total time Claude worked for you today. Parallel sessions stack. Idle gaps >10 min excluded. This is an approximation based on message timestamps, not exact." = "预估 Claude 今日为你工作的总时间。并行会话会累加，超过 10 分钟的空闲间隔被排除。这是基于消息时间戳的近似值，不完全精确。";
+"Estimated lines of code written by Claude via Edit/Write tools" = "预估 Claude 通过 Edit/Write 工具编写的代码行数";
+"Claude Opus 4 — most capable model, best for complex tasks" = "Claude Opus 4 — 最强大的模型，适合复杂任务";
+"Claude Sonnet 4 — balanced speed and capability" = "Claude Sonnet 4 — 速度与能力的平衡";
+"Claude Haiku 4 — fastest model, best for simple tasks" = "Claude Haiku 4 — 最快速的模型，适合简单任务";
+"Estimated API-equivalent cost of your Claude Code usage, for reference only." = "预估 Claude Code 使用的 API 等效费用，仅供参考。";
+"Token expired. Switch to this account in Claude Code to refresh." = "令牌已过期。请在 Claude Code 中切换到此账户以刷新。";
+"Session" = "会话";
+"Weekly" = "每周";
+"Extra usage" = "额外用量";
+"On" = "开启";
+"Off" = "关闭";
+"Resets in %@" = "%@ 后重置";
+
+/* Cost Detail */
+"Today" = "今日";
+"Last 7 Days" = "近 7 天";
+"Last 30 Days" = "近 30 天";
+"Daily History" = "每日历史";
+"Total: %@" = "合计：%@";
+"No cost data available" = "暂无费用数据";
+"How We Calculate" = "计算方式";
+"Cost is computed from Claude Code session logs (~/.claude/projects/), deduplicated by request ID." = "费用根据 Claude Code 会话日志（~/.claude/projects/）计算，按请求 ID 去重。";
+"Cache write = 5-min tier (1.25× base input). Cache read = 0.1× base input." = "缓存写入 = 5 分钟级（1.25× 基础输入）。缓存读取 = 0.1× 基础输入。";
+"Official Pricing — platform.claude.com" = "官方定价 — platform.claude.com";
+"Model" = "模型";
+"Input" = "输入";
+"Output" = "输出";
+"Cache W" = "缓存写";
+"Cache R" = "缓存读";
+"%lld sessions" = "%lld 个会话";
+"%@ tokens" = "%@ 词元";
+
+/* Account Switcher */
+"No Accounts" = "无账户";
+"Add your current Claude Code account to get started." = "添加当前 Claude Code 账户以开始使用。";
+"Custom label" = "自定义标签";
+"Edit label" = "编辑标签";
+"Switch" = "切换";
+"Login New Account" = "登录新账户";
+"Add Current Account" = "添加当前账户";
+"Waiting for browser login..." = "等待浏览器登录...";
+"Complete the login in your browser, then return here." = "请在浏览器中完成登录，然后返回此处。";
+"This will capture the currently logged-in Claude Code account." = "这将捕获当前已登录的 Claude Code 账户。";
+"Cancel" = "取消";
+"Add Account" = "添加账户";
+"Re-authenticate (fix stale token)" = "重新认证（修复过期令牌）";
+"Remove account" = "移除账户";
+
+/* Usage Chart */
+"No Data" = "无数据";
+"Usage data will appear here" = "用量数据将在此显示";
+
+/* Update Checker */
+"A new version of AccountDock is available!" = "AccountDock 有新版本可用！";
+"Version %@ is available. You are currently running version %@.\n\nWould you like to download it now?" = "版本 %1$@ 可用。您当前运行的是版本 %2$@。\n\n是否立即下载？";
+"Download & Install" = "下载并安装";
+"View Release" = "查看发布";
+"Later" = "稍后";
+"Update Check Failed" = "检查更新失败";
+"OK" = "好";
+
+/* AppState Errors */
+"Claude CLI not found" = "未找到 Claude CLI";
+"Not logged in to Claude. Run 'claude auth login' first." = "未登录 Claude。请先运行 'claude auth login'。";
+"Account already exists" = "账户已存在";
+"Could not capture auth token from keychain" = "无法从钥匙串获取认证令牌";
+"Login did not complete" = "登录未完成";
+"Account already exists - credentials refreshed" = "账户已存在 - 凭据已刷新";
+"Could not capture credentials" = "无法获取凭据";
+"No stored credentials for %@. Use re-authenticate to fix." = "没有 %@ 的存储凭据。请使用重新认证来修复。";
+"Logged in as %@, but expected %@. Credentials not updated." = "登录账户为 %1$@，但预期为 %2$@。凭据未更新。";
+"Token expired. Switch to refresh." = "令牌已过期。切换以刷新。";
+"Token expired. Switch to this account to refresh." = "令牌已过期。切换到此账户以刷新。";
+"API Rate Limited. Try again later." = "API 请求频率受限。请稍后重试。";
+"Could not fetch usage: %@" = "无法获取用量：%@";
+
+/* Promo */
+"%@ - %@ (Weekdays) & Weekends" = "%1$@ - %2$@（工作日）及周末";
+"Double limits: 2 PM - 8 AM ET & Weekends" = "双倍额度：美东时间下午 2 点 - 上午 8 点及周末";
+
+/* Menu Bar */
+"Menu bar" = "菜单栏";
+"Menu bar modules" = "菜单栏模块";
+"Drag to reorder, toggle to enable. Disabled modules sit at the bottom." = "拖动排序，勾选启用。未启用的模块排在下方。";
+"Preview" = "预览";
+"Account name" = "账户名称";
+"Session usage (5h)" = "会话用量（5小时）";
+"Weekly usage (7d)" = "每周用量（7天）";
+"Daily cost" = "今日花费";
+"Session reset countdown" = "会话重置倒计时";
+"Weekly reset countdown" = "每周重置倒计时";
+"Menu Bar" = "菜单栏";
+"Account display" = "账户显示";
+"Session — usage vs time (5h)" = "会话 — 用量 vs 时间（5小时）";
+"Weekly — usage vs time (7d)" = "每周 — 用量 vs 时间（7天）";
+"The vertical line marks time elapsed in the window; fill past it means you're using faster than the clock." = "竖线 = 时间进度（该时段已过去多少）；填充超过它 = 你用得比时间快。";
+"Claude Fable 5 — most powerful model, the new flagship tier" = "Claude Fable 5 — 最强大的模型，全新旗舰层级";
