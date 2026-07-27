@@ -1,0 +1,145 @@
+/* Navigation - Tab Bar */
+"Usage" = "Utilisation";
+"Costs" = "Coûts";
+"Accounts" = "Comptes";
+
+/* Main Menu */
+"Double Usage Active" = "Double utilisation active";
+"No account connected" = "Aucun compte connecté";
+"Refresh" = "Actualiser";
+"Settings" = "Réglages";
+"Quit" = "Quitter";
+
+/* Settings - General */
+"General" = "Général";
+"About" = "À propos";
+"Appearance" = "Apparence";
+"System" = "Système";
+"Auto-refresh interval" = "Intervalle d'actualisation automatique";
+"15 seconds" = "15 secondes";
+"30 seconds" = "30 secondes";
+"1 minute" = "1 minute";
+"5 minutes" = "5 minutes";
+"10 minutes" = "10 minutes";
+"Show account name in menu bar" = "Afficher le nom du compte dans la barre des menus";
+"Show full email address" = "Afficher l'adresse e-mail complète";
+"Launch at login" = "Lancer au démarrage";
+
+/* Language */
+"Language" = "Langue";
+"Automatic" = "Automatique";
+
+/* Settings - About */
+"Claude Code Account Switcher" = "Gestionnaire de comptes Claude Code";
+"Version %@" = "Version %@";
+"Checking..." = "Vérification...";
+"Check for Updates" = "Vérifier les mises à jour";
+"Easily switch between Claude Code accounts and monitor usage." = "Basculez facilement entre les comptes Claude Code et surveillez l'utilisation.";
+
+/* Usage Dashboard */
+"Loading usage data..." = "Chargement des données d'utilisation...";
+"Usage data unavailable" = "Données d'utilisation indisponibles";
+"Today's API-Equivalent Cost" = "Coût équivalent API du jour";
+"Today's Activity" = "Activité du jour";
+"Turns" = "Tours";
+"Active" = "Actif";
+"Lines" = "Lignes";
+"Messages you sent to Claude Code today" = "Messages envoyés à Claude Code aujourd'hui";
+"Estimated total time Claude worked for you today. Parallel sessions stack. Idle gaps >10 min excluded. This is an approximation based on message timestamps, not exact." = "Temps total estimé pendant lequel Claude a travaillé pour vous aujourd'hui. Les sessions parallèles sont cumulées. Les pauses de plus de 10 min sont exclues. Approximation basée sur les horodatages des messages.";
+"Estimated lines of code written by Claude via Edit/Write tools" = "Lignes de code estimées écrites par Claude via les outils Edit/Write";
+"Claude Opus 4 — most capable model, best for complex tasks" = "Claude Opus 4 — modèle le plus performant, idéal pour les tâches complexes";
+"Claude Sonnet 4 — balanced speed and capability" = "Claude Sonnet 4 — équilibre entre vitesse et capacité";
+"Claude Haiku 4 — fastest model, best for simple tasks" = "Claude Haiku 4 — modèle le plus rapide, idéal pour les tâches simples";
+"Estimated API-equivalent cost of your Claude Code usage, for reference only." = "Coût équivalent API estimé de votre utilisation de Claude Code, à titre indicatif uniquement.";
+"Token expired. Switch to this account in Claude Code to refresh." = "Jeton expiré. Basculez vers ce compte dans Claude Code pour actualiser.";
+"Session" = "Session";
+"Weekly" = "Hebdomadaire";
+"Extra usage" = "Utilisation supplémentaire";
+"On" = "Activé";
+"Off" = "Désactivé";
+"Resets in %@" = "Réinitialisation dans %@";
+
+/* Cost Detail */
+"Today" = "Aujourd'hui";
+"Last 7 Days" = "7 derniers jours";
+"Last 30 Days" = "30 derniers jours";
+"Daily History" = "Historique quotidien";
+"Total: %@" = "Total : %@";
+"No cost data available" = "Aucune donnée de coût disponible";
+"How We Calculate" = "Méthode de calcul";
+"Cost is computed from Claude Code session logs (~/.claude/projects/), deduplicated by request ID." = "Le coût est calculé à partir des journaux de session Claude Code (~/.claude/projects/), dédupliqué par ID de requête.";
+"Cache write = 5-min tier (1.25× base input). Cache read = 0.1× base input." = "Écriture cache = palier 5 min (1,25× entrée de base). Lecture cache = 0,1× entrée de base.";
+"Official Pricing — platform.claude.com" = "Tarifs officiels — platform.claude.com";
+"Model" = "Modèle";
+"Input" = "Entrée";
+"Output" = "Sortie";
+"Cache W" = "Cache É";
+"Cache R" = "Cache L";
+"%lld sessions" = "%lld sessions";
+"%@ tokens" = "%@ jetons";
+
+/* Account Switcher */
+"No Accounts" = "Aucun compte";
+"Add your current Claude Code account to get started." = "Ajoutez votre compte Claude Code actuel pour commencer.";
+"Custom label" = "Libellé personnalisé";
+"Edit label" = "Modifier le libellé";
+"Switch" = "Basculer";
+"Login New Account" = "Connecter un nouveau compte";
+"Add Current Account" = "Ajouter le compte actuel";
+"Waiting for browser login..." = "En attente de la connexion navigateur...";
+"Complete the login in your browser, then return here." = "Terminez la connexion dans votre navigateur, puis revenez ici.";
+"This will capture the currently logged-in Claude Code account." = "Ceci va capturer le compte Claude Code actuellement connecté.";
+"Cancel" = "Annuler";
+"Add Account" = "Ajouter un compte";
+"Re-authenticate (fix stale token)" = "Réauthentifier (réparer le jeton expiré)";
+"Remove account" = "Supprimer le compte";
+
+/* Usage Chart */
+"No Data" = "Aucune donnée";
+"Usage data will appear here" = "Les données d'utilisation apparaîtront ici";
+
+/* Update Checker */
+"A new version of AccountDock is available!" = "Une nouvelle version de AccountDock est disponible !";
+"Version %@ is available. You are currently running version %@.\n\nWould you like to download it now?" = "La version %1$@ est disponible. Vous utilisez actuellement la version %2$@.\n\nVoulez-vous la télécharger maintenant ?";
+"Download & Install" = "Télécharger et installer";
+"View Release" = "Voir la version";
+"Later" = "Plus tard";
+"Update Check Failed" = "Échec de la vérification";
+"OK" = "OK";
+
+/* AppState Errors */
+"Claude CLI not found" = "Claude CLI introuvable";
+"Not logged in to Claude. Run 'claude auth login' first." = "Non connecté à Claude. Exécutez d'abord 'claude auth login'.";
+"Account already exists" = "Le compte existe déjà";
+"Could not capture auth token from keychain" = "Impossible de récupérer le jeton d'authentification du trousseau";
+"Login did not complete" = "La connexion n'a pas abouti";
+"Account already exists - credentials refreshed" = "Le compte existe déjà – identifiants actualisés";
+"Could not capture credentials" = "Impossible de récupérer les identifiants";
+"No stored credentials for %@. Use re-authenticate to fix." = "Aucun identifiant enregistré pour %@. Utilisez la réauthentification pour corriger.";
+"Logged in as %@, but expected %@. Credentials not updated." = "Connecté en tant que %1$@, mais %2$@ était attendu. Identifiants non mis à jour.";
+"Token expired. Switch to refresh." = "Jeton expiré. Basculez pour actualiser.";
+"Token expired. Switch to this account to refresh." = "Jeton expiré. Basculez vers ce compte pour actualiser.";
+"API Rate Limited. Try again later." = "Limite de l'API atteinte. Réessayez plus tard.";
+"Could not fetch usage: %@" = "Impossible de récupérer l'utilisation : %@";
+
+/* Promo */
+"%@ - %@ (Weekdays) & Weekends" = "%1$@ - %2$@ (Jours ouvrables) & Week-ends";
+"Double limits: 2 PM - 8 AM ET & Weekends" = "Limites doublées : 14h - 8h ET & week-ends";
+
+/* Menu Bar */
+"Menu bar" = "Barre de menus";
+"Menu bar modules" = "Modules de la barre de menus";
+"Drag to reorder, toggle to enable. Disabled modules sit at the bottom." = "Glissez pour réorganiser, basculez pour activer. Les modules désactivés sont en bas.";
+"Preview" = "Aperçu";
+"Account name" = "Nom du compte";
+"Session usage (5h)" = "Utilisation de la session (5h)";
+"Weekly usage (7d)" = "Utilisation hebdomadaire (7j)";
+"Daily cost" = "Coût quotidien";
+"Session reset countdown" = "Compte à rebours réinitialisation session";
+"Weekly reset countdown" = "Compte à rebours réinitialisation semaine";
+"Menu Bar" = "Barre de menus";
+"Account display" = "Affichage du compte";
+"Session — usage vs time (5h)" = "Session — usage vs temps (5 h)";
+"Weekly — usage vs time (7d)" = "Hebdomadaire — usage vs temps (7 j)";
+"The vertical line marks time elapsed in the window; fill past it means you're using faster than the clock." = "La ligne verticale indique le temps écoulé ; remplissage au-delà = consommation plus rapide que l'horloge.";
+"Claude Fable 5 — most powerful model, the new flagship tier" = "Claude Fable 5 — le modèle le plus puissant, le nouveau niveau phare";
