@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Drop-in replacement for os.Logger that writes to ~/Library/Logs/AccountDock-app.log.
 /// Rotates at 5MB, keeps 2 prior files (.1 and .2) for ~15MB total cap.
@@ -136,5 +137,53 @@ private final class FileLogWriter: @unchecked Sendable {
             fileHandle?.write(data)
             bytesWritten += UInt64(data.count)
         }
+    }
+}
+
+struct FailoverEvent: Identifiable, Codable, Sendable {
+    let id: UUID
+    let date: Date
+    let provider: String
+    let message: String
+}
+
+/// A small, privacy-safe operational history intended for display to users.
+/// It is separate from the verbose diagnostic log and never stores credentials
+/// or full account email addresses.
+@MainActor
+final class FailoverEventLog: ObservableObject {
+    static let shared = FailoverEventLog()
+    @Published private(set) var events: [FailoverEvent] = []
+
+    private let path = NSHomeDirectory() + "/Library/Logs/AccountDock-failover.json"
+    private let maximumEvents = 500
+
+    private init() {
+        guard let data = FileManager.default.contents(atPath: path),
+              let decoded = try? JSONDecoder().decode([FailoverEvent].self, from: data) else { return }
+        events = Array(decoded.suffix(maximumEvents))
+    }
+
+    func record(_ provider: AIProviderType, _ message: String) {
+        events.append(FailoverEvent(
+            id: UUID(),
+            date: Date(),
+            provider: provider.rawValue,
+            message: message
+        ))
+        if events.count > maximumEvents {
+            events.removeFirst(events.count - maximumEvents)
+        }
+        persist()
+    }
+
+    func clear() {
+        events = []
+        persist()
+    }
+
+    private func persist() {
+        guard let data = try? JSONEncoder().encode(events) else { return }
+        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 }

@@ -39,6 +39,7 @@ final class CodexService: @unchecked Sendable {
 
     private let fileManager = FileManager.default
     private let binaryPreferenceKey = "codexBinaryPathPreference"
+    private let loginRunner = LoginProcessRunner()
 
     var binaryPath: String? {
         if let preferred = UserDefaults.standard.string(forKey: binaryPreferenceKey),
@@ -142,13 +143,23 @@ final class CodexService: @unchecked Sendable {
         guard let binaryPath else { throw CodexServiceError.binaryNotFound }
         let home = try makeManagedHome()
         do {
-            _ = try await run(binary: binaryPath, arguments: ["login"], codexHome: home.path)
+            var environment = ProcessInfo.processInfo.environment
+            environment["CODEX_HOME"] = home.path
+            _ = try await loginRunner.run(
+                executable: binaryPath,
+                arguments: ["login"],
+                environment: environment
+            )
             let identity = try readIdentity(home: home)
             return (identity, home.path)
         } catch {
             try? removeManagedHome(home)
             throw error
         }
+    }
+
+    func cancelLogin() {
+        loginRunner.cancel()
     }
 
     func promoteToSystem(homePath: String) throws {

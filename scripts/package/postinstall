@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+console_user=$(/usr/bin/stat -f '%Su' /dev/console)
+case "$console_user" in
+    ""|root|loginwindow) exit 0 ;;
+esac
+
+user_home=$(/usr/bin/dscl . -read "/Users/$console_user" NFSHomeDirectory 2>/dev/null | /usr/bin/awk '{print $2}')
+if [ -z "$user_home" ] || [ ! -d "$user_home" ]; then
+    exit 0
+fi
+
+configurator="/Applications/AccountDock.app/Contents/Resources/configure-claude-hooks.js"
+codex_configurator="/Applications/AccountDock.app/Contents/Resources/configure-codex-hooks.js"
+if [ ! -f "$configurator" ] || [ ! -f "$codex_configurator" ]; then
+    exit 1
+fi
+
+/usr/bin/sudo -u "$console_user" \
+    /usr/bin/osascript -l JavaScript "$configurator" "$user_home"
+/usr/bin/sudo -u "$console_user" \
+    /usr/bin/osascript -l JavaScript "$codex_configurator" "$user_home"
+
+/usr/sbin/chown -R "$console_user":staff "$user_home/.claude"
+/usr/sbin/chown -R "$console_user":staff "$user_home/.codex"
+exit 0

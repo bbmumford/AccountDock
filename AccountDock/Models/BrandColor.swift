@@ -4,7 +4,7 @@ import AppKit
 extension Color {
     /// AccountDock's independent blue identity colour.
     static var brand: Color {
-        switch UserDefaults.standard.string(forKey: "accentPalette") ?? "signal" {
+        switch UserDefaults.standard.string(forKey: "accentPalette") ?? "softWhite" {
         case "signal": return Color(red: 0x5E / 255.0, green: 0x6A / 255.0, blue: 0xD2 / 255.0)
         case "ember": return Color(red: 0xE8 / 255.0, green: 0x6D / 255.0, blue: 0x45 / 255.0)
         case "ocean": return Color(red: 0.12, green: 0.48, blue: 0.92)
@@ -12,8 +12,26 @@ extension Color {
         case "forest": return Color(red: 0.12, green: 0.62, blue: 0.38)
         case "rose": return Color(red: 0.88, green: 0.23, blue: 0.45)
         case "graphite": return Color(red: 0.35, green: 0.38, blue: 0.43)
-        default: return Color(red: 0x5E / 255.0, green: 0x6A / 255.0, blue: 0xD2 / 255.0)
+        case "softWhite":
+            return adaptive(
+                light: Color(red: 0.52, green: 0.50, blue: 0.46),
+                dark: Color(red: 0.91, green: 0.90, blue: 0.86)
+            )
+        default:
+            return adaptive(
+                light: Color(red: 0.52, green: 0.50, blue: 0.46),
+                dark: Color(red: 0.91, green: 0.90, blue: 0.86)
+            )
         }
+    }
+
+    /// Foreground used for text and symbols placed directly on a solid brand
+    /// fill. The Default palette uses the adaptive window surface to create a cut-out
+    /// effect; saturated palettes use white.
+    static var brandOnAccent: Color {
+        (UserDefaults.standard.string(forKey: "accentPalette") ?? "softWhite") == "softWhite"
+            ? Color(nsColor: .windowBackgroundColor)
+            : .white
     }
 
     static let dockViolet = Color(red: 0.49, green: 0.25, blue: 0.93)
@@ -62,6 +80,7 @@ extension Color {
 
 extension ShapeStyle where Self == Color {
     static var brand: Color { .brand }
+    static var brandOnAccent: Color { .brandOnAccent }
     static var cardFill: Color { .cardFill }
     static var cardFillStrong: Color { .cardFillStrong }
     static var cardBorder: Color { .cardBorder }

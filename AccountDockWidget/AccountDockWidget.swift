@@ -3,7 +3,7 @@ import SwiftUI
 
 // MARK: - Brand Color
 
-private let brandColor = Color(red: 0xE8 / 255.0, green: 0x6D / 255.0, blue: 0x45 / 255.0)
+private let brandColor = Color(red: 0x5E / 255.0, green: 0x6A / 255.0, blue: 0xD2 / 255.0)
 
 // MARK: - Timeline Entry
 
@@ -14,7 +14,7 @@ struct AccountDockEntry: TimelineEntry {
     static let placeholder = AccountDockEntry(
         date: .now,
         data: WidgetData(
-            selectedProvider: "Claude Code",
+            selectedProvider: nil,
             accounts: [
                 WidgetAccountData(
                     provider: "Claude Code",
@@ -29,13 +29,27 @@ struct AccountDockEntry: TimelineEntry {
                     extraUsageEnabled: true,
                     hasError: false,
                     errorMessage: nil
+                ),
+                WidgetAccountData(
+                    provider: "Codex",
+                    email: "co***@ex***.com",
+                    displayName: "Codex Plus",
+                    subscriptionType: "Plus",
+                    isActive: true,
+                    sessionUtilization: nil,
+                    sessionResetTime: nil,
+                    weeklyUtilization: 14,
+                    weeklyResetTime: "in 6 days",
+                    extraUsageEnabled: nil,
+                    hasError: false,
+                    errorMessage: nil
                 )
             ],
             todayCost: 3.45,
             conversationTurns: 18,
             activeCodingTime: "1h 30m",
             linesWritten: 326,
-            modelUsage: ["Fable": 18, "Opus": 12, "Sonnet": 5, "Haiku": 1],
+            modelUsage: ["Opus": 12, "Sonnet": 5, "gpt-5.3-codex": 18],
             lastUpdated: .now
         )
     )
@@ -111,75 +125,42 @@ struct AccountDockWidgetEntryView: View {
 private struct SmallWidgetView: View {
     let data: WidgetData
 
-    private var activeAccount: WidgetAccountData? {
-        data.accounts.first { $0.provider == data.selectedProvider && $0.isActive }
-            ?? data.accounts.first { $0.provider == data.selectedProvider }
-            ?? data.accounts.first(where: \.isActive)
-            ?? data.accounts.first
+    private var providerAccounts: [WidgetAccountData] {
+        ["Claude Code", "Codex"].compactMap { provider in
+            data.accounts.first { $0.provider == provider && $0.isActive }
+                ?? data.accounts.first { $0.provider == provider }
+        }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Header — icon + account + badge
             HStack(spacing: 5) {
-                Image(systemName: providerIcon(activeAccount))
-                    .font(.caption)
-                    .foregroundStyle(brandColor)
-                    .widgetAccentable()
-                if let account = activeAccount {
-                    Text(account.displayName)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                    Spacer()
-                    if let sub = account.subscriptionType {
-                        Text(sub)
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(brandColor)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(brandColor.opacity(0.15), in: Capsule())
-                    }
-                } else {
-                    Text("AccountDock")
-                        .font(.caption.weight(.semibold))
-                    Spacer()
+                ForEach(providerAccounts, id: \.provider) { account in
+                    Image(systemName: providerIcon(account))
+                        .font(.caption)
+                        .foregroundStyle(brandColor)
+                        .widgetAccentable()
                 }
+                Text("AccountDock")
+                    .font(.caption.weight(.semibold))
+                Spacer()
             }
 
-            if let account = activeAccount {
+            if !providerAccounts.isEmpty {
                 Spacer(minLength: 2)
-
-                // Usage bars
-                if account.hasError {
-                    HStack(spacing: 4) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.yellow)
-                        if let msg = account.errorMessage {
-                            Text(msg)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                        } else {
-                            Text("Error")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                        }
-                    }
-                } else {
-                    compactUsageBar(label: "Session", utilization: account.sessionUtilization)
-                    compactUsageBar(label: "Weekly", utilization: account.weeklyUtilization)
+                ForEach(providerAccounts, id: \.provider) { account in
+                    compactUsageBar(
+                        label: account.provider == "Codex" ? "Codex" : "Claude",
+                        utilization: account.weeklyUtilization,
+                        hasError: account.hasError
+                    )
                 }
-
                 Spacer(minLength: 2)
-
-                // Today's cost
                 HStack {
                     Text(formatCost(data.todayCost))
                         .font(.title3.weight(.semibold).monospacedDigit())
                         .foregroundStyle(.green)
-                    Text("today")
+                    Text("combined today")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                     Spacer()
@@ -194,11 +175,7 @@ private struct SmallWidgetView: View {
         }
     }
 
-    private func providerIcon(_ account: WidgetAccountData?) -> String {
-        account?.provider == "Codex" ? "chevron.left.forwardslash.chevron.right" : "brain.head.profile"
-    }
-
-    private func compactUsageBar(label: LocalizedStringKey, utilization: Double?) -> some View {
+    private func compactUsageBar(label: String, utilization: Double?, hasError: Bool) -> some View {
         let pct = utilization ?? 0
         return VStack(spacing: 3) {
             HStack {
@@ -206,9 +183,9 @@ private struct SmallWidgetView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(Int(pct))%")
+                Text(hasError ? "—" : "\(Int(pct))%")
                     .font(.caption2.weight(.medium).monospacedDigit())
-                    .foregroundStyle(colorForUtilization(pct))
+                    .foregroundStyle(hasError ? Color.secondary : colorForUtilization(pct))
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
@@ -230,34 +207,25 @@ private struct SmallWidgetView: View {
 private struct MediumWidgetView: View {
     let data: WidgetData
 
-    private var activeAccount: WidgetAccountData? {
-        data.accounts.first { $0.provider == data.selectedProvider && $0.isActive }
-            ?? data.accounts.first { $0.provider == data.selectedProvider }
-            ?? data.accounts.first(where: \.isActive)
-            ?? data.accounts.first
+    private var providerAccounts: [WidgetAccountData] {
+        ["Claude Code", "Codex"].compactMap { provider in
+            data.accounts.first { $0.provider == provider && $0.isActive }
+                ?? data.accounts.first { $0.provider == provider }
+        }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header row
             HStack(spacing: 5) {
-                Image(systemName: "brain.head.profile")
-                    .font(.caption)
-                    .foregroundStyle(brandColor)
-                    .widgetAccentable()
-                if let account = activeAccount {
-                    Text(account.displayName)
-                        .font(.caption.weight(.medium))
-                        .lineLimit(1)
-                    if let sub = account.subscriptionType {
-                        Text(sub)
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(brandColor)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(brandColor.opacity(0.15), in: Capsule())
-                    }
+                ForEach(providerAccounts, id: \.provider) { account in
+                    Image(systemName: providerIcon(account))
+                        .font(.caption)
+                        .foregroundStyle(brandColor)
+                        .widgetAccentable()
                 }
+                Text("AccountDock")
+                    .font(.caption.weight(.medium))
                 Spacer()
                 Text(data.lastUpdated, style: .relative)
                     .font(.caption2)
@@ -269,48 +237,20 @@ private struct MediumWidgetView: View {
             // Main content: usage bars on left, activity on right
             HStack(spacing: 12) {
                 // Left: Usage bars
-                VStack(alignment: .leading, spacing: 0) {
-                    if let account = activeAccount {
-                        if account.hasError {
-                            HStack(spacing: 4) {
-                                Image(systemName: "exclamationmark.triangle")
-                                    .font(.caption)
-                                    .foregroundStyle(.yellow)
-                                if let msg = account.errorMessage {
-                                    Text(msg)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                } else {
-                                    Text("Error")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                }
-                            }
-                            Spacer(minLength: 0)
-                        } else {
-                            Spacer(minLength: 0)
-                            usageBar(label: "Session", utilization: account.sessionUtilization, resetTime: account.sessionResetTime)
-                            Spacer(minLength: 4)
-                            usageBar(label: "Weekly", utilization: account.weeklyUtilization, resetTime: account.weeklyResetTime)
-
-                            if let extra = account.extraUsageEnabled {
-                                Spacer(minLength: 4)
-                                HStack(spacing: 4) {
-                                    Image(systemName: extra ? "bolt.fill" : "bolt.slash")
-                                        .font(.caption2)
-                                        .foregroundStyle(extra ? .orange : .gray)
-                                    Text("Extra usage")
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                    Text(LocalizedStringKey(extra ? "On" : "Off"))
-                                        .font(.caption2)
-                                        .foregroundStyle(extra ? .orange : .gray)
-                                }
-                            }
-                            Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(providerAccounts, id: \.provider) { account in
+                        if account.provider == "Claude Code", account.sessionUtilization != nil {
+                            usageBar(
+                                label: "Claude session",
+                                utilization: account.sessionUtilization,
+                                resetTime: account.sessionResetTime
+                            )
                         }
+                        usageBar(
+                            label: account.provider == "Codex" ? "Codex weekly" : "Claude weekly",
+                            utilization: account.weeklyUtilization,
+                            resetTime: account.weeklyResetTime
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -390,6 +330,18 @@ private struct MediumWidgetView: View {
 private struct LargeWidgetView: View {
     let data: WidgetData
 
+    private var visibleModels: [(name: String, count: Int)] {
+        data.modelUsage
+            .filter { $0.value > 0 }
+            .sorted {
+                $0.value == $1.value
+                    ? $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending
+                    : $0.value > $1.value
+            }
+            .prefix(4)
+            .map { (name: $0.key, count: $0.value) }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Header
@@ -415,17 +367,20 @@ private struct LargeWidgetView: View {
                     activityStat(icon: "dollarsign.circle", value: formatCost(data.todayCost), label: "Cost", valueColor: .green)
                 }
 
-                if !data.modelUsage.isEmpty {
+                if !visibleModels.isEmpty {
                     Rectangle()
                         .fill(.quaternary)
                         .frame(height: 0.5)
                         .padding(.horizontal, 8)
 
                     HStack(spacing: 0) {
-                        modelStat(name: "Fable", count: data.modelUsage["Fable"] ?? 0, color: .purple)
-                        modelStat(name: "Opus", count: data.modelUsage["Opus"] ?? 0, color: brandColor)
-                        modelStat(name: "Sonnet", count: data.modelUsage["Sonnet"] ?? 0, color: .blue)
-                        modelStat(name: "Haiku", count: data.modelUsage["Haiku"] ?? 0, color: .green)
+                        ForEach(Array(visibleModels.enumerated()), id: \.offset) { index, model in
+                            modelStat(
+                                name: model.name,
+                                count: model.count,
+                                color: modelColor(index)
+                            )
+                        }
                     }
                 }
             }
@@ -469,16 +424,21 @@ private struct LargeWidgetView: View {
                 Text(name)
                     .font(.caption2)
                     .foregroundStyle(count > 0 ? .tertiary : .quaternary)
+                    .lineLimit(1)
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func modelColor(_ index: Int) -> Color {
+        [brandColor, .purple, .blue, .green][index % 4]
     }
 
     private func accountCard(_ account: WidgetAccountData) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             // Account header
             HStack(spacing: 6) {
-                Image(systemName: "brain.head.profile")
+                Image(systemName: providerIcon(account))
                     .font(.caption2)
                     .foregroundStyle(account.isActive ? brandColor : .secondary)
                 Text(account.displayName)
@@ -565,72 +525,44 @@ private struct LargeWidgetView: View {
 private struct CircleWidgetView: View {
     let data: WidgetData
 
-    private var activeAccount: WidgetAccountData? {
-        data.accounts.first { $0.provider == data.selectedProvider && $0.isActive }
-            ?? data.accounts.first { $0.provider == data.selectedProvider }
-            ?? data.accounts.first(where: \.isActive)
-            ?? data.accounts.first
+    private var providerAccounts: [WidgetAccountData] {
+        ["Claude Code", "Codex"].compactMap { provider in
+            data.accounts.first { $0.provider == provider && $0.isActive }
+                ?? data.accounts.first { $0.provider == provider }
+        }
     }
 
     var body: some View {
         VStack(spacing: 8) {
-            // Header — show account name instead of app name
             HStack(spacing: 5) {
-                Image(systemName: "brain.head.profile")
-                    .font(.caption)
-                    .foregroundStyle(brandColor)
-                    .widgetAccentable()
-                Text(activeAccount?.displayName ?? "AccountDock")
+                ForEach(providerAccounts, id: \.provider) { account in
+                    Image(systemName: providerIcon(account))
+                        .font(.caption)
+                        .foregroundStyle(brandColor)
+                        .widgetAccentable()
+                }
+                Text("AccountDock")
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
                 Spacer()
-                if let sub = activeAccount?.subscriptionType {
-                    Text(sub)
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(brandColor)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(brandColor.opacity(0.15), in: Capsule())
-                }
             }
 
             Spacer(minLength: 0)
 
-            if let account = activeAccount, !account.hasError {
+            if !providerAccounts.isEmpty {
                 HStack(spacing: 12) {
-                    ringStat(
-                        label: "Session",
-                        resetTime: account.sessionResetTime,
-                        utilization: account.sessionUtilization,
-                        accent: colorForUtilization(account.sessionUtilization ?? 0)
-                    )
-                    ringStat(
-                        label: "Weekly",
-                        resetTime: account.weeklyResetTime,
-                        utilization: account.weeklyUtilization,
-                        accent: colorForUtilization(account.weeklyUtilization ?? 0)
-                    )
-                }
-                .frame(maxWidth: .infinity)
-            } else if let account = activeAccount, account.hasError {
-                VStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.title3)
-                        .foregroundStyle(.yellow)
-                    if let msg = account.errorMessage {
-                        Text(msg)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .lineLimit(3)
-                    } else {
-                        Text("Error")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .lineLimit(3)
+                    ForEach(providerAccounts, id: \.provider) { account in
+                        ringStat(
+                            label: account.provider == "Codex" ? "Codex" : "Claude",
+                            resetTime: account.weeklyResetTime,
+                            utilization: account.weeklyUtilization,
+                            accent: account.hasError
+                                ? .secondary
+                                : colorForUtilization(account.weeklyUtilization ?? 0)
+                        )
                     }
                 }
+                .frame(maxWidth: .infinity)
             } else {
                 Text("No accounts")
                     .font(.caption)
@@ -704,6 +636,12 @@ private func formatCost(_ cost: Double) -> String {
     cost >= 1 ? String(format: "$%.2f", cost) : String(format: "$%.4f", cost)
 }
 
+private func providerIcon(_ account: WidgetAccountData) -> String {
+    account.provider == "Codex"
+        ? "chevron.left.forwardslash.chevron.right"
+        : "brain.head.profile"
+}
+
 // MARK: - Widget Definition
 
 struct AccountDockWidget: Widget {
@@ -729,7 +667,7 @@ struct AccountDockCircleWidget: Widget {
                 .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("AccountDock Rings")
-        .description("Session and weekly usage shown as circular progress rings.")
+        .description("Claude and Codex weekly usage shown together as progress rings.")
         .supportedFamilies([.systemSmall])
     }
 }

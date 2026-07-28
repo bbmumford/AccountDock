@@ -69,7 +69,7 @@ struct MainMenuView: View {
     @AppStorage("refreshInterval") private var refreshInterval: Double = 300
     @AppStorage("showFullEmail") private var showFullEmail = false
     @AppStorage("menuPanelWidth") private var menuPanelWidth = 440.0
-    @AppStorage("accentPalette") private var accentPalette = "signal"
+    @AppStorage("accentPalette") private var accentPalette = "softWhite"
     @AppStorage("interfaceDensity") private var interfaceDensity = "comfortable"
     @AppStorage("cardCornerRadius") private var cardCornerRadius = 7.0
     @AppStorage("disableCardShadows") private var disableCardShadows = false
@@ -312,7 +312,7 @@ struct MainMenuView: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
-                    .foregroundStyle(selectedTab == tab ? .white : .textSecondary)
+                    .foregroundStyle(selectedTab == tab ? .brandOnAccent : .textSecondary)
                     .contentShape(Rectangle())
                     .onTapGesture {
                         withAnimation(.easeInOut(duration: 0.15)) {

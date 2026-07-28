@@ -12,10 +12,76 @@ CLI, and combines provider usage, activity, costs, and menu-bar modules.
 - Managed Codex homes with atomic promotion to `~/.codex/auth.json`.
 - Combined usage and API-equivalent cost history for both providers.
 - Configurable menu-bar modules with bar or percentage usage displays.
+- Provider-specific, session- and weekly-aware automatic account failover.
+- Safe Claude credential switching that detects running Claude Code processes.
+- Reset-aware recovery and a privacy-safe failover activity log.
 - Seven-day cost history paging plus colour, density, width, and corner controls.
 - Optional launch at login using macOS `SMAppService`.
 - Read-only GitHub update checks with a copyable, checksum-verifying installer
   command. AccountDock never downloads or executes an update itself.
+
+## Automatic failover
+
+Settings → Failover configures Claude and Codex independently. AccountDock
+never fails over from one provider to the other.
+
+- Choose the account order for each provider and optionally loop through it.
+- Set independent session and weekly thresholds for Claude subscriptions.
+- Set the weekly threshold reported by Codex; Codex does not expose a
+  five-hour/session subscription window.
+- Prefer the eligible account with the most remaining headroom.
+- Prefer accounts whose limits have reset, or hold the current account briefly
+  when its limiting window is about to reset.
+- Adapt active-account polling from five minutes down to fifteen seconds as a
+  configured limit approaches, without forcing a full refresh of every account.
+- Back off exhausted accounts when no failover destination exists, following
+  known reset and provider retry-after times instead of repeatedly polling.
+- Preserve the last known reset information when a provider temporarily
+  responds with a rate-limit error.
+- Quarantine expired non-active Claude credentials after the first failed
+  refresh instead of retrying them every five minutes; switching to or
+  reauthenticating the account clears the quarantine.
+
+When every configured account is exhausted, AccountDock selects the account
+whose blocking limits become available first. A session-limited account is not
+treated as ready while its weekly limit remains blocked. AccountDock prepares
+that account, monitors it for restored capacity, and releases the tracked
+Claude processes only after the provider confirms capacity.
+
+### Safe Claude switching and session recovery
+
+Claude Code processes keep the credential with which they were launched, so
+changing the credential file alone does not move an already-running workload.
+For manual switches, AccountDock offers **Switch Safely**, **Switch Without
+Restart**, or **Cancel**. Automatic failover captures the running Claude Code
+processes before switching credentials and requests a graceful termination
+after the switch. It never force-kills them.
+
+The installer adds AccountDock's own Claude lifecycle hooks without replacing
+other configured hooks. They record privacy-scoped recovery metadata—session
+identifier, working directory, lifecycle state, host type, and timestamp—under
+`~/Library/Application Support/AccountDock/Sessions`. Prompt and transcript
+content are never stored. A one-time copy of the pre-install Claude settings is
+kept at `~/.claude/settings.json.accountdock-backup`.
+
+It also configures `~/.codex/hooks.json` and every AccountDock-managed Codex
+home using the lifecycle-hook format implemented by the `bbmumford/codex`
+fork. Existing Codex hook groups are preserved and backed up once. Because
+upstream Codex does not currently ship this interface, these hooks activate on
+compatible builds and remain inert configuration on builds that do not support
+them. A compatible Codex build may ask the user to review and trust a newly
+installed user hook before its first run.
+
+Recovery is host-neutral. AccountDock detects the recovery method rather than
+assuming a particular harness: IDE-managed sessions are released to their host
+for respawn, while standalone Claude CLI sessions are reopened in Terminal at
+their original working directory with `claude --resume <session-id>`. Before
+resuming, it checks that the same session is not already running.
+
+Settings → Failover Log records switches, exhausted-account waits, reset
+selection, recovery release, and failures. Entries obfuscate account identity,
+are capped at 500, and are stored locally at
+`~/Library/Logs/AccountDock-failover.json`. The log can be cleared from the app.
 
 ## Requirements
 
@@ -32,7 +98,8 @@ install_dir="$(mktemp -d)" && gh release download --repo bbmumford/AccountDock -
 ```
 
 The command downloads the release, verifies its SHA-256 checksum, installs it
-in `/Applications`, adds AccountDock to Login Items, and opens it.
+in `/Applications`, merges AccountDock's lifecycle hooks into the current
+user's Claude settings, adds AccountDock to Login Items, and opens it.
 
 ## Build and test
 

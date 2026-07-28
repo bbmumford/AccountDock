@@ -24,7 +24,7 @@ struct MenuBarStripView: View {
     let config: MenuBarConfig
     let onWidth: (CGFloat) -> Void
     @AppStorage("showFullEmail") private var showFullEmail = false
-    @AppStorage("accentPalette") private var accentPalette = "signal"
+    @AppStorage("accentPalette") private var accentPalette = "softWhite"
     @State private var tick = Date()
     // Polled refresh. ObservableObject change delivery is unreliable for a
     // SwiftUI view hosted in an NSStatusItem, so we re-read AppState/config on
