@@ -58,7 +58,8 @@ commit, and creates a `v<version>` tag. It never pushes.
 1. `test` runs for pull requests, `main`, tags, and manual dispatch.
 2. `release` runs only for a `v*` tag after tests pass. It verifies that the
    tag matches `MARKETING_VERSION`, builds a macOS Installer package, generates
-   its SHA-256 digest, and creates the GitHub release.
+   its SHA-256 digest, installs AccountDock's additive Claude lifecycle hooks,
+   and creates the GitHub release.
 
 The current pipeline creates an unsigned development installer because the
 repository has no Apple Developer signing identities or notarization
@@ -85,7 +86,10 @@ shows a command for the user to inspect and run. That command:
 2. downloads `AccountDock.pkg` over HTTPS;
 3. compares it with `AccountDock.pkg.sha256`;
 4. invokes Apple's `installer`, which requests administrator authorization;
-5. registers AccountDock as a macOS login item.
+5. merges AccountDock's hooks into the console user's Claude settings, Codex
+   hooks file, and managed Codex homes while preserving existing hook groups
+   and one-time settings backups;
+6. registers AccountDock as a macOS login item.
 
 This keeps privileged installation explicit and leaves checksum verification
 visible. A public release must additionally be Developer ID signed and

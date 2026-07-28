@@ -9,7 +9,7 @@ struct SettingsView: View {
     @AppStorage("showFullEmail") private var showFullEmail = false
     @AppStorage("showInDock") private var showInDock = false
     @AppStorage("appLanguage") private var appLanguage = "auto"
-    @AppStorage("accentPalette") private var accentPalette = "signal"
+    @AppStorage("accentPalette") private var accentPalette = "softWhite"
     @AppStorage("interfaceDensity") private var interfaceDensity = "comfortable"
     @AppStorage("cardCornerRadius") private var cardCornerRadius = 7.0
     @AppStorage("disableCardShadows") private var disableCardShadows = false
@@ -34,6 +34,16 @@ struct SettingsView: View {
                     Label("Appearance", systemImage: "paintpalette")
                 }
 
+            FailoverSettingsView()
+                .tabItem {
+                    Label("Failover", systemImage: "arrow.triangle.branch")
+                }
+
+            FailoverLogView()
+                .tabItem {
+                    Label("Log", systemImage: "list.bullet.rectangle")
+                }
+
             if showClaudeProvider {
                 ClaudeCLITabView()
                     .tabItem {
@@ -53,7 +63,7 @@ struct SettingsView: View {
                     Label("About", systemImage: "info.circle")
                 }
         }
-        .frame(width: 620, height: 500)
+        .frame(width: 660, height: 560)
         .tint(Color.brand)
         .id("\(accentPalette)|\(interfaceDensity)|\(cardCornerRadius)|\(disableCardShadows)")
         .onAppear {
@@ -220,5 +230,66 @@ struct SettingsView: View {
         } catch {
             launchAtLogin = !enable // revert on failure
         }
+    }
+}
+
+private struct FailoverLogView: View {
+    @ObservedObject private var eventLog = FailoverEventLog.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Failover activity")
+                        .font(.headline)
+                    Text("Account identities are obfuscated and credentials are never recorded.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Clear", role: .destructive) {
+                    eventLog.clear()
+                }
+                .disabled(eventLog.events.isEmpty)
+            }
+            .padding()
+
+            Divider()
+
+            if eventLog.events.isEmpty {
+                ContentUnavailableView(
+                    "No Failover Activity",
+                    systemImage: "list.bullet.rectangle",
+                    description: Text("Threshold decisions, switches, reset waits, and recovery attempts will appear here.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(Array(eventLog.events.reversed())) { event in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: event.provider == AIProviderType.codex.rawValue
+                              ? AIProviderType.codex.iconName
+                              : AIProviderType.claudeCode.iconName)
+                            .foregroundStyle(.brand)
+                            .frame(width: 20)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(event.provider)
+                                    .font(.caption.weight(.medium))
+                                Spacer()
+                                Text(event.date, format: .dateTime.month(.abbreviated).day().hour().minute().second())
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.tertiary)
+                            }
+                            Text(event.message)
+                                .font(.caption)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .padding(.vertical, 3)
+                }
+                .listStyle(.inset)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }

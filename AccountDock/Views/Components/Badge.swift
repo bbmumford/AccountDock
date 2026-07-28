@@ -8,7 +8,7 @@ struct Badge: View {
     var body: some View {
         Text(text)
             .font(.caption2.weight(.semibold))
-            .foregroundStyle(.white)
+            .foregroundStyle(.brandOnAccent)
             .padding(.horizontal, AppStyle.badgeHPadding)
             .padding(.vertical, AppStyle.badgeVPadding)
             .background(color, in: Capsule())

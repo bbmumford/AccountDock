@@ -6,6 +6,9 @@ struct AccountSwitcherView: View {
     @AppStorage("showFullEmail") private var showFullEmail = false
     @State private var editingAccountId: UUID?
     @State private var editingLabel = ""
+    @State private var pendingSwitchAccount: Account?
+    @State private var pendingClaudeProcesses: [RunningClaudeProcess] = []
+    @State private var showingClaudeProcessWarning = false
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -29,6 +32,26 @@ struct AccountSwitcherView: View {
                     .padding(.top, 8)
             }
             .measureUsageContentHeight()
+        }
+        .alert("Claude sessions are still running", isPresented: $showingClaudeProcessWarning) {
+            Button("Switch Safely") {
+                guard let account = pendingSwitchAccount else { return }
+                let processes = pendingClaudeProcesses
+                clearPendingSwitch()
+                Task {
+                    await appState.switchTo(account, safelyRestarting: processes)
+                }
+            }
+            Button("Switch Without Restart") {
+                guard let account = pendingSwitchAccount else { return }
+                clearPendingSwitch()
+                Task { await appState.switchTo(account) }
+            }
+            Button("Cancel", role: .cancel) {
+                clearPendingSwitch()
+            }
+        } message: {
+            Text(processWarningMessage)
         }
     }
 
@@ -129,8 +152,11 @@ struct AccountSwitcherView: View {
 
             // Actions
             if !account.isActive {
-                Button("Switch") {
-                    Task { await appState.switchTo(account) }
+                Button {
+                    requestSwitch(to: account)
+                } label: {
+                    Text("Switch")
+                        .foregroundStyle(.brandOnAccent)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -146,6 +172,7 @@ struct AccountSwitcherView: View {
             }
             .buttonStyle(.plain)
             .help("Re-authenticate (fix stale token)")
+            .disabled(appState.isLoggingIn)
 
             Button {
                 appState.removeAccount(account)
@@ -178,6 +205,34 @@ struct AccountSwitcherView: View {
         editingAccountId = nil
     }
 
+    private func requestSwitch(to account: Account) {
+        guard account.provider == .claudeCode else {
+            Task { await appState.switchTo(account) }
+            return
+        }
+        let processes = appState.runningClaudeProcesses()
+        guard !processes.isEmpty else {
+            Task { await appState.switchTo(account) }
+            return
+        }
+        pendingSwitchAccount = account
+        pendingClaudeProcesses = processes
+        showingClaudeProcessWarning = true
+    }
+
+    private var processWarningMessage: String {
+        let grouped = Dictionary(grouping: pendingClaudeProcesses, by: \.label)
+            .map { "\($0.value.count) \($0.key)" }
+            .sorted()
+            .joined(separator: ", ")
+        return "\(grouped) will keep using their existing account. “Switch Safely” changes the account, then gracefully closes only these Claude processes. Reopen terminal sessions afterward; IDE integrations may restart automatically."
+    }
+
+    private func clearPendingSwitch() {
+        pendingSwitchAccount = nil
+        pendingClaudeProcesses = []
+    }
+
     // MARK: - Add Account Buttons
 
     @ViewBuilder
@@ -194,6 +249,19 @@ struct AccountSwitcherView: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
+                if let deadline = appState.loginDeadline {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        let remaining = max(0, Int(deadline.timeIntervalSince(context.date)))
+                        Text("Times out in \(remaining / 60):\(String(format: "%02d", remaining % 60))")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                Button("Cancel login", role: .cancel) {
+                    appState.cancelLogin()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
             .frame(maxWidth: .infinity)
             .padding(12)

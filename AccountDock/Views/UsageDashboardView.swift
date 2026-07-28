@@ -139,6 +139,7 @@ struct UsageDashboardView: View {
                         utilization: weekly.utilization ?? 0
                     )
                 }
+                staleUsageNotice(account)
             } else if let error = appState.accountUsageErrors[account.id] {
                 Label(error.message, systemImage: "exclamationmark.triangle")
                     .font(.caption)
@@ -309,6 +310,7 @@ struct UsageDashboardView: View {
             if let usage = usage {
                 usageBars(usage)
                 extraUsageRow(usage.extraUsage)
+                staleUsageNotice(account)
             } else if let errorState = appState.accountUsageErrors[account.id] {
                 HStack {
                     Image(systemName: errorState.isRateLimited ? "timer" : (errorState.isExpired ? "exclamationmark.triangle" : "xmark.circle"))
@@ -334,6 +336,23 @@ struct UsageDashboardView: View {
         }
         .cardStyle(fill: account.isActive ? .cardFill : .cardFill)
         .sectionPadding()
+    }
+
+    @ViewBuilder
+    private func staleUsageNotice(_ account: Account) -> some View {
+        if let error = appState.accountUsageErrors[account.id],
+           let cachedAt = error.cachedAt {
+            HStack(spacing: 5) {
+                Image(systemName: error.isRateLimited ? "timer" : "clock.arrow.circlepath")
+                Text(error.message)
+                    .lineLimit(1)
+                Spacer()
+                Text(cachedAt, style: .relative)
+                    .monospacedDigit()
+            }
+            .font(.caption2)
+            .foregroundStyle(.orange)
+        }
     }
 
     @ViewBuilder

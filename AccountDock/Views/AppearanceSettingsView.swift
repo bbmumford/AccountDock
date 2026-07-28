@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct AppearanceSettingsView: View {
-    @AppStorage("accentPalette") private var accentPalette = "signal"
+    @AppStorage("accentPalette") private var accentPalette = "softWhite"
     @AppStorage("interfaceDensity") private var interfaceDensity = "comfortable"
     @AppStorage("cardCornerRadius") private var storedCardCornerRadius = 7.0
     @AppStorage("disableCardShadows") private var disableCardShadows = false
@@ -12,7 +12,8 @@ struct AppearanceSettingsView: View {
     @State private var menuPanelWidth = 440.0
 
     private let accentChoices: [AccentChoice] = [
-        .init(id: "signal", name: "Dock Blue", color: Color(red: 0x5E / 255.0, green: 0x6A / 255.0, blue: 0xD2 / 255.0)),
+        .init(id: "softWhite", name: "Default", color: Color(red: 0.91, green: 0.90, blue: 0.86)),
+        .init(id: "signal", name: "Navy", color: Color(red: 0x5E / 255.0, green: 0x6A / 255.0, blue: 0xD2 / 255.0)),
         .init(id: "ember", name: "Ember", color: Color(red: 0xE8 / 255.0, green: 0x6D / 255.0, blue: 0x45 / 255.0)),
         .init(id: "ocean", name: "Ocean", color: Color(red: 0.12, green: 0.48, blue: 0.92)),
         .init(id: "violet", name: "Violet", color: Color(red: 0.49, green: 0.25, blue: 0.93)),

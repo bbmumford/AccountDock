@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 private let log = FileLog("Claude")
 
@@ -12,11 +13,54 @@ struct DetectedClaudePath: Hashable, Identifiable {
     var id: String { path }
 }
 
+/// A Claude process which was already running when an account switch was requested.
+/// Existing Claude processes can retain their startup credential after the system
+/// Keychain entry changes, so they must be restarted to guarantee a clean switch.
+struct RunningClaudeProcess: Hashable, Identifiable, Sendable {
+    let id: Int32
+    let command: String
+    let sessionID: String?
+    let workingDirectory: String?
+    let recoveryMethod: RecoveryMethod
+
+    enum RecoveryMethod: String, Hashable, Sendable {
+        case hostManaged
+        case terminal
+        case unavailable
+    }
+
+    var label: String {
+        if command.localizedCaseInsensitiveContains("vscode") {
+            return "VS Code Claude session"
+        }
+        if command.contains("--claude-in-chrome-mcp") {
+            return "Claude in Chrome"
+        }
+        if command.contains("auth login") {
+            return "Claude browser login"
+        }
+        return "Claude Code session"
+    }
+
+    var isWorkload: Bool {
+        !command.contains("--claude-in-chrome-mcp") && !command.contains("auth login")
+    }
+}
+
+private struct ClaudeHookSession: Decodable {
+    let provider: String?
+    let sessionID: String
+    let workingDirectory: String?
+    let processID: Int32?
+    let host: String?
+}
+
 /// Interacts with the Claude CLI to get auth status and manage accounts.
 final class ClaudeService: @unchecked Sendable {
     static let shared = ClaudeService()
 
     private let lock = NSLock()
+    private let loginRunner = LoginProcessRunner()
     private var _claudePath: String
     /// Monotonic counter to detect out-of-order setPath completions.
     private var _setPathGeneration: UInt64 = 0
@@ -220,10 +264,20 @@ final class ClaudeService: @unchecked Sendable {
 
     // MARK: - Usage API
 
-    enum UsageError: Error {
+    enum UsageError: LocalizedError {
         case expired
+        case rateLimited(Date?)
         case network(String)
         case decode(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .expired: "Claude credentials have expired."
+            case .rateLimited: "Anthropic temporarily rate-limited usage refresh."
+            case let .network(message): "Usage request failed: \(message)"
+            case let .decode(message): "Usage response could not be read: \(message)"
+            }
+        }
     }
 
     /// Fetch usage for a specific access token
@@ -244,6 +298,11 @@ final class ClaudeService: @unchecked Sendable {
             if httpResponse?.statusCode == 401 || responseString.contains("token_expired") {
                 throw UsageError.expired
             }
+            if httpResponse?.statusCode == 429 {
+                let retryAfter = httpResponse?.value(forHTTPHeaderField: "Retry-After")
+                    .flatMap { Self.retryAfterDate($0) }
+                throw UsageError.rateLimited(retryAfter)
+            }
             throw UsageError.network("HTTP \(httpResponse?.statusCode ?? 0)")
         }
         
@@ -255,6 +314,17 @@ final class ClaudeService: @unchecked Sendable {
             log.error("[getUsageLimits] Decode Error: \(error.localizedDescription)")
             throw UsageError.decode(error.localizedDescription)
         }
+    }
+
+    static func retryAfterDate(_ value: String, now: Date = Date()) -> Date? {
+        if let seconds = TimeInterval(value), seconds >= 0 {
+            return now.addingTimeInterval(seconds)
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return formatter.date(from: value)
     }
 
     /// Extract access token string from a token JSON (keychain format)
@@ -269,6 +339,170 @@ final class ClaudeService: @unchecked Sendable {
     }
 
     // MARK: - Account Switching
+
+    /// Returns only executable processes whose binary is named `claude`.
+    /// Matching the executable column avoids false positives from editors,
+    /// AccountDock itself, or shell commands that merely mention Claude.
+    func runningProcesses() -> [RunningClaudeProcess] {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "pid=,comm=,args="]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+        } catch {
+            log.warning("[runningProcesses] ps failed: \(error.localizedDescription)")
+            return []
+        }
+
+        // Drain before waiting. `ps -axo ... args` can exceed a pipe's buffer
+        // on machines with many long-lived agent processes. Waiting first
+        // deadlocks: ps blocks trying to write while AccountDock blocks waiting
+        // for ps to exit, freezing the main actor during failover.
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return [] }
+        let text = String(data: data, encoding: .utf8) ?? ""
+        return Self.parseRunningProcesses(
+            text,
+            excludingPID: Int32(ProcessInfo.processInfo.processIdentifier)
+        )
+    }
+
+    static func parseRunningProcesses(
+        _ text: String,
+        excludingPID: Int32
+    ) -> [RunningClaudeProcess] {
+        return text.split(whereSeparator: \.isNewline).compactMap { line in
+            let fields = line.split(
+                maxSplits: 2,
+                omittingEmptySubsequences: true,
+                whereSeparator: \.isWhitespace
+            )
+            guard fields.count == 3,
+                  let pid = Int32(fields[0]),
+                  pid != excludingPID else { return nil }
+            let executable = URL(fileURLWithPath: String(fields[1])).lastPathComponent
+            guard executable == "claude" else { return nil }
+            let command = String(fields[2])
+            let sessionID = extractResumeSessionID(from: command)
+            return RunningClaudeProcess(
+                id: pid,
+                command: command,
+                sessionID: sessionID,
+                workingDirectory: nil,
+                recoveryMethod: command.localizedCaseInsensitiveContains("vscode")
+                    ? .hostManaged
+                    : (sessionID == nil ? .unavailable : .terminal)
+            )
+        }
+    }
+
+    /// Enrich process inspection with AccountDock's own hook registry. Hook
+    /// records map the Claude parent PID to its session without depending on a
+    /// particular IDE, terminal, or orchestration harness.
+    func recoverableRunningProcesses() -> [RunningClaudeProcess] {
+        let records = hookSessionRecords()
+        return runningProcesses().filter(\.isWorkload).map { process in
+            guard let record = records[process.id] else { return process }
+            let hostManaged = process.command.localizedCaseInsensitiveContains("vscode")
+                || record.host?.localizedCaseInsensitiveContains("vscode") == true
+            return RunningClaudeProcess(
+                id: process.id,
+                command: process.command,
+                sessionID: process.sessionID ?? record.sessionID,
+                workingDirectory: record.workingDirectory,
+                recoveryMethod: hostManaged ? .hostManaged : .terminal
+            )
+        }
+    }
+
+    static func extractResumeSessionID(from command: String) -> String? {
+        guard let expression = try? NSRegularExpression(
+            pattern: #"--resume(?:=|\s+)([A-Za-z0-9._:-]+)"#
+        ) else { return nil }
+        let range = NSRange(command.startIndex..., in: command)
+        guard let match = expression.firstMatch(in: command, range: range),
+              let idRange = Range(match.range(at: 1), in: command) else { return nil }
+        return String(command[idRange])
+    }
+
+    private func hookSessionRecords() -> [Int32: ClaudeHookSession] {
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/AccountDock/Sessions")
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else { return [:] }
+        return files.reduce(into: [:]) { result, file in
+            guard file.pathExtension == "json",
+                  let data = try? Data(contentsOf: file),
+                  let record = try? JSONDecoder().decode(ClaudeHookSession.self, from: data),
+                  record.provider == nil || record.provider == "claude",
+                  let pid = record.processID else { return }
+            result[pid] = record
+        }
+    }
+
+    /// Gracefully stops the exact processes captured before a credential switch.
+    /// It intentionally never escalates to SIGKILL; unsaved interactive sessions
+    /// remain under the user's control if they do not respond to termination.
+    func terminateForSafeRestart(_ processes: [RunningClaudeProcess]) async -> [RunningClaudeProcess] {
+        guard !processes.isEmpty else { return [] }
+        for process in processes {
+            if Darwin.kill(process.id, SIGTERM) != 0, errno != ESRCH {
+                log.warning("[safeRestart] Could not terminate pid \(process.id): errno \(errno)")
+            }
+        }
+
+        let deadline = Date().addingTimeInterval(4)
+        while Date() < deadline {
+            let remaining = processes.filter { Darwin.kill($0.id, 0) == 0 || errno == EPERM }
+            if remaining.isEmpty { return [] }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return processes.filter { Darwin.kill($0.id, 0) == 0 || errno == EPERM }
+    }
+
+    /// Resumes workloads using a method appropriate to their host. IDE-managed
+    /// sessions are left to their host's respawn mechanism. Standalone CLI
+    /// sessions open in Terminal at their original working directory.
+    func resumeAfterSafeRestart(_ processes: [RunningClaudeProcess]) {
+        let activeSessionIDs = Set(runningProcesses().compactMap(\.sessionID))
+        for process in processes {
+            guard process.recoveryMethod == .terminal,
+                  let sessionID = process.sessionID,
+                  !activeSessionIDs.contains(sessionID) else { continue }
+            let directory = process.workingDirectory
+                ?? FileManager.default.homeDirectoryForCurrentUser.path
+            let shellCommand = "cd \(Self.shellQuote(directory)) && \(Self.shellQuote(claudePath)) --resume \(Self.shellQuote(sessionID))"
+            let script = "tell application \"Terminal\" to do script \(Self.appleScriptQuote(shellCommand))"
+            let launcher = Process()
+            launcher.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            launcher.arguments = ["-e", script]
+            launcher.standardOutput = FileHandle.nullDevice
+            launcher.standardError = FileHandle.nullDevice
+            do {
+                try launcher.run()
+                log.info("[safeRestart] Requested CLI resume for session \(sessionID.prefix(8))…")
+            } catch {
+                log.warning("[safeRestart] Could not resume CLI session: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+
+    private static func appleScriptQuote(_ value: String) -> String {
+        "\"" + value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
 
     func switchAccount(from currentAccount: Account, to targetAccount: Account) async throws {
         let keychain = KeychainService.shared
@@ -347,12 +581,21 @@ final class ClaudeService: @unchecked Sendable {
     /// Run `claude auth login` which opens browser for OAuth.
     func login() async throws {
         log.info("[login] Starting `claude auth login`... (will open browser)")
-        _ = try await runClaude(args: ["auth", "login"])
+        let claudePath = self.claudePath
+        _ = try await loginRunner.run(
+            executable: claudePath,
+            arguments: ["auth", "login"],
+            environment: environment(for: claudePath)
+        )
         log.info("[login] `claude auth login` process exited")
 
         // Give keychain a moment to sync after CLI writes
         try await Task.sleep(for: .seconds(1))
         log.info("[login] Post-login delay complete, ready for token capture")
+    }
+
+    func cancelLogin() {
+        loginRunner.cancel()
     }
 
     /// Run `claude auth logout`
@@ -490,28 +733,7 @@ final class ClaudeService: @unchecked Sendable {
                 process.standardOutput = pipe
                 process.standardError = pipe
 
-                var env = ProcessInfo.processInfo.environment
-                let homeDir = NSHomeDirectory()
-                // Include the parent directory of the discovered claude binary
-                // so that `node` is on PATH for NVM-installed scripts.
-                // Only add it when claudePath is absolute (skip the bare "claude" fallback).
-                var extraPaths = [
-                    "/opt/homebrew/bin",
-                    "/usr/local/bin",
-                    "\(homeDir)/.local/bin",
-                    "\(homeDir)/.npm-global/bin"
-                ]
-                if claudePath.contains("/") {
-                    // Resolve symlinks so that e.g. /usr/local/bin/claude -> ~/.nvm/.../bin/claude
-                    // yields the NVM bin dir where `node` actually lives
-                    let resolved = URL(fileURLWithPath: claudePath).resolvingSymlinksInPath().path
-                    let resolvedBinDir = URL(fileURLWithPath: resolved).deletingLastPathComponent().path
-                    extraPaths.insert(resolvedBinDir, at: 0)
-                }
-                let existingPath = env["PATH"] ?? "/usr/bin:/bin"
-                env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
-                env["HOME"] = homeDir
-                process.environment = env
+                process.environment = self.environment(for: claudePath)
 
                 do {
                     try process.run()
@@ -533,6 +755,24 @@ final class ClaudeService: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    private func environment(for executable: String) -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        let homeDir = NSHomeDirectory()
+        var extraPaths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "\(homeDir)/.local/bin",
+            "\(homeDir)/.npm-global/bin"
+        ]
+        if executable.contains("/") {
+            let resolved = URL(fileURLWithPath: executable).resolvingSymlinksInPath().path
+            extraPaths.insert(URL(fileURLWithPath: resolved).deletingLastPathComponent().path, at: 0)
+        }
+        environment["PATH"] = (extraPaths + [environment["PATH"] ?? "/usr/bin:/bin"]).joined(separator: ":")
+        environment["HOME"] = homeDir
+        return environment
     }
 }
 
