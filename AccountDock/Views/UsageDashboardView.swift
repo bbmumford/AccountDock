@@ -20,7 +20,7 @@ private struct StatWithTooltip<Content: View>: View {
     }
 }
 
-/// Shows enabled providers together, grouped by provider, with one card per account.
+/// Shows enabled providers in the same grouped order configured in Accounts.
 struct UsageDashboardView: View {
     @EnvironmentObject private var appState: AppState
     @AppStorage("showFullEmail") private var showFullEmail = false
@@ -98,13 +98,24 @@ struct UsageDashboardView: View {
 
     private var visibleProviders: [AIProviderType] {
         var providers: [AIProviderType] = []
-        if showClaudeProvider { providers.append(.claudeCode) }
-        if showCodexProvider { providers.append(.codex) }
+        for account in appState.accounts where providerIsVisible(account.provider) {
+            if !providers.contains(account.provider) {
+                providers.append(account.provider)
+            }
+        }
         return providers
     }
 
+    private func providerIsVisible(_ provider: AIProviderType) -> Bool {
+        switch provider {
+        case .claudeCode: return showClaudeProvider
+        case .codex: return showCodexProvider
+        case .gemini: return false
+        }
+    }
+
     private var visibleAccounts: [Account] {
-        appState.accounts.filter { visibleProviders.contains($0.provider) }
+        appState.accounts.filter { providerIsVisible($0.provider) }
     }
 
     private func accounts(for provider: AIProviderType) -> [Account] {
@@ -134,7 +145,7 @@ struct UsageDashboardView: View {
                 }
                 if let weekly = usage.sevenDay {
                     usageRow(
-                        label: "Weekly",
+                        label: codexQuotaLabel(weekly),
                         resetText: weekly.resetTimeString,
                         utilization: weekly.utilization ?? 0
                     )
@@ -158,6 +169,12 @@ struct UsageDashboardView: View {
         }
         .cardStyle(fill: account.isActive ? .cardFillStrong : .cardFill)
         .sectionPadding()
+    }
+
+    private func codexQuotaLabel(_ window: UsageWindow) -> LocalizedStringKey {
+        guard let seconds = window.windowSeconds else { return "Weekly" }
+        let days = seconds / 86_400
+        return days == 7 ? "Weekly" : LocalizedStringKey("\(days)-day quota")
     }
 
     // MARK: - Today Activity Card

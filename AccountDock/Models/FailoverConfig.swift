@@ -13,11 +13,12 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     var waitForImminentReset = true
     var resetGraceMinutes = 5.0
     var accountOrder: [UUID] = []
+    var excludedAccountIDs: Set<UUID> = []
 
     enum CodingKeys: String, CodingKey {
         case enabled, sessionEnabled, sessionThreshold, weeklyEnabled, weeklyThreshold
         case loops, resetAware, preferMostCapacity, waitForImminentReset
-        case resetGraceMinutes, accountOrder
+        case resetGraceMinutes, accountOrder, excludedAccountIDs
     }
 
     init() {}
@@ -35,6 +36,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         waitForImminentReset = try values.decodeIfPresent(Bool.self, forKey: .waitForImminentReset) ?? true
         resetGraceMinutes = try values.decodeIfPresent(Double.self, forKey: .resetGraceMinutes) ?? 5
         accountOrder = try values.decodeIfPresent([UUID].self, forKey: .accountOrder) ?? []
+        excludedAccountIDs = try values.decodeIfPresent(Set<UUID>.self, forKey: .excludedAccountIDs) ?? []
     }
 
     static func defaults(for provider: AIProviderType) -> Self {
@@ -85,6 +87,7 @@ final class FailoverConfigStore: ObservableObject {
     func synchronizeOrder(provider: AIProviderType, accountIDs: [UUID]) {
         update(provider) { policy in
             policy.accountOrder.removeAll { !accountIDs.contains($0) }
+            policy.excludedAccountIDs = policy.excludedAccountIDs.filter { accountIDs.contains($0) }
             for id in accountIDs where !policy.accountOrder.contains(id) {
                 policy.accountOrder.append(id)
             }
@@ -261,5 +264,19 @@ enum FailoverDecision {
         let after = Array(orderedIDs.dropFirst(currentIndex + 1))
         guard loops else { return after }
         return after + Array(orderedIDs.prefix(currentIndex))
+    }
+
+    /// Filters destinations by quota only. Authentication probe errors are not
+    /// accepted here because a Claude switch verifies and refreshes the target
+    /// credential transactionally; callers may therefore use last-good quota.
+    static func eligibleCandidates(
+        _ candidateIDs: [UUID],
+        usageByID: [UUID: UsageAPIResponse],
+        provider: AIProviderType,
+        policy: ProviderFailoverPolicy
+    ) -> [UUID] {
+        candidateIDs.filter {
+            hasCapacity(usage: usageByID[$0], provider: provider, policy: policy)
+        }
     }
 }

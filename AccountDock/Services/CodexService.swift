@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 private let codexLog = FileLog("Codex")
 
@@ -7,6 +8,35 @@ struct CodexIdentity: Sendable {
     let displayName: String
     let accountID: String?
     let planType: String?
+}
+
+struct RunningCodexProcess: Hashable, Identifiable, Sendable {
+    let id: Int32
+    let command: String
+    let sessionID: String?
+    let workingDirectory: String?
+    let host: String
+
+    var isHostManaged: Bool {
+        host == "vscode" || host == "chatgpt"
+    }
+
+    var label: String {
+        switch host {
+        case "vscode": return "VS Code Codex session"
+        case "chatgpt": return "ChatGPT Codex session"
+        default: return "Codex CLI session"
+        }
+    }
+}
+
+private struct CodexHookSession: Decodable {
+    let provider: String?
+    let sessionID: String
+    let workingDirectory: String?
+    let processID: Int32?
+    let host: String?
+    let observedAt: Date?
 }
 
 enum CodexServiceError: LocalizedError {
@@ -64,6 +94,146 @@ final class CodexService: @unchecked Sendable {
         }
     }
 
+    func recoverableRunningProcesses() -> [RunningCodexProcess] {
+        let records = hookSessionRecords()
+        return runningAppServers().map { process in
+            let record = records[process.id]
+            return RunningCodexProcess(
+                id: process.id,
+                command: process.command,
+                sessionID: record?.sessionID,
+                workingDirectory: record?.workingDirectory,
+                host: record?.host ?? process.host
+            )
+        }
+    }
+
+    func terminateForSafeRestart(_ processes: [RunningCodexProcess]) async -> [RunningCodexProcess] {
+        for process in processes {
+            if Darwin.kill(process.id, SIGTERM) != 0, errno != ESRCH {
+                codexLog.warning("[safeRestart] Could not terminate pid \(process.id): errno \(errno)")
+            }
+        }
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let remaining = processes.filter { Darwin.kill($0.id, 0) == 0 || errno == EPERM }
+            if remaining.isEmpty { return [] }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return processes.filter { Darwin.kill($0.id, 0) == 0 || errno == EPERM }
+    }
+
+    func resumeAfterSafeRestart(_ processes: [RunningCodexProcess]) {
+        guard let binaryPath else { return }
+        for process in processes {
+            guard !process.isHostManaged,
+                  let sessionID = process.sessionID else {
+                if process.isHostManaged {
+                    codexLog.info("[safeRestart] \(process.label) left to its host to reconnect")
+                } else {
+                    codexLog.warning("[safeRestart] No session ID available for pid \(process.id)")
+                }
+                continue
+            }
+            let directory = process.workingDirectory ?? NSHomeDirectory()
+            let command = "\(Self.shellQuote(binaryPath)) resume \(Self.shellQuote(sessionID)) -C \(Self.shellQuote(directory))"
+            let script = "tell application \"Terminal\" to do script \(Self.appleScriptQuote(command))"
+            let launcher = Process()
+            launcher.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            launcher.arguments = ["-e", script]
+            launcher.standardOutput = FileHandle.nullDevice
+            launcher.standardError = FileHandle.nullDevice
+            do {
+                try launcher.run()
+                codexLog.info("[safeRestart] Requested CLI resume for session \(sessionID.prefix(8))…")
+            } catch {
+                codexLog.warning("[safeRestart] Could not resume CLI session: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private struct AppServerProcess {
+        let id: Int32
+        let command: String
+        let host: String
+    }
+
+    private func runningAppServers() -> [AppServerProcess] {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "pid=,ppid=,command="]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return [] }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return [] }
+        let text = String(data: data, encoding: .utf8) ?? ""
+        let lines = text.split(whereSeparator: \.isNewline)
+        let parsed: [(Int32, Int32, String)] = lines.compactMap { line in
+            let fields = line.split(maxSplits: 2, whereSeparator: \.isWhitespace)
+            guard fields.count == 3,
+                  let pid = Int32(fields[0]),
+                  let ppid = Int32(fields[1]) else { return nil }
+            return (pid, ppid, String(fields[2]))
+        }
+        let commandByPID = Dictionary(uniqueKeysWithValues: parsed.map { ($0.0, $0.2) })
+        return parsed.compactMap { pid, ppid, command in
+            guard command.localizedCaseInsensitiveContains("codex"),
+                  command.contains("app-server") else { return nil }
+            var host = "cli"
+            var ancestor = ppid
+            var visited = Set<Int32>()
+            while ancestor > 1, visited.insert(ancestor).inserted {
+                let ancestorCommand = commandByPID[ancestor] ?? ""
+                if ancestorCommand.contains("/Visual Studio Code.app/") || ancestorCommand.contains("Code Helper") {
+                    host = "vscode"
+                    break
+                }
+                if ancestorCommand.contains("/ChatGPT.app/") {
+                    host = "chatgpt"
+                    break
+                }
+                guard let next = parsed.first(where: { $0.0 == ancestor })?.1 else { break }
+                ancestor = next
+            }
+            return AppServerProcess(id: pid, command: command, host: host)
+        }
+    }
+
+    private func hookSessionRecords() -> [Int32: CodexHookSession] {
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/AccountDock/Sessions")
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else { return [:] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return files.reduce(into: [:]) { result, file in
+            guard file.lastPathComponent.hasPrefix("codex-"),
+                  let data = try? Data(contentsOf: file),
+                  let record = try? decoder.decode(CodexHookSession.self, from: data),
+                  let pid = record.processID else { return }
+            if let existing = result[pid],
+               let old = existing.observedAt,
+               let new = record.observedAt,
+               old > new { return }
+            result[pid] = record
+        }
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+
+    private static func appleScriptQuote(_ value: String) -> String {
+        "\"" + value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
     func detectedBinaryPaths() -> [String] {
         var paths = [
             "/opt/homebrew/bin/codex",
@@ -117,10 +287,18 @@ final class CodexService: @unchecked Sendable {
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw CodexServiceError.invalidCredentials
         }
+        return try Self.decodeUsage(data)
+    }
+
+    static func decodeUsage(_ data: Data) throws -> UsageAPIResponse {
         let payload = try JSONDecoder().decode(CodexUsagePayload.self, from: data)
+        let quotaWindow = payload.window(matchingSeconds: 7 * 24 * 60 * 60)
+            ?? payload.primaryWindow
         return UsageAPIResponse(
             fiveHour: payload.window(matchingSeconds: 5 * 60 * 60)?.usageWindow,
-            sevenDay: payload.window(matchingSeconds: 7 * 24 * 60 * 60)?.usageWindow,
+            // `sevenDay` is the shared long-window slot. Free Codex accounts
+            // currently expose a 30-day primary quota instead of a 7-day one.
+            sevenDay: quotaWindow?.usageWindow,
             sevenDayOauthApps: nil,
             sevenDayOpus: nil,
             sevenDaySonnet: nil,
@@ -331,6 +509,10 @@ private struct CodexUsagePayload: Decodable {
             .first { $0.limitWindowSeconds == target }
     }
 
+    var primaryWindow: Window? {
+        rateLimit?.primaryWindow
+    }
+
     struct RateLimit: Decodable {
         let primaryWindow: Window?
         let secondaryWindow: Window?
@@ -357,7 +539,8 @@ private struct CodexUsagePayload: Decodable {
                 utilization: usedPercent,
                 resetsAt: ISO8601DateFormatter().string(
                     from: Date(timeIntervalSince1970: TimeInterval(resetAt))
-                )
+                ),
+                windowSeconds: limitWindowSeconds
             )
         }
     }

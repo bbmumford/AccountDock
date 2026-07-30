@@ -10,6 +10,8 @@ CLI, and combines provider usage, activity, costs, and menu-bar modules.
 
 - Add, rename, reauthenticate, remove, and switch Claude and Codex accounts.
 - Managed Codex homes with atomic promotion to `~/.codex/auth.json`.
+- Safe Codex switching that restarts associated app-servers and resumes
+  captured CLI sessions against the selected account.
 - Combined usage and API-equivalent cost history for both providers.
 - Configurable menu-bar modules with bar or percentage usage displays.
 - Provider-specific, session- and weekly-aware automatic account failover.
@@ -27,7 +29,8 @@ never fails over from one provider to the other.
 
 - Choose the account order for each provider and optionally loop through it.
 - Set independent session and weekly thresholds for Claude subscriptions.
-- Set the weekly threshold reported by Codex; Codex does not expose a
+- Set the long-window quota threshold reported by Codex. This is normally seven
+  days, while Free accounts can expose a 30-day quota; Codex does not expose a
   five-hour/session subscription window.
 - Prefer the eligible account with the most remaining headroom.
 - Prefer accounts whose limits have reset, or hold the current account briefly
@@ -48,7 +51,7 @@ treated as ready while its weekly limit remains blocked. AccountDock prepares
 that account, monitors it for restored capacity, and releases the tracked
 Claude processes only after the provider confirms capacity.
 
-### Safe Claude switching and session recovery
+### Safe Claude and Codex switching and session recovery
 
 Claude Code processes keep the credential with which they were launched, so
 changing the credential file alone does not move an already-running workload.
@@ -77,6 +80,14 @@ assuming a particular harness: IDE-managed sessions are released to their host
 for respawn, while standalone Claude CLI sessions are reopened in Terminal at
 their original working directory with `claude --resume <session-id>`. Before
 resuming, it checks that the same session is not already running.
+
+Codex hooks additionally associate captured sessions with their persistent
+app-server and owning host. Manual safe switching and automatic failover verify
+the promoted account before gracefully stopping only the associated Codex
+app-servers. Standalone sessions are reopened with `codex resume <session-id>`
+in their original working directory; VS Code and ChatGPT integrations reconnect
+through their host. **Switch Without Restart** remains available, but an
+already-running app-server may continue consuming its startup account.
 
 Settings → Failover Log records switches, exhausted-account waits, reset
 selection, recovery release, and failures. Entries obfuscate account identity,

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Lists all configured accounts with switching and management.
 struct AccountSwitcherView: View {
@@ -8,7 +9,11 @@ struct AccountSwitcherView: View {
     @State private var editingLabel = ""
     @State private var pendingSwitchAccount: Account?
     @State private var pendingClaudeProcesses: [RunningClaudeProcess] = []
+    @State private var pendingCodexProcesses: [RunningCodexProcess] = []
     @State private var showingClaudeProcessWarning = false
+    @State private var showingCodexProcessWarning = false
+    @State private var draggedAccountID: UUID?
+    @State private var draggedProvider: AIProviderType?
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -19,8 +24,14 @@ struct AccountSwitcherView: View {
                     if appState.accounts.isEmpty {
                         emptyState
                     } else {
-                        ForEach(appState.accounts) { account in
-                            accountRow(account)
+                        ForEach(providerOrder) { provider in
+                            VStack(alignment: .leading, spacing: 8) {
+                                providerHeader(provider)
+
+                                ForEach(accounts(for: provider)) { account in
+                                    accountRow(account)
+                                }
+                            }
                         }
                     }
                 }
@@ -53,6 +64,26 @@ struct AccountSwitcherView: View {
         } message: {
             Text(processWarningMessage)
         }
+        .alert("Codex sessions are still running", isPresented: $showingCodexProcessWarning) {
+            Button("Switch Safely") {
+                guard let account = pendingSwitchAccount else { return }
+                let processes = pendingCodexProcesses
+                clearPendingSwitch()
+                Task {
+                    await appState.switchTo(account, safelyRestartingCodex: processes)
+                }
+            }
+            Button("Switch Without Restart") {
+                guard let account = pendingSwitchAccount else { return }
+                clearPendingSwitch()
+                Task { await appState.switchTo(account) }
+            }
+            Button("Cancel", role: .cancel) {
+                clearPendingSwitch()
+            }
+        } message: {
+            Text(codexProcessWarningMessage)
+        }
     }
 
     // MARK: - Empty State
@@ -77,8 +108,64 @@ struct AccountSwitcherView: View {
 
     // MARK: - Account Row
 
+    private var providerOrder: [AIProviderType] {
+        var result: [AIProviderType] = []
+        for account in appState.accounts where !result.contains(account.provider) {
+            result.append(account.provider)
+        }
+        return result
+    }
+
+    private func accounts(for provider: AIProviderType) -> [Account] {
+        appState.accounts.filter { $0.provider == provider }
+    }
+
+    private func providerHeader(_ provider: AIProviderType) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "line.3.horizontal")
+                .font(.caption)
+                .foregroundStyle(.textSecondary)
+                .frame(width: 14, height: 28)
+                .contentShape(Rectangle())
+                .onDrag {
+                    draggedProvider = provider
+                    return NSItemProvider(object: provider.rawValue as NSString)
+                }
+
+            Label(
+                provider == .claudeCode ? "Claude" : "Codex",
+                systemImage: provider.iconName
+            )
+            .font(.headline)
+            .foregroundStyle(.brand)
+
+            Spacer()
+        }
+        .contentShape(Rectangle())
+        .onDrop(
+            of: [UTType.text],
+            delegate: ProviderDisplayOrderDropDelegate(
+                destination: provider,
+                draggedProvider: $draggedProvider,
+                move: appState.moveProvider(from:to:)
+            )
+        )
+        .help("Drag to reorder provider groups")
+    }
+
     private func accountRow(_ account: Account) -> some View {
         HStack(spacing: 12) {
+            Image(systemName: "line.3.horizontal")
+                .font(.caption)
+                .foregroundStyle(.textSecondary)
+                .frame(width: 14, height: 32)
+                .contentShape(Rectangle())
+                .onDrag {
+                    draggedAccountID = account.id
+                    return NSItemProvider(object: account.id.uuidString as NSString)
+                }
+                .help("Drag to reorder")
+
             // Provider icon
             Image(systemName: account.provider.iconName)
                 .font(.title2)
@@ -194,6 +281,14 @@ struct AccountSwitcherView: View {
                 )
                 .shadow(color: AppStyle.cardShadowColor, radius: AppStyle.cardShadowRadius, x: 0, y: AppStyle.cardShadowY)
         )
+        .onDrop(
+            of: [UTType.text],
+            delegate: AccountDisplayOrderDropDelegate(
+                destinationID: account.id,
+                draggedAccountID: $draggedAccountID,
+                move: appState.moveAccount(from:to:)
+            )
+        )
     }
 
     private func providerTint(_ provider: AIProviderType) -> Color {
@@ -206,8 +301,15 @@ struct AccountSwitcherView: View {
     }
 
     private func requestSwitch(to account: Account) {
-        guard account.provider == .claudeCode else {
-            Task { await appState.switchTo(account) }
+        if account.provider == .codex {
+            let processes = appState.runningCodexProcesses()
+            guard !processes.isEmpty else {
+                Task { await appState.switchTo(account) }
+                return
+            }
+            pendingSwitchAccount = account
+            pendingCodexProcesses = processes
+            showingCodexProcessWarning = true
             return
         }
         let processes = appState.runningClaudeProcesses()
@@ -228,9 +330,18 @@ struct AccountSwitcherView: View {
         return "\(grouped) will keep using their existing account. “Switch Safely” changes the account, then gracefully closes only these Claude processes. Reopen terminal sessions afterward; IDE integrations may restart automatically."
     }
 
+    private var codexProcessWarningMessage: String {
+        let grouped = Dictionary(grouping: pendingCodexProcesses, by: \.label)
+            .map { "\($0.value.count) \($0.key)" }
+            .sorted()
+            .joined(separator: ", ")
+        return "\(grouped) may retain the current account. “Switch Safely” changes credentials, gracefully restarts the associated Codex app-servers, and resumes captured CLI sessions. IDE and ChatGPT integrations reconnect through their host."
+    }
+
     private func clearPendingSwitch() {
         pendingSwitchAccount = nil
         pendingClaudeProcesses = []
+        pendingCodexProcesses = []
     }
 
     // MARK: - Add Account Buttons
@@ -304,5 +415,47 @@ struct AccountSwitcherView: View {
             .padding(8)
             .background(.cardFillStrong, in: RoundedRectangle(cornerRadius: AppStyle.cardCornerRadius))
         }
+    }
+}
+
+private struct AccountDisplayOrderDropDelegate: DropDelegate {
+    let destinationID: UUID
+    @Binding var draggedAccountID: UUID?
+    let move: (UUID, UUID) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let sourceID = draggedAccountID, sourceID != destinationID else { return }
+        move(sourceID, destinationID)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedAccountID = nil
+        return true
+    }
+
+    func dropExited(info: DropInfo) {}
+}
+
+private struct ProviderDisplayOrderDropDelegate: DropDelegate {
+    let destination: AIProviderType
+    @Binding var draggedProvider: AIProviderType?
+    let move: (AIProviderType, AIProviderType) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let source = draggedProvider, source != destination else { return }
+        move(source, destination)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedProvider = nil
+        return true
     }
 }

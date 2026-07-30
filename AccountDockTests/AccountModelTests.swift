@@ -48,4 +48,58 @@ final class AccountModelTests: XCTestCase {
             .dailyCost
         ])
     }
+
+    func testCachedUsageClearsAfterKnownResetPasses() {
+        let now = Date()
+        let usage = UsageAPIResponse(
+            fiveHour: UsageWindow(
+                utilization: 100,
+                resetsAt: ISO8601DateFormatter().string(from: now.addingTimeInterval(-1))
+            ),
+            sevenDay: UsageWindow(
+                utilization: 72,
+                resetsAt: ISO8601DateFormatter().string(from: now.addingTimeInterval(60))
+            ),
+            sevenDayOauthApps: nil,
+            sevenDayOpus: nil,
+            sevenDaySonnet: nil,
+            sevenDayCowork: nil,
+            iguanaNecktie: nil,
+            extraUsage: nil
+        )
+
+        let effective = usage.expiringPassedResets(at: now)
+
+        XCTAssertEqual(effective.fiveHour?.utilization, 0)
+        XCTAssertNil(effective.fiveHour?.resetsAt)
+        XCTAssertEqual(effective.sevenDay?.utilization, 72)
+        XCTAssertNotNil(effective.sevenDay?.resetsAt)
+    }
+
+    func testCachedUsageReportsItsNextFutureReset() throws {
+        let now = Date()
+        let sessionReset = now.addingTimeInterval(300)
+        let weeklyReset = now.addingTimeInterval(600)
+        let usage = UsageAPIResponse(
+            fiveHour: UsageWindow(
+                utilization: 40,
+                resetsAt: ISO8601DateFormatter().string(from: sessionReset)
+            ),
+            sevenDay: UsageWindow(
+                utilization: 80,
+                resetsAt: ISO8601DateFormatter().string(from: weeklyReset)
+            ),
+            sevenDayOauthApps: nil,
+            sevenDayOpus: nil,
+            sevenDaySonnet: nil,
+            sevenDayCowork: nil,
+            iguanaNecktie: nil,
+            extraUsage: nil
+        )
+
+        let nextReset = try XCTUnwrap(usage.nextResetDate)
+        XCTAssertEqual(nextReset.timeIntervalSince1970,
+                       sessionReset.timeIntervalSince1970,
+                       accuracy: 1)
+    }
 }
