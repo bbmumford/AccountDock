@@ -34,6 +34,7 @@ struct FailoverSettingsView: View {
     private func providerSection(_ provider: AIProviderType) -> some View {
         let policy = store.policy(for: provider)
         let providerAccounts = orderedAccounts(for: provider, policy: policy)
+        let includedCount = providerAccounts.filter { !policy.excludedAccountIDs.contains($0.id) }.count
 
         Section {
             Toggle("Enable automatic failover", isOn: binding(provider, \.enabled))
@@ -44,16 +45,10 @@ struct FailoverSettingsView: View {
                     enabled: binding(provider, \.sessionEnabled),
                     threshold: binding(provider, \.sessionThreshold)
                 )
-            } else {
-                LabeledContent("Session limit") {
-                    Text("Not reported by Codex")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
             }
 
             thresholdRow(
-                title: "Weekly limit",
+                title: provider == .codex ? "Quota limit" : "Weekly limit",
                 enabled: binding(provider, \.weeklyEnabled),
                 threshold: binding(provider, \.weeklyThreshold)
             )
@@ -93,8 +88,18 @@ struct FailoverSettingsView: View {
                 } else {
                     ForEach(Array(providerAccounts.enumerated()), id: \.element.id) { index, account in
                         HStack {
+                            Toggle(
+                                "Include \(account.effectiveDisplayName(obfuscated: false)) in failover",
+                                isOn: accountIncludedBinding(provider, account.id)
+                            )
+                            .labelsHidden()
+                            .help("Include this account in automatic failover")
                             Image(systemName: provider.iconName)
-                                .foregroundStyle(.brand)
+                                .foregroundStyle(
+                                    policy.excludedAccountIDs.contains(account.id)
+                                        ? Color.secondary
+                                        : Color.brand
+                                )
                                 .frame(width: 18)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(account.effectiveDisplayName(obfuscated: false))
@@ -107,6 +112,11 @@ struct FailoverSettingsView: View {
                                 Text("ACTIVE")
                                     .font(.system(size: 9, weight: .medium))
                                     .foregroundStyle(.green)
+                            }
+                            if policy.excludedAccountIDs.contains(account.id) {
+                                Text("EXCLUDED")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundStyle(.secondary)
                             }
                             Spacer()
                             Button {
@@ -131,8 +141,8 @@ struct FailoverSettingsView: View {
         } header: {
             Label(provider.rawValue, systemImage: provider.iconName)
         } footer: {
-            if policy.enabled && providerAccounts.count < 2 {
-                Text("Failover needs at least two managed accounts for this provider.")
+            if policy.enabled && includedCount < 2 {
+                Text("Failover needs at least two included accounts for this provider.")
             }
         }
     }
@@ -162,6 +172,24 @@ struct FailoverSettingsView: View {
         Binding(
             get: { store.policy(for: provider)[keyPath: keyPath] },
             set: { value in store.update(provider) { $0[keyPath: keyPath] = value } }
+        )
+    }
+
+    private func accountIncludedBinding(
+        _ provider: AIProviderType,
+        _ accountID: UUID
+    ) -> Binding<Bool> {
+        Binding(
+            get: { !store.policy(for: provider).excludedAccountIDs.contains(accountID) },
+            set: { included in
+                store.update(provider) { policy in
+                    if included {
+                        policy.excludedAccountIDs.remove(accountID)
+                    } else {
+                        policy.excludedAccountIDs.insert(accountID)
+                    }
+                }
+            }
         )
     }
 

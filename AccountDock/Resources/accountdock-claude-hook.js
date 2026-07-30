@@ -54,7 +54,8 @@ function run() {
         event,
         workingDirectory: cwd,
         processID: Number(environmentValue("ACCOUNTDOCK_AGENT_PID")) || null,
-        host: environmentValue("CLAUDE_CODE_ENTRYPOINT")
+        host: environmentValue("ACCOUNTDOCK_HOST")
+            || environmentValue("CLAUDE_CODE_ENTRYPOINT")
             || (environmentValue("TERM_PROGRAM") === "vscode" ? "vscode" : "cli"),
         observedAt: (new Date()).toISOString()
     };

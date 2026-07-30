@@ -40,6 +40,25 @@ final class CodexServiceTests: XCTestCase {
         XCTAssertThrowsError(try CodexService.identity(fromAuthData: auth))
     }
 
+    func testFreePlanPrimaryQuotaFallsBackToLongWindow() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "rate_limit": [
+                "primary_window": [
+                    "used_percent": 12,
+                    "reset_at": 1_790_000_000,
+                    "limit_window_seconds": 30 * 24 * 60 * 60,
+                ],
+                "secondary_window": NSNull(),
+            ],
+        ])
+
+        let usage = try CodexService.decodeUsage(data)
+
+        XCTAssertEqual(usage.sevenDay?.utilization, 12)
+        XCTAssertEqual(usage.sevenDay?.windowSeconds, 30 * 24 * 60 * 60)
+        XCTAssertNil(usage.fiveHour)
+    }
+
     private func authData(payload: [String: Any]) throws -> Data {
         let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         let payloadPart = payloadData.base64EncodedString()

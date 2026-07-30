@@ -22,15 +22,55 @@ struct UsageAPIResponse: Codable {
         case iguanaNecktie = "iguana_necktie"
         case extraUsage = "extra_usage"
     }
+
+    /// Clears utilization for windows whose last provider-confirmed reset has
+    /// passed. This keeps a last-good snapshot useful when credentials expire
+    /// or the provider cannot be queried, without displaying pre-reset usage
+    /// indefinitely. The reset timestamp is removed because the next rolling
+    /// window is not known until the provider reports it.
+    func expiringPassedResets(at date: Date = Date()) -> UsageAPIResponse {
+        UsageAPIResponse(
+            fiveHour: fiveHour?.expiringPassedReset(at: date),
+            sevenDay: sevenDay?.expiringPassedReset(at: date),
+            sevenDayOauthApps: sevenDayOauthApps?.expiringPassedReset(at: date),
+            sevenDayOpus: sevenDayOpus?.expiringPassedReset(at: date),
+            sevenDaySonnet: sevenDaySonnet?.expiringPassedReset(at: date),
+            sevenDayCowork: sevenDayCowork?.expiringPassedReset(at: date),
+            iguanaNecktie: iguanaNecktie?.expiringPassedReset(at: date),
+            extraUsage: extraUsage
+        )
+    }
+
+    func hasPassedReset(at date: Date = Date()) -> Bool {
+        [
+            fiveHour, sevenDay, sevenDayOauthApps, sevenDayOpus,
+            sevenDaySonnet, sevenDayCowork, iguanaNecktie,
+        ].compactMap { $0?.resetsAtDate }.contains { $0 <= date }
+    }
+
+    var nextResetDate: Date? {
+        [
+            fiveHour, sevenDay, sevenDayOauthApps, sevenDayOpus,
+            sevenDaySonnet, sevenDayCowork, iguanaNecktie,
+        ].compactMap { $0?.resetsAtDate }.min()
+    }
 }
 
 struct UsageWindow: Codable {
     let utilization: Double?
     let resetsAt: String?
+    let windowSeconds: Int?
 
     enum CodingKeys: String, CodingKey {
         case utilization
         case resetsAt = "resets_at"
+        case windowSeconds = "window_seconds"
+    }
+
+    init(utilization: Double?, resetsAt: String?, windowSeconds: Int? = nil) {
+        self.utilization = utilization
+        self.resetsAt = resetsAt
+        self.windowSeconds = windowSeconds
     }
 
     var resetsAtDate: Date? {
@@ -40,6 +80,11 @@ struct UsageWindow: Codable {
         if let date = formatter.date(from: resetsAt) { return date }
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: resetsAt)
+    }
+
+    func expiringPassedReset(at date: Date = Date()) -> UsageWindow {
+        guard let reset = resetsAtDate, reset <= date else { return self }
+        return UsageWindow(utilization: 0, resetsAt: nil, windowSeconds: windowSeconds)
     }
 
     var resetTimeString: String? {

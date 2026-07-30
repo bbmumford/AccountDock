@@ -72,6 +72,7 @@ final class AppState: ObservableObject {
     private let failoverRuntimeKey = "app.accountdock.failover.runtime.v1"
     private var refreshTimer: Timer?
     private var failoverMonitorTimer: Timer?
+    private var usageResetTimer: Timer?
     private var isMonitoringFailover = false
     private var loginAttemptID: UUID?
     private var exhaustedFailoverAccounts: [AIProviderType: Set<UUID>] = [:]
@@ -91,6 +92,7 @@ final class AppState: ObservableObject {
         log.info("[init] Loading accounts from UserDefaults...")
         loadAccounts()
         loadUsageSnapshots()
+        reconcilePassedUsageResets()
         loadFailoverRuntime()
         log.info("[init] Loaded \(self.accounts.count) accounts, active: \(self.activeAccount?.id.uuidString ?? "none")")
     }
@@ -172,7 +174,10 @@ final class AppState: ObservableObject {
         let now = Date()
         let intervals = [AIProviderType.claudeCode, .codex].compactMap { provider -> TimeInterval? in
             let policy = failoverConfig.policy(for: provider)
-            guard policy.enabled, let account = activeAccount(for: provider) else { return nil }
+            guard policy.enabled,
+                  let account = activeAccount(for: provider),
+                  !policy.excludedAccountIDs.contains(account.id)
+            else { return nil }
             let pendingReset = pendingResetRecovery[provider]?.resetDate
             let retryAfter = provider == .claudeCode ? claudeUsageRetryAfter[account.id] : nil
             return FailoverDecision.pollInterval(
@@ -208,6 +213,8 @@ final class AppState: ObservableObject {
         refreshTimer = nil
         failoverMonitorTimer?.invalidate()
         failoverMonitorTimer = nil
+        usageResetTimer?.invalidate()
+        usageResetTimer = nil
     }
 
     private func monitorActiveFailoverUsage() async {
@@ -220,7 +227,10 @@ final class AppState: ObservableObject {
         defer { isMonitoringFailover = false }
 
         for provider in enabledProviders {
-            guard let account = activeAccount(for: provider) else { continue }
+            let policy = failoverConfig.policy(for: provider)
+            guard let account = activeAccount(for: provider),
+                  !policy.excludedAccountIDs.contains(account.id)
+            else { continue }
             do {
                 let usage: UsageAPIResponse
                 if provider == .claudeCode {
@@ -439,6 +449,43 @@ final class AppState: ObservableObject {
         log.info("[updateAccountLabel] Set label for \(account.email): \(trimmed ?? "nil")")
     }
 
+    /// Changes display order only. Failover maintains its own independent
+    /// account order in `FailoverConfigStore`.
+    func moveAccount(from sourceID: UUID, to destinationID: UUID) {
+        guard sourceID != destinationID,
+              let sourceIndex = accounts.firstIndex(where: { $0.id == sourceID }),
+              let destinationIndex = accounts.firstIndex(where: { $0.id == destinationID }),
+              accounts[sourceIndex].provider == accounts[destinationIndex].provider
+        else { return }
+
+        let account = accounts.remove(at: sourceIndex)
+        let insertionIndex = destinationIndex
+        accounts.insert(account, at: insertionIndex)
+        saveAccounts(refreshWidget: true)
+        log.info("[account-order] Moved account \(sourceID.uuidString) to display index \(insertionIndex)")
+    }
+
+    /// Moves an entire provider section while preserving account order inside each section.
+    func moveProvider(from source: AIProviderType, to destination: AIProviderType) {
+        guard source != destination else { return }
+
+        var order: [AIProviderType] = []
+        for account in accounts where !order.contains(account.provider) {
+            order.append(account.provider)
+        }
+        guard let sourceIndex = order.firstIndex(of: source),
+              let destinationIndex = order.firstIndex(of: destination)
+        else { return }
+
+        let provider = order.remove(at: sourceIndex)
+        order.insert(provider, at: destinationIndex)
+        accounts = order.flatMap { provider in
+            accounts.filter { $0.provider == provider }
+        }
+        saveAccounts(refreshWidget: true)
+        log.info("[account-order] Moved provider \(source.rawValue) to section index \(destinationIndex)")
+    }
+
     func removeAccount(_ account: Account) {
         log.info("[removeAccount] Removing account \(account.id)")
         if account.provider == .codex {
@@ -478,6 +525,22 @@ final class AppState: ObservableObject {
         claudeService.recoverableRunningProcesses()
     }
 
+    func runningCodexProcesses() -> [RunningCodexProcess] {
+        codexService.recoverableRunningProcesses()
+    }
+
+    func switchTo(
+        _ account: Account,
+        refreshAfter: Bool = true,
+        safelyRestartingCodex processes: [RunningCodexProcess]
+    ) async {
+        guard account.provider == .codex else {
+            await switchTo(account, refreshAfter: refreshAfter)
+            return
+        }
+        await switchToCodex(account, refreshAfter: refreshAfter, safelyRestarting: processes)
+    }
+
     /// Switch credentials and then stop only the Claude processes that were
     /// captured before the switch. IDE integrations can respawn against the new
     /// credential; terminal sessions can be reopened by the user.
@@ -487,7 +550,7 @@ final class AppState: ObservableObject {
         safelyRestarting processes: [RunningClaudeProcess]
     ) async {
         if account.provider == .codex {
-            await switchToCodex(account)
+            await switchToCodex(account, refreshAfter: refreshAfter, safelyRestarting: [])
             return
         }
         guard let currentActive = activeAccount(for: account.provider), currentActive.id != account.id else {
@@ -614,6 +677,9 @@ final class AppState: ObservableObject {
     // MARK: - Usage
 
     private func fetchAllAccountUsage() async {
+        // A failed or unavailable provider refresh must not leave a cached
+        // pre-reset percentage on screen after its known reset time.
+        reconcilePassedUsageResets()
         accountUsageErrors.removeAll()
         for account in accounts where account.provider == .codex {
             do {
@@ -753,10 +819,12 @@ final class AppState: ObservableObject {
 
         for provider in [AIProviderType.claudeCode, .codex] {
             let policy = failoverConfig.policy(for: provider)
-            let providerAccounts = accounts.filter { $0.provider == provider }
+            let providerAccounts = accounts.filter {
+                $0.provider == provider && !policy.excludedAccountIDs.contains($0.id)
+            }
             guard policy.enabled, providerAccounts.count > 1,
                   let current = providerAccounts.first(where: \.isActive),
-                  accountUsageErrors[current.id] == nil else { continue }
+                  accountUsage[current.id] != nil else { continue }
 
             if let pending = pendingResetRecovery[provider],
                pending.accountID == current.id,
@@ -814,14 +882,16 @@ final class AppState: ObservableObject {
                 currentID: current.id,
                 loops: policy.loops
             )
-            let eligibleIDs = candidateIDs.filter { id in
-                accountUsageErrors[id] == nil
-                    && FailoverDecision.hasCapacity(
-                        usage: accountUsage[id],
-                        provider: provider,
-                        policy: policy
-                    )
-            }
+            // A non-active Claude token may have an expired access token while
+            // its refresh token and last-confirmed quota remain usable. The
+            // switch transaction runs `claude auth status`, which refreshes and
+            // verifies that credential before any workload is resumed.
+            let eligibleIDs = FailoverDecision.eligibleCandidates(
+                candidateIDs,
+                usageByID: accountUsage,
+                provider: provider,
+                policy: policy
+            )
 
             let recoveredIDs = eligibleIDs.filter {
                 exhaustedFailoverAccounts[provider, default: []].contains($0)
@@ -886,27 +956,41 @@ final class AppState: ObservableObject {
 
             let sourceName = current.effectiveDisplayName(obfuscated: true)
             let targetName = target.effectiveDisplayName(obfuscated: true)
+            let isUsingCachedQuota = accountUsageErrors[target.id] != nil
             failoverStatus[provider] = "Switching \(sourceName) → \(targetName)…"
             log.info("[failover] \(provider.rawValue): \(sourceName) -> \(targetName)")
             failoverEvents.record(provider, waitingForReset
                 ? "Preparing \(targetName), the earliest-resetting account."
-                : "Threshold reached; switching \(sourceName) → \(targetName).")
-            // A running Claude process retains the OAuth credential it started
-            // with. Merely updating the Keychain makes the UI look switched
-            // while the workload continues consuming the exhausted account.
-            // Automatic failover therefore captures and gracefully restarts
-            // pre-switch Claude processes after the credential transaction.
+                : isUsingCachedQuota
+                    ? "Threshold reached; switching \(sourceName) → \(targetName) using its last-known available quota."
+                    : "Threshold reached; switching \(sourceName) → \(targetName).")
+            // Both providers can retain startup credentials in long-lived
+            // processes, so capture their exact hosts before changing auth.
             let runningProcesses = provider == .claudeCode && !waitingForReset
                 ? claudeService.recoverableRunningProcesses()
+                : []
+            let runningCodexProcesses = provider == .codex && !waitingForReset
+                ? codexService.recoverableRunningProcesses()
                 : []
             if !runningProcesses.isEmpty {
                 log.info("[failover] Captured \(runningProcesses.count) Claude process(es) for safe restart")
             }
-            await switchTo(
-                target,
-                refreshAfter: false,
-                safelyRestarting: runningProcesses
-            )
+            if !runningCodexProcesses.isEmpty {
+                log.info("[failover] Captured \(runningCodexProcesses.count) Codex process(es) for safe restart")
+            }
+            if provider == .codex {
+                await switchTo(
+                    target,
+                    refreshAfter: false,
+                    safelyRestartingCodex: runningCodexProcesses
+                )
+            } else {
+                await switchTo(
+                    target,
+                    refreshAfter: false,
+                    safelyRestarting: runningProcesses
+                )
+            }
 
             if activeAccount(for: provider)?.id == target.id {
                 exhaustedFailoverAccounts[provider, default: []].remove(target.id)
@@ -918,7 +1002,10 @@ final class AppState: ObservableObject {
                     failoverEvents.record(provider, "Prepared \(targetName); monitoring adaptively for restored capacity.")
                 } else {
                     failoverStatus[provider] = "Switched to \(targetName)."
-                    failoverEvents.record(provider, "Switch completed. \(runningProcesses.count) pre-switch process(es) were handed to safe restart.")
+                    let restartedCount = provider == .codex
+                        ? runningCodexProcesses.count
+                        : runningProcesses.count
+                    failoverEvents.record(provider, "Switch completed. \(restartedCount) pre-switch process(es) were handed to safe restart.")
                 }
             } else {
                 failoverStatus[provider] = "Automatic switch failed. AccountDock will retry later."
@@ -1029,9 +1116,10 @@ final class AppState: ObservableObject {
     }
 
     private func recordUsage(_ usage: UsageAPIResponse, for accountID: UUID) {
-        accountUsage[accountID] = usage
+        accountUsage[accountID] = usage.expiringPassedResets()
         accountUsageUpdatedAt[accountID] = Date()
         saveUsageSnapshots()
+        scheduleNextUsageReset()
     }
 
     private func loadUsageSnapshots() {
@@ -1043,8 +1131,45 @@ final class AppState: ObservableObject {
         let validAccountIDs = Set(accounts.map(\.id))
         for (rawID, snapshot) in snapshots {
             guard let id = UUID(uuidString: rawID), validAccountIDs.contains(id) else { continue }
+            // Load the provider's last-good value verbatim. The reconciliation
+            // pass immediately after loading detects passed reset timestamps,
+            // persists the corrected snapshot, and refreshes widget data.
             accountUsage[id] = snapshot.usage
             accountUsageUpdatedAt[id] = snapshot.updatedAt
+        }
+        scheduleNextUsageReset()
+    }
+
+    /// Applies provider-confirmed reset timestamps locally. This is deliberately
+    /// independent of token validity and network availability.
+    private func reconcilePassedUsageResets(now: Date = Date()) {
+        var changed = false
+        for id in accountUsage.keys {
+            guard let usage = accountUsage[id], usage.hasPassedReset(at: now) else { continue }
+            accountUsage[id] = usage.expiringPassedResets(at: now)
+            changed = true
+            log.info("[usage-reset] Cleared cached utilization for \(id.uuidString) after its known reset")
+        }
+        if changed {
+            saveUsageSnapshots()
+            updateWidgetData()
+        }
+        scheduleNextUsageReset(now: now)
+    }
+
+    private func scheduleNextUsageReset(now: Date = Date()) {
+        usageResetTimer?.invalidate()
+        usageResetTimer = nil
+        guard let next = accountUsage.values.compactMap(\.nextResetDate)
+            .filter({ $0 > now })
+            .min() else { return }
+        usageResetTimer = Timer.scheduledTimer(
+            withTimeInterval: max(next.timeIntervalSince(now), 1),
+            repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.reconcilePassedUsageResets()
+            }
         }
     }
 
@@ -1165,7 +1290,11 @@ final class AppState: ObservableObject {
         saveAccounts(refreshWidget: true)
     }
 
-    private func switchToCodex(_ account: Account) async {
+    private func switchToCodex(
+        _ account: Account,
+        refreshAfter: Bool,
+        safelyRestarting processes: [RunningCodexProcess]
+    ) async {
         guard !account.isActive, let location = account.credentialLocation else { return }
         isLoading = true
         defer { isLoading = false }
@@ -1178,6 +1307,9 @@ final class AppState: ObservableObject {
                 )
             }
             try codexService.promoteToSystem(homePath: location)
+            guard codexService.systemIdentity()?.email.caseInsensitiveCompare(account.email) == .orderedSame else {
+                throw CodexServiceError.loginFailed("The promoted credentials did not match \(account.email).")
+            }
             for index in accounts.indices where accounts[index].provider == .codex {
                 accounts[index].isActive = accounts[index].id == account.id
                 if accounts[index].id == account.id {
@@ -1185,6 +1317,22 @@ final class AppState: ObservableObject {
                 }
             }
             saveAccounts(refreshWidget: true)
+
+            if !processes.isEmpty {
+                let survivors = await codexService.terminateForSafeRestart(processes)
+                if survivors.isEmpty {
+                    log.info("[switchToCodex] Safely stopped \(processes.count) pre-switch Codex process(es)")
+                    codexService.resumeAfterSafeRestart(processes)
+                    failoverEvents.record(.codex, "Restarted \(processes.count) Codex host process(es) against the selected account.")
+                } else {
+                    errorMessage = "\(survivors.count) Codex session host(s) did not close. Quit them manually before continuing work."
+                    log.warning("[switchToCodex] \(survivors.count) Codex process(es) survived graceful termination")
+                }
+            }
+
+            if refreshAfter {
+                await refresh()
+            }
         } catch {
             errorMessage = error.localizedDescription
         }

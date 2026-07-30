@@ -145,6 +145,27 @@ final class FailoverDecisionTests: XCTestCase {
         )
     }
 
+    func testCandidateSelectionUsesLastKnownAvailableQuota() {
+        var policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
+        policy.sessionThreshold = 97
+        policy.weeklyThreshold = 98
+        let unavailable = UUID()
+        let cachedAvailable = UUID()
+        let exhausted = UUID()
+
+        let result = FailoverDecision.eligibleCandidates(
+            [unavailable, cachedAvailable, exhausted],
+            usageByID: [
+                cachedAvailable: usage(session: 0, weekly: 42),
+                exhausted: usage(session: 100, weekly: 20),
+            ],
+            provider: .claudeCode,
+            policy: policy
+        )
+
+        XCTAssertEqual(result, [cachedAvailable])
+    }
+
     func testImminentResetRequiresEveryBreachedWindowToResetSoon() {
         var policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
         policy.sessionThreshold = 80
