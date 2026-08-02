@@ -10,12 +10,19 @@ struct CodexIdentity: Sendable {
     let planType: String?
 }
 
+struct CodexUsageSnapshot: Sendable {
+    let usage: UsageAPIResponse
+    let planType: String?
+}
+
 struct RunningCodexProcess: Hashable, Identifiable, Sendable {
     let id: Int32
     let command: String
     let sessionID: String?
     let workingDirectory: String?
     let host: String
+    let terminalTTY: String?
+    let hasUsageLimitError: Bool
 
     var isHostManaged: Bool {
         host == "vscode" || host == "chatgpt"
@@ -96,19 +103,27 @@ final class CodexService: @unchecked Sendable {
 
     func recoverableRunningProcesses() -> [RunningCodexProcess] {
         let records = hookSessionRecords()
-        return runningAppServers().map { process in
+        return runningCodexProcesses().map { process in
             let record = records[process.id]
+            let openSession = openSessionMetadata(processID: process.id)
             return RunningCodexProcess(
                 id: process.id,
                 command: process.command,
-                sessionID: record?.sessionID,
-                workingDirectory: record?.workingDirectory,
-                host: record?.host ?? process.host
+                sessionID: Self.extractResumeSessionID(from: process.command)
+                    ?? openSession.sessionID
+                    ?? record?.sessionID,
+                workingDirectory: openSession.workingDirectory ?? record?.workingDirectory,
+                host: record?.host ?? process.host,
+                terminalTTY: process.terminalTTY,
+                hasUsageLimitError: openSession.rolloutPath.map(Self.rolloutEndsWithUsageLimit) ?? false
             )
         }
     }
 
-    func terminateForSafeRestart(_ processes: [RunningCodexProcess]) async -> [RunningCodexProcess] {
+    func terminateForSafeRestart(
+        _ processes: [RunningCodexProcess],
+        shouldCloseTerminalTabs: Bool = false
+    ) async -> [RunningCodexProcess] {
         for process in processes {
             if Darwin.kill(process.id, SIGTERM) != 0, errno != ESRCH {
                 codexLog.warning("[safeRestart] Could not terminate pid \(process.id): errno \(errno)")
@@ -117,13 +132,32 @@ final class CodexService: @unchecked Sendable {
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             let remaining = processes.filter { Darwin.kill($0.id, 0) == 0 || errno == EPERM }
-            if remaining.isEmpty { return [] }
+            if remaining.isEmpty {
+                if shouldCloseTerminalTabs {
+                    closeTerminalTabs(for: processes)
+                }
+                return []
+            }
             try? await Task.sleep(for: .milliseconds(100))
         }
         return processes.filter { Darwin.kill($0.id, 0) == 0 || errno == EPERM }
     }
 
-    func resumeAfterSafeRestart(_ processes: [RunningCodexProcess]) {
+    /// Requests an in-process credential reload from the AccountDock Codex
+    /// fork. Stock Codex does not handle SIGUSR1, so this is intentionally used
+    /// only by the explicitly selected Switch Without Restart workflow.
+    func requestCredentialReload(_ processes: [RunningCodexProcess]) -> [RunningCodexProcess] {
+        processes.filter { process in
+            if Darwin.kill(process.id, SIGUSR1) == 0 {
+                codexLog.info("[liveSwitch] Requested credential reload for pid \(process.id)")
+                return false
+            }
+            codexLog.warning("[liveSwitch] Could not signal pid \(process.id): errno \(errno)")
+            return errno != ESRCH
+        }
+    }
+
+    func resumeAfterSafeRestart(_ processes: [RunningCodexProcess], codexHome: String? = nil) {
         guard let binaryPath else { return }
         for process in processes {
             guard !process.isHostManaged,
@@ -136,7 +170,8 @@ final class CodexService: @unchecked Sendable {
                 continue
             }
             let directory = process.workingDirectory ?? NSHomeDirectory()
-            let command = "\(Self.shellQuote(binaryPath)) resume \(Self.shellQuote(sessionID)) -C \(Self.shellQuote(directory))"
+            let scope = codexHome.map { "CODEX_HOME=\(Self.shellQuote($0)) " } ?? ""
+            let command = "\(scope)\(Self.shellQuote(binaryPath)) resume \(Self.shellQuote(sessionID)) -C \(Self.shellQuote(directory))"
             let script = "tell application \"Terminal\" to do script \(Self.appleScriptQuote(command))"
             let launcher = Process()
             launcher.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -152,17 +187,18 @@ final class CodexService: @unchecked Sendable {
         }
     }
 
-    private struct AppServerProcess {
+    private struct CodexProcess {
         let id: Int32
         let command: String
         let host: String
+        let terminalTTY: String?
     }
 
-    private func runningAppServers() -> [AppServerProcess] {
+    private func runningCodexProcesses() -> [CodexProcess] {
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axo", "pid=,ppid=,command="]
+        process.arguments = ["-axo", "pid=,ppid=,tty=,command="]
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         guard (try? process.run()) != nil else { return [] }
@@ -171,20 +207,32 @@ final class CodexService: @unchecked Sendable {
         guard process.terminationStatus == 0 else { return [] }
         let text = String(data: data, encoding: .utf8) ?? ""
         let lines = text.split(whereSeparator: \.isNewline)
-        let parsed: [(Int32, Int32, String)] = lines.compactMap { line in
-            let fields = line.split(maxSplits: 2, whereSeparator: \.isWhitespace)
-            guard fields.count == 3,
+        let parsed: [(Int32, Int32, String, String)] = lines.compactMap { line in
+            let fields = line.split(maxSplits: 3, whereSeparator: \.isWhitespace)
+            guard fields.count == 4,
                   let pid = Int32(fields[0]),
                   let ppid = Int32(fields[1]) else { return nil }
-            return (pid, ppid, String(fields[2]))
+            return (pid, ppid, String(fields[2]), String(fields[3]))
         }
-        let commandByPID = Dictionary(uniqueKeysWithValues: parsed.map { ($0.0, $0.2) })
-        return parsed.compactMap { pid, ppid, command in
-            guard command.localizedCaseInsensitiveContains("codex"),
-                  command.contains("app-server") else { return nil }
-            var host = "cli"
+        let commandByPID = Dictionary(uniqueKeysWithValues: parsed.map { ($0.0, $0.3) })
+        let parentByPID = Dictionary(uniqueKeysWithValues: parsed.map { ($0.0, $0.1) })
+        let candidates = parsed.filter { _, _, _, command in
+            Self.isRestartableCodexCommand(command)
+        }
+        let candidateIDs = Set(candidates.map(\.0))
+        return candidates.compactMap { pid, ppid, tty, command in
+            // Restart only the highest Codex process in a tree. Terminating a
+            // CLI root also stops its app-server and helper descendants.
             var ancestor = ppid
             var visited = Set<Int32>()
+            while ancestor > 1, visited.insert(ancestor).inserted {
+                if candidateIDs.contains(ancestor) { return nil }
+                guard let next = parentByPID[ancestor] else { break }
+                ancestor = next
+            }
+            var host = "cli"
+            ancestor = ppid
+            visited.removeAll()
             while ancestor > 1, visited.insert(ancestor).inserted {
                 let ancestorCommand = commandByPID[ancestor] ?? ""
                 if ancestorCommand.contains("/Visual Studio Code.app/") || ancestorCommand.contains("Code Helper") {
@@ -195,10 +243,61 @@ final class CodexService: @unchecked Sendable {
                     host = "chatgpt"
                     break
                 }
-                guard let next = parsed.first(where: { $0.0 == ancestor })?.1 else { break }
+                guard let next = parentByPID[ancestor] else { break }
                 ancestor = next
             }
-            return AppServerProcess(id: pid, command: command, host: host)
+            return CodexProcess(
+                id: pid,
+                command: command,
+                host: host,
+                terminalTTY: tty == "??" ? nil : tty
+            )
+        }
+    }
+
+    static func isRestartableCodexCommand(_ command: String) -> Bool {
+        let fields = command.split(whereSeparator: \.isWhitespace)
+        guard let executable = fields.first.map(String.init) else { return false }
+        let name = URL(fileURLWithPath: executable).lastPathComponent
+        guard name == "codex" else { return false }
+        return !command.contains("app-server")
+    }
+
+    static func extractResumeSessionID(from command: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"(?:^|\s)resume(?:\s+|=)([A-Za-z0-9._:-]+)"#
+        ) else { return nil }
+        let range = NSRange(command.startIndex..., in: command)
+        guard let match = regex.firstMatch(in: command, range: range),
+              let valueRange = Range(match.range(at: 1), in: command) else { return nil }
+        return String(command[valueRange])
+    }
+
+    private func closeTerminalTabs(for processes: [RunningCodexProcess]) {
+        let ttys = Set(processes.compactMap(\.terminalTTY))
+        guard !ttys.isEmpty else { return }
+        let ttyList = ttys.map { Self.appleScriptQuote("/dev/\($0)") }.joined(separator: ", ")
+        let script = """
+        tell application "Terminal"
+            repeat with windowIndex from (count of windows) to 1 by -1
+                set w to window windowIndex
+                repeat with tabIndex from (count of tabs of w) to 1 by -1
+                    set t to tab tabIndex of w
+                    if tty of t is in {\(ttyList)} then close t
+                end repeat
+            end repeat
+        end tell
+        """
+        let closer = Process()
+        closer.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        closer.arguments = ["-e", script]
+        closer.standardOutput = FileHandle.nullDevice
+        closer.standardError = FileHandle.nullDevice
+        do {
+            try closer.run()
+            closer.waitUntilExit()
+        } catch {
+            codexLog.warning("[forceRestart] Could not close Terminal tabs: \(error.localizedDescription)")
         }
     }
 
@@ -222,6 +321,83 @@ final class CodexService: @unchecked Sendable {
                old > new { return }
             result[pid] = record
         }
+    }
+
+    private func openSessionMetadata(
+        processID: Int32
+    ) -> (sessionID: String?, workingDirectory: String?, rolloutPath: String?) {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        process.arguments = ["-a", "-p", String(processID), "-Fn"]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return (nil, nil, nil) }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return (nil, nil, nil) }
+
+        var sessionID: String?
+        var workingDirectory: String?
+        var rolloutPath: String?
+        for rawLine in String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline) {
+            guard rawLine.first == "n" else { continue }
+            let path = String(rawLine.dropFirst())
+            if path.contains("/.codex/sessions/"), path.hasSuffix(".jsonl"),
+               let id = Self.sessionID(fromRolloutPath: path) {
+                sessionID = id
+                rolloutPath = path
+            } else if workingDirectory == nil,
+                      path.hasPrefix("/"),
+                      FileManager.default.fileExists(atPath: path) {
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+                   isDirectory.boolValue {
+                    workingDirectory = path
+                }
+            }
+        }
+        return (sessionID, workingDirectory, rolloutPath)
+    }
+
+    /// Returns true only when the latest submitted turn ended with a real
+    /// provider usage-limit error. Older errors before a newer user message do
+    /// not arm another failover.
+    static func rolloutEndsWithUsageLimit(_ path: String) -> Bool {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? handle.close() }
+        let length = (try? handle.seekToEnd()) ?? 0
+        let tailLength = min(length, 256 * 1024)
+        try? handle.seek(toOffset: length - tailLength)
+        let text = String(decoding: (try? handle.readToEnd()) ?? Data(), as: UTF8.self)
+
+        for line in text.split(whereSeparator: \.isNewline).reversed() {
+            guard let data = line.data(using: .utf8),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  root["type"] as? String == "event_msg",
+                  let payload = root["payload"] as? [String: Any],
+                  let type = payload["type"] as? String else { continue }
+            if type == "user_message" { return false }
+            guard type == "error" else { continue }
+            let message = (payload["message"] as? String ?? "").lowercased()
+            let errorInfo = String(describing: payload["codex_error_info"] ?? "").lowercased()
+            return message.contains("usage limit")
+                || message.contains("quota exceeded")
+                || errorInfo.contains("usage_limit")
+                || errorInfo.contains("rate_limit_reached")
+        }
+        return false
+    }
+
+    static func sessionID(fromRolloutPath path: String) -> String? {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$"#,
+            options: [.caseInsensitive]
+        ) else { return nil }
+        let range = NSRange(path.startIndex..., in: path)
+        guard let match = regex.firstMatch(in: path, range: range),
+              let valueRange = Range(match.range(at: 1), in: path) else { return nil }
+        return String(path[valueRange])
     }
 
     private static func shellQuote(_ value: String) -> String {
@@ -264,15 +440,68 @@ final class CodexService: @unchecked Sendable {
     /// same first-party usage endpoint used by the Codex CLI ecosystem.
     /// AccountDock performs the request itself; CodexBar is not invoked.
     func getUsageLimits(codexHome: String?) async throws -> UsageAPIResponse {
+        try await getUsageSnapshot(codexHome: codexHome).usage
+    }
+
+    /// Starts the account's quota countdown with a deliberately ephemeral
+    /// request. Codex is instructed not to persist a rollout/session file.
+    func warmQuotaWindow(codexHome: String?) async throws {
+        guard let binaryPath else { throw CodexServiceError.binaryNotFound }
+        try await Task.detached(priority: .utility) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: binaryPath)
+            process.arguments = [
+                "exec", "--ephemeral", "--skip-git-repo-check",
+                "--sandbox", "read-only", "--ignore-rules",
+                "Reply with exactly: OK"
+            ]
+            var environment = ProcessInfo.processInfo.environment
+            if let codexHome { environment["CODEX_HOME"] = codexHome }
+            process.environment = environment
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            let deadline = Date().addingTimeInterval(60)
+            while process.isRunning && Date() < deadline {
+                Darwin.usleep(100_000)
+            }
+            if process.isRunning {
+                process.terminate()
+                throw CodexServiceError.loginFailed("Warm-up request timed out.")
+            }
+            guard process.terminationStatus == 0 else {
+                throw CodexServiceError.loginFailed("Warm-up request exited \(process.terminationStatus).")
+            }
+        }.value
+    }
+
+    func getUsageSnapshot(codexHome: String?) async throws -> CodexUsageSnapshot {
         let home = codexHome.map(URL.init(fileURLWithPath:)) ?? systemHome
         let authURL = home.appendingPathComponent("auth.json")
         let authData = try Data(contentsOf: authURL)
-        guard let auth = try JSONSerialization.jsonObject(with: authData) as? [String: Any],
-              let tokens = auth["tokens"] as? [String: Any],
+        guard var auth = try JSONSerialization.jsonObject(with: authData) as? [String: Any],
+              var tokens = auth["tokens"] as? [String: Any] else {
+            throw CodexServiceError.invalidCredentials
+        }
+        if Self.credentialsNeedRefresh(auth),
+           let refreshToken = tokens["refresh_token"] as? String,
+           !refreshToken.isEmpty {
+            tokens = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
+            auth["tokens"] = tokens
+            auth["last_refresh"] = ISO8601DateFormatter().string(from: Date())
+            try Self.writePrivateAuth(auth, to: authURL)
+        }
+        guard
               let accessToken = tokens["access_token"] as? String,
               !accessToken.isEmpty else {
             throw CodexServiceError.invalidCredentials
         }
+        // The usage endpoint has been observed returning the same plan_type for
+        // different, correctly scoped accounts. Prefer the plan claim carried by
+        // this account's signed access token; use the response only for older
+        // credentials that do not contain the claim.
+        let credentialPlan = Self.planType(fromJWT: accessToken)
+            ?? (tokens["id_token"] as? String).flatMap(Self.planType(fromJWT:))
 
         var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/usage")!)
         request.timeoutInterval = 20
@@ -287,14 +516,60 @@ final class CodexService: @unchecked Sendable {
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw CodexServiceError.invalidCredentials
         }
-        return try Self.decodeUsage(data)
+        let responseSnapshot = try Self.decodeUsageSnapshot(data)
+        return CodexUsageSnapshot(
+            usage: responseSnapshot.usage,
+            planType: credentialPlan ?? responseSnapshot.planType
+        )
+    }
+
+    private func refreshOAuthTokens(
+        _ existing: [String: Any],
+        refreshToken: String
+    ) async throws -> [String: Any] {
+        var request = URLRequest(url: URL(string: "https://auth.openai.com/oauth/token")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "scope": "openid profile email"
+        ])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              let refreshed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CodexServiceError.invalidCredentials
+        }
+        var merged = existing
+        for key in ["access_token", "refresh_token", "id_token"] {
+            if let value = refreshed[key] as? String, !value.isEmpty { merged[key] = value }
+        }
+        return merged
+    }
+
+    private static func credentialsNeedRefresh(_ auth: [String: Any]) -> Bool {
+        guard let value = auth["last_refresh"] as? String,
+              let date = ISO8601DateFormatter().date(from: value) else { return true }
+        return Date().timeIntervalSince(date) > 8 * 24 * 60 * 60
+    }
+
+    private static func writePrivateAuth(_ auth: [String: Any], to url: URL) throws {
+        let data = try JSONSerialization.data(withJSONObject: auth, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     static func decodeUsage(_ data: Data) throws -> UsageAPIResponse {
+        try decodeUsageSnapshot(data).usage
+    }
+
+    static func decodeUsageSnapshot(_ data: Data) throws -> CodexUsageSnapshot {
         let payload = try JSONDecoder().decode(CodexUsagePayload.self, from: data)
         let quotaWindow = payload.window(matchingSeconds: 7 * 24 * 60 * 60)
             ?? payload.primaryWindow
-        return UsageAPIResponse(
+        let usage = UsageAPIResponse(
             fiveHour: payload.window(matchingSeconds: 5 * 60 * 60)?.usageWindow,
             // `sevenDay` is the shared long-window slot. Free Codex accounts
             // currently expose a 30-day primary quota instead of a 7-day one.
@@ -305,6 +580,11 @@ final class CodexService: @unchecked Sendable {
             sevenDayCowork: nil,
             iguanaNecktie: nil,
             extraUsage: nil
+        )
+        let trimmedPlan = payload.planType?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return CodexUsageSnapshot(
+            usage: usage,
+            planType: trimmedPlan?.isEmpty == false ? trimmedPlan : nil
         )
     }
 
@@ -465,6 +745,13 @@ final class CodexService: @unchecked Sendable {
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
+    private static func planType(fromJWT token: String) -> String? {
+        let payload = decodeJWTPayload(token)
+        let plan = (payload?["https://api.openai.com/auth"] as? [String: Any])?["chatgpt_plan_type"] as? String
+        let trimmed = plan?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
+    }
+
     private func run(binary: String, arguments: [String], codexHome: String?) async throws -> String {
         try await Task.detached(priority: .userInitiated) {
             let process = Process()
@@ -497,9 +784,11 @@ final class CodexService: @unchecked Sendable {
 }
 
 private struct CodexUsagePayload: Decodable {
+    let planType: String?
     let rateLimit: RateLimit?
 
     enum CodingKeys: String, CodingKey {
+        case planType = "plan_type"
         case rateLimit = "rate_limit"
     }
 

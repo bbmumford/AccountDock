@@ -2,6 +2,18 @@ import XCTest
 @testable import AccountDock
 
 final class AccountModelTests: XCTestCase {
+    func testUnusedUnstartedWindowRequiresConfirmedZeroAndNoReset() {
+        XCTAssertTrue(UsageWindow(utilization: 0, resetsAt: nil).isUnusedUnstartedWindow)
+        XCTAssertFalse(UsageWindow(utilization: nil, resetsAt: nil).isUnusedUnstartedWindow)
+        XCTAssertFalse(UsageWindow(utilization: 1, resetsAt: nil).isUnusedUnstartedWindow)
+        XCTAssertFalse(
+            UsageWindow(
+                utilization: 0,
+                resetsAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(60))
+            ).isUnusedUnstartedWindow
+        )
+    }
+
     func testLegacyAccountDecodesWithoutCredentialLocation() throws {
         let data = """
         {

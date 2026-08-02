@@ -163,10 +163,11 @@ actor PricingService {
     /// Floor between network revalidations; guards against manual-refresh
     /// storms. The CDN caches for 5 min, so sub-minute rechecks see nothing new.
     private static let minCheckInterval: TimeInterval = 60
-    /// A usable LiteLLM payload yields dozens of Claude pricing rows (~44 at
-    /// time of writing). Anything below this floor means the bytes parsed as
-    /// JSON but aren't the pricing table — reject rather than trust them.
+    /// A usable LiteLLM payload yields many provider pricing rows. These floors
+    /// reject a valid-looking but incomplete response before it replaces the
+    /// bundled Anthropic and OpenAI table.
     private static let minClaudeModels = 10
+    private static let minOpenAIModels = 10
     private static let liteLLMURL = URL(string:
         "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
     )!
@@ -235,16 +236,35 @@ actor PricingService {
     /// provider prefixes, then longest-prefix fuzzy match. Returns nil for
     /// `<synthetic>` and other models with no LiteLLM entry — callers
     /// should treat those as zero-cost.
-    func pricing(for model: String) -> LiteLLMModelPricing? {
-        if let exact = pricing[model] { return exact }
-        for prefix in ["anthropic/", "anthropic."] {
-            if let v = pricing[prefix + model] { return v }
+    func pricing(
+        for model: String,
+        provider: AIProviderType = .claudeCode,
+        reasoningEffort: String? = nil
+    ) -> LiteLLMModelPricing? {
+        let providerPrefix = provider == .codex ? "openai/" : "anthropic/"
+        let effort = reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let effort, !effort.isEmpty {
+            for candidate in [
+                "\(providerPrefix)\(model)-\(effort)",
+                "\(providerPrefix)\(model):\(effort)",
+                "\(model)-\(effort)",
+                "\(model):\(effort)",
+            ] {
+                if let value = pricing[candidate] { return value }
+            }
         }
+        if let exact = pricing[providerPrefix + model] { return exact }
+        if let exact = pricing[model] { return exact }
+        if provider == .claudeCode, let value = pricing["anthropic." + model] { return value }
         // Fuzzy: longest prefix match in either direction. Handles dated
         // suffixes like "claude-sonnet-4-5-20250929" → "claude-sonnet-4-5".
         var best: (String, LiteLLMModelPricing)?
         for (k, v) in pricing {
-            if (model.hasPrefix(k) || k.hasPrefix(model))
+            let providerScoped = k.hasPrefix(providerPrefix)
+            let bareKey = !k.contains("/") && !k.contains(".")
+            guard providerScoped || bareKey else { continue }
+            let normalizedKey = providerScoped ? String(k.dropFirst(providerPrefix.count)) : k
+            if (model.hasPrefix(normalizedKey) || normalizedKey.hasPrefix(model))
                 && (best == nil || k.count > best!.0.count) {
                 best = (k, v)
             }
@@ -256,9 +276,12 @@ actor PricingService {
     /// should use this instead of awaiting `pricing(for:)` per row: it snapshots
     /// the table atomically, so a concurrent `reloadIfFreshChanged()` can't swap
     /// pricing partway through and mix old and new values into one result.
-    func prices(for models: [String]) -> [String: LiteLLMModelPricing?] {
+    func prices(
+        for models: [String],
+        provider: AIProviderType = .claudeCode
+    ) -> [String: LiteLLMModelPricing?] {
         var out: [String: LiteLLMModelPricing?] = [:]
-        for m in models { out[m] = pricing(for: m) }
+        for m in models { out[m] = pricing(for: m, provider: provider) }
         return out
     }
 
@@ -389,7 +412,9 @@ actor PricingService {
         guard Date().timeIntervalSince(verifiedAt) < Self.freshValiditySeconds,
               let data = try? Data(contentsOf: Self.freshURL),
               let models = Self.supportedModels(from: data),
-              models.keys.filter({ $0.contains("claude-") }).count >= Self.minClaudeModels
+              models.keys.filter({ $0.contains("claude-") }).count >= Self.minClaudeModels,
+              models.keys.filter({ $0.hasPrefix("gpt-") || $0.hasPrefix("openai/gpt-") }).count
+                >= Self.minOpenAIModels
         else {
             return nil
         }
@@ -397,9 +422,9 @@ actor PricingService {
     }
 
     /// Decode a raw LiteLLM payload (the on-disk/network shape, not our
-    /// envelope) into Claude pricing rows — the same filter `fetch_litellm.sh`
-    /// applies at build time. Returns nil when the bytes aren't the expected
-    /// object-of-entries schema, so callers can reject a wrong-shape 200 body.
+    /// envelope) into Anthropic/Claude and OpenAI/GPT pricing rows — the same
+    /// filter `fetch_litellm.sh` applies at build time. Returns nil when the
+    /// bytes aren't the expected object-of-entries schema.
     private static func supportedModels(from data: Data) -> [String: LiteLLMModelPricing]? {
         guard let raw = try? JSONDecoder().decode([String: LiteLLMEntry].self, from: data) else { return nil }
         let supported = raw.filter { name, _ in

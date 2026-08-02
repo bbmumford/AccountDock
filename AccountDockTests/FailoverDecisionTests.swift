@@ -2,6 +2,14 @@ import XCTest
 @testable import AccountDock
 
 final class FailoverDecisionTests: XCTestCase {
+    func testLegacyFailoverPolicyDefaultsCodexSwitchingToSafeRestart() throws {
+        let policy = try JSONDecoder().decode(
+            ProviderFailoverPolicy.self,
+            from: Data("{}".utf8)
+        )
+        XCTAssertEqual(policy.codexSwitchMode, .safeRestart)
+    }
+
     func testAdaptivePollingTightensNearLimit() {
         let policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
         XCTAssertEqual(
@@ -164,6 +172,25 @@ final class FailoverDecisionTests: XCTestCase {
         )
 
         XCTAssertEqual(result, [cachedAvailable])
+    }
+
+    func testLocallyElapsedResetCannotBecomeFailoverDestinationUntilVerified() {
+        let resetButUnverified = UUID()
+        let nextVerified = UUID()
+        let policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
+
+        let result = FailoverDecision.eligibleCandidates(
+            [resetButUnverified, nextVerified],
+            usageByID: [
+                resetButUnverified: usage(session: 0, weekly: 20),
+                nextVerified: usage(session: 30, weekly: 40),
+            ],
+            provider: .claudeCode,
+            policy: policy,
+            unverifiedResetIDs: [resetButUnverified]
+        )
+
+        XCTAssertEqual(result, [nextVerified])
     }
 
     func testImminentResetRequiresEveryBreachedWindowToResetSoon() {

@@ -53,6 +53,15 @@ struct FailoverSettingsView: View {
                 threshold: binding(provider, \.weeklyThreshold)
             )
 
+            if provider == .codex {
+                Picker("Failover switch method", selection: binding(provider, \.codexSwitchMode)) {
+                    ForEach(CodexFailoverSwitchMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .help(codexSwitchModeHelp(policy.codexSwitchMode))
+            }
+
             Toggle("Loop through accounts continuously", isOn: binding(provider, \.loops))
             Toggle("Prefer an account after its limit resets", isOn: binding(provider, \.resetAware))
             Toggle("Prefer the account with the most headroom", isOn: binding(provider, \.preferMostCapacity))
@@ -69,6 +78,12 @@ struct FailoverSettingsView: View {
                 }
                 .padding(.leading, 20)
             }
+            Toggle("Keep reset windows warm", isOn: binding(provider, \.keepWindowsWarm))
+                .help(
+                    provider == .claudeCode
+                        ? "For every managed account, after a confirmed session or weekly reset, send one minimal non-persistent request so its new countdown starts. Failover exclusions do not disable warming."
+                        : "For every managed account, after a confirmed weekly reset, send one minimal ephemeral request so its new countdown starts. Failover exclusions do not disable warming."
+                )
 
             if let status = appState.failoverStatus[provider] {
                 Label(status, systemImage: "arrow.triangle.2.circlepath")
@@ -144,6 +159,17 @@ struct FailoverSettingsView: View {
             if policy.enabled && includedCount < 2 {
                 Text("Failover needs at least two included accounts for this provider.")
             }
+        }
+    }
+
+    private func codexSwitchModeHelp(_ mode: CodexFailoverSwitchMode) -> String {
+        switch mode {
+        case .safeRestart:
+            "Waits for a running session to receive a usage-limit error, then switches and resumes only affected sessions."
+        case .forceRestart:
+            "Acts immediately when the reported quota reaches the threshold, closes detected Codex Terminal sessions, and resumes them after switching."
+        case .withoutRestart:
+            "Acts immediately and signals running sessions to reload credentials. Requires the AccountDock Codex fork."
         }
     }
 

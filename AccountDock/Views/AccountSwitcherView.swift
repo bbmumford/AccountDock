@@ -65,6 +65,18 @@ struct AccountSwitcherView: View {
             Text(processWarningMessage)
         }
         .alert("Codex sessions are still running", isPresented: $showingCodexProcessWarning) {
+            Button("Force Restart Sessions", role: .destructive) {
+                guard let account = pendingSwitchAccount else { return }
+                let processes = pendingCodexProcesses
+                clearPendingSwitch()
+                Task {
+                    await appState.switchTo(
+                        account,
+                        safelyRestartingCodex: processes,
+                        closeCodexTerminalTabs: true
+                    )
+                }
+            }
             Button("Switch Safely") {
                 guard let account = pendingSwitchAccount else { return }
                 let processes = pendingCodexProcesses
@@ -75,8 +87,9 @@ struct AccountSwitcherView: View {
             }
             Button("Switch Without Restart") {
                 guard let account = pendingSwitchAccount else { return }
+                let processes = pendingCodexProcesses
                 clearPendingSwitch()
-                Task { await appState.switchTo(account) }
+                Task { await appState.switchTo(account, liveReloadingCodex: processes) }
             }
             Button("Cancel", role: .cancel) {
                 clearPendingSwitch()
@@ -335,7 +348,7 @@ struct AccountSwitcherView: View {
             .map { "\($0.value.count) \($0.key)" }
             .sorted()
             .joined(separator: ", ")
-        return "\(grouped) may retain the current account. “Switch Safely” changes credentials, gracefully restarts the associated Codex app-servers, and resumes captured CLI sessions. IDE and ChatGPT integrations reconnect through their host."
+        return "\(grouped) may retain the current account. “Switch Safely” changes credentials and resumes captured sessions in new Terminal windows, leaving the original tabs open. “Force Restart Sessions” also closes those original Terminal tabs. IDE and ChatGPT integrations reconnect through their host."
     }
 
     private func clearPendingSwitch() {

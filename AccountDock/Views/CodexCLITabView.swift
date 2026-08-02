@@ -4,6 +4,7 @@ struct CodexCLITabView: View {
     @EnvironmentObject private var appState: AppState
     @AppStorage("codexBinaryPathPreference") private var selectedPath = ""
     @State private var customPath = ""
+    @State private var showingForceRestartConfirmation = false
 
     private let service = CodexService.shared
 
@@ -47,11 +48,28 @@ struct CodexCLITabView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section("Session recovery") {
+                Button("Force Restart Codex Sessions", role: .destructive) {
+                    showingForceRestartConfirmation = true
+                }
+                Text("Closes detected Codex Terminal sessions, then opens a new Terminal window for each recoverable session and runs codex resume with its session ID.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .padding()
         .onAppear {
             customPath = selectedPath
+        }
+        .alert("Force restart Codex sessions?", isPresented: $showingForceRestartConfirmation) {
+            Button("Force Restart", role: .destructive) {
+                Task { await appState.forceRestartCodexSessions() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("AccountDock will close every detected Codex terminal process and its Terminal tab. Sessions without a detected session ID cannot be reopened automatically.")
         }
     }
 }

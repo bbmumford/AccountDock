@@ -193,7 +193,10 @@ actor SessionParseCacheV2 {
         for (_, file) in sortedFiles {
             for e in file.entries { distinctModels.insert(e.model) }
         }
-        let priceCache = await PricingService.shared.prices(for: Array(distinctModels))
+        let priceCache = await PricingService.shared.prices(
+            for: Array(distinctModels),
+            provider: .claudeCode
+        )
 
         // Global max-output-wins dedup across files. A message written more than
         // once (partial stream snapshot + final copy) shares a hash; input/cache

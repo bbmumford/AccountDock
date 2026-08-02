@@ -25,12 +25,15 @@ final class CostParser: Sendable {
         let samples = await Task.detached(priority: .utility) {
             Self.scanCodexSamples()
         }.value
-        let prices = await PricingService.shared.prices(for: Array(Set(samples.map(\.model))))
         let today = DateFormatter.codexDay.string(from: Date())
         var dailyCosts: [String: Double] = [:]
         var todayModelCosts: [String: Double] = [:]
         for sample in samples {
-            guard let price = prices[sample.model] ?? nil else { continue }
+            guard let price = await PricingService.shared.pricing(
+                for: sample.model,
+                provider: .codex,
+                reasoningEffort: sample.reasoningEffort
+            ) else { continue }
             let uncachedInput = max(0, sample.input - sample.cachedInput)
             let cost = price.cost(
                 input: uncachedInput,
@@ -43,13 +46,13 @@ final class CostParser: Sendable {
             guard cost > 0 else { continue }
             dailyCosts[sample.day, default: 0] += cost
             if sample.day == today {
-                todayModelCosts[sample.model, default: 0] += cost
+                todayModelCosts[sample.displayKey, default: 0] += cost
             }
         }
         let modelActivity = samples
             .filter { $0.day == today }
             .reduce(into: [String: Int]()) { counts, sample in
-                counts[sample.model, default: 0] += 1
+                counts[sample.displayKey, default: 0] += 1
             }
         return CodexCostHistory(
             dailyCosts: dailyCosts,
@@ -61,9 +64,15 @@ final class CostParser: Sendable {
     private struct CodexCostSample: Sendable {
         let day: String
         let model: String
+        let reasoningEffort: String?
         let input: Int
         let cachedInput: Int
         let output: Int
+
+        var displayKey: String {
+            guard let reasoningEffort, !reasoningEffort.isEmpty else { return model }
+            return "\(model) · \(reasoningEffort)"
+        }
     }
 
     private static func scanCodexSamples() -> [CodexCostSample] {
@@ -84,6 +93,7 @@ final class CostParser: Sendable {
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
             guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
             var model: String?
+            var reasoningEffort: String?
             for line in text.split(separator: "\n") {
                 guard let data = line.data(using: .utf8),
                       let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -92,6 +102,8 @@ final class CostParser: Sendable {
                    let value = payload["model"] as? String {
                     let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
                     model = Self.isDisplayableCodexModel(cleaned) ? cleaned : nil
+                    reasoningEffort = (payload["effort"] as? String)
+                        ?? (payload["reasoning_effort"] as? String)
                     continue
                 }
                 guard payload["type"] as? String == "token_count",
@@ -103,6 +115,7 @@ final class CostParser: Sendable {
                 samples.append(CodexCostSample(
                     day: dayFormatter.string(from: date),
                     model: model,
+                    reasoningEffort: reasoningEffort,
                     input: usage["input_tokens"] as? Int ?? 0,
                     cachedInput: usage["cached_input_tokens"] as? Int ?? 0,
                     output: usage["output_tokens"] as? Int ?? 0
