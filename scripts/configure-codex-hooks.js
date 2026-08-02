@@ -19,7 +19,7 @@ function mergeHooksFile(path) {
         config.hooks = {};
     }
 
-    const command = '"/Applications/AccountDock.app/Contents/Resources/accountdock-codex-hook.sh" # accountdock-hook';
+    const command = '/bin/sh "/Applications/AccountDock.app/Contents/Resources/accountdock-codex-hook.sh" # accountdock-hook';
     ["SessionStart", "UserPromptSubmit", "Stop"].forEach((event) => {
         if (!Array.isArray(config.hooks[event])) config.hooks[event] = [];
         config.hooks[event] = config.hooks[event].filter((group) => {

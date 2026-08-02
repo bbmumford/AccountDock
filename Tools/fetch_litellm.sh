@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # fetch_litellm.sh — Pull the latest LiteLLM model-pricing JSON, filter it
-# down to Claude rows, and write the result into AccountDock/Resources/ so
+# down to Anthropic/Claude and OpenAI/Codex rows, and write the result into
+# AccountDock/Resources/ so
 # it bundles with the app.
 #
 # Run this before tagging a release. The result is committed to the repo
@@ -24,7 +25,8 @@ TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 curl -fsSL "$URL" -o "$TMP"
 
-# Filter to Claude rows + capture the upstream commit hash for traceability.
+# Filter to provider-owned Claude and GPT rows + capture the upstream commit
+# hash for traceability.
 # Provider prefixes covered: bare claude-*, anthropic.claude-* (Bedrock),
 # anthropic/claude-* (Anthropic via LiteLLM router).
 SOURCE_HASH=$(curl -fsSL "https://api.github.com/repos/BerriAI/litellm/commits?path=model_prices_and_context_window.json&per_page=1" \
@@ -38,12 +40,14 @@ src, dest, source_hash, fetched_at = sys.argv[1], sys.argv[2], sys.argv[3], sys.
 with open(src) as f:
     data = json.load(f)
 
-def is_claude(name: str) -> bool:
+def is_supported(name: str) -> bool:
     return (name.startswith('claude-')
             or name.startswith('anthropic.claude-')
-            or name.startswith('anthropic/claude-'))
+            or name.startswith('anthropic/claude-')
+            or name.startswith('gpt-')
+            or name.startswith('openai/gpt-'))
 
-claude = {k: v for k, v in data.items() if is_claude(k)}
+supported = {k: v for k, v in data.items() if is_supported(k)}
 
 # Wrap in an envelope so consumers know the provenance.
 wrapped = {
@@ -51,9 +55,10 @@ wrapped = {
         'source': 'https://github.com/BerriAI/litellm',
         'source_commit': source_hash,
         'fetched_at': fetched_at,
-        'model_count': len(claude),
+        'model_count': len(supported),
+        'providers': ['anthropic', 'openai'],
     },
-    'models': claude,
+    'models': supported,
 }
 
 with open(dest, 'w') as f:
@@ -61,7 +66,7 @@ with open(dest, 'w') as f:
     f.write('\n')
 
 print(f"[wrote] {dest}")
-print(f"  models: {len(claude)}")
+print(f"  models: {len(supported)}")
 print(f"  source_commit: {source_hash}")
 print(f"  fetched_at: {fetched_at}")
 PY

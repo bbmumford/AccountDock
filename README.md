@@ -33,17 +33,22 @@ never fails over from one provider to the other.
   days, while Free accounts can expose a 30-day quota; Codex does not expose a
   five-hour/session subscription window.
 - Prefer the eligible account with the most remaining headroom.
-- Prefer accounts whose limits have reset, or hold the current account briefly
-  when its limiting window is about to reset.
+- After the active account reaches a threshold, prefer a ladder account whose
+  limits have reset, or hold briefly when the active limiting window is about
+  to reset. A recovered account never pulls work away from a healthy account.
+- Optionally keep reset windows warm. After a fresh provider response confirms
+  a reset, AccountDock makes one minimal request against that account so the
+  next countdown begins immediately. Claude uses a unique
+  `--no-session-persistence` probe and removes matching residue; Codex uses
+  `exec --ephemeral`. The probe never becomes a resumable user session.
 - Adapt active-account polling from five minutes down to fifteen seconds as a
   configured limit approaches, without forcing a full refresh of every account.
 - Back off exhausted accounts when no failover destination exists, following
   known reset and provider retry-after times instead of repeatedly polling.
 - Preserve the last known reset information when a provider temporarily
   responds with a rate-limit error.
-- Quarantine expired non-active Claude credentials after the first failed
-  refresh instead of retrying them every five minutes; switching to or
-  reauthenticating the account clears the quarantine.
+- Refresh inactive Claude OAuth credentials independently, including rotated
+  refresh tokens, without replacing the credential used by active sessions.
 
 When every configured account is exhausted, AccountDock selects the account
 whose blocking limits become available first. A session-limited account is not
@@ -82,13 +87,33 @@ their original working directory with `claude --resume <session-id>`. Before
 resuming, it checks that the same session is not already running.
 
 Codex hooks additionally associate captured sessions with their persistent
-app-server and owning host. Manual safe switching and automatic failover verify
-the promoted account before gracefully stopping only the associated Codex
-app-servers. Standalone sessions are reopened with `codex resume <session-id>`
-in their original working directory; VS Code and ChatGPT integrations reconnect
-through their host. **Switch Without Restart** remains available, but an
-already-running app-server may continue consuming its startup account.
+app-server and owning host. Codex automatic failover has three selectable
+switch methods:
 
+- **Switch Safely** arms when the provider reports that the quota threshold was
+  reached, but waits for a running session to record an actual usage-limit
+  error. It then restarts and resumes only affected sessions; unaffected
+  sessions reload the promoted credential in place.
+- **Force Restart Sessions** acts immediately from the provider-reported quota
+  threshold. It closes every detected Codex Terminal session, switches the
+  credential, and reopens each recoverable session with
+  `codex resume <session-id>`.
+- **Switch Without Restart** acts immediately and signals compatible running
+  Codex processes to reload the promoted credential in place.
+
+Standalone sessions are reopened in their original working directory; VS Code
+and ChatGPT integrations reconnect through their host.
+
+- A confirmed **Force Restart Codex Sessions** action in Codex CLI settings
+  closes detected Codex Terminal sessions and reopens every recoverable session
+  with `codex resume <session-id>`. Sessions without a captured ID are reported
+  instead of being silently replaced.
+  The same action is available directly in the Codex account-switch warning.
+
+- Cost records are resolved within their provider before model matching.
+  Codex records retain their reasoning-effort tier, use an effort-specific
+  pricing entry when one exists, and otherwise price the recorded reasoning
+  tokens as output tokens at that provider model's published rate.
 Settings → Failover Log records switches, exhausted-account waits, reset
 selection, recovery release, and failures. Entries obfuscate account identity,
 are capped at 500, and are stored locally at

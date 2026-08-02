@@ -1,6 +1,22 @@
 import Foundation
 import Combine
 
+enum CodexFailoverSwitchMode: String, Codable, CaseIterable, Identifiable {
+    case safeRestart
+    case forceRestart
+    case withoutRestart
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .safeRestart: "Switch Safely"
+        case .forceRestart: "Force Restart Sessions"
+        case .withoutRestart: "Switch Without Restart"
+        }
+    }
+}
+
 struct ProviderFailoverPolicy: Codable, Equatable {
     var enabled = false
     var sessionEnabled = true
@@ -9,16 +25,18 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     var weeklyThreshold = 90.0
     var loops = true
     var resetAware = true
-    var preferMostCapacity = true
+    var preferMostCapacity = false
     var waitForImminentReset = true
     var resetGraceMinutes = 5.0
+    var keepWindowsWarm = true
+    var codexSwitchMode = CodexFailoverSwitchMode.safeRestart
     var accountOrder: [UUID] = []
     var excludedAccountIDs: Set<UUID> = []
 
     enum CodingKeys: String, CodingKey {
         case enabled, sessionEnabled, sessionThreshold, weeklyEnabled, weeklyThreshold
         case loops, resetAware, preferMostCapacity, waitForImminentReset
-        case resetGraceMinutes, accountOrder, excludedAccountIDs
+        case resetGraceMinutes, keepWindowsWarm, codexSwitchMode, accountOrder, excludedAccountIDs
     }
 
     init() {}
@@ -32,9 +50,14 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         weeklyThreshold = try values.decodeIfPresent(Double.self, forKey: .weeklyThreshold) ?? 90
         loops = try values.decodeIfPresent(Bool.self, forKey: .loops) ?? true
         resetAware = try values.decodeIfPresent(Bool.self, forKey: .resetAware) ?? true
-        preferMostCapacity = try values.decodeIfPresent(Bool.self, forKey: .preferMostCapacity) ?? true
+        preferMostCapacity = try values.decodeIfPresent(Bool.self, forKey: .preferMostCapacity) ?? false
         waitForImminentReset = try values.decodeIfPresent(Bool.self, forKey: .waitForImminentReset) ?? true
         resetGraceMinutes = try values.decodeIfPresent(Double.self, forKey: .resetGraceMinutes) ?? 5
+        keepWindowsWarm = try values.decodeIfPresent(Bool.self, forKey: .keepWindowsWarm) ?? true
+        codexSwitchMode = try values.decodeIfPresent(
+            CodexFailoverSwitchMode.self,
+            forKey: .codexSwitchMode
+        ) ?? .safeRestart
         accountOrder = try values.decodeIfPresent([UUID].self, forKey: .accountOrder) ?? []
         excludedAccountIDs = try values.decodeIfPresent(Set<UUID>.self, forKey: .excludedAccountIDs) ?? []
     }
@@ -57,6 +80,7 @@ final class FailoverConfigStore: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let key = "app.accountdock.failover.policies.v1"
+    private let strictLadderMigrationKey = "app.accountdock.failover.strict-ladder.v1"
 
     private struct StoredPolicies: Codable {
         var claude: ProviderFailoverPolicy
@@ -64,10 +88,21 @@ final class FailoverConfigStore: ObservableObject {
     }
 
     private init() {
-        guard let data = defaults.data(forKey: key),
-              let stored = try? JSONDecoder().decode(StoredPolicies.self, from: data) else { return }
-        claude = stored.claude
-        codex = stored.codex
+        if let data = defaults.data(forKey: key),
+           let stored = try? JSONDecoder().decode(StoredPolicies.self, from: data) {
+            claude = stored.claude
+            codex = stored.codex
+        }
+        // Earlier builds silently defaulted to choosing the account with the
+        // most headroom, which could jump over the user's ordered ladder. Move
+        // existing installs once to predictable first-available ordering; the
+        // user can still explicitly enable capacity preference afterwards.
+        if !defaults.bool(forKey: strictLadderMigrationKey) {
+            claude.preferMostCapacity = false
+            codex.preferMostCapacity = false
+            defaults.set(true, forKey: strictLadderMigrationKey)
+            save()
+        }
     }
 
     func policy(for provider: AIProviderType) -> ProviderFailoverPolicy {
@@ -273,9 +308,11 @@ enum FailoverDecision {
         _ candidateIDs: [UUID],
         usageByID: [UUID: UsageAPIResponse],
         provider: AIProviderType,
-        policy: ProviderFailoverPolicy
+        policy: ProviderFailoverPolicy,
+        unverifiedResetIDs: Set<UUID> = []
     ) -> [UUID] {
         candidateIDs.filter {
+            !unverifiedResetIDs.contains($0) &&
             hasCapacity(usage: usageByID[$0], provider: provider, policy: policy)
         }
     }

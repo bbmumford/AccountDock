@@ -338,6 +338,113 @@ final class ClaudeService: @unchecked Sendable {
         return accessToken
     }
 
+    /// Refreshes a stored Claude OAuth record without installing it as the
+    /// machine-wide Claude credential. This keeps inactive accounts observable
+    /// and rotates their refresh token independently of the active CLI account.
+    func refreshStoredToken(_ tokenJSON: String) async throws -> String {
+        guard let data = tokenJSON.data(using: .utf8),
+              var root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var oauth = root["claudeAiOauth"] as? [String: Any],
+              let refreshToken = oauth["refreshToken"] as? String,
+              !refreshToken.isEmpty else {
+            throw UsageError.expired
+        }
+
+        var request = URLRequest(url: URL(string: "https://platform.claude.com/v1/oauth/token")!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        var components = URLComponents()
+        components.queryItems = [
+            URLQueryItem(name: "grant_type", value: "refresh_token"),
+            URLQueryItem(name: "refresh_token", value: refreshToken),
+            URLQueryItem(name: "client_id", value: "9d1c250a-e61b-44d9-88ed-5944d1962f5e")
+        ]
+        request.httpBody = (components.percentEncodedQuery ?? "").data(using: .utf8)
+
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              let refreshed = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+              let accessToken = refreshed["access_token"] as? String,
+              !accessToken.isEmpty else {
+            throw UsageError.expired
+        }
+        oauth["accessToken"] = accessToken
+        if let rotated = refreshed["refresh_token"] as? String, !rotated.isEmpty {
+            oauth["refreshToken"] = rotated
+        }
+        if let expiresIn = refreshed["expires_in"] as? Double {
+            oauth["expiresAt"] = Int(Date().addingTimeInterval(expiresIn).timeIntervalSince1970 * 1_000)
+        } else if let expiresIn = refreshed["expires_in"] as? Int {
+            oauth["expiresAt"] = Int(Date().addingTimeInterval(TimeInterval(expiresIn)).timeIntervalSince1970 * 1_000)
+        }
+        root["claudeAiOauth"] = oauth
+        let encoded = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        guard let result = String(data: encoded, encoding: .utf8) else { throw UsageError.decode("token encoding") }
+        return result
+    }
+
+    /// Starts a fresh quota countdown without creating resumable history.
+    /// The OAuth token is carried only in the child environment, never argv.
+    func warmQuotaWindow(accessToken: String) async throws {
+        let executable = claudePath
+        let probeID = UUID().uuidString.lowercased()
+        try await Task.detached(priority: .utility) {
+            defer { Self.removeWarmupProbeResidue(sessionID: probeID) }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = [
+                "--print",
+                "--no-session-persistence",
+                "--session-id", probeID,
+                "--max-turns", "1",
+                "--model", "haiku",
+                "Reply with exactly: OK"
+            ]
+            var environment = ProcessInfo.processInfo.environment
+            environment["CLAUDE_CODE_OAUTH_TOKEN"] = accessToken
+            environment.removeValue(forKey: "ANTHROPIC_API_KEY")
+            environment.removeValue(forKey: "ANTHROPIC_AUTH_TOKEN")
+            process.environment = environment
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            let deadline = Date().addingTimeInterval(60)
+            while process.isRunning && Date() < deadline {
+                Darwin.usleep(100_000)
+            }
+            if process.isRunning {
+                process.terminate()
+                throw UsageError.network("warm-up request timed out")
+            }
+            guard process.terminationStatus == 0 else {
+                throw UsageError.network("warm-up request exited \(process.terminationStatus)")
+            }
+        }.value
+    }
+
+    private static func removeWarmupProbeResidue(sessionID: String) {
+        let roots = [
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".claude/projects", isDirectory: true),
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/AccountDock/Sessions", isDirectory: true)
+        ]
+        for root in roots {
+            guard let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for case let url as URL in enumerator
+                where url.lastPathComponent.localizedCaseInsensitiveContains(sessionID) {
+                try? FileManager.default.removeItem(at: url)
+                log.info("[warmup] Removed probe residue \(url.lastPathComponent)")
+            }
+        }
+    }
+
     // MARK: - Account Switching
 
     /// Returns only executable processes whose binary is named `claude`.

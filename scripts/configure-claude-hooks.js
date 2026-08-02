@@ -29,7 +29,7 @@ function run(arguments) {
         settings.hooks = {};
     }
 
-    const command = '"/Applications/AccountDock.app/Contents/Resources/accountdock-claude-hook.sh" # accountdock-hook';
+    const command = '/bin/sh "/Applications/AccountDock.app/Contents/Resources/accountdock-claude-hook.sh" # accountdock-hook';
     ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"].forEach((event) => {
         if (!Array.isArray(settings.hooks[event])) {
             settings.hooks[event] = [];

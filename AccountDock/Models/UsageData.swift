@@ -82,6 +82,14 @@ struct UsageWindow: Codable {
         return formatter.date(from: resetsAt)
     }
 
+    /// A provider-confirmed window that has not yet been started. This is the
+    /// only safe state for a one-time bootstrap probe: zero use and no running
+    /// countdown. Missing utilization is treated as unknown, never as zero.
+    var isUnusedUnstartedWindow: Bool {
+        guard let utilization else { return false }
+        return utilization <= 0 && resetsAtDate == nil
+    }
+
     func expiringPassedReset(at date: Date = Date()) -> UsageWindow {
         guard let reset = resetsAtDate, reset <= date else { return self }
         return UsageWindow(utilization: 0, resetsAt: nil, windowSeconds: windowSeconds)

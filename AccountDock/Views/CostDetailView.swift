@@ -332,7 +332,7 @@ struct CostDetailView: View {
             .padding(.horizontal, 16)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Costs are calculated from local Claude and Codex session logs. Each daily bar stacks Claude and Codex into one combined total.")
+                Text("Claude activity uses Anthropic pricing for its exact model. Codex activity uses OpenAI pricing for its exact model and recorded reasoning effort; reasoning tokens are billed at that model’s output-token rate. Cache and long-context rates are applied per request. These same provider totals are used for Today, the 7/30-day totals, and every stacked daily bar.")
                     .font(.caption2)
                     .foregroundStyle(.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -342,7 +342,7 @@ struct CostDetailView: View {
                         Image(systemName: "checkmark.seal.fill")
                             .font(.caption2)
                             .foregroundStyle(.green)
-                        Text("Verified against ccusage \(v.ccusageVersion) on \(v.verifiedOn) — \(v.windowDays)-day total matched to the cent.")
+                        Text("Claude calculation verified against ccusage \(v.ccusageVersion) on \(v.verifiedOn) — \(v.windowDays)-day total matched to the cent. Codex is calculated independently from native Codex token records and OpenAI prices.")
                             .font(.caption2)
                             .foregroundStyle(.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
