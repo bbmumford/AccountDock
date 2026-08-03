@@ -97,7 +97,6 @@ final class AppState: ObservableObject {
     private struct PendingResetRecovery {
         let accountID: UUID
         let resetDate: Date
-        let processes: [RunningClaudeProcess]
     }
     private var pendingResetRecovery: [AIProviderType: PendingResetRecovery] = [:]
 
@@ -951,20 +950,12 @@ final class AppState: ObservableObject {
                     provider: provider,
                     policy: policy
                ) {
-                if provider == .claudeCode, !pending.processes.isEmpty {
-                    let survivors = await claudeService.terminateForSafeRestart(pending.processes)
-                    if !survivors.isEmpty {
-                        log.warning("[failover] \(survivors.count) recovery process(es) did not stop")
-                    } else {
-                        claudeService.resumeAfterSafeRestart(pending.processes)
-                    }
-                }
                 pendingResetRecovery[provider] = nil
                 exhaustedFailoverAccounts[provider, default: []].remove(current.id)
                 saveFailoverRuntime()
-                failoverStatus[provider] = "Capacity restored on \(current.effectiveDisplayName(obfuscated: true)); resuming tracked sessions."
-                failoverEvents.record(provider, "Capacity restored on \(current.effectiveDisplayName(obfuscated: true)); released \(pending.processes.count) tracked session process(es).")
-                log.info("[failover] \(provider.rawValue): reset capacity confirmed; recovery released")
+                failoverStatus[provider] = "Capacity restored on \(current.effectiveDisplayName(obfuscated: true))."
+                failoverEvents.record(provider, "Capacity restored on \(current.effectiveDisplayName(obfuscated: true)).")
+                log.info("[failover] \(provider.rawValue): reset capacity confirmed")
                 continue
             }
 
@@ -1057,11 +1048,9 @@ final class AppState: ObservableObject {
                }).min(by: { $0.1 < $1.1 }) {
                 selectedID = earliest.0
                 waitingForReset = true
-                let tracked = provider == .claudeCode ? claudeService.recoverableRunningProcesses() : []
                 pendingResetRecovery[provider] = PendingResetRecovery(
                     accountID: earliest.0,
-                    resetDate: earliest.1,
-                    processes: tracked
+                    resetDate: earliest.1
                 )
             }
             guard let selectedID,
@@ -1104,14 +1093,6 @@ final class AppState: ObservableObject {
                 : isUsingCachedQuota
                     ? "Threshold reached; switching \(sourceName) → \(targetName) using its last-known available quota."
                     : "Threshold reached; switching \(sourceName) → \(targetName).")
-            // Both providers can retain startup credentials in long-lived
-            // processes, so capture their exact hosts before changing auth.
-            let runningProcesses = provider == .claudeCode && !waitingForReset
-                ? claudeService.recoverableRunningProcesses()
-                : []
-            if !runningProcesses.isEmpty {
-                log.info("[failover] Captured \(runningProcesses.count) Claude process(es) for safe restart")
-            }
             if !runningCodexProcesses.isEmpty {
                 log.info("[failover] Captured \(runningCodexProcesses.count) Codex process(es) for safe restart")
             }
@@ -1141,11 +1122,10 @@ final class AppState: ObservableObject {
                     )
                 }
             } else {
-                await switchTo(
-                    target,
-                    refreshAfter: false,
-                    safelyRestarting: runningProcesses
-                )
+                // Keep Claude's established automatic-failover behaviour:
+                // change credentials without restarting terminal sessions.
+                // Session restart/recovery methods are Codex-only.
+                await switchTo(target, refreshAfter: false)
             }
 
             if activeAccount(for: provider)?.id == target.id {
@@ -1158,10 +1138,11 @@ final class AppState: ObservableObject {
                     failoverEvents.record(provider, "Prepared \(targetName); monitoring adaptively for restored capacity.")
                 } else {
                     failoverStatus[provider] = "Switched to \(targetName)."
-                    let restartedCount = provider == .codex
-                        ? runningCodexProcesses.count
-                        : runningProcesses.count
-                    failoverEvents.record(provider, "Switch completed. \(restartedCount) pre-switch process(es) were handed to safe restart.")
+                    if provider == .codex {
+                        failoverEvents.record(provider, "Switch completed. \(runningCodexProcesses.count) pre-switch process(es) were handed to the selected Codex switch method.")
+                    } else {
+                        failoverEvents.record(provider, "Switch completed without restarting Claude sessions.")
+                    }
                 }
             } else {
                 failoverStatus[provider] = "Automatic switch failed. AccountDock will retry later."
