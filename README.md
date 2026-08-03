@@ -53,17 +53,18 @@ never fails over from one provider to the other.
 When every configured account is exhausted, AccountDock selects the account
 whose blocking limits become available first. A session-limited account is not
 treated as ready while its weekly limit remains blocked. AccountDock prepares
-that account, monitors it for restored capacity, and releases the tracked
-Claude processes only after the provider confirms capacity.
+that account and monitors it for restored capacity without restarting Claude
+terminal sessions.
 
 ### Safe Claude and Codex switching and session recovery
 
 Claude Code processes keep the credential with which they were launched, so
 changing the credential file alone does not move an already-running workload.
 For manual switches, AccountDock offers **Switch Safely**, **Switch Without
-Restart**, or **Cancel**. Automatic failover captures the running Claude Code
-processes before switching credentials and requests a graceful termination
-after the switch. It never force-kills them.
+Restart**, or **Cancel**. Automatic Claude failover keeps its original
+credential-switch behaviour and does not terminate, reopen, or resume Claude
+terminal sessions. Automatic session restart and recovery methods are
+Codex-only.
 
 The installer adds AccountDock's own Claude lifecycle hooks without replacing
 other configured hooks. They record privacy-scoped recovery metadata—session
