@@ -60,11 +60,11 @@ terminal sessions.
 
 Claude Code processes keep the credential with which they were launched, so
 changing the credential file alone does not move an already-running workload.
-For manual switches, AccountDock offers **Switch Safely**, **Switch Without
-Restart**, or **Cancel**. Automatic Claude failover keeps its original
-credential-switch behaviour and does not terminate, reopen, or resume Claude
-terminal sessions. Automatic session restart and recovery methods are
-Codex-only.
+Manual Claude switching is a single direct credential switch, matching the
+original application behaviour. It does not present session-restart choices.
+Automatic Claude failover uses the same credential-switch path and does not
+terminate, reopen, or resume Claude terminal sessions. Session restart and
+recovery methods are Codex-only.
 
 The installer adds AccountDock's own Claude lifecycle hooks without replacing
 other configured hooks. They record privacy-scoped recovery metadata—session

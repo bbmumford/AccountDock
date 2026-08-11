@@ -8,9 +8,7 @@ struct AccountSwitcherView: View {
     @State private var editingAccountId: UUID?
     @State private var editingLabel = ""
     @State private var pendingSwitchAccount: Account?
-    @State private var pendingClaudeProcesses: [RunningClaudeProcess] = []
     @State private var pendingCodexProcesses: [RunningCodexProcess] = []
-    @State private var showingClaudeProcessWarning = false
     @State private var showingCodexProcessWarning = false
     @State private var draggedAccountID: UUID?
     @State private var draggedProvider: AIProviderType?
@@ -43,26 +41,6 @@ struct AccountSwitcherView: View {
                     .padding(.top, 8)
             }
             .measureUsageContentHeight()
-        }
-        .alert("Claude sessions are still running", isPresented: $showingClaudeProcessWarning) {
-            Button("Switch Safely") {
-                guard let account = pendingSwitchAccount else { return }
-                let processes = pendingClaudeProcesses
-                clearPendingSwitch()
-                Task {
-                    await appState.switchTo(account, safelyRestarting: processes)
-                }
-            }
-            Button("Switch Without Restart") {
-                guard let account = pendingSwitchAccount else { return }
-                clearPendingSwitch()
-                Task { await appState.switchTo(account) }
-            }
-            Button("Cancel", role: .cancel) {
-                clearPendingSwitch()
-            }
-        } message: {
-            Text(processWarningMessage)
         }
         .alert("Codex sessions are still running", isPresented: $showingCodexProcessWarning) {
             Button("Force Restart Sessions", role: .destructive) {
@@ -325,22 +303,9 @@ struct AccountSwitcherView: View {
             showingCodexProcessWarning = true
             return
         }
-        let processes = appState.runningClaudeProcesses()
-        guard !processes.isEmpty else {
-            Task { await appState.switchTo(account) }
-            return
-        }
-        pendingSwitchAccount = account
-        pendingClaudeProcesses = processes
-        showingClaudeProcessWarning = true
-    }
-
-    private var processWarningMessage: String {
-        let grouped = Dictionary(grouping: pendingClaudeProcesses, by: \.label)
-            .map { "\($0.value.count) \($0.key)" }
-            .sorted()
-            .joined(separator: ", ")
-        return "\(grouped) will keep using their existing account. “Switch Safely” changes the account, then gracefully closes only these Claude processes. Reopen terminal sessions afterward; IDE integrations may restart automatically."
+        // Claude retains its original single-action account switch. Session
+        // restart choices are intentionally exclusive to Codex.
+        Task { await appState.switchTo(account) }
     }
 
     private var codexProcessWarningMessage: String {
@@ -353,7 +318,6 @@ struct AccountSwitcherView: View {
 
     private func clearPendingSwitch() {
         pendingSwitchAccount = nil
-        pendingClaudeProcesses = []
         pendingCodexProcesses = []
     }
 

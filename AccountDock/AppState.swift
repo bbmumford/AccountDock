@@ -72,6 +72,7 @@ final class AppState: ObservableObject {
     private let failoverRuntimeKey = "app.accountdock.failover.runtime.v1"
     private let warmupBootstrapKey = "app.accountdock.warmup.bootstrap.v1"
     private var refreshTimer: Timer?
+    private var isRefreshing = false
     private var failoverMonitorTimer: Timer?
     private var usageResetTimer: Timer?
     private var isMonitoringFailover = false
@@ -118,6 +119,15 @@ final class AppState: ObservableObject {
         guard !isLoggingIn else {
             log.info("[refresh] Skipping: login in progress")
             return
+        }
+        guard !isRefreshing else {
+            log.debug("[refresh] Skipping: refresh already in progress")
+            return
+        }
+        isRefreshing = true
+        defer {
+            isRefreshing = false
+            isLoading = false
         }
         isLoading = true
         errorMessage = nil
@@ -167,7 +177,6 @@ final class AppState: ObservableObject {
         log.info("[refresh] Usage: weekly=\(self.usageSummary.weeklyMessages) msgs, \(self.activeSessions.count) active sessions, claudeToday=$\(String(format: "%.2f", cost.todayCost)) codexToday=$\(String(format: "%.2f", codexHistory.dailyCosts[todayKey] ?? 0)) turns=\(activity.conversationTurns)")
 
         updateWidgetData()
-        isLoading = false
     }
 
     func startAutoRefresh(interval: TimeInterval = 300) {
