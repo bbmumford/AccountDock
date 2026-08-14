@@ -54,6 +54,53 @@ struct UsageAPIResponse: Codable {
             sevenDaySonnet, sevenDayCowork, iguanaNecktie,
         ].compactMap { $0?.resetsAtDate }.min()
     }
+
+    /// Keeps a locally established countdown when a provider temporarily
+    /// returns its moving "unused" placeholder after a successful probe.
+    /// Any real provider countdown always wins.
+    func preservingEstablishedCountdowns(from previous: UsageAPIResponse?) -> UsageAPIResponse {
+        UsageAPIResponse(
+            fiveHour: fiveHour.preservingEstablishedCountdown(from: previous?.fiveHour),
+            sevenDay: sevenDay.preservingEstablishedCountdown(from: previous?.sevenDay),
+            sevenDayOauthApps: sevenDayOauthApps,
+            sevenDayOpus: sevenDayOpus,
+            sevenDaySonnet: sevenDaySonnet,
+            sevenDayCowork: sevenDayCowork,
+            iguanaNecktie: iguanaNecktie,
+            extraUsage: extraUsage
+        )
+    }
+
+    func pinningWarmupCountdowns(
+        session: Bool,
+        weekly: Bool,
+        startedAt: Date = Date()
+    ) -> UsageAPIResponse {
+        UsageAPIResponse(
+            fiveHour: session ? fiveHour?.pinningCountdown(startedAt: startedAt) : fiveHour,
+            sevenDay: weekly ? sevenDay?.pinningCountdown(startedAt: startedAt) : sevenDay,
+            sevenDayOauthApps: sevenDayOauthApps,
+            sevenDayOpus: sevenDayOpus,
+            sevenDaySonnet: sevenDaySonnet,
+            sevenDayCowork: sevenDayCowork,
+            iguanaNecktie: iguanaNecktie,
+            extraUsage: extraUsage
+        )
+    }
+}
+
+private extension Optional where Wrapped == UsageWindow {
+    func preservingEstablishedCountdown(from previous: UsageWindow?) -> UsageWindow? {
+        guard let current = self else { return nil }
+        guard current.isUnusedUnstartedWindow,
+              let previous,
+              previous.resetsAtDate.map({ $0 > Date() }) == true else { return current }
+        return UsageWindow(
+            utilization: current.utilization,
+            resetsAt: previous.resetsAt,
+            windowSeconds: current.windowSeconds ?? previous.windowSeconds
+        )
+    }
 }
 
 struct UsageWindow: Codable {
@@ -93,6 +140,17 @@ struct UsageWindow: Codable {
     func expiringPassedReset(at date: Date = Date()) -> UsageWindow {
         guard let reset = resetsAtDate, reset <= date else { return self }
         return UsageWindow(utilization: 0, resetsAt: nil, windowSeconds: windowSeconds)
+    }
+
+    func pinningCountdown(startedAt: Date) -> UsageWindow {
+        guard isUnusedUnstartedWindow, let windowSeconds, windowSeconds > 0 else { return self }
+        return UsageWindow(
+            utilization: utilization,
+            resetsAt: ISO8601DateFormatter().string(
+                from: startedAt.addingTimeInterval(TimeInterval(windowSeconds))
+            ),
+            windowSeconds: windowSeconds
+        )
     }
 
     var resetTimeString: String? {

@@ -114,4 +114,68 @@ final class AccountModelTests: XCTestCase {
                        sessionReset.timeIntervalSince1970,
                        accuracy: 1)
     }
+
+    func testSuccessfulWarmupPinsMovingPlaceholderAndLaterPollPreservesIt() throws {
+        let startedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let placeholder = UsageAPIResponse(
+            fiveHour: nil,
+            sevenDay: UsageWindow(utilization: 0, resetsAt: nil, windowSeconds: 604_800),
+            sevenDayOauthApps: nil,
+            sevenDayOpus: nil,
+            sevenDaySonnet: nil,
+            sevenDayCowork: nil,
+            iguanaNecktie: nil,
+            extraUsage: nil
+        )
+
+        let pinned = placeholder.pinningWarmupCountdowns(
+            session: false,
+            weekly: true,
+            startedAt: startedAt
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(pinned.sevenDay?.resetsAtDate).timeIntervalSince1970,
+            startedAt.addingTimeInterval(604_800).timeIntervalSince1970,
+            accuracy: 1
+        )
+
+        let preserved = placeholder.preservingEstablishedCountdowns(from: pinned)
+        XCTAssertEqual(preserved.sevenDay?.resetsAt, pinned.sevenDay?.resetsAt)
+    }
+
+    func testRealProviderCountdownReplacesPinnedCountdown() {
+        let pinned = UsageAPIResponse(
+            fiveHour: nil,
+            sevenDay: UsageWindow(
+                utilization: 0,
+                resetsAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(500)),
+                windowSeconds: 604_800
+            ),
+            sevenDayOauthApps: nil,
+            sevenDayOpus: nil,
+            sevenDaySonnet: nil,
+            sevenDayCowork: nil,
+            iguanaNecktie: nil,
+            extraUsage: nil
+        )
+        let provider = UsageAPIResponse(
+            fiveHour: nil,
+            sevenDay: UsageWindow(
+                utilization: 1,
+                resetsAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(400)),
+                windowSeconds: 604_800
+            ),
+            sevenDayOauthApps: nil,
+            sevenDayOpus: nil,
+            sevenDaySonnet: nil,
+            sevenDayCowork: nil,
+            iguanaNecktie: nil,
+            extraUsage: nil
+        )
+
+        XCTAssertEqual(
+            provider.preservingEstablishedCountdowns(from: pinned).sevenDay?.resetsAt,
+            provider.sevenDay?.resetsAt
+        )
+    }
 }
