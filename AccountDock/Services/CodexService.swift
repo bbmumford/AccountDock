@@ -453,6 +453,8 @@ final class CodexService: @unchecked Sendable {
             process.arguments = [
                 "exec", "--ephemeral", "--skip-git-repo-check",
                 "--sandbox", "read-only", "--ignore-rules",
+                "--ignore-user-config",
+                "--config", "cli_auth_credentials_store=\"file\"",
                 "Reply with exactly: OK"
             ]
             var environment = ProcessInfo.processInfo.environment
@@ -815,20 +817,31 @@ private struct CodexUsagePayload: Decodable {
     struct Window: Decodable {
         let usedPercent: Double
         let resetAt: Int
+        let resetAfterSeconds: Int?
         let limitWindowSeconds: Int
 
         enum CodingKeys: String, CodingKey {
             case usedPercent = "used_percent"
             case resetAt = "reset_at"
+            case resetAfterSeconds = "reset_after_seconds"
             case limitWindowSeconds = "limit_window_seconds"
         }
 
         var usageWindow: UsageWindow {
-            UsageWindow(
+            // OpenAI represents an unused Codex window as 0% with
+            // reset_after_seconds equal to the entire window. Its reset_at is
+            // recomputed as `now + window` on every request, so it is not a
+            // real countdown. Expose no reset until a request establishes a
+            // fixed window; the warm-up scheduler then knows to start it.
+            let isMovingUnusedPlaceholder = usedPercent <= 0
+                && resetAfterSeconds.map { $0 >= limitWindowSeconds - 1 } == true
+            return UsageWindow(
                 utilization: usedPercent,
-                resetsAt: ISO8601DateFormatter().string(
-                    from: Date(timeIntervalSince1970: TimeInterval(resetAt))
-                ),
+                resetsAt: isMovingUnusedPlaceholder
+                    ? nil
+                    : ISO8601DateFormatter().string(
+                        from: Date(timeIntervalSince1970: TimeInterval(resetAt))
+                    ),
                 windowSeconds: limitWindowSeconds
             )
         }

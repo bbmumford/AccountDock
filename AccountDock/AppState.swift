@@ -95,6 +95,7 @@ final class AppState: ObservableObject {
     /// cannot repeatedly consume quota for an already-empty window. Ordinary
     /// provider-confirmed reset events remain independent of these markers.
     private var attemptedWarmupBootstraps: Set<String> = []
+    private var warmupBootstrapsInFlight: Set<String> = []
     private struct PendingResetRecovery {
         let accountID: UUID
         let resetDate: Date
@@ -1289,20 +1290,21 @@ final class AppState: ObservableObject {
         let sessionKey = "\(accountID.uuidString).session"
         if account.provider == .claudeCode,
            usage.fiveHour?.isUnusedUnstartedWindow == true,
-           !attemptedWarmupBootstraps.contains(sessionKey) {
+           !attemptedWarmupBootstraps.contains(sessionKey),
+           !warmupBootstrapsInFlight.contains(sessionKey) {
             pending.session = true
-            attemptedWarmupBootstraps.insert(sessionKey)
+            warmupBootstrapsInFlight.insert(sessionKey)
         }
 
         let weeklyKey = "\(accountID.uuidString).weekly"
         if usage.sevenDay?.isUnusedUnstartedWindow == true,
-           !attemptedWarmupBootstraps.contains(weeklyKey) {
+           !attemptedWarmupBootstraps.contains(weeklyKey),
+           !warmupBootstrapsInFlight.contains(weeklyKey) {
             pending.weekly = true
-            attemptedWarmupBootstraps.insert(weeklyKey)
+            warmupBootstrapsInFlight.insert(weeklyKey)
         }
 
         guard pending.session || pending.weekly else { return nil }
-        saveWarmupBootstraps()
         log.info("[warmup] Scheduled one-time bootstrap for \(accountID.uuidString)")
         return pending
     }
@@ -1442,14 +1444,37 @@ final class AppState: ObservableObject {
                 account.provider,
                 "Started the \(labels) reset countdown for \(account.effectiveDisplayName(obfuscated: true)); the probe session was non-persistent."
             )
+            completeWarmupBootstrap(accountID: accountID, windows: windows)
             log.info("[warmup] \(account.provider.rawValue) \(labels) window started for \(account.id.uuidString)")
         } catch {
+            releaseWarmupBootstrap(accountID: accountID, windows: windows)
             failoverEvents.record(
                 account.provider,
                 "Could not start the \(labels) reset countdown for \(account.effectiveDisplayName(obfuscated: true)): \(error.localizedDescription)"
             )
             log.warning("[warmup] Probe failed for \(account.id.uuidString): \(error.localizedDescription)")
         }
+    }
+
+    private func completeWarmupBootstrap(accountID: UUID, windows: PendingWindowWarmup) {
+        for key in warmupBootstrapKeys(accountID: accountID, windows: windows) {
+            warmupBootstrapsInFlight.remove(key)
+            attemptedWarmupBootstraps.insert(key)
+        }
+        saveWarmupBootstraps()
+    }
+
+    private func releaseWarmupBootstrap(accountID: UUID, windows: PendingWindowWarmup) {
+        for key in warmupBootstrapKeys(accountID: accountID, windows: windows) {
+            warmupBootstrapsInFlight.remove(key)
+        }
+    }
+
+    private func warmupBootstrapKeys(accountID: UUID, windows: PendingWindowWarmup) -> [String] {
+        [
+            windows.session ? "\(accountID.uuidString).session" : nil,
+            windows.weekly ? "\(accountID.uuidString).weekly" : nil,
+        ].compactMap { $0 }
     }
 
     /// Provider usage endpoints can lag behind a successful probe. Refresh the

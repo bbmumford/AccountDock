@@ -112,6 +112,45 @@ final class CodexServiceTests: XCTestCase {
         XCTAssertEqual(snapshot.usage.sevenDay?.utilization, 25)
     }
 
+    func testMovingZeroPercentCodexPlaceholderIsTreatedAsUnstarted() throws {
+        let window = 7 * 24 * 60 * 60
+        let data = try JSONSerialization.data(withJSONObject: [
+            "rate_limit": [
+                "primary_window": [
+                    "used_percent": 0,
+                    "reset_at": 1_790_000_000,
+                    "reset_after_seconds": window,
+                    "limit_window_seconds": window,
+                ],
+            ],
+        ])
+
+        let usage = try CodexService.decodeUsage(data)
+
+        XCTAssertEqual(usage.sevenDay?.utilization, 0)
+        XCTAssertNil(usage.sevenDay?.resetsAt)
+        XCTAssertTrue(usage.sevenDay?.isUnusedUnstartedWindow == true)
+    }
+
+    func testEstablishedZeroPercentCodexCountdownKeepsFixedReset() throws {
+        let window = 7 * 24 * 60 * 60
+        let data = try JSONSerialization.data(withJSONObject: [
+            "rate_limit": [
+                "primary_window": [
+                    "used_percent": 0,
+                    "reset_at": 1_790_000_000,
+                    "reset_after_seconds": window - 10,
+                    "limit_window_seconds": window,
+                ],
+            ],
+        ])
+
+        let usage = try CodexService.decodeUsage(data)
+
+        XCTAssertNotNil(usage.sevenDay?.resetsAt)
+        XCTAssertFalse(usage.sevenDay?.isUnusedUnstartedWindow == true)
+    }
+
     func testDetectsRestartableCodexCLICommands() {
         XCTAssertTrue(CodexService.isRestartableCodexCommand("codex"))
         XCTAssertTrue(CodexService.isRestartableCodexCommand("/Users/me/.local/bin/codex resume session-123"))
