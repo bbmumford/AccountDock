@@ -1263,7 +1263,8 @@ final class AppState: ObservableObject {
     }
 
     private func recordUsage(_ usage: UsageAPIResponse, for accountID: UUID) {
-        accountUsage[accountID] = usage.expiringPassedResets()
+        let reconciled = usage.preservingEstablishedCountdowns(from: accountUsage[accountID])
+        accountUsage[accountID] = reconciled.expiringPassedResets()
         accountUsageUpdatedAt[accountID] = Date()
         accountsAwaitingPostResetVerification.remove(accountID)
         var warmup = pendingWindowWarmups.removeValue(forKey: accountID)
@@ -1486,9 +1487,11 @@ final class AppState: ObservableObject {
         windows: PendingWindowWarmup,
         fetch: @escaping () async throws -> UsageAPIResponse
     ) async throws {
+        var latestUsage: UsageAPIResponse?
         for delay in [2.0, 8.0, 20.0] {
             try? await Task.sleep(for: .seconds(delay))
             let usage = try await fetch()
+            latestUsage = usage
             recordUsage(usage, for: account.id)
 
             let sessionConfirmed = !windows.session || usage.fiveHour?.resetsAtDate != nil
@@ -1499,12 +1502,24 @@ final class AppState: ObservableObject {
             }
             log.info("[warmup] Forced usage refresh is awaiting provider propagation for \(account.id.uuidString)")
         }
+        guard let latestUsage else {
+            throw NSError(
+                domain: "AccountDock.Warmup",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The probe completed, but usage could not be refreshed."]
+            )
+        }
 
-        throw NSError(
-            domain: "AccountDock.Warmup",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "The probe completed, but the provider has not exposed the new countdown yet."]
+        // A successful inference is authoritative evidence that use began even
+        // when the provider continues returning its moving zero-percent
+        // placeholder. Pin the countdown to the probe time so subsequent polls
+        // cannot make the reset drift; a later real provider timestamp replaces it.
+        let pinned = latestUsage.pinningWarmupCountdowns(
+            session: windows.session,
+            weekly: windows.weekly
         )
+        recordUsage(pinned, for: account.id)
+        log.info("[warmup] Provider still reports a moving placeholder; pinned countdown from the successful probe for \(account.id.uuidString)")
     }
 
     private func scheduleNextUsageReset(now: Date = Date()) {
