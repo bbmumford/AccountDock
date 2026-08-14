@@ -40,7 +40,10 @@ never fails over from one provider to the other.
   a reset, AccountDock makes one minimal request against that account so the
   next countdown begins immediately. Claude uses a unique
   `--no-session-persistence` probe and removes matching residue; Codex uses
-  `exec --ephemeral`. The probe never becomes a resumable user session.
+  `exec --ephemeral` with the managed home's file credential explicitly
+  selected. OpenAI's moving `now + window` placeholder for an unused Codex
+  quota is not displayed as a real countdown. The probe never becomes a
+  resumable user session.
 - Adapt active-account polling from five minutes down to fifteen seconds as a
   configured limit approaches, without forcing a full refresh of every account.
 - Back off exhausted accounts when no failover destination exists, following
