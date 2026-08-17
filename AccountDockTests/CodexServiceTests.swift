@@ -75,6 +75,33 @@ final class CodexServiceTests: XCTestCase {
         XCTAssertThrowsError(try CodexService.identity(fromAuthData: auth))
     }
 
+    func testCredentialRefreshUsesAccessTokenExpiryDespiteFractionalTimestamp() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let auth: [String: Any] = [
+            "last_refresh": "2026-08-11T08:35:14.267692Z",
+            "tokens": [
+                "access_token": try jwt(payload: [
+                    "exp": now.addingTimeInterval(24 * 60 * 60).timeIntervalSince1970
+                ])
+            ]
+        ]
+
+        XCTAssertFalse(CodexService.credentialsNeedRefresh(auth, now: now))
+    }
+
+    func testCredentialRefreshStartsFiveMinutesBeforeAccessTokenExpiry() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let auth: [String: Any] = [
+            "tokens": [
+                "access_token": try jwt(payload: [
+                    "exp": now.addingTimeInterval(4 * 60).timeIntervalSince1970
+                ])
+            ]
+        ]
+
+        XCTAssertTrue(CodexService.credentialsNeedRefresh(auth, now: now))
+    }
+
     func testFreePlanPrimaryQuotaFallsBackToLongWindow() throws {
         let data = try JSONSerialization.data(withJSONObject: [
             "rate_limit": [
@@ -181,16 +208,20 @@ final class CodexServiceTests: XCTestCase {
     }
 
     private func authData(payload: [String: Any]) throws -> Data {
-        let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
-        let payloadPart = payloadData.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        let token = "header.\(payloadPart).signature"
+        let token = try jwt(payload: payload)
         return try JSONSerialization.data(withJSONObject: [
             "tokens": [
                 "id_token": token
             ]
         ])
+    }
+
+    private func jwt(payload: [String: Any]) throws -> String {
+        let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        let payloadPart = payloadData.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return "header.\(payloadPart).signature"
     }
 }
