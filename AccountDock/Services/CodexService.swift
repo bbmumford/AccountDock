@@ -551,10 +551,32 @@ final class CodexService: @unchecked Sendable {
         return merged
     }
 
-    private static func credentialsNeedRefresh(_ auth: [String: Any]) -> Bool {
+    static func credentialsNeedRefresh(
+        _ auth: [String: Any],
+        now: Date = Date()
+    ) -> Bool {
+        // The access token's signed expiry is the authoritative signal. Some
+        // Codex auth files write `last_refresh` with fractional seconds, which
+        // the default ISO8601 formatter does not accept; treating that parse
+        // failure as expiry caused valid inactive accounts to refresh and fail.
+        if let tokens = auth["tokens"] as? [String: Any],
+           let accessToken = tokens["access_token"] as? String,
+           let expiry = decodeJWTPayload(accessToken)?["exp"] as? NSNumber {
+            return Date(timeIntervalSince1970: expiry.doubleValue)
+                <= now.addingTimeInterval(5 * 60)
+        }
+
         guard let value = auth["last_refresh"] as? String,
-              let date = ISO8601DateFormatter().date(from: value) else { return true }
-        return Date().timeIntervalSince(date) > 8 * 24 * 60 * 60
+              let date = iso8601Date(value) else { return true }
+        return now.timeIntervalSince(date) > 8 * 24 * 60 * 60
+    }
+
+    private static func iso8601Date(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
     }
 
     private static func writePrivateAuth(_ auth: [String: Any], to url: URL) throws {
