@@ -9,7 +9,7 @@ struct AccountSwitcherView: View {
     @State private var editingLabel = ""
     @State private var pendingSwitchAccount: Account?
     @State private var pendingCodexProcesses: [RunningCodexProcess] = []
-    @State private var showingCodexProcessWarning = false
+    @State private var showingCodexSwitchMethods = false
     @State private var draggedAccountID: UUID?
     @State private var draggedProvider: AIProviderType?
 
@@ -42,7 +42,7 @@ struct AccountSwitcherView: View {
             }
             .measureUsageContentHeight()
         }
-        .alert("Codex sessions are still running", isPresented: $showingCodexProcessWarning) {
+        .alert("Choose Codex switch method", isPresented: $showingCodexSwitchMethods) {
             Button("Force Restart Sessions", role: .destructive) {
                 guard let account = pendingSwitchAccount else { return }
                 let processes = pendingCodexProcesses
@@ -293,14 +293,9 @@ struct AccountSwitcherView: View {
 
     private func requestSwitch(to account: Account) {
         if account.provider == .codex {
-            let processes = appState.runningCodexProcesses()
-            guard !processes.isEmpty else {
-                Task { await appState.switchTo(account) }
-                return
-            }
             pendingSwitchAccount = account
-            pendingCodexProcesses = processes
-            showingCodexProcessWarning = true
+            pendingCodexProcesses = appState.runningCodexProcesses()
+            showingCodexSwitchMethods = true
             return
         }
         // Claude retains its original single-action account switch. Session
@@ -309,6 +304,9 @@ struct AccountSwitcherView: View {
     }
 
     private var codexProcessWarningMessage: String {
+        guard !pendingCodexProcesses.isEmpty else {
+            return "No running Codex sessions were detected. Choose how AccountDock should switch credentials; all Codex switch methods remain available."
+        }
         let grouped = Dictionary(grouping: pendingCodexProcesses, by: \.label)
             .map { "\($0.value.count) \($0.key)" }
             .sorted()
