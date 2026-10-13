@@ -37,6 +37,7 @@ final class AppState: ObservableObject {
     @Published var codexDailyCosts: [String: Double] = [:]
     @Published var codexTodayModelActivity: [String: Int] = [:]
     @Published var codexTodayModelCosts: [String: Double] = [:]
+    @Published var codexTodayLinesChanged = 0
     @Published var activityStats: ActivityStats = .empty
     @Published private(set) var failoverStatus: [AIProviderType: String] = [:]
 
@@ -181,6 +182,7 @@ final class AppState: ObservableObject {
         codexDailyCosts = codexHistory.dailyCosts
         codexTodayModelActivity = codexHistory.todayModelActivity
         codexTodayModelCosts = codexHistory.todayModelCosts
+        codexTodayLinesChanged = codexHistory.todayLinesChanged
         let todayKey = DateFormatter.accountDockDay.string(from: Date())
         combinedTodayCost = cost.todayCost + (codexHistory.dailyCosts[todayKey] ?? 0)
         activityStats = activity

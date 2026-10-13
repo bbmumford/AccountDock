@@ -180,15 +180,9 @@ struct UsageDashboardView: View {
 
     private var todayActivityCard: some View {
         let stats = appState.activityStats
-        let claudeTurns = showClaudeProvider ? stats.conversationTurns : 0
-        let codexTurns = showCodexProvider
-            ? appState.codexTodayModelActivity.values.reduce(0, +)
-            : 0
-        let claudeCost = showClaudeProvider ? appState.costSummary.todayCost : 0
-        let codexCost = showCodexProvider
-            ? max(0, appState.combinedTodayCost - appState.costSummary.todayCost)
-            : 0
-        let combinedCost = claudeCost + codexCost
+        let combinedTurns = visibleProviders.reduce(0) { $0 + todayTurnCount(for: $1) }
+        let combinedCost = visibleProviders.reduce(0) { $0 + todayCost(for: $1) }
+        let exposesClaudeActivity = visibleProviders.contains(.claudeCode)
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "waveform.path.ecg")
@@ -201,14 +195,18 @@ struct UsageDashboardView: View {
 
             // Top stats row
             HStack(spacing: 0) {
-                activityStat(icon: "bubble.left.and.bubble.right", value: "\(claudeTurns + codexTurns)", label: "Turns",
-                             tooltip: "Combined Claude conversation turns and Codex response activity today")
-                activityStat(icon: "clock", value: stats.activeCodingTimeString, label: "Active",
-                             tooltip: "Claude active time today. Codex session timing is not available in its local usage records.")
-                activityStat(icon: "doc.text", value: "\(stats.linesWritten)", label: "Lines",
-                             tooltip: "Lines written by Claude Edit/Write tools. Codex does not record an equivalent local total.")
+                activityStat(icon: "bubble.left.and.bubble.right", value: "\(combinedTurns)", label: "Turns",
+                             tooltip: "Providers: \(metricProviders([.claudeCode, .codex])). Claude conversation turns and Codex response activity today.")
+                activityStat(icon: "clock", value: exposesClaudeActivity ? stats.activeCodingTimeString : "0m", label: "Active",
+                             tooltip: "Providers: \(metricProviders([.claudeCode])). Active session timing is currently exposed by Claude local records.")
+                activityStat(
+                    icon: "doc.text",
+                    value: "\((exposesClaudeActivity ? stats.linesWritten : 0) + (visibleProviders.contains(.codex) ? appState.codexTodayLinesChanged : 0))",
+                    label: "Lines",
+                    tooltip: "Providers: \(metricProviders([.claudeCode, .codex])). Claude Edit/Write changes plus Codex apply_patch additions and removals today."
+                )
                 activityStat(icon: "dollarsign.circle", value: String(format: "$%.0f", combinedCost), label: "Cost",
-                             tooltip: "Estimated API-equivalent cost of visible Claude and Codex activity today.")
+                             tooltip: "Providers: \(metricProviders([.claudeCode, .codex])). API-equivalent cost from local token records and provider pricing today.")
             }
 
             if !todayModels.isEmpty {
@@ -235,7 +233,29 @@ struct UsageDashboardView: View {
     }
 
     private var todayModels: [TodayModel] {
-        let claude = (showClaudeProvider ? appState.activityStats.modelUsage : [:])
+        visibleProviders.flatMap(todayModels(for:))
+    }
+
+    private func todayTurnCount(for provider: AIProviderType) -> Int {
+        switch provider {
+        case .claudeCode: return appState.activityStats.conversationTurns
+        case .codex: return appState.codexTodayModelActivity.values.reduce(0, +)
+        case .kimi, .gemini: return 0
+        }
+    }
+
+    private func todayCost(for provider: AIProviderType) -> Double {
+        switch provider {
+        case .claudeCode: return appState.costSummary.todayCost
+        case .codex: return max(0, appState.combinedTodayCost - appState.costSummary.todayCost)
+        case .kimi, .gemini: return 0
+        }
+    }
+
+    private func todayModels(for provider: AIProviderType) -> [TodayModel] {
+        switch provider {
+        case .claudeCode:
+            return appState.activityStats.modelUsage
             .filter { $0.value > 0 && isDisplayableModel($0.key) }
             .sorted { $0.key < $1.key }
             .map {
@@ -246,7 +266,8 @@ struct UsageDashboardView: View {
                     tooltip: "Claude \($0.key) activity today"
                 )
             }
-        let codex = (showCodexProvider ? appState.codexTodayModelActivity : [:])
+        case .codex:
+            return appState.codexTodayModelActivity
             .filter { $0.value > 0 && isDisplayableModel($0.key) }
             .sorted { $0.key < $1.key }
             .map {
@@ -257,7 +278,18 @@ struct UsageDashboardView: View {
                     tooltip: "Codex \($0.key) activity today"
                 )
             }
-        return claude + codex
+        case .kimi, .gemini:
+            // Kimi currently exposes subscription quota but not reliable
+            // per-turn/token activity through its supported provider API.
+            return []
+        }
+    }
+
+    private func metricProviders(_ supported: Set<AIProviderType>) -> String {
+        let names = visibleProviders
+            .filter { supported.contains($0) }
+            .map { $0.capabilities.displayName }
+        return names.isEmpty ? "none currently visible" : names.joined(separator: ", ")
     }
 
     private func isDisplayableModel(_ model: String) -> Bool {

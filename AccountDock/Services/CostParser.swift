@@ -7,6 +7,7 @@ final class CostParser: Sendable {
         let dailyCosts: [String: Double]
         let todayModelActivity: [String: Int]
         let todayModelCosts: [String: Double]
+        let todayLinesChanged: Int
     }
     static let shared = CostParser()
     private init() {}
@@ -27,7 +28,12 @@ final class CostParser: Sendable {
         var dailyCosts: [String: Double] = [:]
         var todayModelCosts: [String: Double] = [:]
         var modelActivity: [String: Int] = [:]
+        var todayLinesChanged = 0
         for (key, aggregate) in aggregates {
+            if key.day == today {
+                modelActivity[key.displayKey, default: 0] += aggregate.events
+                todayLinesChanged += aggregate.linesChanged
+            }
             guard let price = await PricingService.shared.pricing(
                 for: key.model,
                 provider: .codex,
@@ -46,13 +52,13 @@ final class CostParser: Sendable {
             dailyCosts[key.day, default: 0] += cost
             if key.day == today {
                 todayModelCosts[key.displayKey, default: 0] += cost
-                modelActivity[key.displayKey, default: 0] += aggregate.events
             }
         }
         return CodexCostHistory(
             dailyCosts: dailyCosts,
             todayModelActivity: modelActivity,
-            todayModelCosts: todayModelCosts
+            todayModelCosts: todayModelCosts,
+            todayLinesChanged: todayLinesChanged
         )
     }
 
@@ -72,6 +78,7 @@ final class CostParser: Sendable {
         var cachedInput = 0
         var output = 0
         var events = 0
+        var linesChanged = 0
     }
 
     static func scanCodexFile(_ url: URL) -> [CodexAggregateKey: CodexTokenAggregate] {
@@ -92,6 +99,25 @@ final class CostParser: Sendable {
                     model = Self.isDisplayableCodexModel(cleaned) ? cleaned : nil
                     reasoningEffort = (payload["effort"] as? String)
                         ?? (payload["reasoning_effort"] as? String)
+                    return
+                }
+                if payload["type"] as? String == "custom_tool_call",
+                   payload["name"] as? String == "apply_patch",
+                   let patch = payload["input"] as? String,
+                   let model,
+                   let rawTimestamp = row["timestamp"] as? String,
+                   let date = iso.date(from: rawTimestamp) {
+                    let key = CodexAggregateKey(
+                        day: dayFormatter.string(from: date),
+                        model: model,
+                        reasoningEffort: reasoningEffort
+                    )
+                    var aggregate = aggregates[key] ?? CodexTokenAggregate()
+                    aggregate.linesChanged += patch.split(separator: "\n").filter { line in
+                        (line.hasPrefix("+") && !line.hasPrefix("+++")) ||
+                        (line.hasPrefix("-") && !line.hasPrefix("---"))
+                    }.count
+                    aggregates[key] = aggregate
                     return
                 }
                 guard payload["type"] as? String == "token_count",

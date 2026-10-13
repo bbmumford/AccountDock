@@ -10,18 +10,21 @@ enum MenuBarModule: String, Codable, CaseIterable, Identifiable {
     case claudeWeekly
     case claudeSessionPercent
     case claudeWeeklyPercent
+    case claudePercentages
     case claudeSessionReset
     case claudeWeeklyReset
     case codexSession
     case codexWeekly
     case codexSessionPercent
     case codexWeeklyPercent
+    case codexPercentages
     case codexSessionReset
     case codexWeeklyReset
     case kimiSession
     case kimiMonthly
     case kimiSessionPercent
     case kimiMonthlyPercent
+    case kimiPercentages
     case kimiSessionReset
     case kimiMonthlyReset
     case claudeUsage
@@ -40,11 +43,12 @@ enum MenuBarModule: String, Codable, CaseIterable, Identifiable {
     static var allCases: [MenuBarModule] {
         [
             .claudeSession, .claudeWeekly, .codexSession, .codexWeekly,
-            .claudeSessionPercent, .claudeWeeklyPercent,
-            .codexSessionPercent, .codexWeeklyPercent,
+            .claudeSessionPercent, .claudeWeeklyPercent, .claudePercentages,
+            .codexSessionPercent, .codexWeeklyPercent, .codexPercentages,
             .claudeWeeklyReset, .codexWeeklyReset,
             .claudeSessionReset, .codexSessionReset,
-            .kimiSession, .kimiMonthly, .kimiSessionPercent, .kimiMonthlyPercent,
+            .kimiSession, .kimiMonthly,
+            .kimiSessionPercent, .kimiMonthlyPercent, .kimiPercentages,
             .kimiSessionReset, .kimiMonthlyReset,
             .dailyCost
         ]
@@ -57,18 +61,21 @@ enum MenuBarModule: String, Codable, CaseIterable, Identifiable {
         case .claudeWeekly:   return "7D"
         case .claudeSessionPercent: return "5H"
         case .claudeWeeklyPercent: return "7D"
+        case .claudePercentages: return "%"
         case .claudeSessionReset: return "5H↻"
         case .claudeWeeklyReset: return "7D↻"
         case .codexSession:   return "5H"
         case .codexWeekly:    return "7D"
         case .codexSessionPercent: return "5H"
         case .codexWeeklyPercent: return "7D"
+        case .codexPercentages: return "%"
         case .codexSessionReset: return "5H↻"
         case .codexWeeklyReset: return "7D↻"
         case .kimiSession: return "5H"
         case .kimiMonthly: return "MO"
         case .kimiSessionPercent: return "5H"
         case .kimiMonthlyPercent: return "MO"
+        case .kimiPercentages: return "%"
         case .kimiSessionReset: return "5H↻"
         case .kimiMonthlyReset: return "MO↻"
         case .claudeUsage:    return "CLAUDE"
@@ -91,18 +98,21 @@ enum MenuBarModule: String, Codable, CaseIterable, Identifiable {
         case .claudeWeekly:   return String(localized: "Claude — weekly usage (7d)", bundle: L10n.bundle)
         case .claudeSessionPercent: return String(localized: "Claude — session percentage (5h)", bundle: L10n.bundle)
         case .claudeWeeklyPercent: return String(localized: "Claude — weekly percentage (7d)", bundle: L10n.bundle)
+        case .claudePercentages: return "Claude — session and weekly percentages"
         case .claudeSessionReset: return String(localized: "Claude — session reset", bundle: L10n.bundle)
         case .claudeWeeklyReset: return String(localized: "Claude — weekly reset", bundle: L10n.bundle)
         case .codexSession:   return String(localized: "Codex — session usage (5h)", bundle: L10n.bundle)
         case .codexWeekly:    return String(localized: "Codex — weekly usage (7d)", bundle: L10n.bundle)
         case .codexSessionPercent: return String(localized: "Codex — session percentage (5h, when available)", bundle: L10n.bundle)
         case .codexWeeklyPercent: return String(localized: "Codex — weekly percentage (7d)", bundle: L10n.bundle)
+        case .codexPercentages: return "Codex — session and weekly percentages"
         case .codexSessionReset: return String(localized: "Codex — session reset", bundle: L10n.bundle)
         case .codexWeeklyReset: return String(localized: "Codex — weekly reset", bundle: L10n.bundle)
         case .kimiSession: return "Kimi — session usage (5h)"
         case .kimiMonthly: return "Kimi — monthly usage"
         case .kimiSessionPercent: return "Kimi — session percentage (5h)"
         case .kimiMonthlyPercent: return "Kimi — monthly percentage"
+        case .kimiPercentages: return "Kimi — session and monthly percentages"
         case .kimiSessionReset: return "Kimi — session reset"
         case .kimiMonthlyReset: return "Kimi — monthly reset"
         case .claudeUsage:    return String(localized: "Claude — session and weekly usage", bundle: L10n.bundle)
@@ -123,6 +133,8 @@ enum MenuBarModule: String, Codable, CaseIterable, Identifiable {
 enum MenuBarModuleStore {
     static let storageKey = "menuBarModules"
     static let settingsNormalizedKey = "menuBarSettingsNormalized"
+    static let combinedPercentagesNormalizedKey = "menuBarCombinedPercentagesNormalized"
+    static let combinedPercentagesCorrectionKey = "menuBarCombinedPercentagesCorrection"
     static let legacyShowAccountNameKey = "showAccountName"
 
     /// Decode resiliently: a single unknown/renamed rawValue (e.g. from a
@@ -141,18 +153,18 @@ enum MenuBarModuleStore {
     /// the user's ordering and enabled modules.
     static func normalizeSettingsIfNeeded() {
         let defaults = UserDefaults.standard
-        guard !defaults.bool(forKey: settingsNormalizedKey) else { return }
-
         var current = decode(defaults.data(forKey: storageKey) ?? Data())
         if current.isEmpty {
             current = [.claudeSession, .claudeWeekly, .codexWeekly]
         }
 
-        if current.contains(.sessionReset) {
-            current.append(.claudeSessionReset)
-        }
-        if current.contains(.weeklyReset) {
-            current.append(contentsOf: [.claudeWeeklyReset, .codexWeeklyReset])
+        if !defaults.bool(forKey: settingsNormalizedKey) {
+            if current.contains(.sessionReset) {
+                current.append(.claudeSessionReset)
+            }
+            if current.contains(.weeklyReset) {
+                current.append(contentsOf: [.claudeWeeklyReset, .codexWeeklyReset])
+            }
         }
 
         let obsolete: Set<MenuBarModule> = [
@@ -162,6 +174,22 @@ enum MenuBarModuleStore {
         ]
         var seen = Set<MenuBarModule>()
         current = current.filter { !obsolete.contains($0) && seen.insert($0).inserted }
+
+        // One local build mistakenly replaced enabled individual percentage
+        // modules with the combined module. Restore those choices once; the
+        // three combined indicators remain available as additional options.
+        if defaults.bool(forKey: combinedPercentagesNormalizedKey),
+           !defaults.bool(forKey: combinedPercentagesCorrectionKey) {
+            let originals: [MenuBarModule: [MenuBarModule]] = [
+                .claudePercentages: [.claudeSessionPercent, .claudeWeeklyPercent],
+                .codexPercentages: [.codexSessionPercent, .codexWeeklyPercent],
+                .kimiPercentages: [.kimiSessionPercent, .kimiMonthlyPercent]
+            ]
+            current = current.flatMap { originals[$0] ?? [$0] }
+            var restored = Set<MenuBarModule>()
+            current = current.filter { restored.insert($0).inserted }
+            defaults.set(true, forKey: combinedPercentagesCorrectionKey)
+        }
         defaults.set(encode(current), forKey: storageKey)
         defaults.set(true, forKey: settingsNormalizedKey)
     }
@@ -170,13 +198,13 @@ enum MenuBarModuleStore {
 extension MenuBarModule {
     var provider: AIProviderType? {
         switch self {
-        case .claudeSession, .claudeWeekly, .claudeSessionPercent, .claudeWeeklyPercent,
+        case .claudeSession, .claudeWeekly, .claudeSessionPercent, .claudeWeeklyPercent, .claudePercentages,
              .claudeSessionReset, .claudeWeeklyReset:
             return .claudeCode
-        case .codexSession, .codexWeekly, .codexSessionPercent, .codexWeeklyPercent,
+        case .codexSession, .codexWeekly, .codexSessionPercent, .codexWeeklyPercent, .codexPercentages,
              .codexSessionReset, .codexWeeklyReset:
             return .codex
-        case .kimiSession, .kimiMonthly, .kimiSessionPercent, .kimiMonthlyPercent,
+        case .kimiSession, .kimiMonthly, .kimiSessionPercent, .kimiMonthlyPercent, .kimiPercentages,
              .kimiSessionReset, .kimiMonthlyReset:
             return .kimi
         default:

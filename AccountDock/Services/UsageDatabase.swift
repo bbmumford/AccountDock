@@ -81,13 +81,14 @@ final class UsageDatabase: @unchecked Sendable {
             ])
             for (key, value) in aggregates {
                 run("""
-                    INSERT INTO codex_aggregates(file_path,date,model,reasoning,input,cached_input,output,events)
-                    VALUES(?,?,?,?,?,?,?,?)
+                    INSERT INTO codex_aggregates(file_path,date,model,reasoning,input,cached_input,output,events,lines_changed)
+                    VALUES(?,?,?,?,?,?,?,?,?)
                     """, [
                         .text(path), .text(key.day), .text(key.model),
                         key.reasoningEffort.map(Binding.text) ?? .null,
                         .int64(Int64(value.input)), .int64(Int64(value.cachedInput)),
-                        .int64(Int64(value.output)), .int64(Int64(value.events))
+                        .int64(Int64(value.output)), .int64(Int64(value.events)),
+                        .int64(Int64(value.linesChanged))
                     ])
             }
         }
@@ -105,14 +106,15 @@ final class UsageDatabase: @unchecked Sendable {
     func codexAggregates() -> [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] {
         var result: [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] = [:]
         query("""
-            SELECT date,model,reasoning,SUM(input),SUM(cached_input),SUM(output),SUM(events)
+            SELECT date,model,reasoning,SUM(input),SUM(cached_input),SUM(output),SUM(events),SUM(lines_changed)
             FROM codex_aggregates GROUP BY date,model,reasoning
             """) { row in
             result[CostParser.CodexAggregateKey(
                 day: row.text(0), model: row.text(1), reasoningEffort: row.optionalText(2)
             )] = CostParser.CodexTokenAggregate(
                 input: Int(row.int64(3)), cachedInput: Int(row.int64(4)),
-                output: Int(row.int64(5)), events: Int(row.int64(6))
+                output: Int(row.int64(5)), events: Int(row.int64(6)),
+                linesChanged: Int(row.int64(7))
             )
         }
         return result
@@ -232,10 +234,18 @@ final class UsageDatabase: @unchecked Sendable {
           file_path TEXT NOT NULL REFERENCES codex_files(path) ON DELETE CASCADE,
           date TEXT NOT NULL, model TEXT NOT NULL, reasoning TEXT,
           input INTEGER NOT NULL, cached_input INTEGER NOT NULL, output INTEGER NOT NULL,
-          events INTEGER NOT NULL
+          events INTEGER NOT NULL, lines_changed INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS codex_aggregate_date ON codex_aggregates(date);
         """)
+        var codexColumns = Set<String>()
+        query("PRAGMA table_info(codex_aggregates)") { codexColumns.insert($0.text(1)) }
+        if !codexColumns.contains("lines_changed") {
+            execute("ALTER TABLE codex_aggregates ADD COLUMN lines_changed INTEGER NOT NULL DEFAULT 0")
+            // Re-index existing transcripts once so historical patches fill
+            // the new aggregate instead of remaining permanently zero.
+            execute("DELETE FROM codex_files")
+        }
     }
 
     private func deleteClaudeRows(path: String) {
