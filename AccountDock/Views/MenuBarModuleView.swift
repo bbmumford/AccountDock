@@ -29,8 +29,14 @@ struct MenuBarModuleView: View {
             resetCell(provider: .claudeCode, window: .session)
         } else if module == .claudeWeeklyReset {
             resetCell(provider: .claudeCode, window: .weekly)
+        } else if module == .codexSessionReset {
+            resetCell(provider: .codex, window: .session)
         } else if module == .codexWeeklyReset {
             resetCell(provider: .codex, window: .weekly)
+        } else if module == .kimiSessionReset {
+            resetCell(provider: .kimi, window: .session)
+        } else if module == .kimiMonthlyReset {
+            resetCell(provider: .kimi, window: .weekly)
         } else if module == .account {
             // Account is shown as a single line (no label) — the name is
             // self-identifying and the `@` label added noise. No height frame:
@@ -60,7 +66,8 @@ struct MenuBarModuleView: View {
     private var valueRow: some View {
         switch module {
         case .claudeSession, .claudeWeekly, .claudeSessionPercent, .claudeWeeklyPercent,
-             .codexSession, .codexWeekly, .codexWeeklyPercent,
+             .codexSession, .codexWeekly, .codexSessionPercent, .codexWeeklyPercent,
+             .kimiSession, .kimiMonthly, .kimiSessionPercent, .kimiMonthlyPercent,
              .claudeUsage, .codexUsage:
             EmptyView()
 
@@ -72,6 +79,10 @@ struct MenuBarModuleView: View {
             resetText(provider: .codex, window: .session)
         case .codexWeeklyReset:
             resetText(provider: .codex, window: .weekly)
+        case .kimiSessionReset:
+            resetText(provider: .kimi, window: .session)
+        case .kimiMonthlyReset:
+            resetText(provider: .kimi, window: .weekly)
 
         case .account:
             Text(accountText)
@@ -129,7 +140,12 @@ struct MenuBarModuleView: View {
         case .claudeWeeklyPercent: return (.claudeCode, .weekly, .percentage)
         case .codexSession: return (.codex, .session, .bar)
         case .codexWeekly: return (.codex, .weekly, .bar)
+        case .codexSessionPercent: return (.codex, .session, .percentage)
         case .codexWeeklyPercent: return (.codex, .weekly, .percentage)
+        case .kimiSession: return (.kimi, .session, .bar)
+        case .kimiMonthly: return (.kimi, .weekly, .bar)
+        case .kimiSessionPercent: return (.kimi, .session, .percentage)
+        case .kimiMonthlyPercent: return (.kimi, .weekly, .percentage)
         default: return nil
         }
     }

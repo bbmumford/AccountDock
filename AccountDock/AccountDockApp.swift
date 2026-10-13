@@ -15,6 +15,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // App starts as agent/accessory due to LSUIElement
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Never leave a CLI stopped if AccountDock is quit or updated.
+        AgentSuspensionService.shared.resumeAllSynchronously()
+    }
 }
 
 @main

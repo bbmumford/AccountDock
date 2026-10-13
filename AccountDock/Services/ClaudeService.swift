@@ -55,6 +55,11 @@ private struct ClaudeHookSession: Decodable {
     let host: String?
 }
 
+struct ClaudeSubscriptionSnapshot: Equatable, Sendable {
+    let planType: String?
+    let isInactive: Bool
+}
+
 /// Interacts with the Claude CLI to get auth status and manage accounts.
 final class ClaudeService: @unchecked Sendable {
     static let shared = ClaudeService()
@@ -251,6 +256,69 @@ final class ClaudeService: @unchecked Sendable {
         return status
     }
 
+    /// Reads the current subscription from Claude's account profile. Unlike
+    /// `claude auth status`, this is a live response and therefore reflects a
+    /// subscription which has ended since the credentials were issued.
+    func getLiveSubscription(accessToken: String) async throws -> ClaudeSubscriptionSnapshot {
+        var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/profile")!)
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw UsageError.network("profile HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
+        }
+        let json = try JSONSerialization.jsonObject(with: data)
+        return Self.liveSubscription(fromProfileJSON: json)
+    }
+
+    static func liveSubscription(fromProfileJSON json: Any) -> ClaudeSubscriptionSnapshot {
+        let expired = containsExpiredSubscription(json)
+        return ClaudeSubscriptionSnapshot(
+            planType: expired ? nil : firstString(
+                named: ["subscriptionType", "subscription_type"],
+                in: json
+            ),
+            isInactive: expired
+        )
+    }
+
+    private static func containsExpiredSubscription(_ value: Any) -> Bool {
+        if let dictionary = value as? [String: Any] {
+            if let status = dictionary["status"] as? String,
+               status.caseInsensitiveCompare("expired") == .orderedSame {
+                return true
+            }
+            return dictionary.values.contains(where: containsExpiredSubscription)
+        }
+        if let array = value as? [Any] {
+            return array.contains(where: containsExpiredSubscription)
+        }
+        return false
+    }
+
+    private static func firstString(named keys: Set<String>, in value: Any) -> String? {
+        if let dictionary = value as? [String: Any] {
+            for key in keys {
+                if let result = dictionary[key] as? String,
+                   !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return result
+                }
+            }
+            for child in dictionary.values {
+                if let result = firstString(named: keys, in: child) { return result }
+            }
+        } else if let array = value as? [Any] {
+            for child in array {
+                if let result = firstString(named: keys, in: child) { return result }
+            }
+        }
+        return nil
+    }
+
     func isClaudeAvailable() async -> Bool {
         do {
             let version = try await runClaude(args: ["--version"])
@@ -266,6 +334,7 @@ final class ClaudeService: @unchecked Sendable {
 
     enum UsageError: LocalizedError {
         case expired
+        case subscriptionUnavailable
         case rateLimited(Date?)
         case network(String)
         case decode(String)
@@ -273,6 +342,7 @@ final class ClaudeService: @unchecked Sendable {
         var errorDescription: String? {
             switch self {
             case .expired: "Claude credentials have expired."
+            case .subscriptionUnavailable: "This account does not currently include Claude Code."
             case .rateLimited: "Anthropic temporarily rate-limited usage refresh."
             case let .network(message): "Usage request failed: \(message)"
             case let .decode(message): "Usage response could not be read: \(message)"
@@ -297,6 +367,9 @@ final class ClaudeService: @unchecked Sendable {
 
             if httpResponse?.statusCode == 401 || responseString.contains("token_expired") {
                 throw UsageError.expired
+            }
+            if httpResponse?.statusCode == 403 {
+                throw UsageError.subscriptionUnavailable
             }
             if httpResponse?.statusCode == 429 {
                 let retryAfter = httpResponse?.value(forHTTPHeaderField: "Retry-After")
@@ -394,14 +467,7 @@ final class ClaudeService: @unchecked Sendable {
             defer { Self.removeWarmupProbeResidue(sessionID: probeID) }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = [
-                "--print",
-                "--no-session-persistence",
-                "--session-id", probeID,
-                "--max-turns", "1",
-                "--model", "haiku",
-                "Reply with exactly: OK"
-            ]
+            process.arguments = Self.warmupArguments(sessionID: probeID)
             var environment = ProcessInfo.processInfo.environment
             environment["CLAUDE_CODE_OAUTH_TOKEN"] = accessToken
             environment.removeValue(forKey: "ANTHROPIC_API_KEY")
@@ -410,7 +476,7 @@ final class ClaudeService: @unchecked Sendable {
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             try process.run()
-            let deadline = Date().addingTimeInterval(60)
+            let deadline = Date().addingTimeInterval(90)
             while process.isRunning && Date() < deadline {
                 Darwin.usleep(100_000)
             }
@@ -424,6 +490,23 @@ final class ClaudeService: @unchecked Sendable {
         }.value
     }
 
+    /// `--bare` cannot be used here: current Claude CLI releases deliberately
+    /// disable OAuth and Keychain reads in bare mode, causing an injected
+    /// CLAUDE_CODE_OAUTH_TOKEN to be reported as "Not logged in". Safe mode
+    /// still suppresses hooks and other user customisations, while retaining
+    /// OAuth support for the isolated account probe.
+    static func warmupArguments(sessionID: String) -> [String] {
+        [
+            "--safe-mode",
+            "--print",
+            "--no-session-persistence",
+            "--session-id", sessionID,
+            "--max-turns", "1",
+            "--model", "haiku",
+            "Reply with exactly: OK"
+        ]
+    }
+
     private static func removeWarmupProbeResidue(sessionID: String) {
         let roots = [
             FileManager.default.homeDirectoryForCurrentUser
@@ -434,11 +517,15 @@ final class ClaudeService: @unchecked Sendable {
         for root in roots {
             guard let enumerator = FileManager.default.enumerator(
                 at: root,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
+                includingPropertiesForKeys: [.isSymbolicLinkKey],
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
             ) else { continue }
-            for case let url as URL in enumerator
-                where url.lastPathComponent.localizedCaseInsensitiveContains(sessionID) {
+            for case let url as URL in enumerator {
+                if (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                guard url.lastPathComponent.localizedCaseInsensitiveContains(sessionID) else { continue }
                 try? FileManager.default.removeItem(at: url)
                 log.info("[warmup] Removed probe residue \(url.lastPathComponent)")
             }
@@ -611,8 +698,23 @@ final class ClaudeService: @unchecked Sendable {
             .replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
 
-    func switchAccount(from currentAccount: Account, to targetAccount: Account) async throws {
+    func switchAccount(from currentAccount: Account, to targetAccount: Account) async throws -> AuthStatus {
         let keychain = KeychainService.shared
+        // Keep an exact snapshot of the live state. A target credential can
+        // exist in AccountDock yet have expired or been revoked since capture;
+        // verification must therefore be transactional.
+        let originalToken = keychain.readClaudeToken()
+        let originalOAuth = keychain.readOAuthAccount()
+
+        func restoreOriginalCredentials() {
+            guard let originalToken, let originalOAuth else {
+                log.error("[switchAccount] Rollback unavailable: original credentials could not be read")
+                return
+            }
+            let tokenRestored = keychain.writeClaudeToken(originalToken)
+            let identityRestored = keychain.writeOAuthAccount(originalOAuth)
+            log.info("[switchAccount] Rolled back rejected target credentials: token=\(tokenRestored), identity=\(identityRestored)")
+        }
 
         log.info("[switchAccount] Switching from \(currentAccount.id) to \(targetAccount.id)")
 
@@ -648,26 +750,33 @@ final class ClaudeService: @unchecked Sendable {
         }
         guard keychain.writeOAuthAccount(targetBackup.oauthAccount) else {
             log.error("[switchAccount] Step 3: Failed to write oauthAccount to ~/.claude.json!")
+            restoreOriginalCredentials()
             throw ClaudeServiceError.oauthAccountWriteFailed
         }
         log.info("[switchAccount] Step 3: Both token and oauthAccount written")
 
         // 4. Verify
         log.info("[switchAccount] Step 4: Verifying with `claude auth status`...")
-        let status = try await getAuthStatus()
-        guard status.loggedIn else {
-            log.error("[switchAccount] Step 4: Not logged in after switch!")
-            throw ClaudeServiceError.switchVerificationFailed
+        do {
+            let status = try await getAuthStatus()
+            guard status.loggedIn else {
+                log.error("[switchAccount] Step 4: Target credentials are not logged in")
+                throw ClaudeServiceError.switchVerificationFailed
+            }
+            if status.email != targetAccount.email {
+                log.error("[switchAccount] Step 4: Logged in as \(status.email ?? "nil") instead of \(targetAccount.email)")
+                throw ClaudeServiceError.switchWrongAccount(expected: targetAccount.email, actual: status.email ?? "unknown")
+            }
+            log.info("[switchAccount] Step 4: Switch verified — logged in as \(status.email ?? "")")
+            return status
+        } catch {
+            restoreOriginalCredentials()
+            throw error
         }
-        if status.email != targetAccount.email {
-            log.error("[switchAccount] Step 4: Logged in as \(status.email ?? "nil") instead of \(targetAccount.email)")
-            throw ClaudeServiceError.switchWrongAccount(expected: targetAccount.email, actual: status.email ?? "unknown")
-        }
-        log.info("[switchAccount] Step 4: Switch verified — logged in as \(status.email ?? "")")
     }
 
     /// Capture the current Claude auth token + oauthAccount and associate with an account
-    func captureCurrentCredentials(forAccountId accountId: String) -> Bool {
+    func captureCurrentCredentials(forAccountId accountId: String, expectedEmail: String) -> Bool {
         log.info("[capture] Capturing credentials for account \(accountId)...")
         let keychain = KeychainService.shared
         guard let token = keychain.readClaudeToken() else {
@@ -679,6 +788,10 @@ final class ClaudeService: @unchecked Sendable {
             return false
         }
         let email = (oauthAccount["emailAddress"]?.value as? String) ?? "?"
+        guard email.caseInsensitiveCompare(expectedEmail) == .orderedSame else {
+            log.error("[capture] Refusing credential write: live identity \(email) does not match destination \(expectedEmail)")
+            return false
+        }
         log.info("[capture] Token + oauthAccount found (email=\(email)), saving backup...")
         let result = keychain.saveAccountBackup(token: token, oauthAccount: oauthAccount, forAccountId: accountId)
         log.info("[capture] Save result: \(result)")
@@ -852,6 +965,14 @@ final class ClaudeService: @unchecked Sendable {
                     if process.terminationStatus == 0 {
                         log.debug("[runClaude] Success (exit 0), output length: \(output.count)")
                         continuation.resume(returning: output)
+                    } else if args == ["auth", "status"],
+                              let data = output.data(using: .utf8),
+                              (try? JSONDecoder().decode(AuthStatus.self, from: data)) != nil {
+                        // Claude uses exit 1 for the valid logged-out status
+                        // document. Let getAuthStatus decode it so callers can
+                        // distinguish rejected credentials from a CLI failure.
+                        log.info("[runClaude] auth status returned logged-out state (exit \(process.terminationStatus))")
+                        continuation.resume(returning: output)
                     } else {
                         log.error("[runClaude] Failed (exit \(process.terminationStatus))")
                         continuation.resume(throwing: ClaudeServiceError.cliError("exit \(process.terminationStatus)"))
@@ -910,7 +1031,7 @@ enum ClaudeServiceError: LocalizedError {
         case .oauthAccountWriteFailed:
             return "Failed to write oauthAccount to ~/.claude.json"
         case .switchVerificationFailed:
-            return "Account switch verification failed"
+            return "The target Claude credentials are no longer valid. Re-authenticate that account before switching. The previous profile was restored."
         case .switchWrongAccount(let expected, let actual):
             return "Switch failed: expected \(expected) but got \(actual). Try removing and re-adding the account."
         }

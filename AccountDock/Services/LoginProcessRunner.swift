@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import AppKit
 
 private final class LoginProcessOutput: @unchecked Sendable {
     private let lock = NSLock()
@@ -15,6 +16,50 @@ private final class LoginProcessOutput: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return String(decoding: data, as: UTF8.self)
+    }
+}
+
+/// Opens the first authorization URL emitted by a login CLI. Some CLIs open
+/// their browser themselves, while others only print a device URL when stdout
+/// is redirected; keeping this in the shared runner gives every provider the
+/// same cancellable login behavior.
+private final class LoginBrowserLauncher: @unchecked Sendable {
+    private let log = FileLog("Login")
+    private let lock = NSLock()
+    private let preferredHosts: Set<String>
+    private var opened = false
+
+    init(preferredHosts: [String]) {
+        self.preferredHosts = Set(preferredHosts.map { $0.lowercased() })
+    }
+
+    func inspect(_ text: String) {
+        lock.lock()
+        guard !opened else { lock.unlock(); return }
+        let range = NSRange(text.startIndex..., in: text)
+        let regex = try? NSRegularExpression(pattern: #"https?://[^\s\u{001B}\]\[<>\"']+"#)
+        let urls = regex?.matches(in: text, range: range).compactMap { match -> URL? in
+            guard let swiftRange = Range(match.range, in: text) else { return nil }
+            return URL(string: String(text[swiftRange]).trimmingCharacters(in: CharacterSet(charactersIn: ".,);")))
+        } ?? []
+        let url = urls.first(where: { url in
+            guard !preferredHosts.isEmpty, let host = url.host?.lowercased() else { return false }
+            return preferredHosts.contains(where: { host == $0 || host.hasSuffix(".\($0)") })
+        }) ?? (preferredHosts.isEmpty ? urls.first : nil)
+        guard let url else {
+            lock.unlock()
+            return
+        }
+        opened = true
+        lock.unlock()
+        DispatchQueue.main.async { [log] in
+            let accepted = NSWorkspace.shared.open(url)
+            if accepted {
+                log.info("Opened provider authorization URL in the default browser")
+            } else {
+                log.error("macOS rejected the provider authorization URL")
+            }
+        }
     }
 }
 
@@ -64,6 +109,8 @@ final class LoginProcessRunner: @unchecked Sendable {
         executable: String,
         arguments: [String],
         environment: [String: String],
+        openFirstBrowserURL: Bool = false,
+        preferredBrowserHosts: [String] = [],
         timeout: TimeInterval = LoginProcessRunner.timeout
     ) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
@@ -71,6 +118,9 @@ final class LoginProcessRunner: @unchecked Sendable {
                 let process = Process()
                 let pipe = Pipe()
                 let output = LoginProcessOutput()
+                let browserLauncher = openFirstBrowserURL
+                    ? LoginBrowserLauncher(preferredHosts: preferredBrowserHosts)
+                    : nil
 
                 process.executableURL = URL(fileURLWithPath: executable)
                 process.arguments = arguments
@@ -81,6 +131,7 @@ final class LoginProcessRunner: @unchecked Sendable {
                     let data = handle.availableData
                     guard !data.isEmpty else { return }
                     output.append(data)
+                    browserLauncher?.inspect(output.string())
                 }
 
                 self.lock.lock()
@@ -123,6 +174,7 @@ final class LoginProcessRunner: @unchecked Sendable {
                 let remaining = pipe.fileHandleForReading.readDataToEndOfFile()
                 output.append(remaining)
                 let text = output.string()
+                browserLauncher?.inspect(text)
 
                 let wasCancelled = self.wasCancelled(process)
                 self.clear(process)

@@ -19,6 +19,9 @@ Package.resolved
 # Misc
 *.swp
 *~
+*.profraw
+*-GONODE*
+*-Local’s MacBook Pro*
 
 # XcodeGen generated project
 AccountDock.xcodeproj/

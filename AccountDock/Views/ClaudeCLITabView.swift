@@ -222,7 +222,7 @@ struct ClaudeCLITabView: View {
         ClaudeService.shared.setPath(newValue.isEmpty ? nil : newValue)
         Task {
             await reloadVersions()
-            await appState.refresh()
+            await appState.refresh(forceUnavailablePlanCheck: true)
         }
     }
 }

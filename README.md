@@ -24,15 +24,30 @@ CLI, and combines provider usage, activity, costs, and menu-bar modules.
 
 ## Automatic failover
 
-Settings → Failover configures Claude and Codex independently. AccountDock
+Settings → Failover configures Claude, Codex, and Kimi independently. AccountDock
 never fails over from one provider to the other.
 
 - Choose the account order for each provider and optionally loop through it.
-- Set independent session and weekly thresholds for Claude subscriptions.
+- Set independent session and long-window thresholds for each provider. Kimi
+  exposes a five-hour session window plus the stricter of its monthly total and
+  monthly coding allowances.
 - Set the long-window quota threshold reported by Codex. This is normally seven
   days, while Free accounts can expose a 30-day quota; Codex does not expose a
   five-hour/session subscription window.
 - Prefer the eligible account with the most remaining headroom.
+- Optionally enable intelligent long-window balancing. It compares every
+  included account's utilization and reset horizon, deliberately allowing an
+  account that resets sooner to consume more before that allowance disappears.
+  Balancing targets the full usable allowance; configured thresholds trigger
+  ordinary failover but are not treated as artificial quota ceilings.
+  A configurable advantage threshold and minimum dwell time prevent account
+  oscillation; unavailable session capacity, excluded accounts, and locally
+  elapsed but unverified resets remain hard safety constraints. Every reported
+  session and long window at 100% is rejected as a destination even if that
+  window's trigger is disabled. Threshold
+  failover always takes priority. Codex requires a proactive switch method
+  (`Switch Without Restart` or `Force Restart Sessions`) for balancing because
+  `Switch Safely` is intentionally gated on a real usage-limit error.
 - After the active account reaches a threshold, prefer a ladder account whose
   limits have reset, or hold briefly when the active limiting window is about
   to reset. A recovered account never pulls work away from a healthy account.
@@ -52,6 +67,21 @@ never fails over from one provider to the other.
   responds with a rate-limit error.
 - Refresh inactive Claude OAuth credentials independently, including rotated
   refresh tokens, without replacing the credential used by active sessions.
+- Optionally suspend running provider CLI agents when every included account is
+  exhausted. AccountDock sends `SIGSTOP` only to identified provider processes,
+  resumes those exact PIDs with `SIGCONT` after verified capacity returns, and
+  runs a crash watchdog so a force-quit cannot leave agents permanently paused.
+
+## Kimi Code accounts
+
+The Accounts tab can capture the current Kimi Code login or start `kimi login`
+with cancellation and timeout support. AccountDock stores an isolated credential
+copy per subscription and atomically promotes the selected copy into Kimi Code's
+configured credential slot. Rotating refresh tokens are written back to the
+managed account before use. Usage includes the five-hour session window and the
+more-consumed monthly total/coding window. Kimi accounts participate in account
+ordering, usage display, menu-bar modules, failover, intelligent balancing, and
+agent suspension independently of Claude and Codex.
 
 When every configured account is exhausted, AccountDock selects the account
 whose blocking limits become available first. A session-limited account is not
@@ -184,6 +214,20 @@ does not push anything.
 - `AccountDockTests/` — unit tests.
 - `Shared/` — widget projection shared by both targets.
 - `project.yml` — XcodeGen project definition and version source.
+
+### Adding a provider
+
+Provider-neutral behavior is declared once in
+`AccountDock/Models/ProviderCapabilities.swift`: identity and presentation,
+supported quota windows, workload eligibility, pricing namespaces, and switch
+capabilities. Shared account, failover, pricing, and provider-list UI code reads
+that registry and failover policies are stored by provider identifier.
+
+External integrations remain intentionally provider-specific. Add a service
+adapter for authentication, credential storage, plan discovery, usage fetching,
+and CLI switching, then register the provider's capabilities and mark it
+implemented. This keeps vendor API details at the boundary without leaking
+binary `Claude`/`Codex` assumptions into shared product logic.
 
 ## Upstream attribution
 

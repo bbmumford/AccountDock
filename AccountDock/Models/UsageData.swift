@@ -163,13 +163,30 @@ struct UsageWindow: Codable {
 
         if hours > 24 {
             let formatter = DateFormatter()
-            formatter.dateFormat = "EEE h:mm a"
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .short
             return formatter.string(from: date)
         } else if hours > 0 {
             return "\(hours) hr \(minutes) min"
         } else {
             return "\(minutes) min"
         }
+    }
+
+    /// A complete, unambiguous label for the usage UI. Longer quota windows
+    /// include the calendar date so a weekday cannot be mistaken for the next
+    /// occurrence of that day.
+    var resetLabelString: String? {
+        guard let date = resetsAtDate else { return nil }
+        let remaining = date.timeIntervalSinceNow
+        guard remaining > 0 else { return "Resets now" }
+        guard remaining > 86_400 else {
+            return resetTimeString.map { "Resets in \($0)" }
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE, d MMM yyyy 'at' h:mm a"
+        return "Resets on \(formatter.string(from: date))"
     }
 
     /// Compact countdown rendering for narrow menu-bar modules.

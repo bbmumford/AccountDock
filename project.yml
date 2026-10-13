@@ -32,6 +32,8 @@ targets:
         excludes:
           - Resources/AppIcon.png
           - Resources/MenuBarIcon.png
+          - "**/*-GONODE*"
+          - "**/*-Local’s MacBook Pro*"
       - path: Shared
     info:
       path: AccountDock/Info.plist
@@ -104,6 +106,9 @@ targets:
     platform: macOS
     sources:
       - path: AccountDockTests
+        excludes:
+          - "**/*-GONODE*"
+          - "**/*-Local’s MacBook Pro*"
     dependencies:
       - target: AccountDock
     settings:

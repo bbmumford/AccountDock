@@ -6,23 +6,16 @@ enum AIProviderType: String, Codable, CaseIterable, Identifiable {
     case claudeCode = "Claude Code"
     case gemini = "Gemini"
     case codex = "Codex"
+    case kimi = "Kimi"
 
     var id: String { rawValue }
 
     var iconName: String {
-        switch self {
-        case .claudeCode: return "brain.head.profile"
-        case .gemini: return "sparkles"
-        case .codex: return "chevron.left.forwardslash.chevron.right"
-        }
+        capabilities.iconName
     }
 
     var configDirectory: String {
-        switch self {
-        case .claudeCode: return "~/.claude"
-        case .gemini: return "~/.gemini"
-        case .codex: return "~/.codex"
-        }
+        capabilities.configDirectory
     }
 }
 
@@ -44,6 +37,44 @@ struct Account: Identifiable, Codable, Hashable {
     /// Subscription type with first letter capitalized (e.g., "max" → "Max").
     var displaySubscriptionType: String? {
         subscriptionType?.prefix(1).uppercased().appending(subscriptionType?.dropFirst() ?? "")
+    }
+
+    /// Whether this profile is a viable destination for provider workloads.
+    /// A ChatGPT Free login remains a valid identity, but does not provide the
+    /// Codex subscription capacity needed for account switching/failover.
+    var supportsProviderWorkloads: Bool {
+        workloadAvailability.isAvailable
+    }
+
+    var workloadAvailability: ProviderWorkloadAvailability {
+        Self.workloadAvailability(provider: provider, subscriptionType: subscriptionType)
+    }
+
+    static func supportsProviderWorkloads(
+        provider: AIProviderType,
+        subscriptionType: String?
+    ) -> Bool {
+        workloadAvailability(provider: provider, subscriptionType: subscriptionType).isAvailable
+    }
+
+    static func workloadAvailability(
+        provider: AIProviderType,
+        subscriptionType: String?
+    ) -> ProviderWorkloadAvailability {
+        let tier = subscriptionType?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let isUnavailable = tier == "inactive" || (
+            provider.capabilities.requiresPaidPlanForWorkloads && tier == "free"
+        )
+        return isUnavailable
+            ? .unavailable(label: provider.capabilities.unavailableLabel)
+            : .available
+    }
+
+    var providerUnavailableLabel: String? {
+        guard case let .unavailable(label) = workloadAvailability else { return nil }
+        return label
     }
 
     var obfuscatedEmail: String {

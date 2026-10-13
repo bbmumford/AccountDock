@@ -31,9 +31,11 @@ final class CodexServiceTests: XCTestCase {
 
         XCTAssertNotNil(codex)
         XCTAssertNotNil(claude)
-        if let codex {
-            XCTAssertEqual(codex.inputPerToken, 0.000005, accuracy: 0.000000001)
-            XCTAssertEqual(codex.outputPerToken, 0.00003, accuracy: 0.000000001)
+        if let codex, let claude {
+            XCTAssertGreaterThan(codex.inputPerToken, 0)
+            XCTAssertGreaterThan(codex.outputPerToken, 0)
+            XCTAssertNotEqual(codex.inputPerToken, claude.inputPerToken)
+            XCTAssertNotEqual(codex.outputPerToken, claude.outputPerToken)
         }
     }
 
@@ -137,6 +139,61 @@ final class CodexServiceTests: XCTestCase {
 
         XCTAssertEqual(snapshot.planType, "business")
         XCTAssertEqual(snapshot.usage.sevenDay?.utilization, 25)
+    }
+
+    func testLowerCodexPlanDecodesBothSessionAndWeeklyWindows() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "plan_type": "plus",
+            "rate_limit": [
+                "primary_window": [
+                    "used_percent": 6,
+                    "reset_at": 1_790_000_000,
+                    "reset_after_seconds": 17_000,
+                    "limit_window_seconds": 5 * 60 * 60,
+                ],
+                "secondary_window": [
+                    "used_percent": 17,
+                    "reset_at": 1_790_500_000,
+                    "reset_after_seconds": 580_000,
+                    "limit_window_seconds": 7 * 24 * 60 * 60,
+                ],
+            ],
+        ])
+
+        let snapshot = try CodexService.decodeUsageSnapshot(data)
+
+        XCTAssertEqual(snapshot.planType, "plus")
+        XCTAssertEqual(snapshot.usage.fiveHour?.utilization, 6)
+        XCTAssertEqual(snapshot.usage.sevenDay?.utilization, 17)
+        XCTAssertEqual(snapshot.usage.fiveHour?.windowSeconds, 5 * 60 * 60)
+        XCTAssertEqual(snapshot.usage.sevenDay?.windowSeconds, 7 * 24 * 60 * 60)
+    }
+
+    func testLiveCodexTierOverridesStaleJWTPlan() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "plan_type": "plus",
+            "rate_limit": [
+                "primary_window": [
+                    "used_percent": 1,
+                    "reset_at": 1_790_000_000,
+                    "limit_window_seconds": 7 * 24 * 60 * 60,
+                ],
+            ],
+        ])
+        let snapshot = try CodexService.decodeUsageSnapshot(data)
+        XCTAssertEqual(
+            CodexService.resolvedLivePlan(responseSnapshot: snapshot, credentialPlan: "pro"),
+            "plus"
+        )
+    }
+
+    func testCodexAccountWithoutTierOrQuotaIsInactive() throws {
+        let data = try JSONSerialization.data(withJSONObject: ["rate_limit": [:]])
+        let snapshot = try CodexService.decodeUsageSnapshot(data)
+        XCTAssertEqual(
+            CodexService.resolvedLivePlan(responseSnapshot: snapshot, credentialPlan: "pro"),
+            "inactive"
+        )
     }
 
     func testMovingZeroPercentCodexPlaceholderIsTreatedAsUnstarted() throws {

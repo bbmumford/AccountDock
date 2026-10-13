@@ -3,7 +3,11 @@ import SwiftUI
 /// Unified provider cost tab with today's combined total and available history.
 struct CostDetailView: View {
     @EnvironmentObject private var appState: AppState
+    @AppStorage("showCostLast7Days") private var showLast7Days = true
+    @AppStorage("showCostLast30Days") private var showLast30Days = true
+    @AppStorage("showCostAllTime") private var showAllTime = true
     @State private var visibleDailyCount = 7
+    @State private var showingCalculationInfo = false
 
     private struct ProviderModelCost: Identifiable {
         let id: String
@@ -147,9 +151,41 @@ struct CostDetailView: View {
         let last7 = combinedCostForLastDays(7, today: todayStr, formatter: formatter)
         let last30 = combinedCostForLastDays(30, today: todayStr, formatter: formatter)
 
-        return HStack(spacing: 10) {
-            periodCard(title: "Last 7 Days", cost: last7)
-            periodCard(title: "Last 30 Days", cost: last30)
+        let allTime = combinedDailyCosts.reduce(0) { $0 + $1.total }
+
+        return VStack(spacing: 10) {
+            HStack {
+                Text("Cost summaries")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.textSecondary)
+                Spacer()
+                Menu {
+                    Toggle("Last 7 Days", isOn: $showLast7Days)
+                    Toggle("Last 30 Days", isOn: $showLast30Days)
+                    Toggle("All Time", isOn: $showAllTime)
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .foregroundStyle(.textSecondary)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Choose cost summary periods")
+            }
+
+            if showLast7Days || showLast30Days {
+                HStack(spacing: 10) {
+                    if showLast7Days {
+                        periodCard(title: "Last 7 Days", cost: last7)
+                    }
+                    if showLast30Days {
+                        periodCard(title: "Last 30 Days", cost: last30)
+                    }
+                }
+            }
+
+            if showAllTime {
+                periodCard(title: "All Time", cost: allTime)
+            }
         }
         .sectionPadding()
     }
@@ -322,35 +358,41 @@ struct CostDetailView: View {
     // MARK: - Pricing Info
 
     private var pricingInfoSection: some View {
+        HStack(spacing: 6) {
+            Spacer()
+            Text("How costs are calculated")
+            Image(systemName: "info.circle")
+            Spacer()
+        }
+        .font(.caption)
+        .foregroundStyle(.textSecondary)
+        .contentShape(Rectangle())
+        .onHover { showingCalculationInfo = $0 }
+        .popover(isPresented: $showingCalculationInfo, arrowEdge: .bottom) {
+            calculationInfo
+                .padding(12)
+                .frame(width: 320)
+        }
+        .sectionPadding()
+    }
+
+    private var calculationInfo: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("How We Calculate")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.textSecondary)
-                Spacer()
+            Text("How costs are calculated")
+                .font(.caption.weight(.semibold))
+            Text("AccountDock reads local provider activity and prices each request using that provider’s model-specific input, output, cache, long-context, and recorded reasoning data when available. Provider totals are combined consistently across Today, summary periods, and Daily History. Subscription quota usage is separate from these API-equivalent cost estimates.")
+                .font(.caption2)
+                .foregroundStyle(.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let v = VerifiedAgainst.load() {
+                Label(
+                    "Claude totals were verified against ccusage \(v.ccusageVersion) on \(v.verifiedOn). Other providers use their native local token records and provider pricing.",
+                    systemImage: "checkmark.seal.fill"
+                )
+                .font(.caption2)
+                .foregroundStyle(.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(.horizontal, 16)
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Claude activity uses Anthropic pricing for its exact model. Codex activity uses OpenAI pricing for its exact model and recorded reasoning effort; reasoning tokens are billed at that model’s output-token rate. Cache and long-context rates are applied per request. These same provider totals are used for Today, the 7/30-day totals, and every stacked daily bar.")
-                    .font(.caption2)
-                    .foregroundStyle(.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if let v = VerifiedAgainst.load() {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.seal.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.green)
-                        Text("Claude calculation verified against ccusage \(v.ccusageVersion) on \(v.verifiedOn) — \(v.windowDays)-day total matched to the cent. Codex is calculated independently from native Codex token records and OpenAI prices.")
-                            .font(.caption2)
-                            .foregroundStyle(.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-            .cardStyle()
-            .sectionPadding()
         }
     }
 
