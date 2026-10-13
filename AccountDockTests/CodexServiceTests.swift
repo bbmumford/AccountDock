@@ -2,6 +2,22 @@ import XCTest
 @testable import AccountDock
 
 final class CodexServiceTests: XCTestCase {
+    func testCodexPatchLinesContributeToDailyActivity() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("jsonl")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let rows = [
+            #"{"timestamp":"2026-10-13T01:00:00.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol","effort":"high"}}"#,
+            #"{"timestamp":"2026-10-13T01:01:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n--- a/file\n+++ b/file\n-old\n+new\n+extra\n*** End Patch"}}"#,
+            #"{"timestamp":"2026-10-13T01:02:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3}}}}"#
+        ]
+        try Data(rows.joined(separator: "\n").utf8).write(to: file)
+
+        let result = CostParser.scanCodexFile(file)
+        XCTAssertEqual(result.values.reduce(0) { $0 + $1.linesChanged }, 3)
+    }
+
     func testUsageLimitDetectionRequiresLatestTurnError() throws {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

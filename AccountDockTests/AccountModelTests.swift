@@ -104,8 +104,10 @@ final class AccountModelTests: XCTestCase {
             .codexWeekly,
             .claudeSessionPercent,
             .claudeWeeklyPercent,
+            .claudePercentages,
             .codexSessionPercent,
             .codexWeeklyPercent,
+            .codexPercentages,
             .claudeWeeklyReset,
             .codexWeeklyReset,
             .claudeSessionReset,
@@ -114,6 +116,7 @@ final class AccountModelTests: XCTestCase {
             .kimiMonthly,
             .kimiSessionPercent,
             .kimiMonthlyPercent,
+            .kimiPercentages,
             .kimiSessionReset,
             .kimiMonthlyReset,
             .dailyCost

@@ -19,7 +19,9 @@ struct MenuBarModuleView: View {
     private let valueRowHeight: CGFloat = 13
 
     var body: some View {
-        if let scopedUsage {
+        if let provider = combinedPercentageProvider {
+            combinedPercentageView(provider: provider)
+        } else if let scopedUsage {
             providerUsageView(
                 provider: scopedUsage.provider,
                 window: scopedUsage.window,
@@ -68,6 +70,7 @@ struct MenuBarModuleView: View {
         case .claudeSession, .claudeWeekly, .claudeSessionPercent, .claudeWeeklyPercent,
              .codexSession, .codexWeekly, .codexSessionPercent, .codexWeeklyPercent,
              .kimiSession, .kimiMonthly, .kimiSessionPercent, .kimiMonthlyPercent,
+             .claudePercentages, .codexPercentages, .kimiPercentages,
              .claudeUsage, .codexUsage:
             EmptyView()
 
@@ -127,6 +130,77 @@ struct MenuBarModuleView: View {
 
     private enum UsageWindow { case session, weekly }
     private enum UsagePresentation { case bar, percentage }
+
+    private var combinedPercentageProvider: AIProviderType? {
+        switch module {
+        case .claudePercentages: return .claudeCode
+        case .codexPercentages: return .codex
+        case .kimiPercentages: return .kimi
+        default: return nil
+        }
+    }
+
+    @ViewBuilder
+    private func combinedPercentageView(provider: AIProviderType) -> some View {
+        let usage = appState.activeAccount(for: provider).flatMap { appState.accountUsage[$0.id] }
+        let session = usage?.fiveHour?.utilization
+        let longWindow = usage?.sevenDay?.utilization
+        ZStack {
+            quotaRing(
+                session,
+                diameter: 20,
+                lineWidth: 2.5,
+                unavailable: (longWindow ?? 0) >= 100
+            )
+            quotaRing(longWindow, diameter: 12, lineWidth: 2.5)
+        }
+        .frame(width: 20, height: 20)
+        .frame(height: 22)
+        .fixedSize()
+        .help(combinedPercentageHelp(provider: provider, session: session, longWindow: longWindow))
+    }
+
+    private func quotaRing(
+        _ utilization: Double?,
+        diameter: CGFloat,
+        lineWidth: CGFloat,
+        unavailable: Bool = false
+    ) -> some View {
+        ZStack {
+            if unavailable {
+                EvenDashedCircle(color: Color.primary.opacity(0.45), lineWidth: lineWidth)
+            } else {
+                Circle()
+                    .stroke(Color.primary.opacity(0.2), lineWidth: lineWidth)
+            }
+            if let utilization, !unavailable {
+                Circle()
+                    .trim(from: 0, to: min(max(utilization / 100, 0), 1))
+                    .stroke(
+                        quotaColor(utilization),
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+            }
+        }
+        .frame(width: diameter, height: diameter)
+    }
+
+    private func quotaColor(_ utilization: Double) -> Color {
+        if utilization >= 90 { return .red }
+        if utilization >= 70 { return .orange }
+        return .green
+    }
+
+    private func combinedPercentageHelp(
+        provider: AIProviderType,
+        session: Double?,
+        longWindow: Double?
+    ) -> String {
+        let sessionText = session.map { "\(Int($0.rounded()))%" } ?? "unavailable"
+        let longText = longWindow.map { "\(Int($0.rounded()))%" } ?? "unavailable"
+        return "\(provider.capabilities.sessionQuotaLabel): \(sessionText) · \(provider.capabilities.weeklyQuotaLabel): \(longText)"
+    }
 
     private var scopedUsage: (
         provider: AIProviderType,
@@ -262,6 +336,29 @@ struct MenuBarModuleView: View {
             return "—"
         }
         return s
+    }
+}
+
+/// A closed dashed ring made from equal angular segments. `StrokeStyle.dash`
+/// measures linear dash lengths around a circle and leaves its remainder at
+/// the path seam; explicit fractions keep the closing gap identical.
+private struct EvenDashedCircle: View {
+    let color: Color
+    let lineWidth: CGFloat
+    private let segmentCount = 10
+    private let filledFraction = 0.50
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<segmentCount, id: \.self) { index in
+                let start = Double(index) / Double(segmentCount)
+                let end = start + filledFraction / Double(segmentCount)
+                Circle()
+                    .trim(from: start, to: end)
+                    .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+            }
+        }
+        .rotationEffect(.degrees(-90))
     }
 }
 
