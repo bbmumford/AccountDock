@@ -50,6 +50,8 @@ enum CodexServiceError: LocalizedError {
     case binaryNotFound
     case notLoggedIn
     case invalidCredentials
+    case subscriptionUnavailable
+    case rateLimited
     case loginFailed(String)
     case unsafeCredentialLocation
 
@@ -61,6 +63,10 @@ enum CodexServiceError: LocalizedError {
             return "No Codex login was found."
         case .invalidCredentials:
             return "Codex credentials could not be read."
+        case .subscriptionUnavailable:
+            return "This account does not currently have a Codex-capable subscription."
+        case .rateLimited:
+            return "Codex usage refresh is temporarily rate limited."
         case let .loginFailed(message):
             return "Codex login failed: \(message)"
         case .unsafeCredentialLocation:
@@ -105,17 +111,16 @@ final class CodexService: @unchecked Sendable {
         let records = hookSessionRecords()
         return runningCodexProcesses().map { process in
             let record = records[process.id]
-            let openSession = openSessionMetadata(processID: process.id)
+            let sessionID = Self.extractResumeSessionID(from: process.command) ?? record?.sessionID
+            let rolloutPath = sessionID.flatMap(Self.rolloutPath)
             return RunningCodexProcess(
                 id: process.id,
                 command: process.command,
-                sessionID: Self.extractResumeSessionID(from: process.command)
-                    ?? openSession.sessionID
-                    ?? record?.sessionID,
-                workingDirectory: openSession.workingDirectory ?? record?.workingDirectory,
+                sessionID: sessionID,
+                workingDirectory: record?.workingDirectory,
                 host: record?.host ?? process.host,
                 terminalTTY: process.terminalTTY,
-                hasUsageLimitError: openSession.rolloutPath.map(Self.rolloutEndsWithUsageLimit) ?? false
+                hasUsageLimitError: rolloutPath.map(Self.rolloutEndsWithUsageLimit) ?? false
             )
         }
     }
@@ -323,41 +328,24 @@ final class CodexService: @unchecked Sendable {
         }
     }
 
-    private func openSessionMetadata(
-        processID: Int32
-    ) -> (sessionID: String?, workingDirectory: String?, rolloutPath: String?) {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        process.arguments = ["-a", "-p", String(processID), "-Fn"]
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return (nil, nil, nil) }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return (nil, nil, nil) }
-
-        var sessionID: String?
-        var workingDirectory: String?
-        var rolloutPath: String?
-        for rawLine in String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline) {
-            guard rawLine.first == "n" else { continue }
-            let path = String(rawLine.dropFirst())
-            if path.contains("/.codex/sessions/"), path.hasSuffix(".jsonl"),
-               let id = Self.sessionID(fromRolloutPath: path) {
-                sessionID = id
-                rolloutPath = path
-            } else if workingDirectory == nil,
-                      path.hasPrefix("/"),
-                      FileManager.default.fileExists(atPath: path) {
-                var isDirectory: ObjCBool = false
-                if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
-                   isDirectory.boolValue {
-                    workingDirectory = path
-                }
+    static func rolloutPath(for sessionID: String) -> String? {
+        let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex/sessions", isDirectory: true)
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return nil }
+        for case let url as URL in enumerator {
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else { continue }
+            if values.isSymbolicLink == true {
+                enumerator.skipDescendants()
+                continue
             }
+            guard values.isRegularFile == true, url.pathExtension == "jsonl",
+                  Self.sessionID(fromRolloutPath: url.path) == sessionID else { continue }
+            return url.path
         }
-        return (sessionID, workingDirectory, rolloutPath)
+        return nil
     }
 
     /// Returns true only when the latest submitted turn ended with a real
@@ -493,18 +481,52 @@ final class CodexService: @unchecked Sendable {
             auth["last_refresh"] = ISO8601DateFormatter().string(from: Date())
             try Self.writePrivateAuth(auth, to: authURL)
         }
-        guard
-              let accessToken = tokens["access_token"] as? String,
+        var result = try await fetchUsageResponse(tokens: tokens)
+        if result.statusCode == 401,
+           let refreshToken = tokens["refresh_token"] as? String,
+           !refreshToken.isEmpty {
+            // Subscription changes can revoke a server-side access token well
+            // before its signed JWT expiry. Refresh and retry once so an
+            // upgrade/downgrade immediately publishes its new tier and windows.
+            codexLog.info("[usage] Access token rejected before expiry; refreshing and retrying")
+            tokens = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
+            auth["tokens"] = tokens
+            auth["last_refresh"] = ISO8601DateFormatter().string(from: Date())
+            try Self.writePrivateAuth(auth, to: authURL)
+            result = try await fetchUsageResponse(tokens: tokens)
+        }
+        if result.statusCode == 403 {
+            throw CodexServiceError.subscriptionUnavailable
+        }
+        if result.statusCode == 429 {
+            throw CodexServiceError.rateLimited
+        }
+        guard (200...299).contains(result.statusCode),
+              let accessToken = tokens["access_token"] as? String else {
+            throw CodexServiceError.invalidCredentials
+        }
+        let responseSnapshot = try Self.decodeUsageSnapshot(result.data)
+        let credentialPlan = Self.planType(fromJWT: accessToken)
+            ?? (tokens["id_token"] as? String).flatMap(Self.planType(fromJWT:))
+        return CodexUsageSnapshot(
+            usage: responseSnapshot.usage,
+            // A live tier always wins over the login JWT so upgrades and
+            // downgrades appear immediately. JWT is only a compatibility
+            // fallback when a usable quota response omits plan_type.
+            planType: Self.resolvedLivePlan(
+                responseSnapshot: responseSnapshot,
+                credentialPlan: credentialPlan
+            )
+        )
+    }
+
+    private func fetchUsageResponse(
+        tokens: [String: Any]
+    ) async throws -> (data: Data, statusCode: Int) {
+        guard let accessToken = tokens["access_token"] as? String,
               !accessToken.isEmpty else {
             throw CodexServiceError.invalidCredentials
         }
-        // The usage endpoint has been observed returning the same plan_type for
-        // different, correctly scoped accounts. Prefer the plan claim carried by
-        // this account's signed access token; use the response only for older
-        // credentials that do not contain the claim.
-        let credentialPlan = Self.planType(fromJWT: accessToken)
-            ?? (tokens["id_token"] as? String).flatMap(Self.planType(fromJWT:))
-
         var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/usage")!)
         request.timeoutInterval = 20
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -513,16 +535,22 @@ final class CodexService: @unchecked Sendable {
         if let accountID = tokens["account_id"] as? String, !accountID.isEmpty {
             request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         }
-
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        guard let http = response as? HTTPURLResponse else {
             throw CodexServiceError.invalidCredentials
         }
-        let responseSnapshot = try Self.decodeUsageSnapshot(data)
-        return CodexUsageSnapshot(
-            usage: responseSnapshot.usage,
-            planType: credentialPlan ?? responseSnapshot.planType
-        )
+        return (data, http.statusCode)
+    }
+
+    static func resolvedLivePlan(
+        responseSnapshot: CodexUsageSnapshot,
+        credentialPlan: String?
+    ) -> String? {
+        let livePlan = responseSnapshot.planType?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if livePlan?.isEmpty == false { return livePlan }
+        let hasLiveQuota = responseSnapshot.usage.fiveHour != nil
+            || responseSnapshot.usage.sevenDay != nil
+        return hasLiveQuota ? credentialPlan : "inactive"
     }
 
     private func refreshOAuthTokens(

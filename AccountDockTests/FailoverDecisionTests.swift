@@ -88,7 +88,7 @@ final class FailoverDecisionTests: XCTestCase {
         XCTAssertEqual(result!.timeIntervalSince1970, weeklyReset.timeIntervalSince1970, accuracy: 1)
     }
 
-    func testClaudeEitherWindowCanTriggerButDestinationNeedsBothWindows() {
+    func testThresholdTriggersAreDistinctFromHardDestinationExhaustion() {
         var policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
         policy.sessionThreshold = 80
         policy.weeklyThreshold = 90
@@ -103,7 +103,7 @@ final class FailoverDecisionTests: XCTestCase {
             provider: .claudeCode,
             policy: policy
         ))
-        XCTAssertFalse(FailoverDecision.hasCapacity(
+        XCTAssertTrue(FailoverDecision.hasCapacity(
             usage: usage(session: 20, weekly: 91),
             provider: .claudeCode,
             policy: policy
@@ -113,14 +113,35 @@ final class FailoverDecisionTests: XCTestCase {
             provider: .claudeCode,
             policy: policy
         ))
+        XCTAssertFalse(FailoverDecision.hasCapacity(
+            usage: usage(session: 100, weekly: 30),
+            provider: .claudeCode,
+            policy: policy
+        ))
+        policy.sessionEnabled = false
+        XCTAssertTrue(FailoverDecision.exceedsThreshold(
+            usage: usage(session: 100, weekly: 30),
+            provider: .claudeCode,
+            policy: policy
+        ), "Hard exhaustion must trigger failover even when the early trigger is disabled")
+        XCTAssertFalse(FailoverDecision.hasCapacity(
+            usage: usage(session: 100, weekly: 30),
+            provider: .claudeCode,
+            policy: policy
+        ), "A reported exhausted session is never a safe destination, even when its trigger is disabled")
     }
 
-    func testCodexIgnoresSessionWindow() {
+    func testCodexEnforcesSessionWindowWhenLowerPlanReturnsIt() {
         var policy = ProviderFailoverPolicy.defaults(for: .codex)
         policy.weeklyThreshold = 85
 
-        XCTAssertFalse(FailoverDecision.exceedsThreshold(
+        XCTAssertTrue(FailoverDecision.exceedsThreshold(
             usage: usage(session: 100, weekly: 20),
+            provider: .codex,
+            policy: policy
+        ))
+        XCTAssertTrue(FailoverDecision.hasCapacity(
+            usage: usage(session: nil, weekly: 20),
             provider: .codex,
             policy: policy
         ))
@@ -137,8 +158,76 @@ final class FailoverDecisionTests: XCTestCase {
                 provider: .claudeCode,
                 policy: policy
             ),
-            20
+            30
         )
+    }
+
+    func testIntelligentBalancingPrefersSoonerResetEvenWhenMoreConsumed() {
+        var policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
+        policy.weeklyThreshold = 90
+        policy.balancingMinimumAdvantage = 5
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let later = UUID()
+        let sooner = UUID()
+
+        let result = FailoverDecision.intelligentBalanceTarget(
+            accountIDs: [later, sooner],
+            currentID: later,
+            usageByID: [
+                later: usage(session: 10, weekly: 20, weeklyReset: now.addingTimeInterval(7 * 86_400)),
+                sooner: usage(session: 10, weekly: 55, weeklyReset: now.addingTimeInterval(86_400)),
+            ],
+            provider: .claudeCode,
+            policy: policy,
+            now: now
+        )
+
+        XCTAssertEqual(result?.id, sooner)
+        XCTAssertGreaterThan(result?.advantage ?? 0, 5)
+    }
+
+    func testIntelligentBalancingUsesLeastConsumedForEqualResets() {
+        var policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
+        policy.balancingMinimumAdvantage = 5
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let busy = UUID()
+        let quiet = UUID()
+        let reset = now.addingTimeInterval(6 * 86_400)
+
+        let result = FailoverDecision.intelligentBalanceTarget(
+            accountIDs: [busy, quiet],
+            currentID: busy,
+            usageByID: [
+                busy: usage(session: 10, weekly: 60, weeklyReset: reset),
+                quiet: usage(session: 10, weekly: 20, weeklyReset: reset),
+            ],
+            provider: .claudeCode,
+            policy: policy,
+            now: now
+        )
+
+        XCTAssertEqual(result?.id, quiet)
+    }
+
+    func testIntelligentBalancingRejectsUnverifiedOrSessionBlockedDestination() {
+        var policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
+        policy.balancingMinimumAdvantage = 2
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let current = UUID()
+        let blocked = UUID()
+
+        XCTAssertNil(FailoverDecision.intelligentBalanceTarget(
+            accountIDs: [current, blocked],
+            currentID: current,
+            usageByID: [
+                current: usage(session: 10, weekly: 60, weeklyReset: now.addingTimeInterval(7 * 86_400)),
+                blocked: usage(session: 100, weekly: 0, weeklyReset: now.addingTimeInterval(86_400)),
+            ],
+            provider: .claudeCode,
+            policy: policy,
+            unverifiedResetIDs: [blocked],
+            now: now
+        ))
     }
 
     func testRotationWrapsOnlyWhenLooping() {
@@ -225,16 +314,18 @@ final class FailoverDecisionTests: XCTestCase {
     }
 
     private func usage(
-        session: Double,
+        session: Double?,
         weekly: Double,
         sessionReset: Date? = nil,
         weeklyReset: Date? = nil
     ) -> UsageAPIResponse {
         UsageAPIResponse(
-            fiveHour: UsageWindow(
-                utilization: session,
-                resetsAt: sessionReset.map(iso8601)
-            ),
+            fiveHour: session.map {
+                UsageWindow(
+                    utilization: $0,
+                    resetsAt: sessionReset.map(iso8601)
+                )
+            },
             sevenDay: UsageWindow(
                 utilization: weekly,
                 resetsAt: weeklyReset.map(iso8601)

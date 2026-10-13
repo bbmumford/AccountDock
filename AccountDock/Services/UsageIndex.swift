@@ -1,15 +1,13 @@
 import Foundation
+import Darwin
 
-private let log = FileLog("CacheV2")
+private let log = FileLog("UsageIndex")
 
-// MARK: - V2 Cache Models
+// MARK: - Indexed usage models
 //
-// v2 differs from v1 in three structural ways:
-//
-//   1. We store deduped *entries* per file (not just pre-aggregated day
-//      buckets) so we can dedup globally at query time. v1 baked the dedup
-//      into per-file aggregates, which made global dedup across resume/fork
-//      duplicates impossible to add later.
+// The index stores deduped entries per file (not only pre-aggregated day
+// buckets) so duplicates across resumed or forked sessions can be resolved
+// globally at query time.
 //
 //   2. Each entry carries enough metadata (date, hour, model, speed, hash,
 //      4 token types, tools, lines) that future per-project / per-hour /
@@ -24,7 +22,7 @@ private let log = FileLog("CacheV2")
 /// One assistant row after per-file `(message.id, requestId)` dedup.
 /// Multiple of these may share a `hash`, but only across files; at query
 /// time they get deduped globally max-output-wins (matches ccusage 20.x).
-struct CachedEntryV2: Codable, Sendable {
+struct CachedEntry: Codable, Sendable {
     /// "messageId:requestId", or nil if either id was missing.
     /// nil-hash entries are NEVER deduped — every occurrence is kept.
     let hash: String?
@@ -49,17 +47,20 @@ struct CachedEntryV2: Codable, Sendable {
 /// totals — activity counts (turns, active-minutes, tool counts, lines)
 /// don't have the cross-file resume-duplicate problem cost has, so
 /// per-file aggregation is correct and cheap.
-struct CachedFileV2: Codable, Sendable {
+struct CachedFile: Codable, Sendable {
     let mtimeUnix: Double               // bit-equal-comparable with FS mtime
+    let parsedByteCount: UInt64          // append-only JSONL resume offset
     let earliestTimestampUnix: Double   // for cross-file sort order; .greatestFiniteMagnitude = "no timestamp, sorts last" (must stay finite — see save())
     let project: String                 // dir name under ~/.claude/projects/
     let sessionId: String?              // from the file's first row, if present
     let isSidechain: Bool               // true if path contains /subagents/
-    let entries: [CachedEntryV2]
-    let activityByDate: [String: ActivityDayContributionV2]
+    let entries: [CachedEntry]
+    let activityByDate: [String: ActivityDayContribution]
+    let firstTimestampByDate: [String: Double]
+    let lastTimestampByDate: [String: Double]
 }
 
-struct ActivityDayContributionV2: Codable, Sendable {
+struct ActivityDayContribution: Codable, Sendable {
     let turns: Int
     let activeMinutes: Int
     let toolCounts: [String: Int]
@@ -74,37 +75,29 @@ struct PricingMeta: Codable, Sendable {
     let fetchedAt: Date?
 }
 
-private struct CacheEnvelopeV2: Codable {
-    let version: Int            // must equal CURRENT_VERSION
-    let lastUpdated: Date
-    var pricing: PricingMeta
-    var files: [String: CachedFileV2]
-}
+// MARK: - UsageIndex
 
-// MARK: - SessionParseCacheV2 (actor)
+actor UsageIndex {
+    static let shared = UsageIndex()
 
-actor SessionParseCacheV2 {
-    static let shared = SessionParseCacheV2()
-
-    // v3: cost entries gained `cw1h` (1-hour cache split) and dedup switched to
-    // max-output-wins; bump forces a full re-parse so old caches don't serve
-    // entries missing the new field or deduped under the old first-wins rule.
-    private static let currentVersion = 3
     private let claudeProjectsDir: String
-    private let cacheURL: URL
+    private let codexSessionsDir: URL
+    private let database: UsageDatabase
 
-    private var files: [String: CachedFileV2] = [:]
     private var pricingMeta: PricingMeta = .init(source: "unknown", fetchedAt: nil)
-    private var loaded = false
+    private var lastFilesystemRefresh: Date?
+    private let minimumRefreshInterval: TimeInterval = 15 * 60
 
     private init() {
         self.claudeProjectsDir = NSHomeDirectory() + "/.claude/projects"
+        self.codexSessionsDir = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".codex/sessions", isDirectory: true)
 
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
         let dir = appSupport.appendingPathComponent("AccountDock", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        self.cacheURL = dir.appendingPathComponent("session-parse-cache-v2.json")
+        self.database = UsageDatabase(url: dir.appendingPathComponent("usage.sqlite"))
     }
 
     // MARK: Public API
@@ -114,7 +107,11 @@ actor SessionParseCacheV2 {
     /// on the actor's executor; the actor is on the cooperative pool, not
     /// the main thread, so the UI is never blocked.
     func refreshFromFilesystem() async {
-        ensureLoaded()
+        if let lastFilesystemRefresh,
+           Date().timeIntervalSince(lastFilesystemRefresh) < minimumRefreshInterval {
+            log.debug("refresh: skipped; compact index is less than 15 minutes old")
+            return
+        }
         await PricingService.shared.ensureLoaded()
         // Pick up a newer pricing snapshot the background download may have
         // written since launch — otherwise a long-lived session prices any
@@ -128,29 +125,30 @@ actor SessionParseCacheV2 {
         PricingService.shared.refreshInBackground()
 
         let start = Date()
-        let cachedMtimes: [String: Double] = files.mapValues { $0.mtimeUnix }
-        let result = Self.scanAndParse(projectsDir: claudeProjectsDir, cachedMtimes: cachedMtimes)
-
-        for (path, entry) in result.updates {
-            files[path] = entry
-        }
-        var evicted = 0
-        for path in files.keys where !result.livePaths.contains(path) {
-            files.removeValue(forKey: path)
-            evicted += 1
-            log.debug("EVICT \(path) reason=file-deleted")
-        }
+        let result = Self.scanAndPersist(
+            projectsDir: claudeProjectsDir,
+            cachedFiles: database.claudeFiles(),
+            database: database
+        )
+        let evicted = database.removeClaudeFiles(notIn: result.livePaths)
+        let codexResult = Self.scanCodexAndPersist(
+            sessionsDir: codexSessionsDir,
+            cachedFiles: database.codexFiles(),
+            database: database
+        )
+        let codexEvicted = database.removeCodexFiles(notIn: codexResult.livePaths)
 
         let totalMs = Int(Date().timeIntervalSince(start) * 1000)
+        lastFilesystemRefresh = Date()
         log.info(
             "refresh: scanned=\(result.livePaths.count) "
             + "hit=\(result.hits) miss=\(result.missesNew + result.missesMtime) "
             + "(new=\(result.missesNew), mtime=\(result.missesMtime)) "
             + "evicted=\(evicted) parse_total=\(result.parseElapsedMs)ms total=\(totalMs)ms "
-            + "pricing=\(pricingMeta.source)"
+            + "codex_scanned=\(codexResult.livePaths.count) codex_changed=\(codexResult.changed) "
+            + "codex_evicted=\(codexEvicted) "
+            + "database=\(database.databasePageBytes())B pricing=\(pricingMeta.source)"
         )
-
-        save()
     }
 
     /// Per-day, per-model cost summary. Applies global max-output-wins dedup
@@ -164,20 +162,6 @@ actor SessionParseCacheV2 {
     func costSummary() async -> CostSummary {
         await PricingService.shared.ensureLoaded()
 
-        // Sort files by earliest timestamp. Secondary sort by path string for
-        // deterministic ordering when timestamps tie (or are
-        // .greatestFiniteMagnitude for files with no parseable timestamps,
-        // which sort last). Dedup is max-output-wins below, so this order no
-        // longer affects which duplicate copy wins — it only stabilizes output.
-        let sortedFiles: [(path: String, file: CachedFileV2)] = files
-            .map { ($0.key, $0.value) }
-            .sorted {
-                if $0.1.earliestTimestampUnix != $1.1.earliestTimestampUnix {
-                    return $0.1.earliestTimestampUnix < $1.1.earliestTimestampUnix
-                }
-                return $0.0 < $1.0
-            }
-
         // (date, model) → running totals; cost is summed per-row.
         struct Acc {
             var input = 0, output = 0, cw = 0, cr = 0
@@ -189,46 +173,18 @@ actor SessionParseCacheV2 {
         // this atomically — rather than awaiting `pricing(for:)` per row —
         // means a concurrent `reloadIfFreshChanged()` can't swap the pricing
         // table mid-summary and leave one result mixing old and new prices.
-        var distinctModels: Set<String> = []
-        for (_, file) in sortedFiles {
-            for e in file.entries { distinctModels.insert(e.model) }
-        }
         let priceCache = await PricingService.shared.prices(
-            for: Array(distinctModels),
+            for: database.distinctClaudeModels(),
             provider: .claudeCode
         )
 
-        // Global max-output-wins dedup across files. A message written more than
-        // once (partial stream snapshot + final copy) shares a hash; input/cache
-        // are identical across copies, only output_tokens grows, so keep the
-        // largest-output copy. nil-hash entries are never deduped. Selecting the
-        // winner is order-independent (max), so file order doesn't matter here.
-        struct Winner { let e: CachedEntryV2; let sessionKey: String }
-        var bestByHash: [String: Winner] = [:]
-        var nilHashWinners: [Winner] = []
-        for (path, file) in sortedFiles {
-            let sessionKey = file.sessionId ?? path
-            for e in file.entries {
-                let w = Winner(e: e, sessionKey: sessionKey)
-                guard let h = e.hash else { nilHashWinners.append(w); continue }
-                if let cur = bestByHash[h] {
-                    if e.output > cur.e.output { bestByHash[h] = w }
-                } else {
-                    bestByHash[h] = w
-                }
-            }
-        }
-
-        var winners: [Winner] = Array(bestByHash.values)
-        winners.append(contentsOf: nilHashWinners)
-        for w in winners {
-            let e = w.e
+        database.forEachCostEntry { e, sessionKey in
             // ccusage strips `<synthetic>` from modelBreakdowns at aggregation
             // time. These rows are zero-token / zero-cost anyway (compaction
             // events, internal errors), so skipping them changes no numbers —
             // only removes a meaningless entry from the UI's model column.
-            if e.model == "<synthetic>" { continue }
-            sessionsByDate[e.date, default: []].insert(w.sessionKey)
+            if e.model == "<synthetic>" { return }
+            sessionsByDate[e.date, default: []].insert(sessionKey)
 
             // priceCache holds every model seen above; `?? nil` flattens
             // the optional-of-optional for a model with no pricing entry.
@@ -281,36 +237,18 @@ actor SessionParseCacheV2 {
         return CostSummary(todayCost: todayCost, dailyCosts: dailyCosts)
     }
 
-    /// Today's activity stats. Sidechain (subagent) files are excluded —
-    /// matches v1 behavior and avoids subagent tool-calls inflating the
-    /// "today you wrote X lines" headline.
+    /// Today's activity stats. Sidechain (subagent) files are excluded to
+    /// avoid subagent tool calls inflating the headline.
     func activityStatsToday() -> ActivityStats {
         let today = Self.localDateString(Date())
+        var stats = database.activity(on: today)
+        stats.modelUsage = stats.modelUsage.filter { Self.isDisplayableModel($0.key) }
+        log.info("activityStatsToday: turns=\(stats.conversationTurns) active=\(stats.activeCodingMinutes)m lines=\(stats.linesWritten)")
+        return stats
+    }
 
-        var turns = 0, active = 0, lines = 0
-        var tools: [String: Int] = [:]
-        var models: [String: Int] = [:]
-
-        for (_, file) in files {
-            if file.isSidechain { continue }
-            guard let day = file.activityByDate[today] else { continue }
-            turns += day.turns
-            active += day.activeMinutes
-            lines += day.linesWritten
-            for (k, v) in day.toolCounts { tools[k, default: 0] += v }
-            for (k, v) in day.modelCounts where Self.isDisplayableModel(k) {
-                models[k, default: 0] += v
-            }
-        }
-
-        log.info("activityStatsToday: turns=\(turns) active=\(active)m lines=\(lines)")
-        return ActivityStats(
-            conversationTurns: turns,
-            activeCodingMinutes: active,
-            toolUsage: tools,
-            linesWritten: lines,
-            modelUsage: models
-        )
+    func codexAggregates() -> [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] {
+        database.codexAggregates()
     }
 
     private static func isDisplayableModel(_ model: String) -> Bool {
@@ -328,98 +266,138 @@ actor SessionParseCacheV2 {
 
     private struct ScanResult {
         let livePaths: Set<String>
-        let updates: [String: CachedFileV2]
         let hits: Int
         let missesNew: Int
         let missesMtime: Int
         let parseElapsedMs: Int
     }
 
-    private static func scanAndParse(
+    private static func scanAndPersist(
         projectsDir: String,
-        cachedMtimes: [String: Double]
+        cachedFiles: [String: StoredFileMetadata],
+        database: UsageDatabase
     ) -> ScanResult {
         let fm = FileManager.default
-        guard let enumerator = fm.enumerator(atPath: projectsDir) else {
+        let root = URL(fileURLWithPath: projectsDir, isDirectory: true)
+        guard let enumerator = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
             log.warning("scan: cannot enumerate \(projectsDir)")
-            return ScanResult(livePaths: [], updates: [:], hits: 0, missesNew: 0, missesMtime: 0, parseElapsedMs: 0)
+            return ScanResult(livePaths: [], hits: 0, missesNew: 0, missesMtime: 0, parseElapsedMs: 0)
         }
 
         var live: Set<String> = []
-        var updates: [String: CachedFileV2] = [:]
         var hits = 0, missesNew = 0, missesMtime = 0, parseMs = 0
+        var filesParsed = 0
 
-        while let rel = enumerator.nextObject() as? String {
-            guard rel.hasSuffix(".jsonl") else { continue }
-            let filePath = projectsDir + "/" + rel
+        while let url = enumerator.nextObject() as? URL {
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else { continue }
+            if values.isSymbolicLink == true {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard values.isRegularFile == true, url.pathExtension == "jsonl" else { continue }
+            let filePath = url.path
+            let rel = String(filePath.dropFirst(projectsDir.count + 1))
             guard let attrs = try? fm.attributesOfItem(atPath: filePath),
-                  let mtimeDate = attrs[.modificationDate] as? Date else { continue }
+                  let mtimeDate = attrs[.modificationDate] as? Date,
+                  let fileSizeNumber = attrs[.size] as? NSNumber else { continue }
             let mtime = mtimeDate.timeIntervalSince1970
+            let fileSize = fileSizeNumber.uint64Value
             live.insert(filePath)
 
-            if let cached = cachedMtimes[filePath], cached == mtime {
+            if let cached = cachedFiles[filePath], cached.modificationTime == mtime {
                 hits += 1
                 continue
             }
-            if cachedMtimes[filePath] == nil { missesNew += 1 } else { missesMtime += 1 }
+            if cachedFiles[filePath] == nil { missesNew += 1 } else { missesMtime += 1 }
 
             let t0 = Date()
-            if let parsed = parseFile(at: filePath, relativePath: rel, mtime: mtime) {
-                updates[filePath] = parsed
+            autoreleasepool {
+                if let cached = cachedFiles[filePath],
+                   fileSize >= cached.byteCount,
+                   cached.byteCount > 0,
+                   let delta = parseFile(
+                       at: filePath,
+                       relativePath: rel,
+                       mtime: mtime,
+                       fileSize: fileSize,
+                       startingAt: cached.byteCount
+                   ) {
+                    database.appendClaudeFile(path: filePath, parsed: delta)
+                } else if let parsed = parseFile(
+                    at: filePath,
+                    relativePath: rel,
+                    mtime: mtime,
+                    fileSize: fileSize
+                ) {
+                    database.replaceClaudeFile(path: filePath, parsed: parsed)
+                }
+            }
+            filesParsed += 1
+            if filesParsed.isMultiple(of: 100) {
+                // JSONSerialization creates many short-lived allocations. The
+                // autorelease pool releases them; pressure relief returns the
+                // now-empty allocator pages during a large first-run import.
+                malloc_zone_pressure_relief(nil, 0)
             }
             parseMs += Int(Date().timeIntervalSince(t0) * 1000)
         }
 
-        return ScanResult(livePaths: live, updates: updates, hits: hits,
+        return ScanResult(livePaths: live, hits: hits,
                           missesNew: missesNew, missesMtime: missesMtime,
                           parseElapsedMs: parseMs)
     }
 
-    // MARK: - Disk I/O
-
-    private func ensureLoaded() {
-        guard !loaded else { return }
-        loaded = true
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: cacheURL.path),
-              let data = try? Data(contentsOf: cacheURL) else {
-            log.info("LOAD path=\(cacheURL.path) status=missing")
-            return
-        }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let envelope = try? decoder.decode(CacheEnvelopeV2.self, from: data) else {
-            log.warning("LOAD bytes=\(data.count) decode-failed, discarding")
-            return
-        }
-        guard envelope.version == Self.currentVersion else {
-            log.info("LOAD version=\(envelope.version) != current=\(Self.currentVersion), discarding")
-            return
-        }
-        files = envelope.files
-        pricingMeta = envelope.pricing
-        log.info("LOAD bytes=\(data.count) entries=\(files.count) pricing=\(envelope.pricing.source)")
+    private struct CodexScanResult {
+        let livePaths: Set<String>
+        let changed: Int
     }
 
-    private func save() {
-        let envelope = CacheEnvelopeV2(
-            version: Self.currentVersion,
-            lastUpdated: Date(),
-            pricing: pricingMeta,
-            files: files
-        )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(envelope) else {
-            log.error("SAVE failed to encode")
-            return
+    private static func scanCodexAndPersist(
+        sessionsDir: URL,
+        cachedFiles: [String: StoredFileMetadata],
+        database: UsageDatabase
+    ) -> CodexScanResult {
+        guard let enumerator = FileManager.default.enumerator(
+            at: sessionsDir,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return CodexScanResult(livePaths: [], changed: 0) }
+
+        var live: Set<String> = []
+        var changed = 0
+        while let url = enumerator.nextObject() as? URL {
+            guard let values = try? url.resourceValues(
+                    forKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]
+                  ) else { continue }
+            if values.isSymbolicLink == true {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard values.isRegularFile == true,
+                  url.pathExtension == "jsonl",
+                  let modified = values.contentModificationDate else { continue }
+            let mtime = modified.timeIntervalSince1970
+            let byteCount = UInt64(values.fileSize ?? 0)
+            live.insert(url.path)
+            if let cached = cachedFiles[url.path],
+               cached.modificationTime == mtime,
+               cached.byteCount == byteCount { continue }
+            autoreleasepool {
+                database.replaceCodexFile(
+                    path: url.path,
+                    modificationTime: mtime,
+                    byteCount: byteCount,
+                    aggregates: CostParser.scanCodexFile(url)
+                )
+            }
+            changed += 1
+            if changed.isMultiple(of: 100) { malloc_zone_pressure_relief(nil, 0) }
         }
-        do {
-            try data.write(to: cacheURL, options: .atomic)
-            log.info("SAVE bytes=\(data.count) entries=\(files.count)")
-        } catch {
-            log.error("SAVE failed: \(error.localizedDescription)")
-        }
+        return CodexScanResult(livePaths: live, changed: changed)
     }
 
     // MARK: - Helpers
@@ -447,9 +425,14 @@ actor SessionParseCacheV2 {
 // Reads one JSONL file and produces (a) deduped per-file cost entries and
 // (b) per-date activity contributions. Pure: no actor state, no side effects.
 
-private func parseFile(at path: String, relativePath: String, mtime: Double) -> CachedFileV2? {
-    guard let data = FileManager.default.contents(atPath: path),
-          let content = String(data: data, encoding: .utf8) else { return nil }
+private func parseFile(
+    at path: String,
+    relativePath: String,
+    mtime: Double,
+    fileSize: UInt64,
+    startingAt offset: UInt64 = 0
+) -> CachedFile? {
+    guard FileManager.default.isReadableFile(atPath: path) else { return nil }
 
     let isoMain = ISO8601DateFormatter()
     isoMain.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -475,7 +458,7 @@ private func parseFile(at path: String, relativePath: String, mtime: Double) -> 
 
     // Per-file cost dedup state.
     var perFileBest: [String: Int] = [:]   // hash -> index of current max-output winner in costEntries
-    var costEntries: [CachedEntryV2] = []
+    var costEntries: [CachedEntry] = []
 
     // Per-date activity bookkeeping.
     var perDayTurns: [String: Int] = [:]
@@ -491,9 +474,8 @@ private func parseFile(at path: String, relativePath: String, mtime: Double) -> 
     let timestampPattern = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$"#
     let versionPattern   = #"^\d+\.\d+\.\d+"#
 
-    content.enumerateLines { line, _ in
-        guard !line.isEmpty,
-              let lineData = line.data(using: .utf8),
+    guard JSONLStreamReader.read(path: path, startingAt: offset, handleLine: { lineData in
+        guard !lineData.isEmpty,
               let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
         else { return }
 
@@ -587,7 +569,7 @@ private func parseFile(at path: String, relativePath: String, mtime: Double) -> 
                         }
                     }
                 }
-                let entry = CachedEntryV2(
+                let entry = CachedEntry(
                     hash: hash,
                     date: dateStr,
                     hour: hour,
@@ -616,7 +598,7 @@ private func parseFile(at path: String, relativePath: String, mtime: Double) -> 
             }
 
             // === Activity-data path (file-level aggregation) ===
-            // Matches v1 semantics: model usage deduped by requestId within file,
+            // Model usage is deduped by requestId within each file,
             // tool counts and linesWritten summed across all assistant rows
             // (not just deduped winners).
             if let model = message["model"] as? String,
@@ -638,10 +620,10 @@ private func parseFile(at path: String, relativePath: String, mtime: Double) -> 
 
         default: break
         }
-    }
+    }) else { return nil }
 
     // Reduce activity per-day.
-    var activityOut: [String: ActivityDayContributionV2] = [:]
+    var activityOut: [String: ActivityDayContribution] = [:]
     let allDates = Set(perDayTurns.keys)
         .union(perDayTools.keys)
         .union(perDayModels.keys)
@@ -649,7 +631,7 @@ private func parseFile(at path: String, relativePath: String, mtime: Double) -> 
         .union(perDayTimestamps.keys)
     for date in allDates {
         let active = calculateActiveMinutes(perDayTimestamps[date] ?? [])
-        let c = ActivityDayContributionV2(
+        let c = ActivityDayContribution(
             turns: perDayTurns[date] ?? 0,
             activeMinutes: active,
             toolCounts: perDayTools[date] ?? [:],
@@ -662,8 +644,9 @@ private func parseFile(at path: String, relativePath: String, mtime: Double) -> 
         }
     }
 
-    return CachedFileV2(
+    return CachedFile(
         mtimeUnix: mtime,
+        parsedByteCount: fileSize,
         // Must stay FINITE: JSONEncoder rejects non-finite floats by default, so a
         // single timestamp-less file with .infinity here made save() throw and the
         // whole cache silently never persisted (forcing a full re-parse every
@@ -673,11 +656,17 @@ private func parseFile(at path: String, relativePath: String, mtime: Double) -> 
         sessionId: sessionId,
         isSidechain: isSidechain,
         entries: costEntries,
-        activityByDate: activityOut
+        activityByDate: activityOut,
+        firstTimestampByDate: perDayTimestamps.mapValues {
+            $0.map(\.timeIntervalSince1970).min() ?? 0
+        },
+        lastTimestampByDate: perDayTimestamps.mapValues {
+            $0.map(\.timeIntervalSince1970).max() ?? 0
+        }
     )
 }
 
-/// Active coding minutes from a single date's timestamp set. Mirrors v1's
+/// Active coding minutes from a single date's timestamp set. Uses the same
 /// algorithm (10-min idle gap splits sessions, 2-min tail padding).
 private func calculateActiveMinutes(_ timestamps: [Date]) -> Int {
     let maxGap: TimeInterval = 10 * 60

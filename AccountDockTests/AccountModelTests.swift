@@ -2,6 +2,56 @@ import XCTest
 @testable import AccountDock
 
 final class AccountModelTests: XCTestCase {
+    func testProviderRegistryDefinesImplementedProvidersAndQuotaCapabilities() {
+        XCTAssertEqual(AIProviderType.implementedProviders, [.claudeCode, .codex, .kimi])
+        XCTAssertTrue(AIProviderType.claudeCode.capabilities.supportsSessionQuota)
+        XCTAssertTrue(AIProviderType.codex.capabilities.supportsSessionQuota)
+        XCTAssertEqual(AIProviderType.codex.capabilities.sessionQuotaMode, .whenPresent)
+        XCTAssertEqual(AIProviderType.codex.capabilities.pricingPrefixes.first, "openai/")
+        XCTAssertEqual(AIProviderType.kimi.capabilities.weeklyQuotaLabel, "Monthly limit")
+        XCTAssertEqual(AIProviderType.kimi.capabilities.sessionQuotaLabel, "5-hour")
+    }
+
+    func testFreeTierEligibilityIsProviderCapabilityDriven() {
+        XCTAssertFalse(Account.supportsProviderWorkloads(provider: .claudeCode, subscriptionType: "free"))
+        XCTAssertFalse(Account.supportsProviderWorkloads(provider: .codex, subscriptionType: "free"))
+        XCTAssertTrue(Account.supportsProviderWorkloads(provider: .gemini, subscriptionType: "free"))
+    }
+
+    func testFreeCodexAccountIsNotAWorkloadDestination() {
+        let account = Account(
+            email: "free@example.com",
+            displayName: "Free",
+            provider: .codex,
+            subscriptionType: "free"
+        )
+        XCTAssertFalse(account.supportsProviderWorkloads)
+        XCTAssertEqual(account.providerUnavailableLabel, "Codex unavailable")
+        XCTAssertFalse(Account.supportsProviderWorkloads(provider: .codex, subscriptionType: "FREE"))
+    }
+
+    func testPaidCodexAccountRemainsAWorkloadDestination() {
+        let account = Account(
+            email: "plus@example.com",
+            displayName: "Plus",
+            provider: .codex,
+            subscriptionType: "plus"
+        )
+        XCTAssertTrue(account.supportsProviderWorkloads)
+        XCTAssertNil(account.providerUnavailableLabel)
+    }
+
+    func testFreeClaudeAccountIsNotAClaudeCodeDestination() {
+        let account = Account(
+            email: "free@example.com",
+            displayName: "Free",
+            provider: .claudeCode,
+            subscriptionType: "free"
+        )
+        XCTAssertFalse(account.supportsProviderWorkloads)
+        XCTAssertEqual(account.providerUnavailableLabel, "Claude Code unavailable")
+    }
+
     func testUnusedUnstartedWindowRequiresConfirmedZeroAndNoReset() {
         XCTAssertTrue(UsageWindow(utilization: 0, resetsAt: nil).isUnusedUnstartedWindow)
         XCTAssertFalse(UsageWindow(utilization: nil, resetsAt: nil).isUnusedUnstartedWindow)
@@ -50,13 +100,22 @@ final class AccountModelTests: XCTestCase {
         XCTAssertEqual(MenuBarModule.allCases, [
             .claudeSession,
             .claudeWeekly,
+            .codexSession,
             .codexWeekly,
             .claudeSessionPercent,
             .claudeWeeklyPercent,
+            .codexSessionPercent,
             .codexWeeklyPercent,
             .claudeWeeklyReset,
             .codexWeeklyReset,
             .claudeSessionReset,
+            .codexSessionReset,
+            .kimiSession,
+            .kimiMonthly,
+            .kimiSessionPercent,
+            .kimiMonthlyPercent,
+            .kimiSessionReset,
+            .kimiMonthlyReset,
             .dailyCost
         ])
     }

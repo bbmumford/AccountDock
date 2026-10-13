@@ -26,6 +26,7 @@ struct UsageDashboardView: View {
     @AppStorage("showFullEmail") private var showFullEmail = false
     @AppStorage("showClaudeProvider") private var showClaudeProvider = true
     @AppStorage("showCodexProvider") private var showCodexProvider = true
+    @AppStorage("showKimiProvider") private var showKimiProvider = true
 
     var body: some View {
         ScrollView {
@@ -57,7 +58,7 @@ struct UsageDashboardView: View {
                     ForEach(visibleProviders) { provider in
                         VStack(alignment: .leading, spacing: 12) {
                             Label(
-                                provider == .claudeCode ? "Claude" : "Codex",
+                                provider.capabilities.displayName,
                                 systemImage: provider.iconName
                             )
                             .font(.headline)
@@ -68,7 +69,7 @@ struct UsageDashboardView: View {
                                 if provider == .claudeCode {
                                     accountUsageCard(account: account, usage: appState.accountUsage[account.id])
                                 } else {
-                                    codexAccountCard(account)
+                                    providerAccountCard(account)
                                 }
                             }
                         }
@@ -110,6 +111,7 @@ struct UsageDashboardView: View {
         switch provider {
         case .claudeCode: return showClaudeProvider
         case .codex: return showCodexProvider
+        case .kimi: return showKimiProvider
         case .gemini: return false
         }
     }
@@ -122,56 +124,53 @@ struct UsageDashboardView: View {
         appState.accounts.filter { $0.provider == provider }
     }
 
-    private func codexAccountCard(_ account: Account) -> some View {
+    private func providerAccountCard(_ account: Account) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                accountHeader(account)
-                Image(systemName: "info.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .help(
-                        account.isActive
-                        ? "This account is active at ~/.codex/auth.json and is currently used by Codex on this Mac."
-                        : "This account is stored in an isolated managed Codex home. Make it active to use it at ~/.codex/auth.json."
-                    )
-            }
+            accountHeader(account)
             if let usage = appState.accountUsage[account.id] {
                 if let session = usage.fiveHour {
                     usageRow(
-                        label: "Session",
-                        resetText: session.resetTimeString,
+                        label: LocalizedStringKey(account.provider.capabilities.sessionQuotaLabel),
+                        resetText: session.resetLabelString,
                         utilization: session.utilization ?? 0
                     )
                 }
                 if let weekly = usage.sevenDay {
                     usageRow(
-                        label: codexQuotaLabel(weekly),
-                        resetText: weekly.resetTimeString,
+                        label: longQuotaLabel(for: account.provider, window: weekly),
+                        resetText: weekly.resetLabelString,
                         utilization: weekly.utilization ?? 0
                     )
                 }
                 staleUsageNotice(account)
             } else if let error = appState.accountUsageErrors[account.id] {
-                Label(error.message, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Image(systemName: account.providerUnavailableLabel == nil
+                        ? "exclamationmark.triangle"
+                        : "nosign")
+                        .foregroundStyle(account.providerUnavailableLabel == nil ? .red : .yellow)
+                    Text(error.message)
+                        .font(.caption)
+                        .foregroundStyle(.textSecondary)
+                        .lineLimit(2)
+                    Spacer()
+                }
+                .padding(.top, 4)
             }
-            HStack(spacing: 6) {
-                Image(systemName: account.credentialLocation == nil ? "exclamationmark.triangle" : "checkmark.shield")
-                    .foregroundStyle(account.credentialLocation == nil ? .orange : .green)
-                Text(account.credentialLocation == nil
-                     ? "Credentials need to be captured again."
-                     : "Credentials isolated in a managed Codex home.")
+            if account.credentialLocation == nil {
+                Label("Credentials need to be captured again.", systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.textSecondary)
-                Spacer()
+                    .foregroundStyle(.orange)
             }
         }
         .cardStyle(fill: account.isActive ? .cardFillStrong : .cardFill)
         .sectionPadding()
     }
 
-    private func codexQuotaLabel(_ window: UsageWindow) -> LocalizedStringKey {
+    private func longQuotaLabel(for provider: AIProviderType, window: UsageWindow) -> LocalizedStringKey {
+        if provider != .codex {
+            return LocalizedStringKey(provider.capabilities.weeklyQuotaLabel)
+        }
         guard let seconds = window.windowSeconds else { return "Weekly" }
         let days = seconds / 86_400
         return days == 7 ? "Weekly" : LocalizedStringKey("\(days)-day quota")
@@ -325,12 +324,16 @@ struct UsageDashboardView: View {
         VStack(alignment: .leading, spacing: 10) {
             accountHeader(account)
             if let usage = usage {
-                usageBars(usage)
+                usageBars(usage, provider: account.provider)
                 extraUsageRow(usage.extraUsage)
                 staleUsageNotice(account)
             } else if let errorState = appState.accountUsageErrors[account.id] {
                 HStack {
-                    Image(systemName: errorState.isRateLimited ? "timer" : (errorState.isExpired ? "exclamationmark.triangle" : "xmark.circle"))
+                    Image(systemName: account.providerUnavailableLabel != nil
+                        ? "nosign"
+                        : (errorState.isRateLimited
+                            ? "timer"
+                            : (errorState.isExpired ? "exclamationmark.triangle" : "xmark.circle")))
                         .foregroundStyle(errorState.isExpired ? .yellow : .red)
                     Text(errorState.message)
                         .font(.caption)
@@ -392,16 +395,27 @@ struct UsageDashboardView: View {
             if let sub = account.displaySubscriptionType {
                 Badge(text: sub, color: .brand)
             }
+            if let unavailable = account.providerUnavailableLabel {
+                Badge(text: unavailable, color: .orange)
+            }
         }
     }
 
     @ViewBuilder
-    private func usageBars(_ usage: UsageAPIResponse) -> some View {
+    private func usageBars(_ usage: UsageAPIResponse, provider: AIProviderType) -> some View {
         if let session = usage.fiveHour {
-            usageRow(label: "Session", resetText: session.resetTimeString, utilization: session.utilization ?? 0)
+            usageRow(
+                label: LocalizedStringKey(provider.capabilities.sessionQuotaLabel),
+                resetText: session.resetLabelString,
+                utilization: session.utilization ?? 0
+            )
         }
         if let weekly = usage.sevenDay {
-            usageRow(label: "Weekly", resetText: weekly.resetTimeString, utilization: weekly.utilization ?? 0)
+            usageRow(
+                label: longQuotaLabel(for: provider, window: weekly),
+                resetText: weekly.resetLabelString,
+                utilization: weekly.utilization ?? 0
+            )
         }
     }
 
@@ -436,7 +450,7 @@ struct UsageDashboardView: View {
                     .foregroundStyle(.textSecondary)
                 Spacer()
                 if let resetText {
-                    Text("Resets in \(resetText)")
+                    Text(resetText)
                         .font(.caption)
                         .foregroundStyle(.textSecondary)
                 }

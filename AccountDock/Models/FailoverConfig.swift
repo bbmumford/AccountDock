@@ -29,6 +29,10 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     var waitForImminentReset = true
     var resetGraceMinutes = 5.0
     var keepWindowsWarm = true
+    var intelligentBalancingEnabled = false
+    var balancingMinimumAdvantage = 5.0
+    var balancingMinimumDwellMinutes = 30.0
+    var suspendAgentsWhenExhausted = false
     var codexSwitchMode = CodexFailoverSwitchMode.safeRestart
     var accountOrder: [UUID] = []
     var excludedAccountIDs: Set<UUID> = []
@@ -36,7 +40,10 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case enabled, sessionEnabled, sessionThreshold, weeklyEnabled, weeklyThreshold
         case loops, resetAware, preferMostCapacity, waitForImminentReset
-        case resetGraceMinutes, keepWindowsWarm, codexSwitchMode, accountOrder, excludedAccountIDs
+        case resetGraceMinutes, keepWindowsWarm, intelligentBalancingEnabled
+        case balancingMinimumAdvantage, balancingMinimumDwellMinutes
+        case suspendAgentsWhenExhausted
+        case codexSwitchMode, accountOrder, excludedAccountIDs
     }
 
     init() {}
@@ -54,6 +61,10 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         waitForImminentReset = try values.decodeIfPresent(Bool.self, forKey: .waitForImminentReset) ?? true
         resetGraceMinutes = try values.decodeIfPresent(Double.self, forKey: .resetGraceMinutes) ?? 5
         keepWindowsWarm = try values.decodeIfPresent(Bool.self, forKey: .keepWindowsWarm) ?? true
+        intelligentBalancingEnabled = try values.decodeIfPresent(Bool.self, forKey: .intelligentBalancingEnabled) ?? false
+        balancingMinimumAdvantage = try values.decodeIfPresent(Double.self, forKey: .balancingMinimumAdvantage) ?? 5
+        balancingMinimumDwellMinutes = try values.decodeIfPresent(Double.self, forKey: .balancingMinimumDwellMinutes) ?? 30
+        suspendAgentsWhenExhausted = try values.decodeIfPresent(Bool.self, forKey: .suspendAgentsWhenExhausted) ?? false
         codexSwitchMode = try values.decodeIfPresent(
             CodexFailoverSwitchMode.self,
             forKey: .codexSwitchMode
@@ -64,8 +75,12 @@ struct ProviderFailoverPolicy: Codable, Equatable {
 
     static func defaults(for provider: AIProviderType) -> Self {
         var policy = Self()
-        if provider == .codex {
+        if !provider.capabilities.supportsSessionQuota {
             policy.sessionEnabled = false
+        }
+        if provider == .kimi {
+            // Kimi's CLI does not yet expose a non-persistent probe contract.
+            policy.keepWindowsWarm = false
         }
         return policy
     }
@@ -75,47 +90,66 @@ struct ProviderFailoverPolicy: Codable, Equatable {
 final class FailoverConfigStore: ObservableObject {
     static let shared = FailoverConfigStore()
 
-    @Published private(set) var claude = ProviderFailoverPolicy.defaults(for: .claudeCode)
-    @Published private(set) var codex = ProviderFailoverPolicy.defaults(for: .codex)
+    @Published private var policies: [AIProviderType: ProviderFailoverPolicy] = [:]
 
     private let defaults = UserDefaults.standard
     private let key = "app.accountdock.failover.policies.v1"
     private let strictLadderMigrationKey = "app.accountdock.failover.strict-ladder.v1"
+    private let conditionalCodexSessionMigrationKey = "app.accountdock.failover.codex-session-window.v1"
 
     private struct StoredPolicies: Codable {
         var claude: ProviderFailoverPolicy
         var codex: ProviderFailoverPolicy
     }
 
+    private struct ProviderPolicyStore: Codable {
+        var policies: [AIProviderType: ProviderFailoverPolicy]
+    }
+
     private init() {
-        if let data = defaults.data(forKey: key),
-           let stored = try? JSONDecoder().decode(StoredPolicies.self, from: data) {
-            claude = stored.claude
-            codex = stored.codex
+        if let data = defaults.data(forKey: key) {
+            if let stored = try? JSONDecoder().decode(ProviderPolicyStore.self, from: data) {
+                policies = stored.policies
+            } else if let legacy = try? JSONDecoder().decode(StoredPolicies.self, from: data) {
+                policies[.claudeCode] = legacy.claude
+                policies[.codex] = legacy.codex
+            }
+        }
+        for provider in AIProviderType.implementedProviders where policies[provider] == nil {
+            policies[provider] = .defaults(for: provider)
         }
         // Earlier builds silently defaulted to choosing the account with the
         // most headroom, which could jump over the user's ordered ladder. Move
         // existing installs once to predictable first-available ordering; the
         // user can still explicitly enable capacity preference afterwards.
         if !defaults.bool(forKey: strictLadderMigrationKey) {
-            claude.preferMostCapacity = false
-            codex.preferMostCapacity = false
+            for provider in AIProviderType.implementedProviders {
+                policies[provider]?.preferMostCapacity = false
+            }
             defaults.set(true, forKey: strictLadderMigrationKey)
+            save()
+        }
+        // Codex was previously treated as having no session window at all.
+        // Lower plans now return a five-hour window, so enable its conditional
+        // policy once while still allowing the user to disable it afterwards.
+        if !defaults.bool(forKey: conditionalCodexSessionMigrationKey) {
+            policies[.codex]?.sessionEnabled = true
+            defaults.set(true, forKey: conditionalCodexSessionMigrationKey)
             save()
         }
     }
 
     func policy(for provider: AIProviderType) -> ProviderFailoverPolicy {
-        provider == .codex ? codex : claude
+        policies[provider] ?? .defaults(for: provider)
     }
 
     func update(_ provider: AIProviderType, _ change: (inout ProviderFailoverPolicy) -> Void) {
-        if provider == .codex {
-            change(&codex)
-            codex.sessionEnabled = false
-        } else {
-            change(&claude)
+        var policy = policies[provider] ?? .defaults(for: provider)
+        change(&policy)
+        if !provider.capabilities.supportsSessionQuota {
+            policy.sessionEnabled = false
         }
+        policies[provider] = policy
         save()
     }
 
@@ -130,7 +164,7 @@ final class FailoverConfigStore: ObservableObject {
     }
 
     private func save() {
-        let stored = StoredPolicies(claude: claude, codex: codex)
+        let stored = ProviderPolicyStore(policies: policies)
         if let data = try? JSONEncoder().encode(stored) {
             defaults.set(data, forKey: key)
         }
@@ -169,7 +203,7 @@ enum FailoverDecision {
 
         guard let usage else { return 5 * 60 }
         var margins: [Double] = []
-        if provider == .claudeCode, policy.sessionEnabled,
+        if provider.capabilities.supportsSessionQuota, policy.sessionEnabled,
            let value = usage.fiveHour?.utilization {
             margins.append(policy.sessionThreshold - value)
         }
@@ -191,15 +225,15 @@ enum FailoverDecision {
     ) -> Date? {
         guard let usage else { return nil }
         var blockingDates: [Date] = []
-        if provider == .claudeCode, policy.sessionEnabled,
+        if provider.capabilities.supportsSessionQuota,
            let value = usage.fiveHour?.utilization,
-           value >= policy.sessionThreshold,
+           value >= 100 || (policy.sessionEnabled && value >= policy.sessionThreshold),
            let date = usage.fiveHour?.resetsAtDate {
             blockingDates.append(date)
         }
-        if policy.weeklyEnabled,
+        if provider.capabilities.supportsWeeklyQuota,
            let value = usage.sevenDay?.utilization,
-           value >= policy.weeklyThreshold,
+           value >= 100 || (policy.weeklyEnabled && value >= policy.weeklyThreshold),
            let date = usage.sevenDay?.resetsAtDate {
             blockingDates.append(date)
         }
@@ -213,11 +247,14 @@ enum FailoverDecision {
         policy: ProviderFailoverPolicy
     ) -> Bool {
         guard let usage else { return false }
-        let sessionExceeded = provider == .claudeCode
-            && policy.sessionEnabled
-            && usage.fiveHour?.utilization.map { $0 >= policy.sessionThreshold } == true
-        let weeklyExceeded = policy.weeklyEnabled
-            && usage.sevenDay?.utilization.map { $0 >= policy.weeklyThreshold } == true
+        let sessionExceeded = provider.capabilities.supportsSessionQuota
+            && usage.fiveHour?.utilization.map {
+                $0 >= 100 || (policy.sessionEnabled && $0 >= policy.sessionThreshold)
+            } == true
+        let weeklyExceeded = provider.capabilities.supportsWeeklyQuota
+            && usage.sevenDay?.utilization.map {
+                $0 >= 100 || (policy.weeklyEnabled && $0 >= policy.weeklyThreshold)
+            } == true
         return sessionExceeded || weeklyExceeded
     }
 
@@ -227,13 +264,18 @@ enum FailoverDecision {
         policy: ProviderFailoverPolicy
     ) -> Bool {
         guard let usage else { return false }
-        if provider == .claudeCode && policy.sessionEnabled {
-            guard let value = usage.fiveHour?.utilization, value < policy.sessionThreshold else {
+        // Destination safety is deliberately independent from trigger settings.
+        // A disabled/90% trigger may permit continued use, but a provider-reported
+        // exhausted window can never be selected as a destination.
+        if provider.capabilities.supportsSessionQuota {
+            if let value = usage.fiveHour?.utilization {
+                guard value < 100 else { return false }
+            } else if provider.capabilities.sessionQuotaMode == .required {
                 return false
             }
         }
-        if policy.weeklyEnabled {
-            guard let value = usage.sevenDay?.utilization, value < policy.weeklyThreshold else {
+        if provider.capabilities.supportsWeeklyQuota {
+            guard let value = usage.sevenDay?.utilization, value < 100 else {
                 return false
             }
         }
@@ -247,14 +289,69 @@ enum FailoverDecision {
     ) -> Double {
         guard let usage else { return -.infinity }
         var margins: [Double] = []
-        if provider == .claudeCode && policy.sessionEnabled,
+        if provider.capabilities.supportsSessionQuota,
            let value = usage.fiveHour?.utilization {
-            margins.append(policy.sessionThreshold - value)
+            margins.append(100 - value)
         }
-        if policy.weeklyEnabled, let value = usage.sevenDay?.utilization {
-            margins.append(policy.weeklyThreshold - value)
+        if provider.capabilities.supportsWeeklyQuota, let value = usage.sevenDay?.utilization {
+            margins.append(100 - value)
         }
         return margins.min() ?? -.infinity
+    }
+
+    /// Chooses the account whose long-window allowance is most at risk of being
+    /// wasted before its reset. Equal reset dates reduce to ordinary least-used
+    /// balancing; an earlier reset raises the utilization that account should
+    /// carry, allowing it to consume more before capacity disappears.
+    static func intelligentBalanceTarget(
+        accountIDs: [UUID],
+        currentID: UUID,
+        usageByID: [UUID: UsageAPIResponse],
+        provider: AIProviderType,
+        policy: ProviderFailoverPolicy,
+        unverifiedResetIDs: Set<UUID> = [],
+        now: Date = Date()
+    ) -> (id: UUID, advantage: Double)? {
+        guard provider.capabilities.supportsWeeklyQuota,
+              accountIDs.contains(currentID),
+              let currentUsage = usageByID[currentID],
+              hasCapacity(usage: currentUsage, provider: provider, policy: policy) else {
+            return nil
+        }
+        let eligible = accountIDs.filter {
+            !unverifiedResetIDs.contains($0)
+                && hasCapacity(usage: usageByID[$0], provider: provider, policy: policy)
+                && usageByID[$0]?.sevenDay?.utilization != nil
+        }
+        guard eligible.count > 1 else { return nil }
+
+        let horizons = eligible.compactMap { id -> TimeInterval? in
+            guard let reset = usageByID[id]?.sevenDay?.resetsAtDate else { return nil }
+            return max(0, reset.timeIntervalSince(now))
+        }
+        let normalizationHorizon = max(horizons.max() ?? 0, 1)
+
+        func score(_ id: UUID) -> Double {
+            guard let window = usageByID[id]?.sevenDay,
+                  let utilization = window.utilization else { return -.infinity }
+            // Missing reset times get no urgency credit, but remain comparable
+            // by utilization. A known imminent reset approaches the threshold.
+            let horizon = window.resetsAtDate.map { max(0, $0.timeIntervalSince(now)) }
+                ?? normalizationHorizon
+            let urgency = max(0, min(1, 1 - horizon / normalizationHorizon))
+            // Balancing consumes the complete allowance. The configured
+            // threshold is a failover trigger, not a quota ceiling.
+            let desiredUtilization = 100 * urgency
+            return desiredUtilization - utilization
+        }
+
+        let currentScore = score(currentID)
+        guard let best = eligible.max(by: { score($0) < score($1) }), best != currentID else {
+            return nil
+        }
+        let advantage = score(best) - currentScore
+        guard advantage >= policy.balancingMinimumAdvantage else { return nil }
+        return (best, advantage)
     }
 
     static func shouldWaitForImminentReset(
@@ -265,7 +362,7 @@ enum FailoverDecision {
     ) -> Bool {
         guard policy.waitForImminentReset, let usage else { return false }
         var breached: [UsageWindow] = []
-        if provider == .claudeCode, policy.sessionEnabled,
+        if provider.capabilities.supportsSessionQuota, policy.sessionEnabled,
            let window = usage.fiveHour,
            let value = window.utilization,
            value >= policy.sessionThreshold {

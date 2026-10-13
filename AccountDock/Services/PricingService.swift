@@ -241,7 +241,8 @@ actor PricingService {
         provider: AIProviderType = .claudeCode,
         reasoningEffort: String? = nil
     ) -> LiteLLMModelPricing? {
-        let providerPrefix = provider == .codex ? "openai/" : "anthropic/"
+        let providerPrefixes = provider.capabilities.pricingPrefixes
+        let providerPrefix = providerPrefixes.first ?? ""
         let effort = reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let effort, !effort.isEmpty {
             for candidate in [
@@ -255,15 +256,18 @@ actor PricingService {
         }
         if let exact = pricing[providerPrefix + model] { return exact }
         if let exact = pricing[model] { return exact }
-        if provider == .claudeCode, let value = pricing["anthropic." + model] { return value }
+        for prefix in providerPrefixes.dropFirst() {
+            if let value = pricing[prefix + model] { return value }
+        }
         // Fuzzy: longest prefix match in either direction. Handles dated
         // suffixes like "claude-sonnet-4-5-20250929" → "claude-sonnet-4-5".
         var best: (String, LiteLLMModelPricing)?
         for (k, v) in pricing {
-            let providerScoped = k.hasPrefix(providerPrefix)
+            let matchedPrefix = providerPrefixes.first(where: k.hasPrefix)
+            let providerScoped = matchedPrefix != nil
             let bareKey = !k.contains("/") && !k.contains(".")
             guard providerScoped || bareKey else { continue }
-            let normalizedKey = providerScoped ? String(k.dropFirst(providerPrefix.count)) : k
+            let normalizedKey = matchedPrefix.map { String(k.dropFirst($0.count)) } ?? k
             if (model.hasPrefix(normalizedKey) || normalizedKey.hasPrefix(model))
                 && (best == nil || k.count > best!.0.count) {
                 best = (k, v)
@@ -286,7 +290,7 @@ actor PricingService {
     }
 
     /// Snapshot of which source the cache is currently serving from.
-    /// Used by SessionParseCacheV2 to stamp the cache envelope.
+    /// Used by the usage index to stamp persisted pricing metadata.
     func currentSource() -> PricingSource { source }
 
     /// Trigger a background revalidation of the LiteLLM pricing JSON. Returns

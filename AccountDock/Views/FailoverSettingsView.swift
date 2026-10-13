@@ -7,13 +7,14 @@ struct FailoverSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Text("Automatically rotate to another account from the same provider when the active subscription reaches a configured limit.")
+                Text("Automatically rotate within each provider. Thresholds trigger a switch; they are not ceilings. Destination accounts remain usable until a provider-reported session or long window reaches 100%.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            providerSection(.claudeCode)
-            providerSection(.codex)
+            ForEach(AIProviderType.implementedProviders) { provider in
+                providerSection(provider)
+            }
 
             Section {
                 Label(
@@ -39,7 +40,7 @@ struct FailoverSettingsView: View {
         Section {
             Toggle("Enable automatic failover", isOn: binding(provider, \.enabled))
 
-            if provider == .claudeCode {
+            if provider.capabilities.supportsSessionQuota {
                 thresholdRow(
                     title: "Session limit",
                     enabled: binding(provider, \.sessionEnabled),
@@ -48,12 +49,12 @@ struct FailoverSettingsView: View {
             }
 
             thresholdRow(
-                title: provider == .codex ? "Quota limit" : "Weekly limit",
+                title: provider.capabilities.weeklyQuotaLabel,
                 enabled: binding(provider, \.weeklyEnabled),
                 threshold: binding(provider, \.weeklyThreshold)
             )
 
-            if provider == .codex {
+            if provider.capabilities.supportsSelectableSwitchMode {
                 Picker("Failover switch method", selection: binding(provider, \.codexSwitchMode)) {
                     ForEach(CodexFailoverSwitchMode.allCases) { mode in
                         Text(mode.title).tag(mode)
@@ -80,10 +81,50 @@ struct FailoverSettingsView: View {
             }
             Toggle("Keep reset windows warm", isOn: binding(provider, \.keepWindowsWarm))
                 .help(
-                    provider == .claudeCode
+                    provider.capabilities.supportsSessionQuota
                         ? "For every managed account, after a confirmed session or weekly reset, send one minimal non-persistent request so its new countdown starts. Failover exclusions do not disable warming."
                         : "For every managed account, after a confirmed weekly reset, send one minimal ephemeral request so its new countdown starts. Failover exclusions do not disable warming."
                 )
+
+            Toggle("Suspend agents when all accounts are exhausted", isOn: binding(provider, \.suspendAgentsWhenExhausted))
+                .help("Pauses running provider CLI processes without terminating them. AccountDock resumes those exact processes after capacity returns.")
+
+            Toggle("Intelligent long-window balancing", isOn: binding(provider, \.intelligentBalancingEnabled))
+                .help("Targets full usable quota across included accounts. Accounts resetting sooner are deliberately consumed more aggressively before their allowance clears, while exhausted session windows are always rejected.")
+            if policy.intelligentBalancingEnabled {
+                LabeledContent("Switch advantage") {
+                    Stepper(
+                        "\(Int(policy.balancingMinimumAdvantage)) points",
+                        value: binding(provider, \.balancingMinimumAdvantage),
+                        in: 2...25,
+                        step: 1
+                    )
+                    .monospacedDigit()
+                }
+                .padding(.leading, 20)
+                .help("Required reset-adjusted utilization advantage before AccountDock rebalances. Larger values reduce switching.")
+
+                LabeledContent("Minimum time on account") {
+                    Stepper(
+                        "\(Int(policy.balancingMinimumDwellMinutes)) min",
+                        value: binding(provider, \.balancingMinimumDwellMinutes),
+                        in: 5...180,
+                        step: 5
+                    )
+                    .monospacedDigit()
+                }
+                .padding(.leading, 20)
+                .help("Prevents oscillation after a balancing switch. Threshold failover still acts immediately.")
+
+                if provider == .codex && policy.codexSwitchMode == .safeRestart {
+                    Label(
+                        "Codex balancing waits in Switch Safely mode because healthy sessions have no limit error. Choose Switch Without Restart or Force Restart Sessions to rebalance proactively.",
+                        systemImage: "info.circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
 
             if let status = appState.failoverStatus[provider] {
                 Label(status, systemImage: "arrow.triangle.2.circlepath")
@@ -156,8 +197,8 @@ struct FailoverSettingsView: View {
         } header: {
             Label(provider.rawValue, systemImage: provider.iconName)
         } footer: {
-            if policy.enabled && includedCount < 2 {
-                Text("Failover needs at least two included accounts for this provider.")
+            if (policy.enabled || policy.intelligentBalancingEnabled) && includedCount < 2 {
+                Text("Automatic switching needs at least two included accounts for this provider.")
             }
         }
     }
@@ -230,7 +271,7 @@ struct FailoverSettingsView: View {
     }
 
     private func synchronizeOrders() {
-        for provider in [AIProviderType.claudeCode, .codex] {
+        for provider in AIProviderType.implementedProviders {
             store.synchronizeOrder(
                 provider: provider,
                 accountIDs: appState.accounts.filter { $0.provider == provider }.map(\.id)

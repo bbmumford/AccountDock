@@ -2,6 +2,27 @@ import XCTest
 @testable import AccountDock
 
 final class ClaudeServiceTests: XCTestCase {
+    func testLiveProfileReportsCurrentSubscription() {
+        let profile: [String: Any] = [
+            "account": ["subscription_type": "pro"]
+        ]
+        XCTAssertEqual(
+            ClaudeService.liveSubscription(fromProfileJSON: profile),
+            ClaudeSubscriptionSnapshot(planType: "pro", isInactive: false)
+        )
+    }
+
+    func testExpiredLiveProfileClearsStaleSubscription() {
+        let profile: [String: Any] = [
+            "subscription": ["status": "expired", "endsAt": "2026-08-28T00:00:00Z"],
+            "subscriptionType": "max"
+        ]
+        XCTAssertEqual(
+            ClaudeService.liveSubscription(fromProfileJSON: profile),
+            ClaudeSubscriptionSnapshot(planType: nil, isInactive: true)
+        )
+    }
+
     func testRunningProcessParserOnlyAcceptsClaudeExecutable() {
         let sample = """
           101 /opt/homebrew/bin/claude /opt/homebrew/bin/claude --resume abc
@@ -50,5 +71,13 @@ final class ClaudeServiceTests: XCTestCase {
 
         let parsed = ClaudeService.retryAfterDate("Wed, 15 Nov 2023 00:15:00 GMT", now: now)
         XCTAssertNotNil(parsed)
+    }
+
+    func testWarmupUsesOAuthCompatibleSafeMode() {
+        let arguments = ClaudeService.warmupArguments(sessionID: "probe-id")
+
+        XCTAssertTrue(arguments.contains("--safe-mode"))
+        XCTAssertFalse(arguments.contains("--bare"))
+        XCTAssertTrue(arguments.contains("--no-session-persistence"))
     }
 }

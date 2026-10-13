@@ -15,6 +15,7 @@ struct SettingsView: View {
     @AppStorage("disableCardShadows") private var disableCardShadows = false
     @AppStorage("showClaudeProvider") private var showClaudeProvider = true
     @AppStorage("showCodexProvider") private var showCodexProvider = true
+    @AppStorage("showKimiProvider") private var showKimiProvider = true
     @State private var launchAtLogin = false
 
     var body: some View {
@@ -57,6 +58,15 @@ struct SettingsView: View {
                         Label("Codex CLI", systemImage: AIProviderType.codex.iconName)
                     }
             }
+            if showKimiProvider {
+                VStack(spacing: 12) {
+                    Image(systemName: AIProviderType.kimi.iconName)
+                        .font(.largeTitle)
+                    Text("Kimi accounts are managed from the Accounts tab.")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .tabItem { Label("Kimi CLI", systemImage: AIProviderType.kimi.iconName) }
+            }
 
             aboutTab
                 .tabItem {
@@ -94,9 +104,11 @@ struct SettingsView: View {
 
             Section("Providers") {
                 Toggle("Show Claude", isOn: $showClaudeProvider)
-                    .disabled(showClaudeProvider && !showCodexProvider)
+                    .disabled(showClaudeProvider && !showCodexProvider && !showKimiProvider)
                 Toggle("Show Codex", isOn: $showCodexProvider)
-                    .disabled(showCodexProvider && !showClaudeProvider)
+                    .disabled(showCodexProvider && !showClaudeProvider && !showKimiProvider)
+                Toggle("Show Kimi", isOn: $showKimiProvider)
+                    .disabled(showKimiProvider && !showClaudeProvider && !showCodexProvider)
                 Text("Visible providers appear together in AccountDock. At least one provider must remain enabled.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

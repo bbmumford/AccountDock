@@ -190,7 +190,14 @@ struct MainMenuView: View {
         let activeScreen = NSScreen.screens.first {
             $0.frame.contains(NSEvent.mouseLocation)
         } ?? NSScreen.main
-        let maxHeight: CGFloat = max(320, (activeScreen?.visibleFrame.height ?? 900) - 12)
+        // NSPopover adds its arrow, border, and shadow outside the hosted
+        // SwiftUI content. Reserving only a token margin lets that outer frame
+        // exceed the visible screen and AppKit clips the header at full height.
+        let popoverExteriorAllowance: CGFloat = 32
+        let maxHeight: CGFloat = max(
+            320,
+            (activeScreen?.visibleFrame.height ?? 900) - popoverExteriorAllowance
+        )
 
         // +1 for the Divider between content and footer (not measured).
         let desired = chromeHeight + usageContentHeight + 1
@@ -344,7 +351,7 @@ struct MainMenuView: View {
             Spacer()
 
             Button {
-                Task { await appState.refresh() }
+                Task { await appState.refresh(forceUnavailablePlanCheck: true) }
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.caption)

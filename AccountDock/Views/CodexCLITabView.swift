@@ -30,7 +30,7 @@ struct CodexCLITabView: View {
                 }
                 .onChange(of: selectedPath) { _, value in
                     service.setBinaryPath(value)
-                    Task { await appState.refresh() }
+                    Task { await appState.refresh(forceUnavailablePlanCheck: true) }
                 }
 
                 HStack {

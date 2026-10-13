@@ -88,7 +88,7 @@ struct AccountSwitcherView: View {
             Text("No Accounts")
                 .font(.headline)
 
-            Text("Add a Claude Code or Codex account to get started.")
+            Text("Add a Claude Code, Codex, or Kimi account to get started.")
                 .font(.caption)
                 .foregroundStyle(.textSecondary)
                 .multilineTextAlignment(.center)
@@ -124,7 +124,7 @@ struct AccountSwitcherView: View {
                 }
 
             Label(
-                provider == .claudeCode ? "Claude" : "Codex",
+                provider.capabilities.displayName,
                 systemImage: provider.iconName
             )
             .font(.headline)
@@ -224,12 +224,18 @@ struct AccountSwitcherView: View {
                         .font(.caption2)
                         .foregroundStyle(.textSecondary)
                 }
+                if let unavailable = account.providerUnavailableLabel {
+                    Label(unavailable, systemImage: "nosign")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Spacer()
 
             // Actions
-            if !account.isActive {
+            if !account.isActive && account.supportsProviderWorkloads {
                 Button {
                     requestSwitch(to: account)
                 } label: {
@@ -239,6 +245,7 @@ struct AccountSwitcherView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .tint(providerTint(account.provider))
+                .help("Switch to this account")
             }
 
             Button {
@@ -358,34 +365,46 @@ struct AccountSwitcherView: View {
                     .shadow(color: AppStyle.cardShadowColor, radius: AppStyle.cardShadowRadius, x: 0, y: AppStyle.cardShadowY)
             )
         } else {
-            HStack(spacing: 8) {
+            Menu {
                 Menu {
-                    Button("Login new Claude account") {
+                    Button("Login new account") {
                         Task { await appState.loginNewAccount() }
                     }
-                    Button("Capture current Claude account") {
+                    Button("Capture current account") {
                         Task { await appState.addAccount() }
                     }
                 } label: {
-                    Label("Add Claude", systemImage: AIProviderType.claudeCode.iconName)
-                        .frame(maxWidth: .infinity)
+                    Label("Claude", systemImage: AIProviderType.claudeCode.iconName)
                 }
-                .menuStyle(.borderlessButton)
 
                 Menu {
-                    Button("Login new Codex account") {
+                    Button("Login new account") {
                         Task { await appState.loginNewCodexAccount() }
                     }
                     .disabled(!appState.codexAvailable)
-                    Button("Capture current Codex account") {
+                    Button("Capture current account") {
                         Task { await appState.addCurrentCodexAccount() }
                     }
                 } label: {
-                    Label("Add Codex", systemImage: AIProviderType.codex.iconName)
-                        .frame(maxWidth: .infinity)
+                    Label("Codex", systemImage: AIProviderType.codex.iconName)
                 }
-                .menuStyle(.borderlessButton)
+
+                Menu {
+                    Button("Login new account") {
+                        Task { await appState.loginNewKimiAccount() }
+                    }
+                    .disabled(!appState.kimiAvailable)
+                    Button("Capture current account") {
+                        Task { await appState.addCurrentKimiAccount() }
+                    }
+                } label: {
+                    Label("Kimi", systemImage: AIProviderType.kimi.iconName)
+                }
+            } label: {
+                Label("Add Provider", systemImage: "person.crop.circle.badge.plus")
+                    .frame(maxWidth: .infinity)
             }
+            .menuStyle(.borderlessButton)
             .controlSize(.large)
             .padding(8)
             .background(.cardFillStrong, in: RoundedRectangle(cornerRadius: AppStyle.cardCornerRadius))

@@ -29,7 +29,9 @@ final class MenuBarConfig: ObservableObject {
         self.modules = MenuBarModuleStore.decode(data)
         let storedOrder = UserDefaults.standard.stringArray(forKey: providerOrderKey) ?? []
         let decodedOrder = storedOrder.compactMap(AIProviderType.init(rawValue:))
-        self.providerOrder = decodedOrder.isEmpty ? [.claudeCode, .codex] : decodedOrder
+        self.providerOrder = decodedOrder.isEmpty
+            ? AIProviderType.implementedProviders
+            : decodedOrder + AIProviderType.implementedProviders.filter { !decodedOrder.contains($0) }
     }
 
     private func persist() {
