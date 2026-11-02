@@ -700,6 +700,150 @@ final class FailoverPlannerTests: XCTestCase {
         XCTAssertEqual(FailoverPlanner(settings: settings).plan(current: current, ladder: [current, expiring], lastSwitch: nil, now: now),
                        .stay(.healthy), "with no work to serve, moving gains nothing")
     }
+
+    // MARK: - Saved settings
+
+    func testSettingsSavedWithoutASwitchMethodSwitchSafely() throws {
+        let policy = try JSONDecoder().decode(ProviderFailoverPolicy.self, from: Data("{}".utf8))
+        XCTAssertEqual(policy.switchMethod, .safeRestart)
+    }
+
+    // MARK: - Reading cadence
+
+    func testTheActiveAccountIsReadSoonerAsItNearsATrigger() {
+        let p = planner(policy())
+        XCTAssertEqual(p.readingInterval(account(session: 20, weekly: 20, active: true, burn: 10), now: now), 300,
+                       "seven hours from the trigger: the longest interval")
+        // 87% read a minute ago at 60%/h is 88% now, two minutes from 90%.
+        XCTAssertEqual(p.readingInterval(account(session: 87, weekly: 20, active: true, burn: 60), now: now), 60, accuracy: 1)
+        // Past the trigger the limit sets the pace: 96% now, four minutes from 100%.
+        XCTAssertEqual(p.readingInterval(account(session: 95, weekly: 20, active: true, burn: 60), now: now), 120, accuracy: 1)
+        XCTAssertEqual(p.readingInterval(account(session: 40, weekly: 20, active: true), now: now), 300,
+                       "nothing measurably consumed: the longest interval")
+    }
+
+    func testAnExhaustedAccountIsReadJustAfterItsResetWithSparseReadsBefore() {
+        let p = planner(policy())
+        XCTAssertEqual(p.nextUsefulReading(account(session: 100, weekly: 50, sessionReset: 3 * 3600, active: true), now: now),
+                       now.addingTimeInterval(15 * 60))
+        XCTAssertEqual(p.nextUsefulReading(account(session: 100, weekly: 50, sessionReset: 120, active: true), now: now),
+                       now.addingTimeInterval(125))
+        XCTAssertNil(p.nextUsefulReading(account(session: 40, weekly: 40, active: true), now: now))
+    }
+
+    @MainActor
+    func testAThrottledBudgetWaitsForTheProvidersRetryAfter() {
+        let budget = UsageRequestBudget(capacity: 3, refillInterval: 30, now: now)
+        budget.recordThrottle(retryAfter: now.addingTimeInterval(20 * 60), now: now)
+        XCTAssertEqual(budget.blockedUntil, now.addingTimeInterval(20 * 60))
+        XCTAssertFalse(budget.canSpend(.critical, now: now.addingTimeInterval(19 * 60)))
+        XCTAssertTrue(budget.canSpend(.critical, now: now.addingTimeInterval(21 * 60)))
+    }
+
+    // MARK: - Triggers, limits and headroom
+
+    func testAnAccountLimitedOnBothWindowsReturnsAtTheLaterReset() {
+        let spent = account(session: 100, weekly: 100, sessionReset: 600, weeklyReset: 3600)
+        XCTAssertEqual(planner(policy()).availableAt(spent, now: now), now.addingTimeInterval(3600))
+    }
+
+    func testCrossingATriggerLeavesTheAccountUsableUntilItsLimit() {
+        var settings = policy(session: 80, weekly: 90)
+        var p = planner(settings)
+        XCTAssertTrue(p.isTriggered(account(session: 81, weekly: 20, active: true), now: now))
+        XCTAssertTrue(p.isTriggered(account(session: 20, weekly: 91, active: true), now: now))
+        XCTAssertEqual(p.tier(account(session: 20, weekly: 91), now: now), .usable)
+        XCTAssertEqual(p.tier(account(session: 20, weekly: 30), now: now), .belowTrigger)
+        XCTAssertEqual(p.tier(account(session: 100, weekly: 30), now: now), .exhausted)
+        settings.sessionEnabled = false
+        p = planner(settings)
+        XCTAssertTrue(p.isTriggered(account(session: 100, weekly: 30, active: true), now: now),
+                      "the limit moves work even when the session trigger is off")
+        XCTAssertEqual(p.tier(account(session: 100, weekly: 30), now: now), .exhausted,
+                       "a spent session is never a destination, even when its trigger is off")
+    }
+
+    func testACodexSessionWindowCountsOnlyWhenThePlanReportsOne() {
+        var codex = ProviderFailoverPolicy.defaults(for: .codex)
+        codex.weeklyThreshold = 85
+        let p = FailoverPlanner(settings: .init(policy: codex, provider: .codex))
+        XCTAssertTrue(p.isTriggered(account(session: 100, weekly: 20, active: true), now: now))
+        XCTAssertEqual(p.tier(account(session: nil, weekly: 20), now: now), .belowTrigger)
+    }
+
+    func testHeadroomIsSetByTheWeakerWindow() {
+        let p = planner(policy())
+        var weeklyBound = account(session: 10, weekly: 70)
+        weeklyBound.sessionPerWeekly = 1
+        XCTAssertEqual(p.headroom(weeklyBound, p.projection(weeklyBound, now: now)!), 30)
+        var sessionBound = account(session: 80, weekly: 10)
+        sessionBound.sessionPerWeekly = 1
+        XCTAssertEqual(p.headroom(sessionBound, p.projection(sessionBound, now: now)!), 20)
+    }
+
+    // MARK: - Choosing a destination
+
+    func testDoesNotWrapToEarlierAccountsWithoutLooping() {
+        var settings = policy()
+        settings.loops = false
+        let earlier = account(session: 10, weekly: 10)
+        let current = account(session: 95, weekly: 30, active: true)
+        let later = account(session: 99, weekly: 99)
+        let plan = planner(settings).plan(current: current, ladder: [earlier, current, later], lastSwitch: nil, now: now)
+        XCTAssertEqual(plan, .stay(.drainingToLimit))
+    }
+
+    func testAnUnreadAccountIsPassedOverForOneWithAKnownReading() {
+        let current = account(session: 95, weekly: 30, active: true)
+        let unread = QuotaAccountState(id: UUID())
+        let spent = account(session: 100, weekly: 20)
+        let known = account(session: 0, weekly: 42)
+        let plan = planner(policy()).plan(current: current, ladder: [current, unread, spent, known], lastSwitch: nil, now: now)
+        XCTAssertEqual(plan, .switchTo(known.id, .threshold))
+    }
+
+    func testAnAccountWithAnUnconfirmedResetIsPassedOverForTheNextConfirmedOne() {
+        let current = account(session: 95, weekly: 30, active: true)
+        let unconfirmed = account(session: 0, weekly: 20, resetUnverified: true)
+        let confirmed = account(session: 30, weekly: 40)
+        let plan = planner(policy()).plan(current: current, ladder: [current, unconfirmed, confirmed], lastSwitch: nil, now: now)
+        XCTAssertEqual(plan, .switchTo(confirmed.id, .threshold))
+    }
+
+    func testHoldsOnlyWhenEveryBreachedWindowResetsWithinTheGrace() {
+        let p = planner(policy(session: 80, weekly: 80))
+        let spare = account(session: 0, weekly: 0)
+        let bothSoon = account(session: 85, weekly: 85, sessionReset: 60, weeklyReset: 240, active: true)
+        XCTAssertEqual(p.plan(current: bothSoon, ladder: [bothSoon, spare], lastSwitch: nil, now: now),
+                       .stay(.holdingForImminentReset))
+        let weeklyLater = account(session: 85, weekly: 85, sessionReset: 60, weeklyReset: 360, active: true)
+        XCTAssertEqual(p.plan(current: weeklyLater, ladder: [weeklyLater, spare], lastSwitch: nil, now: now),
+                       .switchTo(spare.id, .threshold))
+    }
+
+    // MARK: - Balancing destinations
+
+    func testBalancingSpendsTheLessUsedAllowanceWhenBothResetTogether() {
+        let busy = account(session: 10, weekly: 60, weeklyReset: 6 * 86_400, active: true)
+        let quiet = account(session: 10, weekly: 20, weeklyReset: 6 * 86_400)
+        let plan = planner(policy(balancing: true)).plan(current: busy, ladder: [busy, quiet], lastSwitch: nil, now: now)
+        guard case .switchTo(let id, .balance) = plan else { return XCTFail("got \(plan)") }
+        XCTAssertEqual(id, quiet.id)
+
+        var quietActive = quiet
+        quietActive.isActive = true
+        var busyIdle = busy
+        busyIdle.isActive = false
+        XCTAssertEqual(planner(policy(balancing: true)).plan(current: quietActive, ladder: [quietActive, busyIdle], lastSwitch: nil, now: now),
+                       .stay(.healthy))
+    }
+
+    func testBalancingNeverMovesToAnAccountWithAnUnconfirmedReset() {
+        let current = account(session: 10, weekly: 60, weeklyReset: 6 * 86_400, active: true)
+        let unconfirmed = account(session: 0, weekly: 0, weeklyReset: 86_400, resetUnverified: true)
+        let plan = planner(policy(balancing: true)).plan(current: current, ladder: [current, unconfirmed], lastSwitch: nil, now: now)
+        XCTAssertEqual(plan, .stay(.healthy))
+    }
 }
 
 
