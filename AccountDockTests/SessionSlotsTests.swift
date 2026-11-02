@@ -96,6 +96,35 @@ final class SessionSlotsTests: XCTestCase {
         XCTAssertEqual(SessionSlots.addingLine(line, to: ""), line + "\n")
     }
 
+    func testARenewedTokenGoesToEverySlotHoldingTheAccountsPreviousOne() throws {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let slots = try XCTUnwrap(SessionSlots(.claudeCode, home: temp))
+        let account = UUID(), other = UUID()
+        let fm = FileManager.default
+        for id in [account, other] { try fm.createDirectory(at: slots.directory(for: id), withIntermediateDirectories: true) }
+        func sessionSlot(_ id: UUID, claimed: Bool) throws -> String {
+            let directory = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            XCTAssertTrue(slots.assign(directory, to: id))
+            if claimed { try fm.createDirectory(at: directory.appendingPathComponent(SessionSlots.claimedMarker), withIntermediateDirectories: true) }
+            return directory.path
+        }
+        let spare = try sessionSlot(account, claimed: false)
+        let claimedHere = try sessionSlot(account, claimed: true)
+        let claimedElsewhere = try sessionSlot(account, claimed: true)
+        _ = try sessionSlot(other, claimed: false)
+        let own = slots.directory(for: account).path
+        let otherOwn = slots.directory(for: other).path
+
+        // A claimed slot holds the account it serves now, which may not be
+        // the one its account file names before the cycle that moves it.
+        let serving = [claimedHere: account, claimedElsewhere: other, otherOwn: account]
+        XCTAssertEqual(slots.directories(holding: account, serving: serving), [own, spare, claimedHere, otherOwn])
+        // An account's own slot serving another account holds that one's token.
+        XCTAssertEqual(slots.directories(holding: account, serving: [own: other]), [spare])
+    }
+
     func testLauncherStartsTheRealCLIOnThePickedSlot() throws {
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: temp) }
