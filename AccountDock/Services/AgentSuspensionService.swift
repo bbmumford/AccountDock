@@ -32,6 +32,10 @@ final class AgentSuspensionService: @unchecked Sendable {
         }
     }
 
+    /// Stops the provider's agent processes that no interactive shell owns.
+    /// A shell takes its terminal back from a stopped foreground job, so a
+    /// continued agent would be left in the background, unable to read its
+    /// terminal; those sessions are paused through `AgentPauseGate` instead.
     @discardableResult
     func suspend(provider: AIProviderType) async -> Int {
         await Task.detached(priority: .utility) { [self] in
@@ -44,7 +48,8 @@ final class AgentSuspensionService: @unchecked Sendable {
         defer { lock.unlock() }
         let existing = Set(records.map(\.pid))
         var added = 0
-        for process in runningProcesses(provider: provider) where !existing.contains(process.pid) {
+        for process in runningProcesses(provider: provider)
+        where !existing.contains(process.pid) && !process.ownedByInteractiveShell {
             if Darwin.kill(process.pid, SIGSTOP) == 0 {
                 records.append(Record(pid: process.pid, provider: provider, command: process.command))
                 added += 1
@@ -81,6 +86,11 @@ final class AgentSuspensionService: @unchecked Sendable {
         return resumed
     }
 
+    func suspendedCount(provider: AIProviderType) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return records.filter { $0.provider == provider && Darwin.kill($0.pid, 0) == 0 }.count
+    }
+
     func hasSuspendedAgents(provider: AIProviderType) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return records.contains { $0.provider == provider && Darwin.kill($0.pid, 0) == 0 }
@@ -90,12 +100,12 @@ final class AgentSuspensionService: @unchecked Sendable {
         for provider in AIProviderType.implementedProviders { _ = resumeSynchronously(provider: provider) }
     }
 
-    private func runningProcesses(provider: AIProviderType) -> [(pid: Int32, command: String)] {
+    private func runningProcesses(provider: AIProviderType) -> [(pid: Int32, command: String, ownedByInteractiveShell: Bool)] {
         let process = Process()
         let pipe = Pipe()
         let outputBuffer = ProcessListOutput()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axo", "pid=,command="]
+        process.arguments = ["-axo", "pid=,ppid=,tty=,command="]
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         pipe.fileHandleForReading.readabilityHandler = { handle in
@@ -114,12 +124,42 @@ final class AgentSuspensionService: @unchecked Sendable {
         pipe.fileHandleForReading.readabilityHandler = nil
         outputBuffer.append(pipe.fileHandleForReading.readDataToEndOfFile())
         let output = String(decoding: outputBuffer.snapshot(), as: UTF8.self)
-        return output.split(separator: "\n").compactMap { line in
-            let parts = line.split(maxSplits: 1, whereSeparator: \.isWhitespace)
-            guard parts.count == 2, let pid = Int32(parts[0]), pid != getpid() else { return nil }
-            let command = String(parts[1])
-            return Self.matchesCommand(command, provider: provider) ? (pid, command) : nil
+        let rows: [(pid: Int32, ppid: Int32, tty: String, command: String)] = output.split(separator: "\n").compactMap { line in
+            let parts = line.split(maxSplits: 3, whereSeparator: \.isWhitespace)
+            guard parts.count == 4, let pid = Int32(parts[0]), let ppid = Int32(parts[1]) else { return nil }
+            return (pid, ppid, String(parts[2]), String(parts[3]))
         }
+        let parents = Dictionary(rows.map { ($0.pid, $0.ppid) }, uniquingKeysWith: { first, _ in first })
+        let commands = Dictionary(rows.map { ($0.pid, $0.command) }, uniquingKeysWith: { first, _ in first })
+        return rows.compactMap { row in
+            guard !Self.descends(row.pid, from: getpid(), parents: parents),
+                  Self.matchesCommand(row.command, provider: provider) else { return nil }
+            let interactive = Self.isInteractiveShellJob(tty: row.tty, parentCommand: commands[row.ppid])
+            return (row.pid, row.command, interactive)
+        }
+    }
+
+    /// Whether a process runs as a job of a shell attached to a terminal.
+    static func isInteractiveShellJob(tty: String, parentCommand: String?) -> Bool {
+        guard tty != "??", !tty.isEmpty, let parentCommand,
+              let executable = parentCommand.split(whereSeparator: \.isWhitespace).first else { return false }
+        let name = URL(fileURLWithPath: String(executable).trimmingCharacters(in: CharacterSet(charactersIn: "-")))
+            .lastPathComponent.lowercased()
+        return ["zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "xonsh", "login"].contains(name)
+    }
+
+    /// AccountDock runs provider CLIs itself for status checks and window
+    /// warm-ups and waits for them to exit; pausing one of those would stall
+    /// the refresh that started it, so the app's own process tree is excluded.
+    static func descends(_ pid: Int32, from ancestor: Int32, parents: [Int32: Int32]) -> Bool {
+        var current = pid
+        var visited: Set<Int32> = []
+        while current > 1, visited.insert(current).inserted {
+            if current == ancestor { return true }
+            guard let parent = parents[current] else { return false }
+            current = parent
+        }
+        return false
     }
 
     private func currentCommand(pid: Int32) -> String? {
@@ -146,12 +186,8 @@ final class AgentSuspensionService: @unchecked Sendable {
             first == expected || ((first == "node" || first == "bun" || first == "deno")
                 && executableNames.dropFirst().first == expected)
         }
-        switch provider {
-        case .claudeCode: return directOrRuntimeScript("claude")
-        case .codex: return directOrRuntimeScript("codex")
-        case .kimi: return directOrRuntimeScript("kimi")
-        case .gemini: return false
-        }
+        guard let executable = provider.capabilities.cliExecutableName else { return false }
+        return directOrRuntimeScript(executable)
     }
 
     private func persist() {

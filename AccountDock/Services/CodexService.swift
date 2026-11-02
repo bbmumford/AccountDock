@@ -37,15 +37,6 @@ struct RunningCodexProcess: Hashable, Identifiable, Sendable {
     }
 }
 
-private struct CodexHookSession: Decodable {
-    let provider: String?
-    let sessionID: String
-    let workingDirectory: String?
-    let processID: Int32?
-    let host: String?
-    let observedAt: Date?
-}
-
 enum CodexServiceError: LocalizedError {
     case binaryNotFound
     case notLoggedIn
@@ -54,6 +45,9 @@ enum CodexServiceError: LocalizedError {
     case rateLimited
     case loginFailed(String)
     case unsafeCredentialLocation
+    /// The token endpoint refused the refresh token: the account must sign
+    /// in again.
+    case credentialRejected
 
     var errorDescription: String? {
         switch self {
@@ -71,6 +65,8 @@ enum CodexServiceError: LocalizedError {
             return "Codex login failed: \(message)"
         case .unsafeCredentialLocation:
             return "The managed Codex account location is outside AccountDock's storage."
+        case .credentialRejected:
+            return "Codex rejected this account's saved sign-in. Reauthenticate this account."
         }
     }
 }
@@ -108,7 +104,7 @@ final class CodexService: @unchecked Sendable {
     }
 
     func recoverableRunningProcesses() -> [RunningCodexProcess] {
-        let records = hookSessionRecords()
+        let records = AgentSessions.byProcess(.codex)
         return runningCodexProcesses().map { process in
             let record = records[process.id]
             let sessionID = Self.extractResumeSessionID(from: process.command) ?? record?.sessionID
@@ -303,28 +299,6 @@ final class CodexService: @unchecked Sendable {
             closer.waitUntilExit()
         } catch {
             codexLog.warning("[forceRestart] Could not close Terminal tabs: \(error.localizedDescription)")
-        }
-    }
-
-    private func hookSessionRecords() -> [Int32: CodexHookSession] {
-        let directory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/AccountDock/Sessions")
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil
-        ) else { return [:] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return files.reduce(into: [:]) { result, file in
-            guard file.lastPathComponent.hasPrefix("codex-"),
-                  let data = try? Data(contentsOf: file),
-                  let record = try? decoder.decode(CodexHookSession.self, from: data),
-                  let pid = record.processID else { return }
-            if let existing = result[pid],
-               let old = existing.observedAt,
-               let new = record.observedAt,
-               old > new { return }
-            result[pid] = record
         }
     }
 
@@ -568,7 +542,12 @@ final class CodexService: @unchecked Sendable {
             "scope": "openid profile email"
         ])
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        // A refused grant is answered with 400 or 401; anything else says
+        // nothing about the refresh token.
+        if status == 400 || status == 401 { throw CodexServiceError.credentialRejected }
+        if status == 429 { throw CodexServiceError.rateLimited }
+        guard (200...299).contains(status),
               let refreshed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw CodexServiceError.invalidCredentials
         }
@@ -577,6 +556,41 @@ final class CodexService: @unchecked Sendable {
             if let value = refreshed[key] as? String, !value.isEmpty { merged[key] = value }
         }
         return merged
+    }
+
+    /// Renews the credential in a managed Codex home and saves it there,
+    /// without touching the system `auth.json` running sessions use. Called
+    /// by `CodexCredentialModule`.
+    func renewCredential(codexHome: String) async -> CredentialRenewal {
+        let home = URL(fileURLWithPath: codexHome, isDirectory: true).standardizedFileURL
+        let authURL = home.appendingPathComponent("auth.json")
+        do {
+            try validateManagedHome(home)
+            guard var auth = try JSONSerialization.jsonObject(with: Data(contentsOf: authURL)) as? [String: Any],
+                  let tokens = auth["tokens"] as? [String: Any],
+                  let refreshToken = tokens["refresh_token"] as? String,
+                  !refreshToken.isEmpty else { return .rejected }
+            auth["tokens"] = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
+            auth["last_refresh"] = ISO8601DateFormatter().string(from: Date())
+            try Self.writePrivateAuth(auth, to: authURL)
+            return .renewed
+        } catch CodexServiceError.credentialRejected {
+            return .rejected
+        } catch {
+            return .unavailable
+        }
+    }
+
+    /// Whether the access token in a Codex home stays valid `interval` from
+    /// now, by its signed expiry.
+    func credentialLasts(codexHome: String, for interval: TimeInterval, now: Date = Date()) -> Bool {
+        let authURL = URL(fileURLWithPath: codexHome, isDirectory: true).appendingPathComponent("auth.json")
+        guard let data = try? Data(contentsOf: authURL),
+              let auth = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = auth["tokens"] as? [String: Any],
+              let accessToken = tokens["access_token"] as? String,
+              let expiry = Self.decodeJWTPayload(accessToken)?["exp"] as? NSNumber else { return false }
+        return Date(timeIntervalSince1970: expiry.doubleValue) > now.addingTimeInterval(interval)
     }
 
     static func credentialsNeedRefresh(

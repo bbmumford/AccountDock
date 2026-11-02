@@ -19,27 +19,21 @@ struct MenuBarModuleView: View {
     private let valueRowHeight: CGFloat = 13
 
     var body: some View {
-        if let provider = combinedPercentageProvider {
+        switch module.kind {
+        case .provider(let provider, .percentages):
             combinedPercentageView(provider: provider)
-        } else if let scopedUsage {
-            providerUsageView(
-                provider: scopedUsage.provider,
-                window: scopedUsage.window,
-                presentation: scopedUsage.presentation
-            )
-        } else if module == .claudeSessionReset {
-            resetCell(provider: .claudeCode, window: .session)
-        } else if module == .claudeWeeklyReset {
-            resetCell(provider: .claudeCode, window: .weekly)
-        } else if module == .codexSessionReset {
-            resetCell(provider: .codex, window: .session)
-        } else if module == .codexWeeklyReset {
-            resetCell(provider: .codex, window: .weekly)
-        } else if module == .kimiSessionReset {
-            resetCell(provider: .kimi, window: .session)
-        } else if module == .kimiMonthlyReset {
-            resetCell(provider: .kimi, window: .weekly)
-        } else if module == .account {
+        case .provider(let provider, let metric):
+            if let window = metric.window {
+                switch metric {
+                case .sessionReset, .longReset:
+                    resetCell(provider: provider, window: window)
+                case .sessionPercent, .longPercent:
+                    providerUsageView(provider: provider, window: window, presentation: .percentage)
+                default:
+                    providerUsageView(provider: provider, window: window, presentation: .bar)
+                }
+            }
+        case .legacy(.account):
             // Account is shown as a single line (no label) — the name is
             // self-identifying and the `@` label added noise. No height frame:
             // wrapping the Text in a fixed-height frame truncated it.
@@ -48,7 +42,7 @@ struct MenuBarModuleView: View {
                 .lineLimit(1)
                 .foregroundStyle(.primary)
                 .fixedSize()
-        } else {
+        case .dailyCost, .legacy:
             VStack(alignment: .center, spacing: 0) {
                 Text(module.compactLabel)
                     .font(.system(size: 8, weight: .semibold))
@@ -66,44 +60,27 @@ struct MenuBarModuleView: View {
 
     @ViewBuilder
     private var valueRow: some View {
-        switch module {
-        case .claudeSession, .claudeWeekly, .claudeSessionPercent, .claudeWeeklyPercent,
-             .codexSession, .codexWeekly, .codexSessionPercent, .codexWeeklyPercent,
-             .kimiSession, .kimiMonthly, .kimiSessionPercent, .kimiMonthlyPercent,
-             .claudePercentages, .codexPercentages, .kimiPercentages,
-             .claudeUsage, .codexUsage:
+        switch module.kind {
+        case .provider, .legacy(.claudeUsage), .legacy(.codexUsage):
             EmptyView()
 
-        case .claudeSessionReset:
-            resetText(provider: .claudeCode, window: .session)
-        case .claudeWeeklyReset:
-            resetText(provider: .claudeCode, window: .weekly)
-        case .codexSessionReset:
-            resetText(provider: .codex, window: .session)
-        case .codexWeeklyReset:
-            resetText(provider: .codex, window: .weekly)
-        case .kimiSessionReset:
-            resetText(provider: .kimi, window: .session)
-        case .kimiMonthlyReset:
-            resetText(provider: .kimi, window: .weekly)
-
-        case .account:
+        case .legacy(.account):
             Text(accountText)
                 .font(.system(size: 10, weight: .medium))
                 .lineLimit(1)
                 .foregroundStyle(.primary)
                 .fixedSize()
 
-        case .sessionBar:
+        case .legacy(.sessionBar):
             UtilizationBar(utilization: sessionUtilization, markerPercent: sessionTimeElapsed)
 
-        case .weeklyBar:
+        case .legacy(.weeklyBar):
             UtilizationBar(utilization: weeklyUtilization, markerPercent: weeklyTimeElapsed)
 
-        case .sessionBarPlain:
+        case .legacy(.sessionBarPlain):
             UtilizationBar(utilization: sessionUtilization)
 
-        case .weeklyBarPlain:
+        case .legacy(.weeklyBarPlain):
             UtilizationBar(utilization: weeklyUtilization)
 
         case .dailyCost:
@@ -112,13 +89,13 @@ struct MenuBarModuleView: View {
                 .foregroundStyle(.primary)
                 .fixedSize()
 
-        case .sessionReset:
+        case .legacy(.sessionReset):
             Text(sessionResetText)
                 .font(.system(size: 10, weight: .medium).monospacedDigit())
                 .foregroundStyle(.primary)
                 .fixedSize()
 
-        case .weeklyReset:
+        case .legacy(.weeklyReset):
             Text(weeklyResetText)
                 .font(.system(size: 10, weight: .medium).monospacedDigit())
                 .foregroundStyle(.primary)
@@ -128,17 +105,8 @@ struct MenuBarModuleView: View {
 
     // MARK: - Data accessors
 
-    private enum UsageWindow { case session, weekly }
+    private typealias UsageWindow = MenuBarModule.Window
     private enum UsagePresentation { case bar, percentage }
-
-    private var combinedPercentageProvider: AIProviderType? {
-        switch module {
-        case .claudePercentages: return .claudeCode
-        case .codexPercentages: return .codex
-        case .kimiPercentages: return .kimi
-        default: return nil
-        }
-    }
 
     @ViewBuilder
     private func combinedPercentageView(provider: AIProviderType) -> some View {
@@ -146,13 +114,16 @@ struct MenuBarModuleView: View {
         let session = usage?.fiveHour?.utilization
         let longWindow = usage?.sevenDay?.utilization
         ZStack {
+            // An account without a session window shows its long window alone.
             quotaRing(
-                session,
+                usage?.reportsNoSessionWindow == true ? longWindow : session,
                 diameter: 20,
                 lineWidth: 2.5,
                 unavailable: (longWindow ?? 0) >= 100
             )
-            quotaRing(longWindow, diameter: 12, lineWidth: 2.5)
+            if usage?.reportsNoSessionWindow != true {
+                quotaRing(longWindow, diameter: 12, lineWidth: 2.5)
+            }
         }
         .frame(width: 20, height: 20)
         .frame(height: 22)
@@ -202,28 +173,6 @@ struct MenuBarModuleView: View {
         return "\(provider.capabilities.sessionQuotaLabel): \(sessionText) · \(provider.capabilities.weeklyQuotaLabel): \(longText)"
     }
 
-    private var scopedUsage: (
-        provider: AIProviderType,
-        window: UsageWindow,
-        presentation: UsagePresentation
-    )? {
-        switch module {
-        case .claudeSession: return (.claudeCode, .session, .bar)
-        case .claudeWeekly: return (.claudeCode, .weekly, .bar)
-        case .claudeSessionPercent: return (.claudeCode, .session, .percentage)
-        case .claudeWeeklyPercent: return (.claudeCode, .weekly, .percentage)
-        case .codexSession: return (.codex, .session, .bar)
-        case .codexWeekly: return (.codex, .weekly, .bar)
-        case .codexSessionPercent: return (.codex, .session, .percentage)
-        case .codexWeeklyPercent: return (.codex, .weekly, .percentage)
-        case .kimiSession: return (.kimi, .session, .bar)
-        case .kimiMonthly: return (.kimi, .weekly, .bar)
-        case .kimiSessionPercent: return (.kimi, .session, .percentage)
-        case .kimiMonthlyPercent: return (.kimi, .weekly, .percentage)
-        default: return nil
-        }
-    }
-
     private func providerUsageView(
         provider: AIProviderType,
         window: UsageWindow,
@@ -233,7 +182,7 @@ struct MenuBarModuleView: View {
         let utilization: Double? = account.flatMap {
             switch window {
             case .session: return appState.accountUsage[$0.id]?.fiveHour?.utilization
-            case .weekly: return appState.accountUsage[$0.id]?.sevenDay?.utilization
+            case .long: return appState.accountUsage[$0.id]?.sevenDay?.utilization
             }
         }
 
@@ -262,7 +211,7 @@ struct MenuBarModuleView: View {
         let value: String? = account.flatMap {
             switch window {
             case .session: return appState.accountUsage[$0.id]?.fiveHour?.compactResetString
-            case .weekly: return appState.accountUsage[$0.id]?.sevenDay?.compactResetString
+            case .long: return appState.accountUsage[$0.id]?.sevenDay?.compactResetString
             }
         }
         return Text(value ?? "—")

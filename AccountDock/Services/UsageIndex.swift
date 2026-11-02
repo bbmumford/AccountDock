@@ -82,6 +82,7 @@ actor UsageIndex {
 
     private let claudeProjectsDir: String
     private let codexSessionsDir: URL
+    private let kimiSessionsDir: URL
     private let database: UsageDatabase
 
     private var pricingMeta: PricingMeta = .init(source: "unknown", fetchedAt: nil)
@@ -92,6 +93,8 @@ actor UsageIndex {
         self.claudeProjectsDir = NSHomeDirectory() + "/.claude/projects"
         self.codexSessionsDir = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent(".codex/sessions", isDirectory: true)
+        self.kimiSessionsDir = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".kimi-code/sessions", isDirectory: true)
 
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
@@ -137,6 +140,15 @@ actor UsageIndex {
             database: database
         )
         let codexEvicted = database.removeCodexFiles(notIn: codexResult.livePaths)
+        let kimiResult = Self.scanProviderAndPersist(
+            .kimi,
+            root: kimiSessionsDir,
+            fileName: "wire.jsonl",
+            cachedFiles: database.providerFiles(.kimi),
+            database: database,
+            scan: CostParser.scanKimiFile
+        )
+        _ = database.removeProviderFiles(.kimi, notIn: kimiResult.livePaths)
 
         let totalMs = Int(Date().timeIntervalSince(start) * 1000)
         lastFilesystemRefresh = Date()
@@ -146,7 +158,7 @@ actor UsageIndex {
             + "(new=\(result.missesNew), mtime=\(result.missesMtime)) "
             + "evicted=\(evicted) parse_total=\(result.parseElapsedMs)ms total=\(totalMs)ms "
             + "codex_scanned=\(codexResult.livePaths.count) codex_changed=\(codexResult.changed) "
-            + "codex_evicted=\(codexEvicted) "
+            + "codex_evicted=\(codexEvicted) kimi_scanned=\(kimiResult.livePaths.count) kimi_changed=\(kimiResult.changed) "
             + "database=\(database.databasePageBytes())B pricing=\(pricingMeta.source)"
         )
     }
@@ -178,12 +190,16 @@ actor UsageIndex {
             provider: .claudeCode
         )
 
+        let routed = RouteTarget.allRoutedModels
         database.forEachCostEntry { e, sessionKey in
             // ccusage strips `<synthetic>` from modelBreakdowns at aggregation
             // time. These rows are zero-token / zero-cost anyway (compaction
             // events, internal errors), so skipping them changes no numbers —
             // only removes a meaningless entry from the UI's model column.
             if e.model == "<synthetic>" { return }
+            // Turns the router served from a route target are that target's
+            // provider's usage; `routedAggregates` reports them there.
+            if routed.contains(e.model) { return }
             sessionsByDate[e.date, default: []].insert(sessionKey)
 
             // priceCache holds every model seen above; `?? nil` flattens
@@ -249,6 +265,49 @@ actor UsageIndex {
 
     func codexAggregates() -> [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] {
         database.codexAggregates()
+    }
+
+    func providerAggregates(_ provider: AIProviderType) -> [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] {
+        database.providerAggregates(provider)
+    }
+
+    /// Whether `provider`'s usage is indexed as per-day, per-model
+    /// aggregates. Claude Code's is indexed per request for `costSummary`.
+    func aggregatesUsage(_ provider: AIProviderType) -> Bool {
+        switch provider {
+        case .codex, .kimi: true
+        case .claudeCode, .gemini: false
+        }
+    }
+
+    /// The per-day, per-model aggregates of a provider that has them.
+    func aggregates(_ provider: AIProviderType) -> [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] {
+        switch provider {
+        case .codex: database.codexAggregates()
+        case .kimi: database.providerAggregates(provider)
+        case .claudeCode, .gemini: [:]
+        }
+    }
+
+    /// Claude Code turns the router served from a route target of
+    /// `provider`, by day and model, in the provider aggregate form: input
+    /// includes cached input.
+    func routedAggregates(_ provider: AIProviderType) -> [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] {
+        let models = RouteTarget.routedModels(for: provider)
+        guard !models.isEmpty else { return [:] }
+        var result: [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] = [:]
+        database.forEachCostEntry { entry, _ in
+            guard models.contains(entry.model) else { return }
+            let key = CostParser.CodexAggregateKey(day: entry.date, model: entry.model, reasoningEffort: nil)
+            var aggregate = result[key] ?? CostParser.CodexTokenAggregate()
+            aggregate.input += entry.input + entry.cr
+            aggregate.cachedInput += entry.cr
+            aggregate.cacheWrite += entry.cw + entry.cw1h
+            aggregate.output += entry.output
+            aggregate.events += 1
+            result[key] = aggregate
+        }
+        return result
     }
 
     private static func isDisplayableModel(_ model: String) -> Bool {
@@ -396,6 +455,53 @@ actor UsageIndex {
             }
             changed += 1
             if changed.isMultiple(of: 100) { malloc_zone_pressure_relief(nil, 0) }
+        }
+        return CodexScanResult(livePaths: live, changed: changed)
+    }
+
+    /// Indexes one provider's transcript files named `fileName` under `root`.
+    /// A file is rescanned only when its modification time or size changed.
+    private static func scanProviderAndPersist(
+        _ provider: AIProviderType,
+        root: URL,
+        fileName: String,
+        cachedFiles: [String: StoredFileMetadata],
+        database: UsageDatabase,
+        scan: (URL) -> [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate]
+    ) -> CodexScanResult {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return CodexScanResult(livePaths: [], changed: 0) }
+        var live: Set<String> = []
+        var changed = 0
+        while let url = enumerator.nextObject() as? URL {
+            guard let values = try? url.resourceValues(
+                forKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]
+            ) else { continue }
+            if values.isSymbolicLink == true {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard values.isRegularFile == true, url.lastPathComponent == fileName,
+                  let modified = values.contentModificationDate else { continue }
+            let mtime = modified.timeIntervalSince1970
+            let byteCount = UInt64(values.fileSize ?? 0)
+            live.insert(url.path)
+            if let cached = cachedFiles[url.path],
+               cached.modificationTime == mtime,
+               cached.byteCount == byteCount { continue }
+            autoreleasepool {
+                database.replaceProviderFile(
+                    provider,
+                    path: url.path,
+                    modificationTime: mtime,
+                    byteCount: byteCount,
+                    aggregates: scan(url)
+                )
+            }
+            changed += 1
         }
         return CodexScanResult(livePaths: live, changed: changed)
     }

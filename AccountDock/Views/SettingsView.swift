@@ -13,9 +13,7 @@ struct SettingsView: View {
     @AppStorage("interfaceDensity") private var interfaceDensity = "comfortable"
     @AppStorage("cardCornerRadius") private var cardCornerRadius = 7.0
     @AppStorage("disableCardShadows") private var disableCardShadows = false
-    @AppStorage("showClaudeProvider") private var showClaudeProvider = true
-    @AppStorage("showCodexProvider") private var showCodexProvider = true
-    @AppStorage("showKimiProvider") private var showKimiProvider = true
+    @AppStorage(ProviderVisibility.storageKey) private var hiddenProviders = ""
     @State private var launchAtLogin = false
 
     var body: some View {
@@ -45,27 +43,11 @@ struct SettingsView: View {
                     Label("Log", systemImage: "list.bullet.rectangle")
                 }
 
-            if showClaudeProvider {
-                ClaudeCLITabView()
+            ForEach(ProviderVisibility.visibleProviders(in: hiddenProviders)) { provider in
+                providerTab(provider)
                     .tabItem {
-                        Label("Claude CLI", systemImage: "terminal")
+                        Label("\(provider.capabilities.displayName) CLI", systemImage: provider.iconName)
                     }
-            }
-
-            if showCodexProvider {
-                CodexCLITabView()
-                    .tabItem {
-                        Label("Codex CLI", systemImage: AIProviderType.codex.iconName)
-                    }
-            }
-            if showKimiProvider {
-                VStack(spacing: 12) {
-                    Image(systemName: AIProviderType.kimi.iconName)
-                        .font(.largeTitle)
-                    Text("Kimi accounts are managed from the Accounts tab.")
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .tabItem { Label("Kimi CLI", systemImage: AIProviderType.kimi.iconName) }
             }
 
             aboutTab
@@ -81,14 +63,42 @@ struct SettingsView: View {
         }
     }
 
+    /// The provider's own settings tab: its CLI's options, or where its
+    /// accounts are managed when it has none.
+    @ViewBuilder
+    private func providerTab(_ provider: AIProviderType) -> some View {
+        switch provider {
+        case .claudeCode:
+            ClaudeCLITabView()
+        case .codex:
+            CodexCLITabView()
+        case .kimi, .gemini:
+            VStack(spacing: 12) {
+                Image(systemName: provider.iconName)
+                    .font(.largeTitle)
+                Text("\(provider.capabilities.displayName) accounts are managed from the Accounts tab.")
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func visibilityBinding(_ provider: AIProviderType) -> Binding<Bool> {
+        Binding(
+            get: { !ProviderVisibility.hidden(in: hiddenProviders).contains(provider) },
+            set: { shown in
+                var hidden = ProviderVisibility.hidden(in: hiddenProviders)
+                if shown { hidden.remove(provider) } else { hidden.insert(provider) }
+                hiddenProviders = ProviderVisibility.encode(hidden)
+            }
+        )
+    }
+
     // MARK: - General Tab
 
     private var generalTab: some View {
         Form {
             Section("Refresh") {
-                Picker("Auto-refresh interval", selection: $refreshInterval) {
-                    Text("15 seconds").tag(15.0)
-                    Text("30 seconds").tag(30.0)
+                Picker("Full refresh interval", selection: $refreshInterval) {
                     Text("1 minute").tag(60.0)
                     Text("5 minutes").tag(300.0)
                     Text("10 minutes").tag(600.0)
@@ -96,6 +106,15 @@ struct SettingsView: View {
                 .onChange(of: refreshInterval) { _, newValue in
                     appState.startAutoRefresh(interval: newValue)
                 }
+                .onAppear {
+                    // Usage reads follow the quota cycle and the shared request
+                    // budget; a full refresh faster than a minute only re-reads
+                    // cost files.
+                    if refreshInterval < 60 { refreshInterval = 60 }
+                }
+                Text("Usage limits are read on their own schedule, faster as an account nears its limit and within each provider's request allowance.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Account display") {
@@ -103,12 +122,10 @@ struct SettingsView: View {
             }
 
             Section("Providers") {
-                Toggle("Show Claude", isOn: $showClaudeProvider)
-                    .disabled(showClaudeProvider && !showCodexProvider && !showKimiProvider)
-                Toggle("Show Codex", isOn: $showCodexProvider)
-                    .disabled(showCodexProvider && !showClaudeProvider && !showKimiProvider)
-                Toggle("Show Kimi", isOn: $showKimiProvider)
-                    .disabled(showKimiProvider && !showClaudeProvider && !showCodexProvider)
+                ForEach(AIProviderType.implementedProviders) { provider in
+                    Toggle("Show \(provider.capabilities.displayName)", isOn: visibilityBinding(provider))
+                        .disabled(ProviderVisibility.visibleProviders(in: hiddenProviders) == [provider])
+                }
                 Text("Visible providers appear together in AccountDock. At least one provider must remain enabled.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -135,6 +152,9 @@ struct SettingsView: View {
                         toggleLaunchAtLogin(newValue)
                     }
             }
+
+            AgentHooksSettingsSection()
+                .environmentObject(appState)
         }
         .formStyle(.grouped)
         .padding()
@@ -167,7 +187,7 @@ struct SettingsView: View {
                 .tracking(1.8)
                 .foregroundStyle(.brand)
 
-            Text("Claude Code & Codex Account Switcher")
+            Text("\(AIProviderType.implementedNames(conjunction: "&")) Account Switcher")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
@@ -206,13 +226,13 @@ struct SettingsView: View {
 
             Spacer()
 
-            Text("Switch Claude Code and Codex accounts, monitor usage, and shape the interface around your workflow.")
+            Text("Switch \(AIProviderType.implementedNames()) accounts, monitor usage, and shape the interface around your workflow.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
 
-            Text("Unified local account control for Claude Code and Codex.")
+            Text("Unified local account control for \(AIProviderType.implementedNames()).")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
             .padding(.top, 8)
@@ -278,9 +298,7 @@ private struct FailoverLogView: View {
             } else {
                 List(Array(eventLog.events.reversed())) { event in
                     HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: event.provider == AIProviderType.codex.rawValue
-                              ? AIProviderType.codex.iconName
-                              : AIProviderType.claudeCode.iconName)
+                        Image(systemName: AIProviderType(rawValue: event.provider)?.iconName ?? "circle")
                             .foregroundStyle(.brand)
                             .frame(width: 20)
                         VStack(alignment: .leading, spacing: 3) {

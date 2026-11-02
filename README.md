@@ -2,174 +2,276 @@
 
 One dock for every local AI coding identity.
 
-AccountDock is a native macOS menu-bar app for managing Claude Code and OpenAI
-Codex accounts. It isolates credentials, switches the account consumed by each
-CLI, and combines provider usage, activity, costs, and menu-bar modules.
+AccountDock is a native macOS menu-bar app for people who run Claude Code,
+Codex and Kimi Code on more than one account. It keeps each account's
+credentials apart, switches the account each CLI uses, shows every account's
+quota, cost and activity in one place, and moves work between accounts on its
+own before a limit stops you.
+
+<p align="center">
+  <img src="docs/images/menu-bar.png" width="331" alt="AccountDock in the menu bar: quota rings for Claude, Codex and Kimi, the session reset countdown and today's cost">
+</p>
+
+<p align="center">
+  <img src="docs/images/menu-usage.png" width="300" alt="Usage tab: today's activity and every account's session and weekly quota">
+  <img src="docs/images/menu-costs.png" width="300" alt="Costs tab: today's cost by provider and model, and daily history">
+  <img src="docs/images/menu-accounts.png" width="300" alt="Accounts tab: accounts grouped by provider, with switch, re-authenticate and remove">
+</p>
 
 ## Highlights
 
-- Add, rename, reauthenticate, remove, and switch Claude and Codex accounts.
-- Managed Codex homes with atomic promotion to `~/.codex/auth.json`.
-- Safe Codex switching that restarts associated app-servers and resumes
-  captured CLI sessions against the selected account.
-- Combined usage and API-equivalent cost history for both providers.
-- Configurable menu-bar modules with bar or percentage usage displays.
-- Provider-specific, session- and weekly-aware automatic account failover.
-- Safe Claude credential switching that detects running Claude Code processes.
-- Reset-aware recovery and a privacy-safe failover activity log.
-- Seven-day cost history paging plus colour, density, width, and corner controls.
-- Optional launch at login using macOS `SMAppService`.
-- Read-only GitHub update checks with a copyable, checksum-verifying installer
-  command. AccountDock never downloads or executes an update itself.
+- **Every account in one place.** Add, label, reorder, re-authenticate, remove
+  and switch Claude Code, Codex and Kimi Code accounts. Each keeps an isolated
+  credential, and switching never writes an incomplete or dead credential into
+  a CLI's live slot.
+- **Quota at a glance.** Session, weekly and monthly windows for every account,
+  with reset times, in the menu and the menu bar. Model-scoped weekly limits
+  are read and planned for.
+- **Costs and activity.** API-equivalent cost per provider and model, daily and
+  30-day history, turns, active time and lines changed, all computed locally
+  from session logs.
+- **Automatic failover.** Each provider rotates through its own accounts on
+  thresholds you set, plans ahead with learned usage rates, and never switches
+  to an account that would run out straight away.
+- **No failed requests at the limit.** When every account is spent, Claude Code
+  sessions can keep running on a route target such as Kimi and return when
+  Claude has capacity, or sessions can pause and resume on their own.
+- **Several accounts at once.** Claude Code sessions can each be served by
+  their own account, so several 5-hour windows are used in parallel.
+- **Configurable menu bar.** Rings, bars, percentages, countdowns, account and
+  cost modules, in any order.
+- **Private by design.** No prompts or transcripts are stored or sent anywhere.
+  Credentials stay in the macOS Keychain and in memory.
+
+## Usage and costs
+
+The **Usage** tab lists every account by provider, in the order you set in
+**Accounts**: its plan, the session (5-hour) window, the weekly or monthly
+window, and when each resets. Today's activity across all providers sits on
+top. The **Costs** tab totals today's API-equivalent spend by provider and
+model, with 7-day, 30-day and all-time summaries and a daily history.
+
+Usage comes first from what the CLIs already record (Claude Code's status line
+and cache, Codex rollouts, the router's response headers). Provider usage
+endpoints are called sparingly within a per-provider request allowance: the
+active account whenever a decision depends on it, idle accounts every half
+hour. Costs are computed from local session logs and Claude totals match
+[ccusage](https://github.com/ryoppippi/ccusage); see
+[COST_VERIFICATION.md](COST_VERIFICATION.md).
 
 ## Automatic failover
 
-Settings → Failover configures Claude, Codex, and Kimi independently. AccountDock
-never fails over from one provider to the other.
+<p align="center">
+  <img src="docs/images/settings-failover.png" width="560" alt="Failover settings for Claude Code: thresholds, ordering, routing to Kimi and balancing">
+</p>
 
-- Choose the account order for each provider and optionally loop through it.
-- Set independent session and long-window thresholds for each provider. Kimi
-  exposes a five-hour session window plus the stricter of its monthly total and
-  monthly coding allowances.
-- Set the long-window quota threshold reported by Codex. This is normally seven
-  days, while Free accounts can expose a 30-day quota; Codex does not expose a
-  five-hour/session subscription window.
-- Prefer the eligible account with the most remaining headroom.
-- Optionally enable intelligent long-window balancing. It compares every
-  included account's utilization and reset horizon, deliberately allowing an
-  account that resets sooner to consume more before that allowance disappears.
-  Balancing targets the full usable allowance; configured thresholds trigger
-  ordinary failover but are not treated as artificial quota ceilings.
-  A configurable advantage threshold and minimum dwell time prevent account
-  oscillation; unavailable session capacity, excluded accounts, and locally
-  elapsed but unverified resets remain hard safety constraints. Every reported
-  session and long window at 100% is rejected as a destination even if that
-  window's trigger is disabled. Threshold
-  failover always takes priority. Codex requires a proactive switch method
-  (`Switch Without Restart` or `Force Restart Sessions`) for balancing because
-  `Switch Safely` is intentionally gated on a real usage-limit error.
-- After the active account reaches a threshold, prefer a ladder account whose
-  limits have reset, or hold briefly when the active limiting window is about
-  to reset. A recovered account never pulls work away from a healthy account.
-- Optionally keep reset windows warm. After a fresh provider response confirms
-  a reset, AccountDock makes one minimal request against that account so the
-  next countdown begins immediately. Claude uses a unique
-  `--no-session-persistence` probe and removes matching residue; Codex uses
-  `exec --ephemeral` with the managed home's file credential explicitly
-  selected. OpenAI's moving `now + window` placeholder for an unused Codex
-  quota is not displayed as a real countdown. The probe never becomes a
-  resumable user session.
-- Adapt active-account polling from five minutes down to fifteen seconds as a
-  configured limit approaches, without forcing a full refresh of every account.
-- Back off exhausted accounts when no failover destination exists, following
-  known reset and provider retry-after times instead of repeatedly polling.
-- Preserve the last known reset information when a provider temporarily
-  responds with a rate-limit error.
-- Refresh inactive Claude OAuth credentials independently, including rotated
-  refresh tokens, without replacing the credential used by active sessions.
-- Optionally suspend running provider CLI agents when every included account is
-  exhausted. AccountDock sends `SIGSTOP` only to identified provider processes,
-  resumes those exact PIDs with `SIGCONT` after verified capacity returns, and
-  runs a crash watchdog so a force-quit cannot leave agents permanently paused.
+Settings → Failover configures Claude Code, Codex and Kimi Code independently.
+Work never moves from one provider's accounts to another's, apart from the
+request router's route target below.
 
-## Kimi Code accounts
+- **Thresholds.** A session and a long-window threshold per provider. Crossing
+  either moves work to the next account, in your order, that is below **both**
+  of its thresholds with room to stay there for a while.
+- **No switch loops.** When no account is below its thresholds, the active
+  account keeps working up to the provider's 100% limit, then moves to the
+  account with the most room left. An account that is merely less full than its
+  threshold is never chosen.
+- **Fresh data.** An account other sessions may still be using is read again
+  before AccountDock switches to it.
+- **Ahead of time.** Decisions look 30 seconds ahead and use each account's
+  learned usage rate plus its variability, so several agents finishing the last
+  few percent between two checks cannot overrun a limit. Work also moves while
+  there is still room for the requests already under way.
+- **Worthwhile destinations.** When the active account is at its limit, work
+  moves only to an account with room for at least ten minutes of the current
+  use; a sliver of allowance would be gone before the move paid for itself.
+- **Reset-aware.** Hold briefly when a limit resets before the account would
+  run out, and optionally prefer an account whose limit has just reset.
+- **Keep windows warm.** Optionally make one minimal request right after a reset
+  is confirmed, so the next countdown starts immediately. The probe never
+  becomes a resumable session.
+- **Intelligent balancing.** Optionally spend accounts in the order their weekly
+  allowance would otherwise expire unused. Once AccountDock has learned a day of
+  your usage pattern, it simulates the coming week to choose, and shows a
+  one-line outlook for the week.
+- **Pace estimate.** Under each provider, while its active account is in use:
+  when that account reaches its limit at the current pace, and when every
+  included account would be used up and sessions paused.
+- **Quarantine.** An account whose stored credential fails verification is left
+  out of automatic switching until you re-authenticate it.
 
-The Accounts tab can capture the current Kimi Code login or start `kimi login`
-with cancellation and timeout support. AccountDock stores an isolated credential
-copy per subscription and atomically promotes the selected copy into Kimi Code's
-configured credential slot. Rotating refresh tokens are written back to the
-managed account before use. Usage includes the five-hour session window and the
-more-consumed monthly total/coding window. Kimi accounts participate in account
-ordering, usage display, menu-bar modules, failover, intelligent balancing, and
-agent suspension independently of Claude and Codex.
+The planning rules and the maths behind them are in
+[ARCHITECTURE.md](ARCHITECTURE.md#failover-planning).
 
-When every configured account is exhausted, AccountDock selects the account
-whose blocking limits become available first. A session-limited account is not
-treated as ready while its weekly limit remains blocked. AccountDock prepares
-that account and monitors it for restored capacity without restarting Claude
-terminal sessions.
+### When every account is exhausted
 
-### Safe Claude and Codex switching and session recovery
+<p align="center">
+  <img src="docs/images/failover-banners.png" width="440" alt="Banners: requests served by Kimi with a Return now button, and two sessions paused with a Resume now button">
+</p>
 
-Claude Code processes keep the credential with which they were launched, so
-changing the credential file alone does not move an already-running workload.
-Manual Claude switching is a single direct credential switch, matching the
-original application behaviour. It does not present session-restart choices.
-Automatic Claude failover uses the same credential-switch path and does not
-terminate, reopen, or resume Claude terminal sessions. Session restart and
-recovery methods are Codex-only.
+Choose what happens for each provider:
 
-The installer adds AccountDock's own Claude lifecycle hooks without replacing
-other configured hooks. They record privacy-scoped recovery metadata—session
-identifier, working directory, lifecycle state, host type, and timestamp—under
-`~/Library/Application Support/AccountDock/Sessions`. Prompt and transcript
-content are never stored. A one-time copy of the pre-install Claude settings is
-kept at `~/.claude/settings.json.accountdock-backup`.
+- **Serve requests from a route target** (Claude Code). Claude Code's requests
+  go to the target through AccountDock's local router and come back to Claude
+  as soon as an account has capacity. Sessions stay open the whole time. Kimi
+  is the available target; pick the Kimi model. Only models with a context
+  window of at least 1M tokens are offered (K3, K3.1 Pro, K3.1 Pro high speed
+  and Kimi for Coding), since a session moves with its whole conversation.
+  Kimi counts every routed token
+  against its 5-hour window, so AccountDock routes only sessions up to a
+  context size you set, keeps a share of Kimi's window for your own Kimi
+  sessions, and routes only when Kimi would last a set time at the current
+  demand. Sessions larger than that context size (90% of the model's window
+  unless you set another) are paused while the rest run on Kimi, including at their next
+  prompt, and resume on Claude as capacity returns. **Return now** sends
+  requests back at once.
+- **Pause sessions.** Every session waits at its next tool call, including
+  subagents and workflow agents, and a turn started during the pause waits
+  before its first request, so nothing is sent to an account that would refuse
+  it. **Pause sessions now** in the failover settings starts a pause yourself,
+  for instance before switching to an account at its limit; it holds until you
+  resume or an account in the failover order has capacity. The
+  terminal stays attached and usable, and a message shows why. While an account
+  still has a little room, paused sessions are let through one step at a time.
+  Everything continues on its own when capacity returns, or with
+  **Resume now**. To let one session go on while the rest stay paused, press
+  ⌃⌥⌘R with its terminal in front, or choose it under **Resume one**.
+- **Use extra usage** (Claude Code, combines with the options above). Accounts
+  with extra usage enabled keep serving past their plan, up to a monthly
+  spending limit you set, before AccountDock routes or pauses.
+- **Do nothing.** AccountDock waits and switches to the account whose limits
+  reset first.
 
-It also configures `~/.codex/hooks.json` and every AccountDock-managed Codex
-home using the lifecycle-hook format implemented by the `bbmumford/codex`
-fork. Existing Codex hook groups are preserved and backed up once. Because
-upstream Codex does not currently ship this interface, these hooks activate on
-compatible builds and remain inert configuration on builds that do not support
-them. A compatible Codex build may ask the user to review and trust a newly
-installed user hook before its first run.
+### Serving sessions from several accounts
 
-Recovery is host-neutral. AccountDock detects the recovery method rather than
-assuming a particular harness: IDE-managed sessions are released to their host
-for respawn, while standalone Claude CLI sessions are reopened in Terminal at
-their original working directory with `claude --resume <session-id>`. Before
-resuming, it checks that the same session is not already running.
+With **Serve sessions from several accounts at once**, each Claude Code session
+is served by its own account through the router and keeps it while that account
+has room. Several accounts' 5-hour windows are used in parallel instead of one
+after another. The account cards show how many sessions each account served in
+the last ten minutes.
 
-Codex hooks additionally associate captured sessions with their persistent
-app-server and owning host. Codex automatic failover has three selectable
-switch methods:
+**Pace sessions to each account's 5-hour window**, on by default, spreads them
+by how fast each account is being used. New sessions go to the accounts with
+the most unused rate for the rest of their window. A session stays on its
+account while its prompt cache lasts. When an account's sessions would reach
+its limit and stay there for longer than their cache lasts, some of them move
+at their next turn to accounts that can carry them. Otherwise they stay, and
+a session that reaches the limit with the reset at most five minutes away
+waits for it on its own account and continues with its cache. When the reset
+is further away but still comes before the working sessions' caches expire,
+those sessions wait at their next tool call and continue on their account
+after it resets, instead of writing their whole context again elsewhere.
+Sessions whose next turn comes soon move before one deep in a long turn.
 
-- **Switch Safely** arms when the provider reports that the quota threshold was
-  reached, but waits for a running session to record an actual usage-limit
-  error. It then restarts and resumes only affected sessions; unaffected
-  sessions reload the promoted credential in place.
-- **Force Restart Sessions** acts immediately from the provider-reported quota
-  threshold. It closes every detected Codex Terminal session, switches the
-  credential, and reopens each recoverable session with
-  `codex resume <session-id>`.
-- **Switch Without Restart** acts immediately and signals compatible running
-  Codex processes to reload the promoted credential in place.
+**Keep prompt caches for an hour**, on by default, extends Claude Code's own
+one-hour prompt cache. On a subscription Claude Code already uses the hour
+for its main conversation, but five minutes for subagents, workflow agents and
+background requests, and for everything while the account is on extra usage.
+The router asks for the hour on every request, so one that comes after a
+longer gap reads its context back cheaply instead of writing it again. The
+setting shows what the hour saved and cost over the last week. Claude Code's
+own `promptCacheTtl` and `subagentPromptCacheTtl` settings, set to `"1h"`, do
+the same for sessions started after they are set.
 
-Standalone sessions are reopened in their original working directory; VS Code
-and ChatGPT integrations reconnect through their host.
+### Resuming paused sessions as capacity allows
 
-- A confirmed **Force Restart Codex Sessions** action in Codex CLI settings
-  closes detected Codex Terminal sessions and reopens every recoverable session
-  with `codex resume <session-id>`. Sessions without a captured ID are reported
-  instead of being silently replaced.
-  The same action is available directly in the Codex account-switch warning.
+With **Resume sessions as capacity allows**, paused Claude Code sessions don't
+all continue the moment one account resets. AccountDock forecasts each
+session's use from the hour before it paused and lets them continue a few at
+a time, each on an account where that use fits before the account's window
+resets. The session doing most of the work goes first and smaller ones fill
+what is left, and as more accounts reset, more sessions continue, spread
+across them. A resumed session is paused again if its account nears its limit
+anyway.
 
-- Cost records are resolved within their provider before model matching.
-  Codex records retain their reasoning-effort tier, use an effort-specific
-  pricing entry when one exists, and otherwise price the recorded reasoning
-  tokens as output tokens at that provider model's published rate.
-Settings → Failover Log records switches, exhausted-account waits, reset
-selection, recovery release, and failures. Entries obfuscate account identity,
-are capped at 500, and are stored locally at
-`~/Library/Logs/AccountDock-failover.json`. The log can be cleared from the app.
+### The request router
+
+The router is a small helper that AccountDock installs, updates and removes on
+its own. It runs while Claude Code failover, a route target or several-account
+serving is on. A running Claude Code session keeps the credential it already
+holds, so without the router a switch reaches running sessions only late; with
+it, every session moves to the newly active account at its next turn, and a
+request an account refuses at its limit is sent again on the next account
+instead of failing. It listens on `127.0.0.1` only,
+refuses requests from web pages, and serves your accounts only to clients that
+already hold one of your credentials. Credentials are passed to it from the
+Keychain over an authenticated local connection and kept in memory, never on
+disk. Requests that lose their connection to Anthropic before any reply are sent
+again on a fresh connection. When the route target reaches its own limit,
+sessions return to Claude at once; with every option out, a session gets
+Claude's own limit reply, so Claude Code waits for the reset and continues by
+itself. An interrupted turn stops the upstream reply. Claude Code sessions started before the router was
+enabled keep talking to Anthropic directly until they are restarted. Details are in
+[ARCHITECTURE.md](ARCHITECTURE.md#request-router).
+
+## Agent hooks
+
+AccountDock adds a few hooks to each CLI's settings, alongside your own:
+
+- session lifecycle records, used to recover sessions after a Codex switch;
+- Claude Code's status line, so every response's quota reaches AccountDock
+  without an extra request (your own status line keeps working);
+- the pause gate;
+- `ANTHROPIC_BASE_URL`, only while the router is in use.
+
+On launch, AccountDock asks to install any that are missing.
+Settings → General → Agent hooks shows each one and can reinstall them. Each
+settings file is backed up once before the first change, for example
+`~/.claude/settings.json.accountdock-backup`. Session records hold the session
+ID, working directory, state, host and time, never prompt or transcript content.
+
+## Switching and session recovery
+
+**Claude Code.** Switching replaces the credential Claude Code uses and checks
+the result with `claude auth status`, rolling back if the target is rejected.
+Running sessions are never terminated or restarted.
+
+**Codex** has three switch methods for automatic failover:
+
+- **Switch Safely** waits until a running session records an actual usage-limit
+  error, then restarts and resumes only the affected sessions; the others
+  reload the new credential in place.
+- **Force Restart Sessions** closes every detected Codex Terminal session,
+  switches, and reopens each with `codex resume <session-id>`.
+- **Switch Without Restart** signals compatible Codex processes to reload the
+  credential in place.
+
+Standalone sessions reopen in their original directory; IDE sessions reconnect
+through their host. Codex lifecycle hooks need a Codex build that supports them
+(the `bbmumford/codex` fork); on other builds they are inert.
+
+**Kimi Code.** The Accounts tab can capture the current Kimi Code login or run
+`kimi login`. Each subscription keeps an isolated credential, and Kimi's
+rotating refresh tokens are written back before use.
+
+## Failover log
+
+Settings → Log records switches, waits, routing, pauses, recoveries and
+failures. Account identity is obfuscated, entries are capped at 500 and stored
+locally at `~/Library/Logs/AccountDock-failover.json`, and the log can be
+cleared from the app.
 
 ## Requirements
 
 - macOS 14 or newer
-- Xcode 16 or newer for development
-- XcodeGen (`brew install xcodegen`)
+- Claude Code, Codex or Kimi Code installed for the providers you use
+- For development: Xcode 16 or newer and XcodeGen (`brew install xcodegen`)
 
 ## Install
 
-Because the repository is private, sign in once with `gh auth login`, then run:
+The repository is private, so sign in once with `gh auth login`, then run:
 
 ```bash
 install_dir="$(mktemp -d)" && gh release download --repo bbmumford/AccountDock --pattern 'AccountDock.pkg*' --dir "$install_dir" --clobber && (cd "$install_dir" && shasum -a 256 -c AccountDock.pkg.sha256) && sudo installer -pkg "$install_dir/AccountDock.pkg" -target / && osascript -e 'tell application "System Events" to if not (exists login item "AccountDock") then make login item at end with properties {name:"AccountDock", path:"/Applications/AccountDock.app", hidden:false}' && rm -rf "$install_dir" && open -a AccountDock
 ```
 
-The command downloads the release, verifies its SHA-256 checksum, installs it
-in `/Applications`, merges AccountDock's lifecycle hooks into the current
-user's Claude settings, adds AccountDock to Login Items, and opens it.
+The command downloads the latest release, verifies its SHA-256 checksum,
+installs it in `/Applications`, adds the Claude Code and Codex session hooks to
+the current user's settings, adds AccountDock to Login Items and opens it. On
+first launch the app offers to install the remaining hooks.
+
+AccountDock checks GitHub for newer releases and shows the same kind of command
+in Settings → About. It never downloads or runs an update itself.
 
 ## Build and test
 
@@ -184,50 +286,55 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-Open [AccountDock.xcodeproj](AccountDock.xcodeproj) for local development.
 `project.yml` is the source of truth; regenerate the project after changing it.
+Release builds, packaging and versioning are in [BUILD_GUIDE.md](BUILD_GUIDE.md).
 
-## Updates and releases
+The screenshots above are rendered from the app's own views with sample
+accounts, never real ones:
 
-AccountDock checks `bbmumford/AccountDock` for the latest GitHub release. A
-release contains:
-
-- `AccountDock.pkg` — macOS Installer package.
-- `AccountDock.pkg.sha256` — SHA-256 digest generated by CI.
-
-When a newer semantic version is available, Settings → About offers a safe
-install command. The command downloads over HTTPS, checks SHA-256, asks for
-administrator approval through `/usr/sbin/installer`, and enables startup.
-
-The workflow in `.github/workflows/ci-release.yml` tests every change and
-publishes releases only for `v*` tags. The current private development release
-is not Developer ID signed or notarized; add Apple signing and notarization
-before public distribution. See [BUILD_GUIDE.md](BUILD_GUIDE.md).
-
-`scripts/release.sh` prepares a version commit and tag locally. It deliberately
-does not push anything.
+```bash
+Tools/render_screenshots.sh   # writes docs/images/*.png
+```
 
 ## Source layout
 
-- `AccountDock/` — app models, services, and SwiftUI views.
-- `AccountDockWidget/` — WidgetKit extension.
-- `AccountDockTests/` — unit tests.
-- `Shared/` — widget projection shared by both targets.
-- `project.yml` — XcodeGen project definition and version source.
+| Path | Contents |
+| --- | --- |
+| `AccountDock/` | App: models, services, SwiftUI views, resources and localizations |
+| `AccountDockRouter/` | The local request router (`Core/` is shared with the app) |
+| `AccountDockWidget/` | WidgetKit extension |
+| `AccountDockTests/` | Unit tests |
+| `Shared/` | Widget data shared by the app and the widget |
+| `Tools/` | Cost verification, pricing refresh and screenshot rendering |
+| `scripts/` | Release helper, hook configurators and installer scripts |
+| `docs/` | Images, the Kimi provider design and archived upstream docs |
+| `project.yml` | XcodeGen project definition and version source |
 
-### Adding a provider
+## Extending
 
-Provider-neutral behavior is declared once in
-`AccountDock/Models/ProviderCapabilities.swift`: identity and presentation,
-supported quota windows, workload eligibility, pricing namespaces, and switch
-capabilities. Shared account, failover, pricing, and provider-list UI code reads
-that registry and failover policies are stored by provider identifier.
+**A provider.** Every provider is declared once in
+`AccountDock/Models/ProviderCapabilities.swift`: identity, quota windows,
+workload eligibility, pricing, how switching reaches running sessions, its
+pause gate and lifecycle hooks, a live usage feed, whether the router serves
+it and whether it offers a route target. Add a service for authentication,
+credential storage, plan discovery, usage and CLI switching, give each adapter
+in [ARCHITECTURE.md](ARCHITECTURE.md#providers) its case, then register the
+capabilities. Accounts, usage reading, failover, pausing, routing, hooks, costs,
+the menu bar and the settings pick it up from the registry.
 
-External integrations remain intentionally provider-specific. Add a service
-adapter for authentication, credential storage, plan discovery, usage fetching,
-and CLI switching, then register the provider's capabilities and mark it
-implemented. This keeps vendor API details at the boundary without leaking
-binary `Claude`/`Codex` assumptions into shared product logic.
+**A route target.** Set a `RouteTarget` as its provider's `routeTarget`
+capability and supply its token in `AppState.accessCredential`. The router
+needs no change.
+
+## Documentation
+
+- [ARCHITECTURE.md](ARCHITECTURE.md): components, credentials, failover
+  planning, pausing, the request router, hooks and files.
+- [BUILD_GUIDE.md](BUILD_GUIDE.md): building, versioning, CI and releases.
+- [RELEASE_NOTES.md](RELEASE_NOTES.md): what changed in each version.
+- [COST_VERIFICATION.md](COST_VERIFICATION.md): keeping costs aligned with ccusage.
+- [docs/KIMI_PROVIDER_ASSESSMENT.md](docs/KIMI_PROVIDER_ASSESSMENT.md): the Kimi
+  provider design.
 
 ## Upstream attribution
 
@@ -237,5 +344,5 @@ informed by the account-isolation and telemetry approaches in
 [steipete/CodexBar](https://github.com/steipete/CodexBar).
 
 The reviewed CCSwitcher revision did not contain a repository license. Public
-redistribution requires permission from its copyright holder. Archived
-upstream documentation is retained under `docs/upstream/`.
+redistribution requires permission from its copyright holder. Archived upstream
+documentation is kept under `docs/upstream/`.

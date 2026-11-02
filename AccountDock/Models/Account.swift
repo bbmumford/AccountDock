@@ -33,10 +33,16 @@ struct Account: Identifiable, Codable, Hashable {
     var customLabel: String?
     /// Provider-scoped credential location. Codex accounts use an isolated CODEX_HOME.
     var credentialLocation: String?
+    /// The provider's rate-limit tier from the account's credential, which
+    /// tells apart plans sharing one stored plan name.
+    var rateLimitTier: String?
 
-    /// Subscription type with first letter capitalized (e.g., "max" → "Max").
+    /// The plan's name: the provider's name for its plan and tier, or else
+    /// the subscription type with first letter capitalized ("pro" → "Pro").
     var displaySubscriptionType: String? {
-        subscriptionType?.prefix(1).uppercased().appending(subscriptionType?.dropFirst() ?? "")
+        if let plan = subscriptionType, let tier = rateLimitTier,
+           let name = provider.capabilities.planNames["\(plan):\(tier)"] { return name }
+        return subscriptionType?.prefix(1).uppercased().appending(subscriptionType?.dropFirst() ?? "")
     }
 
     /// Whether this profile is a viable destination for provider workloads.
@@ -104,6 +110,21 @@ struct Account: Identifiable, Codable, Hashable {
             return label
         }
         return obfuscated ? obfuscatedDisplayName : displayName
+    }
+
+    /// The name failover events, alerts and logs call the account by. The
+    /// display name is only a label the user chose, so when another account
+    /// of the same provider shows the same name the obfuscated email is
+    /// added and every message still names one account; the full email only
+    /// when the obfuscated forms collide too.
+    func messageName(among accounts: [Account]) -> String {
+        let name = effectiveDisplayName(obfuscated: true)
+        let namesakes = accounts.filter {
+            $0.id != id && $0.provider == provider && $0.effectiveDisplayName(obfuscated: true) == name
+        }
+        guard !namesakes.isEmpty || name.isEmpty else { return name }
+        let email = namesakes.contains { $0.obfuscatedEmail == obfuscatedEmail } ? self.email : obfuscatedEmail
+        return name.isEmpty ? email : "\(name) (\(email))"
     }
 
     init(

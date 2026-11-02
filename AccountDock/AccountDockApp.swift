@@ -43,12 +43,19 @@ struct AccountDockApp: App {
                     guard !isRunningTests else { return }
                     guard !didBootstrap else { return }
                     didBootstrap = true
+                    #if DEBUG
+                    if let directory = ScreenshotRenderer.outputDirectory {
+                        Task { await ScreenshotRenderer.run(appState: appState, config: menuBarConfig, into: directory) }
+                        return
+                    }
+                    #endif
                     Task { await updateChecker.checkForUpdates() }
                     statusItemController.install(
                         appState: appState,
                         config: menuBarConfig,
                         locale: currentLocale
                     )
+                    SessionResumeShortcut.shared.install { [appState] in appState.resumeFrontmostSession() }
                     // Kick off background usage tracking immediately upon app start
                     Task {
                         await appState.refresh()
