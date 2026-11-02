@@ -37,7 +37,9 @@ extension AppState {
         guard let module = credentialModule(for: account.provider) else { return .unavailable }
         let outcome = await module.renewSavedCopy(account)
         switch outcome {
-        case .renewed: clearNeedsSignIn(account)
+        case .renewed:
+            clearNeedsSignIn(account)
+            if slotCredentialAccounts.contains(account.id) { await reissueSlotCredential(for: account) }
         case .rejected: noteCredentialRejected(account)
         case .unavailable: break
         }
@@ -52,7 +54,12 @@ extension AppState {
     /// that cannot be made for a network or server failure allows the
     /// switch while the access token lasts five more minutes. A check passed
     /// within the last minute is not repeated, because `evaluate` checks a
-    /// destination before `performAutomaticSwitch` does.
+    /// destination before `performAutomaticSwitch` does. An account whose
+    /// access token session slots hold is not renewed while that token lasts
+    /// five more minutes: a renewal revokes the token, and every request its
+    /// sessions make before their slots are rewritten is refused. Their use
+    /// of it shows the account works, and its refresh token is the one
+    /// AccountDock itself last rotated, since a slot holds no refresh token.
     func credentialIsUsable(_ account: Account) async -> Bool {
         guard let module = credentialModule(for: account.provider) else { return true }
         if let checked = credentialVerifiedAt[account.id], Date().timeIntervalSince(checked) < 60 { return true }
@@ -62,6 +69,11 @@ extension AppState {
             quarantineCredentials(of: account, reason: "no stored credential")
             return false
         case true?: break
+        }
+        if slotCredentialAccounts.contains(account.id), !needsSignIn(account),
+           module.savedCopyLasts(account, for: 5 * 60) {
+            credentialVerifiedAt[account.id] = Date()
+            return true
         }
         switch await renewSavedCredential(account) {
         case .renewed:

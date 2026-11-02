@@ -101,6 +101,22 @@ struct SessionSlots: Sendable {
         }
     }
 
+    /// The slots that hold `account`'s access token: those `serving` names
+    /// for it, its own slot unless `serving` names another account for it,
+    /// and its spare one-session slots. `AppState.reissueSlotCredential`
+    /// writes a renewed token to them.
+    func directories(holding account: UUID, serving: [String: UUID]) -> Set<String> {
+        var found = Set(serving.filter { $0.value == account }.map(\.key))
+        let own = directory(for: account).path
+        if slotDirectories().contains(where: { $0.path == own }), serving[own].map({ $0 == account }) ?? true {
+            found.insert(own)
+        }
+        for slot in sessionSlots() where slot.claimedAt == nil && slot.account == account {
+            found.insert(slot.directory.path)
+        }
+        return found
+    }
+
     /// Fills a new spare slot for `account`. The account file is written
     /// last, so the launcher never claims a slot without its credential.
     @discardableResult

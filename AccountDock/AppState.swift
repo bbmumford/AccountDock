@@ -133,6 +133,11 @@ final class AppState: ObservableObject {
     /// Accounts whose slot a running session reads, kept by
     /// `maintainSessionSlots`; they are read and planned as in use.
     var slotServedAccounts: Set<UUID> = []
+    /// Accounts whose access token a session slot holds, for running or new
+    /// sessions; kept by `maintainSessionSlots` and read by
+    /// `credentialIsUsable` and `renewSavedCredential`, because renewing
+    /// such an account's saved copy revokes the token those slots hold.
+    var slotCredentialAccounts: Set<UUID> = []
     /// The slot directory each running process reads, and the account
     /// serving each slot that has running sessions; read by
     /// `slotAccount(forSession:)`.

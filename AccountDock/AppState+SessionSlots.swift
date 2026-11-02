@@ -40,6 +40,7 @@ extension AppState {
             await serveRunning(slots, provider: provider, members: [], inUse: inUse)
             await serveSessionSlots(slots, provider: provider, members: [], inUse: inUse, now: now)
             slotServedAccounts = Set(slotDirectoryServing.values)
+            slotCredentialAccounts = slotServedAccounts
             return
         }
         if !slots.launcherInstalled {
@@ -65,6 +66,7 @@ extension AppState {
         }.sorted { $0.session < $1.session }
         await Task.detached(priority: .utility) { slots.writeResumes(resumeEntries) }.value
         slotServedAccounts = Set(slotDirectoryServing.values)
+        slotCredentialAccounts = slotServedAccounts.union(served).union(spares)
         let active = accounts.first { $0.provider == provider && $0.isActive }?.id
         // The launcher names an account by its slot's path. The active
         // account's slot holds no credential, so when no spare of it is left
@@ -246,6 +248,26 @@ extension AppState {
             await Task.detached(priority: .utility) { remove.forEach(slots.remove) }.value
         }
         return Set(sparesOf.filter { $0.value > 0 }.keys)
+    }
+
+    /// Writes the account's renewed access token to every session slot that
+    /// serves it, at once. The renewal revoked the token those slots held,
+    /// and a session that reads its slot before the next quota cycle rewrites
+    /// it is refused and told to sign in again. The active account's slots
+    /// hold the live credential's token, which its saved copy does not
+    /// change. Called by `renewSavedCredential`.
+    func reissueSlotCredential(for account: Account) async {
+        guard !account.isActive, account.provider == AIProviderType.routedProvider,
+              let slots = SessionSlots(account.provider),
+              let json = credentialModule(for: account.provider)?.liveCredential?.savedCopy(account),
+              let accessOnly = SessionSlots.accessOnly(json) else { return }
+        let id = account.id
+        let serving = slotDirectoryServing
+        let written = await Task.detached(priority: .utility) {
+            slots.directories(holding: id, serving: serving)
+                .filter { slots.serve(URL(fileURLWithPath: $0), credential: accessOnly) }.count
+        }.value
+        slotsLog.info("Renewed credential of \(messageName(account)) written to \(written) slot(s)")
     }
 
     /// Writes a current credential to the slot of every account in
