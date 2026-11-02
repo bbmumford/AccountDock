@@ -24,9 +24,7 @@ private struct StatWithTooltip<Content: View>: View {
 struct UsageDashboardView: View {
     @EnvironmentObject private var appState: AppState
     @AppStorage("showFullEmail") private var showFullEmail = false
-    @AppStorage("showClaudeProvider") private var showClaudeProvider = true
-    @AppStorage("showCodexProvider") private var showCodexProvider = true
-    @AppStorage("showKimiProvider") private var showKimiProvider = true
+    @AppStorage(ProviderVisibility.storageKey) private var hiddenProviders = ""
 
     var body: some View {
         ScrollView {
@@ -65,12 +63,26 @@ struct UsageDashboardView: View {
                             .foregroundStyle(.brand)
                             .sectionPadding()
 
+                            if let routed = appState.routedStatus[provider] {
+                                RoutedRequestsBanner(provider: provider, status: routed)
+                            }
+                            if let pause = appState.agentPauseStatus[provider] {
+                                AgentPauseBanner(provider: provider, status: pause)
+                            }
+                            let ungated = appState.sessionsWithoutGate(provider)
+                            if !ungated.isEmpty {
+                                UngatedSessionsLine(provider: provider, sessions: ungated)
+                            }
+                            if appState.agentPauseStatus[provider] == nil, let pace = appState.paceOutlook(provider) {
+                                PaceOutlookLine(outlook: pace)
+                            }
+                            if let outlook = appState.weekOutlook(provider) {
+                                WeekOutlookLine(outlook: outlook, limit: provider.capabilities.weeklyQuotaLabel.lowercased(),
+                                                pausesSessions: appState.pausingProviders.contains(provider))
+                            }
+
                             ForEach(accounts(for: provider)) { account in
-                                if provider == .claudeCode {
-                                    accountUsageCard(account: account, usage: appState.accountUsage[account.id])
-                                } else {
-                                    providerAccountCard(account)
-                                }
+                                accountCard(account)
                             }
                         }
                     }
@@ -108,12 +120,7 @@ struct UsageDashboardView: View {
     }
 
     private func providerIsVisible(_ provider: AIProviderType) -> Bool {
-        switch provider {
-        case .claudeCode: return showClaudeProvider
-        case .codex: return showCodexProvider
-        case .kimi: return showKimiProvider
-        case .gemini: return false
-        }
+        provider.capabilities.isImplemented && !ProviderVisibility.hidden(in: hiddenProviders).contains(provider)
     }
 
     private var visibleAccounts: [Account] {
@@ -124,40 +131,47 @@ struct UsageDashboardView: View {
         appState.accounts.filter { $0.provider == provider }
     }
 
-    private func providerAccountCard(_ account: Account) -> some View {
+    /// One account's windows, extra usage where the provider has it, and
+    /// what stops it from being read.
+    private func accountCard(_ account: Account) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             accountHeader(account)
+            if appState.needsSignIn(account) {
+                signInPrompt(account)
+            }
             if let usage = appState.accountUsage[account.id] {
-                if let session = usage.fiveHour {
-                    usageRow(
-                        label: LocalizedStringKey(account.provider.capabilities.sessionQuotaLabel),
-                        resetText: session.resetLabelString,
-                        utilization: session.utilization ?? 0
-                    )
-                }
-                if let weekly = usage.sevenDay {
-                    usageRow(
-                        label: longQuotaLabel(for: account.provider, window: weekly),
-                        resetText: weekly.resetLabelString,
-                        utilization: weekly.utilization ?? 0
-                    )
+                usageBars(usage, provider: account.provider)
+                if account.provider.capabilities.supportsExtraUsage {
+                    extraUsageRow(usage.extraUsage)
                 }
                 staleUsageNotice(account)
-            } else if let error = appState.accountUsageErrors[account.id] {
+            } else if let errorState = appState.accountUsageErrors[account.id] {
                 HStack {
-                    Image(systemName: account.providerUnavailableLabel == nil
-                        ? "exclamationmark.triangle"
-                        : "nosign")
-                        .foregroundStyle(account.providerUnavailableLabel == nil ? .red : .yellow)
-                    Text(error.message)
+                    Image(systemName: account.providerUnavailableLabel != nil
+                        ? "nosign"
+                        : (errorState.isRateLimited
+                            ? "timer"
+                            : (errorState.isExpired ? "exclamationmark.triangle" : "xmark.circle")))
+                        .foregroundStyle(errorState.isExpired ? .yellow : .red)
+                    Text(errorState.message)
                         .font(.caption)
                         .foregroundStyle(.textSecondary)
                         .lineLimit(2)
                     Spacer()
                 }
                 .padding(.top, 4)
+            } else if account.provider.capabilities.credentialStore == .keychain {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.yellow)
+                    Text("Token expired. Switch to this account in \(account.provider.rawValue) to refresh.")
+                        .font(.caption)
+                        .foregroundStyle(.textSecondary)
+                    Spacer()
+                }
+                .padding(.top, 4)
             }
-            if account.credentialLocation == nil {
+            if account.provider.capabilities.credentialStore == .files, account.credentialLocation == nil {
                 Label("Credentials need to be captured again.", systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -168,7 +182,7 @@ struct UsageDashboardView: View {
     }
 
     private func longQuotaLabel(for provider: AIProviderType, window: UsageWindow) -> LocalizedStringKey {
-        if provider != .codex {
+        if !provider.capabilities.longWindowReportsLength {
             return LocalizedStringKey(provider.capabilities.weeklyQuotaLabel)
         }
         guard let seconds = window.windowSeconds else { return "Weekly" }
@@ -179,10 +193,13 @@ struct UsageDashboardView: View {
     // MARK: - Today Activity Card
 
     private var todayActivityCard: some View {
-        let stats = appState.activityStats
-        let combinedTurns = visibleProviders.reduce(0) { $0 + todayTurnCount(for: $1) }
-        let combinedCost = visibleProviders.reduce(0) { $0 + todayCost(for: $1) }
-        let exposesClaudeActivity = visibleProviders.contains(.claudeCode)
+        func reporting(_ metric: ActivityMetric) -> [AIProviderType] {
+            visibleProviders.filter { $0.capabilities.activityMetrics.contains(metric) }
+        }
+        let combinedTurns = reporting(.turns).reduce(0) { $0 + appState.todayTurns(for: $1) }
+        let combinedCost = reporting(.cost).reduce(0) { $0 + todayCost(for: $1) }
+        let combinedLines = reporting(.linesChanged).reduce(0) { $0 + appState.todayLinesChanged(for: $1) }
+        let activeMinutes = reporting(.activeTime).reduce(0) { $0 + (appState.providerCosts[$1]?.todayActiveMinutes ?? 0) }
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "waveform.path.ecg")
@@ -196,17 +213,13 @@ struct UsageDashboardView: View {
             // Top stats row
             HStack(spacing: 0) {
                 activityStat(icon: "bubble.left.and.bubble.right", value: "\(combinedTurns)", label: "Turns",
-                             tooltip: "Providers: \(metricProviders([.claudeCode, .codex])). Claude conversation turns and Codex response activity today.")
-                activityStat(icon: "clock", value: exposesClaudeActivity ? stats.activeCodingTimeString : "0m", label: "Active",
-                             tooltip: "Providers: \(metricProviders([.claudeCode])). Active session timing is currently exposed by Claude local records.")
-                activityStat(
-                    icon: "doc.text",
-                    value: "\((exposesClaudeActivity ? stats.linesWritten : 0) + (visibleProviders.contains(.codex) ? appState.codexTodayLinesChanged : 0))",
-                    label: "Lines",
-                    tooltip: "Providers: \(metricProviders([.claudeCode, .codex])). Claude Edit/Write changes plus Codex apply_patch additions and removals today."
-                )
+                             tooltip: "Providers: \(metricProviders(.turns)). Conversation turns, or the model responses a provider records, today.")
+                activityStat(icon: "clock", value: ActivityStats(activeCodingMinutes: activeMinutes).activeCodingTimeString, label: "Active",
+                             tooltip: "Providers: \(metricProviders(.activeTime)). Active session timing from local session records.")
+                activityStat(icon: "doc.text", value: "\(combinedLines)", label: "Lines",
+                             tooltip: "Providers: \(metricProviders(.linesChanged)). Lines added and removed by file edits today.")
                 activityStat(icon: "dollarsign.circle", value: String(format: "$%.0f", combinedCost), label: "Cost",
-                             tooltip: "Providers: \(metricProviders([.claudeCode, .codex])). API-equivalent cost from local token records and provider pricing today.")
+                             tooltip: "Providers: \(metricProviders(.cost)). API-equivalent cost from local token records and provider pricing today.")
             }
 
             if !todayModels.isEmpty {
@@ -236,58 +249,27 @@ struct UsageDashboardView: View {
         visibleProviders.flatMap(todayModels(for:))
     }
 
-    private func todayTurnCount(for provider: AIProviderType) -> Int {
-        switch provider {
-        case .claudeCode: return appState.activityStats.conversationTurns
-        case .codex: return appState.codexTodayModelActivity.values.reduce(0, +)
-        case .kimi, .gemini: return 0
-        }
-    }
-
     private func todayCost(for provider: AIProviderType) -> Double {
-        switch provider {
-        case .claudeCode: return appState.costSummary.todayCost
-        case .codex: return max(0, appState.combinedTodayCost - appState.costSummary.todayCost)
-        case .kimi, .gemini: return 0
-        }
+        appState.todayCost(for: provider)
     }
 
     private func todayModels(for provider: AIProviderType) -> [TodayModel] {
-        switch provider {
-        case .claudeCode:
-            return appState.activityStats.modelUsage
+        appState.todayModelActivity(for: provider)
             .filter { $0.value > 0 && isDisplayableModel($0.key) }
             .sorted { $0.key < $1.key }
             .map {
                 TodayModel(
-                    id: "claude-\($0.key)",
-                    name: $0.key,
+                    id: "\(provider.rawValue)-\($0.key)",
+                    name: provider.displayModelName($0.key),
                     count: $0.value,
-                    tooltip: "Claude \($0.key) activity today"
+                    tooltip: "\(provider.capabilities.displayName) \($0.key) activity today"
                 )
             }
-        case .codex:
-            return appState.codexTodayModelActivity
-            .filter { $0.value > 0 && isDisplayableModel($0.key) }
-            .sorted { $0.key < $1.key }
-            .map {
-                TodayModel(
-                    id: "codex-\($0.key)",
-                    name: displayCodexModel($0.key),
-                    count: $0.value,
-                    tooltip: "Codex \($0.key) activity today"
-                )
-            }
-        case .kimi, .gemini:
-            // Kimi currently exposes subscription quota but not reliable
-            // per-turn/token activity through its supported provider API.
-            return []
-        }
     }
 
-    private func metricProviders(_ supported: Set<AIProviderType>) -> String {
+    private func metricProviders(_ metric: ActivityMetric) -> String {
         let names = visibleProviders
-            .filter { supported.contains($0) }
+            .filter { $0.capabilities.activityMetrics.contains(metric) }
             .map { $0.capabilities.displayName }
         return names.isEmpty ? "none currently visible" : names.joined(separator: ", ")
     }
@@ -299,15 +281,6 @@ struct UsageDashboardView: View {
             cleaned != "<unknown>"
     }
 
-    private func displayCodexModel(_ raw: String) -> String {
-        raw.split(separator: "-")
-            .map {
-                let part = String($0)
-                if part.lowercased() == "gpt" { return "GPT" }
-                return part.prefix(1).uppercased() + part.dropFirst()
-            }
-            .joined(separator: " ")
-    }
 
     private func activityStat(icon: String, value: String, label: LocalizedStringKey, tooltip: LocalizedStringKey) -> some View {
         StatWithTooltip(tooltip: tooltip) {
@@ -352,42 +325,25 @@ struct UsageDashboardView: View {
 
     // MARK: - Per-Account Card
 
-    private func accountUsageCard(account: Account, usage: UsageAPIResponse?) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            accountHeader(account)
-            if let usage = usage {
-                usageBars(usage, provider: account.provider)
-                extraUsageRow(usage.extraUsage)
-                staleUsageNotice(account)
-            } else if let errorState = appState.accountUsageErrors[account.id] {
-                HStack {
-                    Image(systemName: account.providerUnavailableLabel != nil
-                        ? "nosign"
-                        : (errorState.isRateLimited
-                            ? "timer"
-                            : (errorState.isExpired ? "exclamationmark.triangle" : "xmark.circle")))
-                        .foregroundStyle(errorState.isExpired ? .yellow : .red)
-                    Text(errorState.message)
-                        .font(.caption)
-                        .foregroundStyle(.textSecondary)
-                        .lineLimit(2)
-                    Spacer()
-                }
-                .padding(.top, 4)
-            } else {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle")
-                        .foregroundStyle(.yellow)
-                    Text("Token expired. Switch to this account in Claude Code to refresh.")
-                        .font(.caption)
-                        .foregroundStyle(.textSecondary)
-                    Spacer()
-                }
-                .padding(.top, 4)
+    /// Shown while the provider rejects the account's sign-in. The usage
+    /// shown beside it is the last reading, not a limit reached, so the
+    /// account is described as signed out rather than exhausted.
+    private func signInPrompt(_ account: Account) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "person.crop.circle.badge.exclamationmark")
+                .foregroundStyle(.orange)
+            Text("Needs sign-in. \(account.provider.capabilities.displayName) rejected this account's saved sign-in; its usage below is the last reading.")
+                .font(.caption)
+                .foregroundStyle(.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            Button("Sign In") {
+                Task { await appState.reauthenticateAccount(account) }
             }
+            .controlSize(.small)
+            .disabled(appState.isLoggingIn)
         }
-        .cardStyle(fill: account.isActive ? .cardFill : .cardFill)
-        .sectionPadding()
+        .padding(.top, 4)
     }
 
     @ViewBuilder
@@ -414,12 +370,22 @@ struct UsageDashboardView: View {
                 .font(.subheadline)
                 .foregroundStyle(account.isActive ? .brand : .secondary)
 
-            Text(account.displayEmail(obfuscated: !showFullEmail))
-                .font(.subheadline.weight(.medium))
-                .lineLimit(1)
-
-            if account.isActive {
-                Badge(text: String(localized: "Active", bundle: L10n.bundle), color: .brand)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Text(account.headerTitle(obfuscated: !showFullEmail))
+                        .font(.subheadline.weight(.medium))
+                        .lineLimit(1)
+                    if account.isActive {
+                        Badge(text: String(localized: "Active", bundle: L10n.bundle), color: .brand)
+                    }
+                    if let sessions = appState.accountSessions[account.id], !sessions.isEmpty {
+                        Text(sessions.count == 1 ? "1 session" : "\(sessions.count) sessions")
+                            .font(.caption2)
+                            .foregroundStyle(.textSecondary)
+                            .help("\(account.provider.rawValue) sessions running on this account.")
+                    }
+                }
+                AccountEmailLabel(email: account.email, alwaysVisible: showFullEmail)
             }
 
             Spacer()
@@ -441,6 +407,10 @@ struct UsageDashboardView: View {
                 resetText: session.resetLabelString,
                 utilization: session.utilization ?? 0
             )
+        } else if usage.reportsNoSessionWindow, provider.capabilities.supportsSessionQuota {
+            Label("No \(provider.capabilities.sessionQuotaLabel.lowercased()) limit on this account", systemImage: "infinity")
+                .font(.caption)
+                .foregroundStyle(.textSecondary)
         }
         if let weekly = usage.sevenDay {
             usageRow(
@@ -514,5 +484,112 @@ struct UsageDashboardView: View {
         if pct >= 90 { return .red }
         if pct >= 60 { return .orange }
         return .brand
+    }
+}
+
+/// Sessions started before the pause hook was installed, which a pause
+/// cannot hold until they are restarted (`AppState.sessionsWithoutGate`).
+private struct UngatedSessionsLine: View {
+    let provider: AIProviderType
+    let sessions: [AgentSession]
+
+    var body: some View {
+        Label(text, systemImage: "exclamationmark.triangle")
+            .font(.caption)
+            .foregroundStyle(Color.orange)
+            .help(places)
+            .sectionPadding()
+    }
+
+    private var text: String {
+        let name = provider.capabilities.displayName
+        let count = sessions.count == 1 ? "1 \(name) session" : "\(sessions.count) \(name) sessions"
+        let verb = sessions.count == 1 ? "was" : "were"
+        let pronoun = sessions.count == 1 ? "it" : "them"
+        return "\(count) \(verb) started before AccountDock's pause hook was installed, so a pause cannot hold \(pronoun). Restart \(pronoun) to fix this."
+    }
+
+    private var places: String {
+        sessions.map { session in
+            session.workingDirectory.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? session.sessionID
+        }.joined(separator: "\n")
+    }
+}
+
+/// When the active account runs out and when sessions would be paused, at
+/// the active account's current pace (`AppState.paceOutlook`).
+private struct PaceOutlookLine: View {
+    let outlook: AppState.PaceOutlook
+
+    var body: some View {
+        Label(text, systemImage: "gauge.with.dots.needle.67percent")
+            .font(.caption)
+            .foregroundStyle(soon ? Color.orange : Color.textSecondary)
+            .help("Estimated from the active account's use over the last few readings, with work moving between accounts as failover would move it.")
+            .sectionPadding()
+    }
+
+    /// A pause within the next two hours is shown in orange.
+    private var soon: Bool { outlook.holdAt.map { $0.timeIntervalSinceNow < 2 * 3600 } ?? false }
+
+    private var text: String {
+        var parts: [String] = []
+        if let runsOut = outlook.runsOutAt, let limit = outlook.limit {
+            let window = outlook.afterCurrentWindow ? " in a later window than this one" : ""
+            let room = outlook.resumesAt.map { ", and has room again at \($0.formatted(date: .omitted, time: .shortened))" } ?? ""
+            parts.append("At the current pace, \(outlook.account) reaches its \(limit)\(window) \(Self.when(runsOut))\(room).")
+        } else {
+            parts.append("At the current pace, \(outlook.account) does not run out this week.")
+        }
+        if let hold = outlook.holdAt {
+            parts.append(outlook.pausesSessions
+                ? "Sessions pause \(Self.when(hold)), when every included account is used up."
+                : "Every included account is used up \(Self.when(hold)); its sessions are not paused, so they stop at the limit until it resets.")
+        } else {
+            parts.append(outlook.pausesSessions ? "No pause is expected this week." : "No account runs out this week.")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    /// "in about 40 min (9:12 am)", or the day and time beyond today.
+    static func when(_ date: Date) -> String {
+        let minutes = max(0, Int((date.timeIntervalSinceNow / 60).rounded()))
+        let clock = Calendar.current.isDateInToday(date)
+            ? date.formatted(date: .omitted, time: .shortened)
+            : date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+        if minutes < 1 { return "now" }
+        if minutes < 60 { return "in about \(minutes) min (\(clock))" }
+        if minutes < 24 * 60 {
+            let hours = minutes / 60, rest = minutes % 60
+            return "in about \(hours) h\(rest > 0 ? " \(rest) min" : "") (\(clock))"
+        }
+        return "around \(clock)"
+    }
+}
+
+/// One line summarising the coming week under the current strategy, from
+/// the demand forecast.
+private struct WeekOutlookLine: View {
+    let outlook: QuotaSimulator.Outcome
+    /// The long window's name, such as "weekly limit" or "monthly limit".
+    let limit: String
+    let pausesSessions: Bool
+
+    var body: some View {
+        Label(text, systemImage: outlook.unmet > 0.5 ? "exclamationmark.circle" : "calendar")
+            .font(.caption)
+            .foregroundStyle(outlook.unmet > 0.5 ? Color.orange : Color.textSecondary)
+            .help("Simulated from your usage by hour of the week over the next seven days, with the current failover strategy. Percentages are of one account's weekly allowance.")
+            .sectionPadding()
+    }
+
+    private var text: String {
+        if let shortfall = outlook.firstShortfall, outlook.unmet > 0.5 {
+            return "At your usual pace, which differs from the current one, every account's \(limit) is used up \(shortfall.formatted(.dateTime.weekday(.abbreviated).hour().minute())); about \(Int(outlook.unmet.rounded()))% of the next 7 days' work would \(pausesSessions ? "wait" : "be refused") until it resets."
+        }
+        if outlook.expired > 0.5 {
+            return "At your usual pace, about \(Int(outlook.expired.rounded()))% of allowance resets unused this week."
+        }
+        return "At your usual pace, this week's allowances cover your work with nothing left to expire."
     }
 }

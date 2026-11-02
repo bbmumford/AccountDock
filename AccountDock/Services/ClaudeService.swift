@@ -47,17 +47,15 @@ struct RunningClaudeProcess: Hashable, Identifiable, Sendable {
     }
 }
 
-private struct ClaudeHookSession: Decodable {
-    let provider: String?
-    let sessionID: String
-    let workingDirectory: String?
-    let processID: Int32?
-    let host: String?
-}
-
 struct ClaudeSubscriptionSnapshot: Equatable, Sendable {
     let planType: String?
     let isInactive: Bool
+}
+
+/// The account a Claude access token belongs to, from the account profile.
+struct ClaudeProfileIdentity: Equatable, Sendable {
+    let accountUUID: String?
+    let email: String?
 }
 
 /// Interacts with the Claude CLI to get auth status and manage accounts.
@@ -275,6 +273,36 @@ final class ClaudeService: @unchecked Sendable {
         return Self.liveSubscription(fromProfileJSON: json)
     }
 
+    /// Reads which account an access token belongs to: the token names no
+    /// account, so a credential found in Claude's shared Keychain slot is
+    /// attributed by asking. A rejected token throws `UsageError.expired`.
+    func getProfileIdentity(accessToken: String) async throws -> ClaudeProfileIdentity {
+        var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/profile")!)
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        switch status {
+        case 200...299: break
+        case 401: throw UsageError.expired
+        case 429: throw UsageError.rateLimited(nil)
+        default: throw UsageError.network("profile HTTP \(status)")
+        }
+        return Self.profileIdentity(fromProfileJSON: try JSONSerialization.jsonObject(with: data))
+    }
+
+    static func profileIdentity(fromProfileJSON json: Any) -> ClaudeProfileIdentity {
+        let account = (json as? [String: Any])?["account"] as? [String: Any]
+        return ClaudeProfileIdentity(
+            accountUUID: account?["uuid"] as? String,
+            email: (account?["email"] as? String) ?? (account?["email_address"] as? String)
+        )
+    }
+
     static func liveSubscription(fromProfileJSON json: Any) -> ClaudeSubscriptionSnapshot {
         let expired = containsExpiredSubscription(json)
         return ClaudeSubscriptionSnapshot(
@@ -411,6 +439,14 @@ final class ClaudeService: @unchecked Sendable {
         return accessToken
     }
 
+    /// The rate-limit tier in a token JSON (keychain format).
+    static func rateLimitTier(from tokenJSON: String) -> String? {
+        guard let data = tokenJSON.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = json["claudeAiOauth"] as? [String: Any] else { return nil }
+        return oauth["rateLimitTier"] as? String
+    }
+
     /// Refreshes a stored Claude OAuth record without installing it as the
     /// machine-wide Claude credential. This keeps inactive accounts observable
     /// and rotates their refresh token independently of the active CLI account.
@@ -436,7 +472,19 @@ final class ClaudeService: @unchecked Sendable {
         ]
         request.httpBody = (components.percentEncodedQuery ?? "").data(using: .utf8)
 
-        let (responseData, response) = try await URLSession.shared.data(for: request)
+        let responseData: Data
+        let response: URLResponse
+        do {
+            (responseData, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            throw UsageError.network(error.localizedDescription)
+        }
+        // Only a rejection of the grant means the stored credential is dead;
+        // throttling and server errors leave it usable later.
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode),
+           http.statusCode == 429 || http.statusCode >= 500 {
+            throw UsageError.network("token endpoint returned \(http.statusCode)")
+        }
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
               let refreshed = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
               let accessToken = refreshed["access_token"] as? String,
@@ -473,8 +521,11 @@ final class ClaudeService: @unchecked Sendable {
             environment.removeValue(forKey: "ANTHROPIC_API_KEY")
             environment.removeValue(forKey: "ANTHROPIC_AUTH_TOKEN")
             process.environment = environment
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
+            // The reply's last lines say why a probe failed, such as a usage
+            // limit the account has already reached.
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = output
             try process.run()
             let deadline = Date().addingTimeInterval(90)
             while process.isRunning && Date() < deadline {
@@ -485,7 +536,10 @@ final class ClaudeService: @unchecked Sendable {
                 throw UsageError.network("warm-up request timed out")
             }
             guard process.terminationStatus == 0 else {
-                throw UsageError.network("warm-up request exited \(process.terminationStatus)")
+                let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile().suffix(300), as: UTF8.self)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: "\n", with: " ")
+                throw UsageError.network("warm-up request exited \(process.terminationStatus)\(text.isEmpty ? "" : ": \(text)")")
             }
         }.value
     }
@@ -599,7 +653,7 @@ final class ClaudeService: @unchecked Sendable {
     /// records map the Claude parent PID to its session without depending on a
     /// particular IDE, terminal, or orchestration harness.
     func recoverableRunningProcesses() -> [RunningClaudeProcess] {
-        let records = hookSessionRecords()
+        let records = AgentSessions.byProcess(.claudeCode)
         return runningProcesses().filter(\.isWorkload).map { process in
             guard let record = records[process.id] else { return process }
             let hostManaged = process.command.localizedCaseInsensitiveContains("vscode")
@@ -624,22 +678,6 @@ final class ClaudeService: @unchecked Sendable {
         return String(command[idRange])
     }
 
-    private func hookSessionRecords() -> [Int32: ClaudeHookSession] {
-        let directory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/AccountDock/Sessions")
-        guard let files = try? FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: nil
-        ) else { return [:] }
-        return files.reduce(into: [:]) { result, file in
-            guard file.pathExtension == "json",
-                  let data = try? Data(contentsOf: file),
-                  let record = try? JSONDecoder().decode(ClaudeHookSession.self, from: data),
-                  record.provider == nil || record.provider == "claude",
-                  let pid = record.processID else { return }
-            result[pid] = record
-        }
-    }
 
     /// Gracefully stops the exact processes captured before a credential switch.
     /// It intentionally never escalates to SIGKILL; unsaved interactive sessions
@@ -720,7 +758,11 @@ final class ClaudeService: @unchecked Sendable {
 
         // 1. Back up current account (token + oauthAccount)
         log.info("[switchAccount] Step 1: Backing up current account...")
-        if let currentToken = keychain.readClaudeToken(),
+        if currentAccount.id == targetAccount.id {
+            // Restoring the active account: the live credential is the one
+            // being replaced, so it must not overwrite the backup restored.
+            log.info("[switchAccount] Step 1: Restoring the same account; live credential not backed up")
+        } else if let currentToken = keychain.readClaudeToken(),
            let currentOAuth = keychain.readOAuthAccount() {
             let email = (currentOAuth["emailAddress"]?.value as? String) ?? "?"
             if email == currentAccount.email {
@@ -735,9 +777,17 @@ final class ClaudeService: @unchecked Sendable {
 
         // 2. Retrieve target account's backup
         log.info("[switchAccount] Step 2: Reading backup for target account...")
-        guard let targetBackup = keychain.getAccountBackup(forAccountId: targetAccount.id.uuidString) else {
+        guard var targetBackup = keychain.getAccountBackup(forAccountId: targetAccount.id.uuidString) else {
             log.error("[switchAccount] Step 2: No backup found for target account!")
             throw ClaudeServiceError.noTokenForAccount(targetAccount.id.uuidString)
+        }
+        if !AccountBackup.isCompleteCredential(targetBackup.token) {
+            guard let previous = targetBackup.previousToken, AccountBackup.isCompleteCredential(previous) else {
+                log.error("[switchAccount] Step 2: Target backup is incomplete and no earlier copy exists")
+                throw ClaudeServiceError.noTokenForAccount(targetAccount.id.uuidString)
+            }
+            log.warning("[switchAccount] Step 2: Target backup is incomplete; using the earlier copy")
+            targetBackup = AccountBackup(token: previous, oauthAccount: targetBackup.oauthAccount)
         }
         let targetEmail = (targetBackup.oauthAccount["emailAddress"]?.value as? String) ?? "?"
         log.info("[switchAccount] Step 2: Target backup found (email=\(targetEmail))")

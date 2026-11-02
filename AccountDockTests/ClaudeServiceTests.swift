@@ -2,6 +2,85 @@ import XCTest
 @testable import AccountDock
 
 final class ClaudeServiceTests: XCTestCase {
+    func testRateLimitTierComesFromTheToken() {
+        XCTAssertEqual(ClaudeService.rateLimitTier(from: #"{"claudeAiOauth":{"rateLimitTier":"default_claude_max_20x"}}"#), "default_claude_max_20x")
+        XCTAssertNil(ClaudeService.rateLimitTier(from: #"{"claudeAiOauth":{}}"#))
+    }
+
+    func testProfileIdentityNamesTheTokensAccount() {
+        let profile: [String: Any] = [
+            "account": ["uuid": "acct-1", "email": "owner@mail.example", "display_name": "Owner"],
+            "organization": ["uuid": "org-1"]
+        ]
+        XCTAssertEqual(
+            ClaudeService.profileIdentity(fromProfileJSON: profile),
+            ClaudeProfileIdentity(accountUUID: "acct-1", email: "owner@mail.example")
+        )
+        XCTAssertEqual(
+            ClaudeService.profileIdentity(fromProfileJSON: ["organization": ["uuid": "org-1"]]),
+            ClaudeProfileIdentity(accountUUID: nil, email: nil)
+        )
+    }
+
+    func testLiveCredentialOwnerIsMatchedByProviderIDBeforeEmail() {
+        let first = Account(email: "a@mail.example", displayName: "A")
+        let second = Account(email: "b@mail.example", displayName: "B")
+        let ids = [first.id: "uuid-a", second.id: "uuid-b"]
+        func match(_ owner: CredentialOwner) -> UUID? {
+            AppState.owningAccount(owner, among: [first, second], providerAccountID: { ids[$0.id] })?.id
+        }
+        XCTAssertEqual(match(CredentialOwner(providerAccountID: "uuid-b", email: "a@mail.example")), second.id)
+        XCTAssertEqual(match(CredentialOwner(providerAccountID: "unknown", email: "A@MAIL.example")), first.id)
+        XCTAssertNil(match(CredentialOwner(providerAccountID: nil, email: "c@mail.example")))
+    }
+
+    func testOnlyAnotherAccountsRenewedCredentialIsAdoptedAndTheActiveOneRestored() {
+        let active = UUID(), other = UUID()
+        XCTAssertEqual(AppState.liveCredentialAction(ownerID: active, activeID: active, signedInAsActive: true, activeCopyIsCurrent: false), .saveActiveCopy)
+        XCTAssertEqual(AppState.liveCredentialAction(ownerID: active, activeID: active, signedInAsActive: true, activeCopyIsCurrent: true), .none)
+        XCTAssertEqual(AppState.liveCredentialAction(ownerID: active, activeID: active, signedInAsActive: false, activeCopyIsCurrent: false), .none)
+        XCTAssertEqual(AppState.liveCredentialAction(ownerID: other, activeID: active, signedInAsActive: true, activeCopyIsCurrent: false), .adopt(restoreActive: true))
+        // Signed in as another account outside AccountDock: its credential is
+        // saved, and the live slot is left alone.
+        XCTAssertEqual(AppState.liveCredentialAction(ownerID: other, activeID: active, signedInAsActive: false, activeCopyIsCurrent: false), .adopt(restoreActive: false))
+        // Only the identity named the active account: a session on it rewrote
+        // the identity, and the live credential's owner is the active account.
+        // Nothing is installed, so no running session moves.
+        XCTAssertEqual(AppState.liveCredentialAction(ownerID: other, activeID: active, signedInAsActive: true, activeCopyIsCurrent: false, liveWasActives: false), .makeOwnerActive)
+    }
+
+    func testSignallingRunningSessionsChangesOnlyTheModificationTime() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent(".credentials.json")
+        try Data("{}".utf8).write(to: file)
+        let later = Date().addingTimeInterval(60)
+        XCTAssertTrue(ClaudeCredentialModule.touchIfPresent(file.path, now: later))
+        let modified = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date)
+        XCTAssertEqual(modified.timeIntervalSince1970, later.timeIntervalSince1970, accuracy: 1)
+        XCTAssertEqual(try Data(contentsOf: file), Data("{}".utf8))
+        // A missing file is never created: it would read as a stored credential.
+        let absent = dir.appendingPathComponent("absent.json")
+        XCTAssertFalse(ClaudeCredentialModule.touchIfPresent(absent.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: absent.path))
+    }
+
+    func testOnlyLeavingAnAccountThatWouldRefuseThemMovesRunningSessionsAtOnce() {
+        XCTAssertTrue(AppState.switchMovesRunningSessions(.exhausted))
+        XCTAssertTrue(AppState.switchMovesRunningSessions(.workloadUnavailable))
+        XCTAssertFalse(AppState.switchMovesRunningSessions(.threshold))
+        XCTAssertFalse(AppState.switchMovesRunningSessions(.balance(advantageHours: 2)))
+    }
+
+    func testCredentialDigestDistinguishesCredentialsWithoutHoldingThem() {
+        let first = AppState.credentialDigest("{\"claudeAiOauth\":{\"accessToken\":\"a\"}}")
+        XCTAssertEqual(first, AppState.credentialDigest("{\"claudeAiOauth\":{\"accessToken\":\"a\"}}"))
+        XCTAssertNotEqual(first, AppState.credentialDigest("{\"claudeAiOauth\":{\"accessToken\":\"b\"}}"))
+        XCTAssertFalse(first.contains("accessToken"))
+        XCTAssertEqual(first.count, 64)
+    }
+
     func testLiveProfileReportsCurrentSubscription() {
         let profile: [String: Any] = [
             "account": ["subscription_type": "pro"]

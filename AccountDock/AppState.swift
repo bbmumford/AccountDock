@@ -34,12 +34,11 @@ final class AppState: ObservableObject {
     @Published var lastUsageRefresh: Date?
     @Published var costSummary: CostSummary = .empty
     @Published var combinedTodayCost: Double = 0
-    @Published var codexDailyCosts: [String: Double] = [:]
-    @Published var codexTodayModelActivity: [String: Int] = [:]
-    @Published var codexTodayModelCosts: [String: Double] = [:]
-    @Published var codexTodayLinesChanged = 0
+    /// Cost and today's activity of every provider, in one shape; Claude
+    /// Code's is built from `costSummary` and `activityStats`.
+    @Published var providerCosts: [AIProviderType: CostParser.ProviderCostHistory] = [:]
     @Published var activityStats: ActivityStats = .empty
-    @Published private(set) var failoverStatus: [AIProviderType: String] = [:]
+    @Published var failoverStatus: [AIProviderType: String] = [:]
 
     // Store errors as special struct to surface in UI
     struct UsageErrorState {
@@ -60,37 +59,98 @@ final class AppState: ObservableObject {
 
     // MARK: - Services
 
-    private let claudeService = ClaudeService.shared
-    private let codexService = CodexService.shared
-    private let kimiService = KimiService.shared
+    let claudeService = ClaudeService.shared
+    let codexService = CodexService.shared
+    let kimiService = KimiService.shared
     private let statsParser = StatsParser.shared
     private let costParser = CostParser.shared
     private let activityParser = ActivityParser.shared
-    private let keychain = KeychainService.shared
-    private let failoverConfig = FailoverConfigStore.shared
-    private let failoverEvents = FailoverEventLog.shared
-    private let agentSuspension = AgentSuspensionService.shared
+    let keychain = KeychainService.shared
+    let failoverConfig = FailoverConfigStore.shared
+    let failoverEvents = FailoverEventLog.shared
+    let agentSuspension = AgentSuspensionService.shared
 
     private let accountsKey = "app.accountdock.accounts"
     private let usageSnapshotsKey = "app.accountdock.usageSnapshots"
     private let failoverRuntimeKey = "app.accountdock.failover.runtime"
     private var refreshTimer: Timer?
-    private var isRefreshing = false
+    var isRefreshing = false
     private var unavailablePlanCheckedAt: [UUID: Date] = [:]
     private let unavailablePlanCheckInterval: TimeInterval = 15 * 60
-    private var failoverMonitorTimer: Timer?
+    var failoverMonitorTimer: Timer?
     private var usageResetTimer: Timer?
-    private var isMonitoringFailover = false
+    var isMonitoringFailover = false
+    /// Learned consumption rates per account, used to time readings and to
+    /// project usage while a provider throttles its usage endpoint.
+    var quotaTrends: [UUID: QuotaTrend] = [:]
+    /// One shared request allowance per provider usage endpoint.
+    let usageBudgets: [AIProviderType: UsageRequestBudget] = Dictionary(uniqueKeysWithValues:
+        AIProviderType.allCases.compactMap { provider in
+            provider.capabilities.usageRequestBudget.map {
+                (provider, UsageRequestBudget(capacity: $0.capacity, refillInterval: $0.refillInterval))
+            }
+        }
+    )
+    /// Accounts whose stored credentials failed verification, and until when
+    /// automatic failover must not choose them.
+    var credentialQuarantine: [UUID: Date] = [:]
+    /// When automatic or manual switching last moved work off an account.
+    var lastSwitchedAway: [UUID: Date] = [:]
+    /// Accounts whose usage endpoint asked to wait, and until when; any
+    /// provider.
+    var usageRetryAfter: [UUID: Date] = [:]
+    var lastProfileCheck: [UUID: Date] = [:]
+    /// Set while one failover evaluation, including any switch it performs,
+    /// is in progress; a second evaluation would plan from the half-switched
+    /// state and could start a competing switch.
+    var isEvaluatingFailover = false
+    /// Destinations whose automatic switch just failed, and until when they
+    /// are not tried again.
+    var switchFailureCooldown: [UUID: Date] = [:]
+    /// Claude `accountUuid` to AccountDock account, used to attribute the
+    /// usage Claude Code caches in `~/.claude.json`.
+    var claudeAccountUUIDs: [String: UUID] = [:]
+    var claudeAccountUUIDsBuiltAt: Date?
     private var loginAttemptID: UUID?
-    private var exhaustedFailoverAccounts: [AIProviderType: Set<UUID>] = [:]
-    private var lastAutomaticFailover: [AIProviderType: Date] = [:]
-    private var claudeUsageRetryAfter: [UUID: Date] = [:]
-    private var expiredClaudeAccounts: Set<UUID> = []
+    var exhaustedFailoverAccounts: [AIProviderType: Set<UUID>] = [:]
+    var lastAutomaticFailover: [AIProviderType: Date] = [:]
+    /// Accounts that need signing in again: the provider rejected the
+    /// sign-in AccountDock holds for them even after renewal. Failover
+    /// leaves them out, and the account views show the re-authenticate
+    /// prompt, until a reading or re-authentication succeeds.
+    @Published var rejectedCredentialAccounts: Set<UUID> = []
+    /// When each account's saved sign-in last passed the switch check,
+    /// which renews it; read by `credentialIsUsable`.
+    var credentialVerifiedAt: [UUID: Date] = [:]
+    /// Each provider's live credential last seen, as a digest, and when it
+    /// was last read; used by `adoptRenewedCredentials`.
+    var liveCredentialDigests: [AIProviderType: String] = [:]
+    var liveCredentialCheckedAt: [AIProviderType: Date] = [:]
+    /// The account each provider's live credential belongs to, with the
+    /// digest of the credential its owner was read for; read through
+    /// `liveCredentialOwner`.
+    var liveCredentialOwners: [AIProviderType: (digest: String, account: UUID)] = [:]
+    /// Accounts whose slot a running session reads, kept by
+    /// `maintainSessionSlots`; they are read and planned as in use.
+    var slotServedAccounts: Set<UUID> = []
+    /// The slot directory each running process reads, and the account
+    /// serving each slot that has running sessions; read by
+    /// `slotAccount(forSession:)`.
+    var slotDirectoryByProcess: [Int32: String] = [:]
+    var slotDirectoryServing: [String: UUID] = [:]
+    /// Sessions `SessionPacer` moves to another account to balance load,
+    /// applied to one-session slots by `maintainSessionSlots`.
+    var slotSessionMoves: [String: UUID] = [:]
+    /// When each one-session slot last moved to another account.
+    var slotDirectoryMovedAt: [String: Date] = [:]
+    /// Accounts a threshold or balancing switch left, whose running sessions
+    /// stay on them until `moveSessionsOffLimitedAccounts` moves them.
+    var sessionsLeftOn: [AIProviderType: Set<UUID>] = [:]
     /// A locally elapsed reset is useful for clearing a stale 100% display,
     /// but it is not proof that the provider has opened a new quota window.
     /// Never fail over to one of these accounts until a fresh API response
     /// confirms its post-reset capacity.
-    private var accountsAwaitingPostResetVerification: Set<UUID> = []
+    var accountsAwaitingPostResetVerification: Set<UUID> = []
     private struct PendingWindowWarmup {
         var session = false
         var weekly = false
@@ -99,18 +159,132 @@ final class AppState: ObservableObject {
     private var warmupBootstrapsInFlight: Set<String> = []
     private var warmupRetryAttempts: [UUID: Int] = [:]
     private var accountWarmupsInFlight: Set<UUID> = []
-    private struct PendingResetRecovery {
+    struct PendingResetRecovery {
         let accountID: UUID
         let resetDate: Date
     }
-    private var pendingResetRecovery: [AIProviderType: PendingResetRecovery] = [:]
+    var pendingResetRecovery: [AIProviderType: PendingResetRecovery] = [:]
+    /// The account that was active when a provider's agents were paused, its
+    /// usage at that moment and the burn rate that justified the pause.
+    struct SuspensionContext {
+        let accountID: UUID
+        let usage: UsageAPIResponse?
+        let sessionBurnPerHour: Double
+        let weeklyBurnPerHour: Double
+    }
+    var suspensionContexts: [AIProviderType: SuspensionContext] = [:]
+    /// Sessions paused because every account reached its limit, as shown in
+    /// the usage view.
+    struct AgentPauseStatus: Equatable {
+        var sessions: Int
+        /// Paused sessions currently waiting inside the pause hook.
+        var waiting: Int
+        /// Processes stopped because they cannot be paused through a hook.
+        var stoppedProcesses: Int
+        var since: Date
+        var resumeAt: Date?
+        var reason: String
+        /// Started by the user rather than at a limit.
+        var manual = false
+    }
+    @Published var agentPauseStatus: [AIProviderType: AgentPauseStatus] = [:]
+    /// Set when the user resumes paused sessions themselves; no new pause
+    /// starts for the provider before this time.
+    var pauseOverrideUntil: [AIProviderType: Date] = [:]
+    var pauseGateSynchronizedAt: Date?
+    var hookCheckDone = false
+    /// Set once the user has been told the saved accounts wait on a
+    /// Keychain access prompt.
+    var keychainWaitNoted = false
+    let launchedAt = Date()
+    /// Claude Code requests currently served by Kimi through the router.
+    struct RoutedStatus: Equatable {
+        var since: Date
+        var target: String
+        var model: String
+        var backingAccount: String
+        var resumeAt: Date?
+        var turns = 0
+    }
+    /// Sessions each account served through the router in the last ten
+    /// minutes; one input to `accountSessions`.
+    @Published var routedSessions: [UUID: Set<String>] = [:]
+    /// Every provider's running sessions, from their lifecycle records.
+    @Published var liveSessions: [AIProviderType: [AgentSession]] = [:]
+    /// The running sessions each account serves, shown on the account cards.
+    @Published var accountSessions: [UUID: Set<String>] = [:]
+    var routedSessionSeen: [String: (account: UUID, at: Date)] = [:]
+    /// Credential fingerprint to account, for usage the router observed.
+    var credentialFingerprints: [String: UUID] = [:]
+    /// When each credential fingerprint was last seen as an account's token.
+    var credentialFingerprintSeen: [String: Date] = [:]
+    /// Accounts the router found refused at their plan limit, and until when.
+    var routerRefusedUntil: [UUID: Date] = [:]
+    /// Route targets the router found refusing at their plan limit, by
+    /// target id, until when; `routeTargetAccount` treats them as full.
+    var routeTargetRefusedUntil: [String: Date] = [:]
+    /// What routed tokens cost each route target, by target id.
+    var routeTargetCosts: [String: RouteTargetCostModel] = [:]
+    /// Requests the router served in the last hour, any backend.
+    var recentRouterRequests: [RecentRouterRequest] = []
+    /// Why each route target was last judged unable to take the demand.
+    @Published var routeTargetVerdicts: [String: RouteCapacity.Verdict] = [:]
+    var routerUsageApplied: [String: Date] = [:]
+    @Published var routedStatus: [AIProviderType: RoutedStatus] = [:]
+    /// Set when the user returns requests to Claude themselves.
+    var routeOverrideUntil: [AIProviderType: Date] = [:]
+    var routerEventOffset: UInt64 = 0
+    var routerCheckedAt: Date?
+    var lastRouterFailureNote: Date?
+    var lastRouterHoldNote: Date?
+    var routerPoolMembers: [RouterPoolMember] = []
+    /// Recent token use of each routed session, for pacing sessions.
+    var sessionRates = SessionRates()
+    /// What the one-hour prompt cache the router asks for saved and cost.
+    @Published var cacheExtension = CacheExtensionLedger()
+    /// Sessions the router moves at their next turn, from `SessionPacer`.
+    var routerSessionMoves: [String: UUID] = [:]
+    /// Accounts currently giving sessions up to stay within their windows.
+    var pacingShedding: Set<UUID> = []
+    /// Paused sessions AccountDock let continue during the current pause,
+    /// by provider and session.
+    var sessionAdmissions: [AIProviderType: [String: SessionAdmission]] = [:]
+    /// Sessions the user resumed during the current pause while the account
+    /// serving them had room: the account each was on, by provider and
+    /// session. Each is held again when that account nears its limit.
+    var userResumes: [AIProviderType: [String: UUID]] = [:]
+    /// The reset each provider's last account hold waited for, so one reset
+    /// holds its account's sessions once.
+    var accountHoldResets: [AIProviderType: Date] = [:]
+
+    struct SessionAdmission: Equatable {
+        let session: String
+        /// The account the session was placed on.
+        let account: UUID
+        let at: Date
+        /// It runs on what its account would leave unused by the reset
+        /// (`SessionPacer.Placement.surplus`).
+        var surplus = false
+    }
+    /// Why the router could not be installed, shown in Failover settings.
+    @Published var routerProblem: String?
+    var credentialFingerprintsBuiltAt: Date?
+    var turnCostModel = TurnCostModel()
+    var demandForecasts: [AIProviderType: DemandForecast] = [:]
+    var learningSavedAt: Date?
+    /// Model the provider's sessions were last seen using, from the Claude
+    /// Code status line; selects which model-scoped weekly limit applies.
+    var workloadModels: [AIProviderType: (model: String, seenAt: Date)] = [:]
 
     // MARK: - Initialization
 
     init() {
+        ProviderVisibility.migrate()
         log.info("[init] Loading accounts from UserDefaults...")
+        keychain.preloadBackupStore()
         loadAccounts()
         loadUsageSnapshots()
+        loadLearning()
         // Older builds stored permanent per-account warm-up markers. They
         // incorrectly suppressed every later reset, so the countdown snapshot
         // is now the durable duplicate guard and these markers are retired.
@@ -121,6 +295,50 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - Refresh
+
+    /// Today's API-equivalent cost of one provider.
+    func todayCost(for provider: AIProviderType) -> Double {
+        providerCosts[provider]?.dailyCosts[DateFormatter.accountDockDay.string(from: Date())] ?? 0
+    }
+
+    /// Per-day API-equivalent cost of one provider, keyed by `yyyy-MM-dd`.
+    func dailyCosts(for provider: AIProviderType) -> [String: Double] {
+        providerCosts[provider]?.dailyCosts ?? [:]
+    }
+
+    /// Today's cost per model for one provider.
+    func todayModelCosts(for provider: AIProviderType) -> [String: Double] {
+        providerCosts[provider]?.todayModelCosts ?? [:]
+    }
+
+    /// Today's model responses (Claude Code: turns) per model.
+    func todayModelActivity(for provider: AIProviderType) -> [String: Int] {
+        providerCosts[provider]?.todayModelActivity ?? [:]
+    }
+
+    /// Today's turns: Claude Code's conversation turns, and the model
+    /// responses other providers record.
+    func todayTurns(for provider: AIProviderType) -> Int {
+        providerCosts[provider]?.todayTurns ?? 0
+    }
+
+    /// Lines the provider's sessions changed today.
+    func todayLinesChanged(for provider: AIProviderType) -> Int {
+        providerCosts[provider]?.todayLinesChanged ?? 0
+    }
+
+    /// Input, output and cache tokens the provider's sessions used today.
+    func todayTokens(for provider: AIProviderType) -> Int {
+        providerCosts[provider]?.todayTokens ?? 0
+    }
+
+    /// Sessions with activity today: the usage records' count, or the
+    /// sessions the provider's lifecycle hooks recorded today.
+    func todaySessions(for provider: AIProviderType) -> Int {
+        let startOfDay = Calendar.current.startOfDay(for: Date())
+        let recorded = AgentSessions.records(provider).values.filter { ($0.observedAt ?? .distantPast) >= startOfDay }.count
+        return max(providerCosts[provider]?.todaySessions ?? 0, recorded)
+    }
 
     func refresh(forceUnavailablePlanCheck: Bool = false) async {
         guard !isLoggingIn else {
@@ -165,7 +383,9 @@ final class AppState: ObservableObject {
         }
         updateActiveCodexAccount()
 
-        // Fetch usage limits for all accounts
+        // Readings the agents already recorded locally come first; endpoint
+        // requests are then only made for accounts those readings do not cover.
+        await ingestPassiveTelemetry()
         await fetchAllAccountUsage(forceUnavailablePlanCheck: forceUnavailablePlanCheck)
         await evaluateFailover()
         lastUsageRefresh = Date()
@@ -176,18 +396,20 @@ final class AppState: ObservableObject {
 
         await usageIndexRefresh
         let cost = await costParser.getCostSummary()
-        let codexHistory = await costParser.getCodexCostHistory()
+        var histories: [AIProviderType: CostParser.ProviderCostHistory] = [:]
+        for provider in AIProviderType.implementedProviders {
+            if let history = await costParser.costHistory(for: provider) { histories[provider] = history }
+        }
         let activity = await activityParser.getTodayStats()
+        histories[.claudeCode] = CostParser.ProviderCostHistory(
+            claude: cost, activity: activity, today: DateFormatter.accountDockDay.string(from: Date())
+        )
         costSummary = cost
-        codexDailyCosts = codexHistory.dailyCosts
-        codexTodayModelActivity = codexHistory.todayModelActivity
-        codexTodayModelCosts = codexHistory.todayModelCosts
-        codexTodayLinesChanged = codexHistory.todayLinesChanged
-        let todayKey = DateFormatter.accountDockDay.string(from: Date())
-        combinedTodayCost = cost.todayCost + (codexHistory.dailyCosts[todayKey] ?? 0)
         activityStats = activity
+        providerCosts = histories
+        combinedTodayCost = AIProviderType.implementedProviders.reduce(0) { $0 + todayCost(for: $1) }
 
-        log.info("[refresh] Usage: weekly=\(self.usageSummary.weeklyMessages) msgs, \(self.activeSessions.count) active sessions, claudeToday=$\(String(format: "%.2f", cost.todayCost)) codexToday=$\(String(format: "%.2f", codexHistory.dailyCosts[todayKey] ?? 0)) turns=\(activity.conversationTurns)")
+        log.info("[refresh] Usage: weekly=\(self.usageSummary.weeklyMessages) msgs, \(self.activeSessions.count) active sessions, today=$\(String(format: "%.2f", self.combinedTodayCost)) turns=\(activity.conversationTurns)")
 
         updateWidgetData()
     }
@@ -200,49 +422,20 @@ final class AppState: ObservableObject {
                 await self.refresh()
             }
         }
-        // Full refreshes query every account. Failover monitoring is a one-shot,
-        // adaptive timer: it tightens near a configured limit and backs away
-        // from exhausted or rate-limited accounts until their next useful check.
-        scheduleNextFailoverMonitor()
-    }
-
-    private func scheduleNextFailoverMonitor() {
-        failoverMonitorTimer?.invalidate()
-        let now = Date()
-        let intervals = AIProviderType.implementedProviders.compactMap { provider -> TimeInterval? in
-            let policy = failoverConfig.policy(for: provider)
-            guard (policy.enabled || policy.intelligentBalancingEnabled || policy.suspendAgentsWhenExhausted),
-                  let account = activeAccount(for: provider),
-                  !policy.excludedAccountIDs.contains(account.id)
-            else { return nil }
-            let pendingReset = pendingResetRecovery[provider]?.resetDate
-            let retryAfter = provider == .claudeCode ? claudeUsageRetryAfter[account.id] : nil
-            return FailoverDecision.pollInterval(
-                usage: accountUsage[account.id],
-                provider: provider,
-                policy: policy,
-                noFailoverAvailable: pendingReset != nil
-                    || (FailoverDecision.exceedsThreshold(
-                        usage: accountUsage[account.id],
-                        provider: provider,
-                        policy: policy
-                    ) && pendingResetRecovery[provider] == nil),
-                blockingReset: pendingReset,
-                retryAfter: retryAfter,
-                now: now
-            )
-        }
-        // Keep a low-frequency sentinel so enabling failover in Settings is
-        // discovered without requiring an app restart.
-        let interval = intervals.min() ?? 300
-        failoverMonitorTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                self.failoverMonitorTimer = nil
-                await self.monitorActiveFailoverUsage()
+        // Full refreshes read only the accounts whose readings are due. The
+        // quota cycle is a one-shot adaptive timer that follows the active
+        // accounts more closely as they approach a limit.
+        scheduleQuotaCycle(after: 5)
+        Task.detached(priority: .utility) { ClaudeStatusLineTelemetry.synchronize() }
+        // Offered once per launch, after the status line has been applied.
+        if !hookCheckDone {
+            hookCheckDone = true
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                guard let self else { return }
+                AgentHookInstaller.promptIfMissing(pausingProviders: self.pausingProviders)
             }
         }
-        log.debug("[failover-monitor] next active-account check in \(Int(interval))s")
     }
 
     func stopAutoRefresh() {
@@ -252,58 +445,6 @@ final class AppState: ObservableObject {
         failoverMonitorTimer = nil
         usageResetTimer?.invalidate()
         usageResetTimer = nil
-    }
-
-    private func monitorActiveFailoverUsage() async {
-        defer { scheduleNextFailoverMonitor() }
-        guard !isMonitoringFailover, !isLoading, !isLoggingIn else { return }
-        let enabledProviders = AIProviderType.implementedProviders
-            .filter {
-                let policy = failoverConfig.policy(for: $0)
-                return policy.enabled || policy.intelligentBalancingEnabled || policy.suspendAgentsWhenExhausted
-            }
-        guard !enabledProviders.isEmpty else { return }
-        isMonitoringFailover = true
-        defer { isMonitoringFailover = false }
-
-        for provider in enabledProviders {
-            let policy = failoverConfig.policy(for: provider)
-            guard let account = activeAccount(for: provider),
-                  !policy.excludedAccountIDs.contains(account.id)
-            else { continue }
-            do {
-                let usage: UsageAPIResponse
-                if provider == .claudeCode {
-                    if let retryAt = claudeUsageRetryAfter[account.id], retryAt > Date() {
-                        continue
-                    }
-                    guard let tokenJSON = keychain.readClaudeToken(),
-                          let token = ClaudeService.extractAccessToken(from: tokenJSON) else {
-                        continue
-                    }
-                    usage = try await claudeService.getUsageLimits(accessToken: token)
-                } else if provider == .codex {
-                    usage = try await codexService.getUsageLimits(
-                        codexHome: account.credentialLocation
-                    )
-                } else if provider == .kimi, let location = account.credentialLocation {
-                    usage = try await kimiService.getUsageLimits(location: location, isActive: true)
-                } else {
-                    continue
-                }
-                recordUsage(usage, for: account.id)
-                accountUsageErrors[account.id] = nil
-            } catch ClaudeService.UsageError.rateLimited(let retryAt) {
-                noteClaudeRateLimit(accountID: account.id, retryAt: retryAt)
-                continue
-            } catch {
-                // The normal full refresh owns user-facing diagnostics. A
-                // transient monitor failure must not discard its last-good data.
-                log.warning("[failover-monitor] \(provider.rawValue) poll failed: \(error.localizedDescription)")
-                continue
-            }
-        }
-        await evaluateFailover()
     }
 
     // MARK: - Account Management
@@ -505,6 +646,8 @@ final class AppState: ObservableObject {
             accounts[index].orgName = identity.accountMetadata
             accounts[index].subscriptionType = identity.planType
             if account.isActive { try adapter.activate(identity.credentialLocation) }
+            credentialQuarantine[account.id] = nil
+            rejectedCredentialAccounts.remove(account.id)
             saveAccounts(refreshWidget: true)
             if let oldLocation, oldLocation != identity.credentialLocation {
                 try? adapter.remove(oldLocation)
@@ -734,14 +877,8 @@ final class AppState: ObservableObject {
 
     func removeAccount(_ account: Account) {
         log.info("[removeAccount] Removing account \(account.id)")
-        if account.provider == .codex {
-            if let location = account.credentialLocation {
-                try? codexService.removeManagedAccount(homePath: location)
-            }
-        } else if account.provider == .kimi {
-            if let location = account.credentialLocation {
-                try? kimiService.removeManagedAccount(location: location)
-            }
+        if let adapter = managedProviderAdapter(for: account.provider) {
+            if let location = account.credentialLocation { try? adapter.remove(location) }
         } else {
             keychain.removeAccountBackup(forAccountId: account.id.uuidString)
         }
@@ -749,8 +886,8 @@ final class AppState: ObservableObject {
         accountUsage[account.id] = nil
         accountUsageUpdatedAt[account.id] = nil
         accountUsageErrors[account.id] = nil
-        claudeUsageRetryAfter[account.id] = nil
-        expiredClaudeAccounts.remove(account.id)
+        usageRetryAfter[account.id] = nil
+        rejectedCredentialAccounts.remove(account.id)
         exhaustedFailoverAccounts[account.provider]?.remove(account.id)
         saveUsageSnapshots()
         saveFailoverRuntime()
@@ -877,13 +1014,11 @@ final class AppState: ObservableObject {
             errorMessage = account.providerUnavailableLabel ?? "This account is unavailable."
             return
         }
-        if account.provider == .codex {
-            await switchToCodex(account, refreshAfter: refreshAfter, safelyRestarting: [])
-            return
-        }
-        if account.provider == .kimi {
-            await switchToKimi(account, refreshAfter: refreshAfter)
-            return
+        switch account.provider {
+        case .codex: return await switchToCodex(account, refreshAfter: refreshAfter, safelyRestarting: [])
+        case .kimi: return await switchToKimi(account, refreshAfter: refreshAfter)
+        case .gemini: return
+        case .claudeCode: break
         }
         guard let currentActive = activeAccount(for: account.provider), currentActive.id != account.id else {
             log.info("[switchTo] No switch needed (same account or no active account)")
@@ -893,6 +1028,11 @@ final class AppState: ObservableObject {
         log.info("[switchTo] ===== Switching from \(currentActive.email) to \(account.email) =====")
 
         // Pre-switch: verify target has a backup
+        guard keychain.backupStoreAvailable else {
+            log.error("[switchTo] ABORT: saved accounts not read yet")
+            errorMessage = Self.keychainWaitMessage
+            return
+        }
         guard keychain.getAccountBackup(forAccountId: account.id.uuidString) != nil else {
             log.error("[switchTo] ABORT: no backup for target account")
             errorMessage = String(localized: "No stored credentials for \(account.email). Use re-authenticate to fix.", bundle: L10n.bundle)
@@ -902,7 +1042,14 @@ final class AppState: ObservableObject {
         isLoading = true
         do {
             let status = try await claudeService.switchAccount(from: currentActive, to: account)
-            expiredClaudeAccounts.remove(account.id)
+            rejectedCredentialAccounts.remove(account.id)
+            credentialQuarantine[account.id] = nil
+            // Claude processes keep the credential they hold until signalled,
+            // so the previous account can go on being consumed after this
+            // switch. A switch the user asks for moves them at once.
+            lastSwitchedAway[currentActive.id] = Date()
+            noteLiveCredentialOwner(.claudeCode, account: account.id)
+            if refreshAfter { moveRunningSessions(.claudeCode, from: currentActive.id) }
 
             var verifiedSubscription = status.subscriptionType
             if let tokenJSON = keychain.readClaudeToken(),
@@ -937,6 +1084,7 @@ final class AppState: ObservableObject {
                 expectedEmail: account.email
             )
             saveAccounts()
+            await routerFollowActiveAccount()
 
             if !processes.isEmpty {
                 let survivors = await claudeService.terminateForSafeRestart(processes)
@@ -961,19 +1109,24 @@ final class AppState: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
             isLoading = false
+            switch error {
+            case ClaudeServiceError.switchVerificationFailed, ClaudeServiceError.switchWrongAccount,
+                 ClaudeServiceError.noTokenForAccount:
+                quarantineCredentials(of: account, reason: error.localizedDescription)
+            default:
+                break
+            }
             log.error("[switchTo] Switch failed: \(error.localizedDescription)")
         }
     }
 
     /// Re-authenticate an account by running `claude auth login` and capturing fresh credentials.
     func reauthenticateAccount(_ account: Account) async {
-        if account.provider == .codex {
-            await reauthenticateCodexAccount(account)
-            return
-        }
-        if account.provider == .kimi {
-            await reauthenticateKimiAccount(account)
-            return
+        switch account.provider {
+        case .codex: return await reauthenticateCodexAccount(account)
+        case .kimi: return await reauthenticateKimiAccount(account)
+        case .gemini: return
+        case .claudeCode: break
         }
         log.info("[reauth] ===== Re-authenticating account \(account.id) (\(account.email)) =====")
         guard claudeAvailable else {
@@ -1020,7 +1173,9 @@ final class AppState: ObservableObject {
                 expectedEmail: account.email
             )
             log.info("[reauth] Token capture result: \(captured)")
-            expiredClaudeAccounts.remove(account.id)
+            if captured { noteLiveCredentialOwner(.claudeCode, account: account.id) }
+            rejectedCredentialAccounts.remove(account.id)
+            credentialQuarantine[account.id] = nil
 
             // 5. Update account metadata
             if let index = accounts.firstIndex(where: { $0.id == account.id }) {
@@ -1047,267 +1202,301 @@ final class AppState: ObservableObject {
 
     // MARK: - Usage
 
+    /// What one read of an account's usage found. Each provider's reader
+    /// produces one; `applyUsageRead` records it the same way for every
+    /// provider.
+    enum UsageReadOutcome {
+        case reading(UsageAPIResponse)
+        /// The account's plan does not include the provider's workloads.
+        case workloadUnavailable(String)
+        case throttled(retryAt: Date?)
+        /// The provider rejected the credential: the account cannot be used
+        /// until it signs in again.
+        case credentialRejected(String)
+        /// The credential was refused and could not be renewed, for a
+        /// reason that does not show whether the sign-in is dead.
+        case credentialUnrenewed(String)
+        /// Nothing could be read and nothing about the account changed: no
+        /// credential yet, or a renewal failed on the network.
+        case skipped
+        case failed(Error)
+    }
+
+    /// Reads every account's usage, the active account of each provider
+    /// first and then the account read longest ago, within each provider's
+    /// request budget.
     private func fetchAllAccountUsage(forceUnavailablePlanCheck: Bool = false) async {
         // A failed or unavailable provider refresh must not leave a cached
         // pre-reset percentage on screen after its known reset time.
         reconcilePassedUsageResets()
         accountUsageErrors.removeAll()
-        var codexPlanMetadataChanged = false
-        for account in accounts where account.provider == .codex {
-            if shouldDeferUnavailablePlanCheck(account, forced: forceUnavailablePlanCheck) {
-                accountUsageErrors[account.id] = unavailableUsageState(for: account)
-                continue
-            }
-            if !account.supportsProviderWorkloads {
-                unavailablePlanCheckedAt[account.id] = Date()
-            }
-            do {
-                let snapshot = try await codexService.getUsageSnapshot(codexHome: account.credentialLocation)
-                let usage = snapshot.usage
-                if let index = accounts.firstIndex(where: { $0.id == account.id }),
-                   accounts[index].subscriptionType != snapshot.planType {
-                    accounts[index].subscriptionType = snapshot.planType
-                    codexPlanMetadataChanged = true
+        for provider in AIProviderType.implementedProviders {
+            for account in accountsByReadUrgency(provider) {
+                if shouldDeferUnavailablePlanCheck(account, forced: forceUnavailablePlanCheck) {
+                    accountUsageErrors[account.id] = unavailableUsageState(for: account)
+                    continue
                 }
-                if Account.supportsProviderWorkloads(
-                    provider: .codex,
-                    subscriptionType: snapshot.planType
-                ) {
-                    recordUsage(usage, for: account.id)
-                    accountUsageErrors[account.id] = nil
-                } else {
+                if !account.supportsProviderWorkloads {
                     unavailablePlanCheckedAt[account.id] = Date()
-                    accountUsage[account.id] = nil
-                    accountUsageUpdatedAt[account.id] = nil
-                    saveUsageSnapshots()
+                }
+                if let retryAt = usageRetryAfter[account.id], retryAt > Date() {
                     accountUsageErrors[account.id] = UsageErrorState(
-                        isExpired: true,
-                        isRateLimited: false,
-                        message: "This Free account does not currently include Codex.",
-                        cachedAt: nil
+                        isExpired: false,
+                        isRateLimited: true,
+                        message: accountUsage[account.id] == nil
+                            ? "Usage refresh is temporarily rate limited."
+                            : "Usage refresh throttled. Showing the last known limits.",
+                        cachedAt: accountUsageUpdatedAt[account.id]
                     )
+                    continue
                 }
-                log.info("[fetchUsage] Codex \(account.email): plan=\(snapshot.planType ?? "none"), session=\(usage.fiveHour?.utilization ?? -1)%, weekly=\(usage.sevenDay?.utilization ?? -1)%")
-            } catch CodexServiceError.subscriptionUnavailable {
-                if let index = accounts.firstIndex(where: { $0.id == account.id }),
-                   accounts[index].subscriptionType != "inactive" {
-                    accounts[index].subscriptionType = "inactive"
-                    codexPlanMetadataChanged = true
+                guard let priority = usageReadPriority(account, forced: forceUnavailablePlanCheck) else { continue }
+                guard spendUsageRequest(provider, priority) else {
+                    if accountUsageErrors[account.id] == nil, accountUsage[account.id] != nil,
+                       let updatedAt = accountUsageUpdatedAt[account.id],
+                       Date().timeIntervalSince(updatedAt) > 30 * 60 {
+                        accountUsageErrors[account.id] = UsageErrorState(
+                            isExpired: false,
+                            isRateLimited: true,
+                            message: "Usage refresh deferred to stay inside the provider rate limit.",
+                            cachedAt: updatedAt
+                        )
+                    }
+                    continue
                 }
+                let outcome = await readUsage(account, forced: forceUnavailablePlanCheck, includeMetadata: true)
+                applyUsageRead(outcome, for: account)
+            }
+        }
+    }
+
+    /// Reads `account`'s usage with its provider's reader. With
+    /// `includeMetadata`, the reader also refreshes the plan and identity
+    /// the provider reports, which costs some providers another request.
+    func readUsage(_ account: Account, forced: Bool, includeMetadata: Bool) async -> UsageReadOutcome {
+        switch account.provider {
+        case .claudeCode: await readClaudeUsage(account, forced: forced, includeMetadata: includeMetadata)
+        case .codex: await readCodexUsage(account)
+        case .kimi: await readKimiUsage(account, includeMetadata: includeMetadata)
+        case .gemini: .skipped
+        }
+    }
+
+    /// Records a read's outcome. Returns whether a fresh reading was
+    /// recorded.
+    @discardableResult
+    func applyUsageRead(_ outcome: UsageReadOutcome, for account: Account) -> Bool {
+        let name = account.provider.capabilities.displayName
+        switch outcome {
+        case .reading(let usage):
+            usageBudgets[account.provider]?.recordSuccess()
+            recordUsage(usage, for: account.id)
+            accountUsageErrors[account.id] = nil
+            usageRetryAfter[account.id] = nil
+            if !account.isActive { credentialQuarantine[account.id] = nil }
+            // A reading made with the account's own credential proves its
+            // sign-in works.
+            clearNeedsSignIn(account)
+            log.info("[fetchUsage] \(name) \(account.email): session=\(usage.fiveHour?.utilization ?? -1)%, long=\(usage.sevenDay?.utilization ?? -1)%")
+            return true
+        case .workloadUnavailable(let message):
+            unavailablePlanCheckedAt[account.id] = Date()
+            if accountUsage[account.id] != nil {
                 accountUsage[account.id] = nil
                 accountUsageUpdatedAt[account.id] = nil
                 saveUsageSnapshots()
-                accountUsageErrors[account.id] = UsageErrorState(
-                    isExpired: true,
-                    isRateLimited: false,
-                    message: "This account does not currently include Codex.",
-                    cachedAt: nil
-                )
-                log.info("[fetchUsage] Codex \(account.email): live subscription is inactive")
-            } catch {
-                accountUsageErrors[account.id] = UsageErrorState(
-                    isExpired: false,
-                    isRateLimited: false,
-                    message: accountUsage[account.id] == nil
-                        ? "Could not fetch Codex usage: \(error.localizedDescription)"
-                        : "Could not refresh Codex usage. Showing the last known limits.",
-                    cachedAt: accountUsageUpdatedAt[account.id]
-                )
-                log.error("[fetchUsage] Codex \(account.email) failed: \(error.localizedDescription)")
             }
+            accountUsageErrors[account.id] = UsageErrorState(isExpired: true, isRateLimited: false, message: message, cachedAt: nil)
+            log.info("[fetchUsage] \(name) \(account.email): \(message)")
+        case .throttled(let retryAt):
+            noteUsageThrottle(account, retryAt: retryAt)
+        case .credentialRejected(let message):
+            noteCredentialRejected(account)
+            accountUsageErrors[account.id] = UsageErrorState(
+                isExpired: true, isRateLimited: false, message: message, cachedAt: accountUsageUpdatedAt[account.id]
+            )
+        case .credentialUnrenewed(let message):
+            accountUsageErrors[account.id] = UsageErrorState(
+                isExpired: true, isRateLimited: false, message: message, cachedAt: accountUsageUpdatedAt[account.id]
+            )
+        case .skipped:
+            break
+        case .failed(let error):
+            accountUsageErrors[account.id] = UsageErrorState(
+                isExpired: false,
+                isRateLimited: false,
+                message: accountUsage[account.id] == nil
+                    ? "Could not fetch \(name) usage: \(error.localizedDescription)"
+                    : "Could not refresh \(name) usage. Showing the last known limits.",
+                cachedAt: accountUsageUpdatedAt[account.id]
+            )
+            log.warning("[fetchUsage] \(name) \(account.email) failed: \(error.localizedDescription)")
         }
-        if codexPlanMetadataChanged {
-            saveAccounts(refreshWidget: true)
+        return false
+    }
+
+    // MARK: Provider readers
+
+    /// Codex reports the plan with every reading. The active account's live
+    /// credential is the system copy the CLI refreshes; its managed copy can
+    /// hold a rotated-out token.
+    private func readCodexUsage(_ account: Account) async -> UsageReadOutcome {
+        do {
+            let snapshot = try await codexService.getUsageSnapshot(
+                codexHome: account.isActive ? nil : account.credentialLocation
+            )
+            setSubscriptionType(snapshot.planType, for: account.id)
+            guard Account.supportsProviderWorkloads(provider: .codex, subscriptionType: snapshot.planType) else {
+                return .workloadUnavailable(unavailableMessage(for: account.provider))
+            }
+            return .reading(snapshot.usage)
+        } catch CodexServiceError.subscriptionUnavailable {
+            setSubscriptionType("inactive", for: account.id)
+            return .workloadUnavailable(unavailableMessage(for: account.provider))
+        } catch CodexServiceError.rateLimited {
+            return .throttled(retryAt: nil)
+        } catch CodexServiceError.credentialRejected {
+            return .credentialRejected(CodexServiceError.credentialRejected.localizedDescription)
+        } catch {
+            return .failed(error)
         }
-        var kimiIdentityChanged = false
-        for account in accounts where account.provider == .kimi {
-            guard let location = account.credentialLocation else { continue }
-            do {
-                let usage = try await kimiService.getUsageLimits(
-                    location: location,
-                    isActive: account.isActive
-                )
-                let identity = try await kimiService.identity(location: location)
-                if let index = accounts.firstIndex(where: { $0.id == account.id }) {
-                    if accounts[index].email != identity.identifier ||
-                        accounts[index].displayName != identity.displayName ||
-                        accounts[index].subscriptionType != identity.planType {
-                        accounts[index].email = identity.identifier
-                        accounts[index].displayName = identity.displayName
-                        accounts[index].subscriptionType = identity.planType
-                        kimiIdentityChanged = true
-                    }
-                }
-                recordUsage(usage, for: account.id)
-                accountUsageErrors[account.id] = nil
-                log.info("[fetchUsage] Kimi \(account.email): session=\(usage.fiveHour?.utilization ?? -1)%, monthly=\(usage.sevenDay?.utilization ?? -1)%")
-            } catch {
-                accountUsageErrors[account.id] = UsageErrorState(
-                    isExpired: false,
-                    isRateLimited: false,
-                    message: accountUsage[account.id] == nil
-                        ? "Could not fetch Kimi usage: \(error.localizedDescription)"
-                        : "Could not refresh Kimi usage. Showing the last known limits.",
-                    cachedAt: accountUsageUpdatedAt[account.id]
-                )
-                log.warning("[fetchUsage] Kimi \(account.email) failed: \(error.localizedDescription)")
+    }
+
+    /// Kimi reports the signed-in identity and plan through a separate
+    /// request, made only with `includeMetadata`.
+    private func readKimiUsage(_ account: Account, includeMetadata: Bool) async -> UsageReadOutcome {
+        guard let location = account.credentialLocation else { return .skipped }
+        do {
+            let usage = try await kimiService.getUsageLimits(location: location, isActive: account.isActive)
+            if includeMetadata, let identity = try? await kimiService.identity(location: location),
+               let index = accounts.firstIndex(where: { $0.id == account.id }),
+               accounts[index].email != identity.identifier
+                || accounts[index].displayName != identity.displayName
+                || accounts[index].subscriptionType != identity.planType {
+                accounts[index].email = identity.identifier
+                accounts[index].displayName = identity.displayName
+                accounts[index].subscriptionType = identity.planType
+                saveAccounts(refreshWidget: true)
             }
+            return .reading(usage)
+        } catch KimiServiceError.rateLimited {
+            return .throttled(retryAt: nil)
+        } catch KimiServiceError.credentialRejected {
+            return .credentialRejected(KimiServiceError.credentialRejected.localizedDescription)
+        } catch {
+            return .failed(error)
         }
-        if kimiIdentityChanged {
-            saveAccounts(refreshWidget: true)
-        }
-        // For active account: use live keychain token (with delegated refresh on expiry)
-        // For other accounts: use backup token (no silent swap — just mark expired)
-        for account in accounts where account.provider == .claudeCode {
-            if shouldDeferUnavailablePlanCheck(account, forced: forceUnavailablePlanCheck) {
-                accountUsageErrors[account.id] = unavailableUsageState(for: account)
-                continue
-            }
-            if !account.supportsProviderWorkloads {
-                unavailablePlanCheckedAt[account.id] = Date()
-            }
-            if let retryAt = claudeUsageRetryAfter[account.id], retryAt > Date() {
-                accountUsageErrors[account.id] = UsageErrorState(
-                    isExpired: false,
-                    isRateLimited: true,
-                    message: accountUsage[account.id] == nil
-                        ? "Usage refresh is temporarily rate limited."
-                        : "Usage refresh throttled. Showing the last known limits.",
-                    cachedAt: accountUsageUpdatedAt[account.id]
-                )
-                continue
-            }
-            claudeUsageRetryAfter[account.id] = nil
-            let tokenJSON: String?
-            if account.isActive {
-                tokenJSON = keychain.readClaudeToken()
-            } else {
+    }
+
+    /// Claude reads with the active account's live Keychain token, which
+    /// Claude Code renews itself, or another account's stored copy, renewed
+    /// here without ever entering Claude's shared Keychain slot, so running
+    /// sessions keep consuming their own subscription.
+    private func readClaudeUsage(_ account: Account, forced: Bool, includeMetadata: Bool) async -> UsageReadOutcome {
+        var tokenJSON: String?
+        if account.isActive, liveCredentialOwner(.claudeCode).map({ $0 == account.id }) ?? true {
+            tokenJSON = keychain.readClaudeToken()
+        } else {
+            tokenJSON = keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
+            // An idle account's token is renewed before it expires, which
+            // saves the rejected request a stale token would cost.
+            if let stored = tokenJSON, ClaudeCredentialModule.expires(stored, within: 2 * 60),
+               await renewSavedCredential(account) == .renewed {
                 tokenJSON = keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
             }
-            guard let tokenJSON, let accessToken = ClaudeService.extractAccessToken(from: tokenJSON) else {
-                log.warning("[fetchUsage] No token for \(account.email), skipping")
-                continue
-            }
-            if await refreshClaudeSubscriptionMetadata(
-                accountID: account.id,
-                accessToken: accessToken
-            ) {
-                accountUsageErrors[account.id] = UsageErrorState(
-                    isExpired: true,
-                    isRateLimited: false,
-                    message: "This Free account does not currently include Claude Code.",
-                    cachedAt: nil
-                )
-                continue
-            }
+        }
+        guard let tokenJSON, let accessToken = ClaudeService.extractAccessToken(from: tokenJSON) else {
+            log.warning("[fetchUsage] No token for \(account.email), skipping")
+            return .skipped
+        }
+        setRateLimitTier(ClaudeService.rateLimitTier(from: tokenJSON), for: account.id)
+        if includeMetadata, shouldCheckClaudeProfile(account, forced: forced),
+           await refreshClaudeSubscriptionMetadata(accountID: account.id, accessToken: accessToken) {
+            return .workloadUnavailable(unavailableMessage(for: account.provider))
+        }
+        do {
+            return .reading(try await claudeService.getUsageLimits(accessToken: accessToken))
+        } catch ClaudeService.UsageError.expired {
+            log.warning("[fetchUsage] Token expired for \(account.email)")
+            return await readClaudeUsageAfterRenewal(account)
+        } catch ClaudeService.UsageError.subscriptionUnavailable {
+            markClaudeCodeUnavailable(accountID: account.id)
+            return .workloadUnavailable(unavailableMessage(for: account.provider))
+        } catch ClaudeService.UsageError.rateLimited(let retryAt) {
+            return .throttled(retryAt: retryAt)
+        } catch {
+            return .failed(error)
+        }
+    }
+
+    /// The read retried once the rejected token is renewed: by Claude Code
+    /// itself for the active account (`claude auth status`), and here for
+    /// the stored copy of any other account.
+    private func readClaudeUsageAfterRenewal(_ account: Account) async -> UsageReadOutcome {
+        let accessToken: String
+        if account.isActive {
             do {
-                let usage = try await claudeService.getUsageLimits(accessToken: accessToken)
-                recordUsage(usage, for: account.id)
-                accountUsageErrors[account.id] = nil
-                claudeUsageRetryAfter[account.id] = nil
-                log.info("[fetchUsage] \(account.email): session=\(usage.fiveHour?.utilization ?? -1)%, weekly=\(usage.sevenDay?.utilization ?? -1)%")
-            } catch ClaudeService.UsageError.expired {
-                log.warning("[fetchUsage] Token expired for \(account.email)")
-                if account.isActive {
-                    // Active account: delegated refresh via `claude auth status` is safe (no keychain swap)
-                    do {
-                        _ = try await claudeService.getAuthStatus()
-                        log.info("[fetchUsage] Delegated refresh completed for active account.")
-                        // Re-read refreshed token and retry
-                        guard let refreshedJSON = keychain.readClaudeToken(),
-                              let refreshedToken = ClaudeService.extractAccessToken(from: refreshedJSON) else {
-                            throw ClaudeService.UsageError.expired
-                        }
-                        do {
-                            let usage = try await claudeService.getUsageLimits(accessToken: refreshedToken)
-                            recordUsage(usage, for: account.id)
-                            _ = await refreshClaudeSubscriptionMetadata(
-                                accountID: account.id,
-                                accessToken: refreshedToken
-                            )
-                            accountUsageErrors[account.id] = nil
-                            log.info("[fetchUsage] Recovered \(account.email) via delegated refresh.")
-                        } catch ClaudeService.UsageError.rateLimited(let retryAt) {
-                            noteClaudeRateLimit(accountID: account.id, retryAt: retryAt)
-                        }
-                    } catch {
-                        log.error("[fetchUsage] Delegated refresh failed for active account: \(error.localizedDescription)")
-                        accountUsageErrors[account.id] = UsageErrorState(
-                            isExpired: true,
-                            isRateLimited: false,
-                            message: String(localized: "Token expired. Switch to refresh.", bundle: L10n.bundle),
-                            cachedAt: accountUsageUpdatedAt[account.id]
-                        )
-                    }
-                } else {
-                    // Refresh the account's isolated backup directly. Never put
-                    // it into Claude's global Keychain slot, so active sessions
-                    // continue consuming their original subscription.
-                    guard let backup = keychain.getAccountBackup(forAccountId: account.id.uuidString) else {
-                        expiredClaudeAccounts.insert(account.id)
-                        accountUsageErrors[account.id] = UsageErrorState(
-                            isExpired: true,
-                            isRateLimited: false,
-                            message: "Stored credentials are unavailable. Reauthenticate this account.",
-                            cachedAt: accountUsageUpdatedAt[account.id]
-                        )
-                        continue
-                    }
-                    do {
-                        let refreshedJSON = try await claudeService.refreshStoredToken(backup.token)
-                        guard keychain.saveAccountBackup(
-                            token: refreshedJSON,
-                            oauthAccount: backup.oauthAccount,
-                            forAccountId: account.id.uuidString
-                        ), let refreshedAccess = ClaudeService.extractAccessToken(from: refreshedJSON) else {
-                            throw ClaudeService.UsageError.expired
-                        }
-                        let usage = try await claudeService.getUsageLimits(accessToken: refreshedAccess)
-                        recordUsage(usage, for: account.id)
-                        _ = await refreshClaudeSubscriptionMetadata(
-                            accountID: account.id,
-                            accessToken: refreshedAccess
-                        )
-                        expiredClaudeAccounts.remove(account.id)
-                        accountUsageErrors[account.id] = nil
-                        log.info("[fetchUsage] Independently refreshed inactive Claude account \(account.email).")
-                    } catch ClaudeService.UsageError.rateLimited(let retryAt) {
-                        noteClaudeRateLimit(accountID: account.id, retryAt: retryAt)
-                    } catch {
-                        expiredClaudeAccounts.insert(account.id)
-                        log.warning("[fetchUsage] Isolated refresh failed for \(account.email): \(error.localizedDescription)")
-                        accountUsageErrors[account.id] = UsageErrorState(
-                            isExpired: true,
-                            isRateLimited: false,
-                            message: "Stored credentials expired. Reauthenticate this account.",
-                            cachedAt: accountUsageUpdatedAt[account.id]
-                        )
-                    }
+                let status = try await claudeService.getAuthStatus()
+                if !status.loggedIn {
+                    return .credentialRejected("Claude Code is signed out. Reauthenticate this account.")
                 }
-            } catch ClaudeService.UsageError.subscriptionUnavailable {
-                markClaudeCodeUnavailable(accountID: account.id)
-                accountUsageErrors[account.id] = UsageErrorState(
-                    isExpired: true,
-                    isRateLimited: false,
-                    message: "This Free account does not currently include Claude Code.",
-                    cachedAt: nil
-                )
-                log.info("[fetchUsage] Claude \(account.email): usage endpoint confirmed Claude Code is unavailable")
-            } catch ClaudeService.UsageError.rateLimited(let retryAt) {
-                log.warning("[fetchUsage] Usage refresh rate limited for \(account.email)")
-                noteClaudeRateLimit(accountID: account.id, retryAt: retryAt)
+                guard let refreshed = keychain.readClaudeToken().flatMap(ClaudeService.extractAccessToken(from:)) else {
+                    throw ClaudeService.UsageError.expired
+                }
+                accessToken = refreshed
             } catch {
-                log.error("[fetchUsage] Failed to get usage for \(account.email): \(error.localizedDescription)")
-                accountUsageErrors[account.id] = UsageErrorState(
-                    isExpired: false,
-                    isRateLimited: false,
-                    message: accountUsage[account.id] == nil
-                        ? String(localized: "Could not fetch usage: \(error.localizedDescription)", bundle: L10n.bundle)
-                        : "Could not refresh usage. Showing the last known limits.",
-                    cachedAt: accountUsageUpdatedAt[account.id]
-                )
+                log.error("[fetchUsage] Delegated refresh failed for active account: \(error.localizedDescription)")
+                return .credentialUnrenewed(String(localized: "Token expired. Switch to refresh.", bundle: L10n.bundle))
+            }
+        } else {
+            switch await renewSavedCredential(account) {
+            case .renewed:
+                let stored = keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
+                guard let refreshed = stored.flatMap(ClaudeService.extractAccessToken(from:)) else { return .skipped }
+                accessToken = refreshed
+            case .rejected:
+                log.warning("[fetchUsage] Isolated refresh rejected for \(account.email)")
+                return .credentialRejected("Stored credentials expired. Reauthenticate this account.")
+            case .unavailable:
+                // A network or server failure, or a Keychain still waiting
+                // for access, says nothing about the credential; the account
+                // is read again later.
+                return .skipped
             }
         }
+        do {
+            let usage = try await claudeService.getUsageLimits(accessToken: accessToken)
+            _ = await refreshClaudeSubscriptionMetadata(accountID: account.id, accessToken: accessToken)
+            log.info("[fetchUsage] Recovered \(account.email) after renewing its credential.")
+            return .reading(usage)
+        } catch ClaudeService.UsageError.rateLimited(let retryAt) {
+            return .throttled(retryAt: retryAt)
+        } catch ClaudeService.UsageError.expired {
+            // `claude auth status` can report a login without renewing its
+            // token, so a second refusal on the active account shows only
+            // that no session has renewed it yet; the next one that sends a
+            // request does.
+            if account.isActive {
+                return .credentialUnrenewed(String(localized: "Token expired. Switch to refresh.", bundle: L10n.bundle))
+            }
+            return .credentialRejected("Stored credentials expired. Reauthenticate this account.")
+        } catch {
+            return .failed(error)
+        }
+    }
+
+    func setRateLimitTier(_ tier: String?, for accountID: UUID) {
+        guard let tier, let index = accounts.firstIndex(where: { $0.id == accountID }),
+              accounts[index].rateLimitTier != tier else { return }
+        accounts[index].rateLimitTier = tier
+        saveAccounts(refreshWidget: true)
+    }
+
+    private func setSubscriptionType(_ type: String?, for accountID: UUID) {
+        guard let index = accounts.firstIndex(where: { $0.id == accountID }),
+              accounts[index].subscriptionType != type else { return }
+        accounts[index].subscriptionType = type
+        saveAccounts(refreshWidget: true)
     }
 
     private func shouldDeferUnavailablePlanCheck(_ account: Account, forced: Bool) -> Bool {
@@ -1316,19 +1505,20 @@ final class AppState: ObservableObject {
         return Date().timeIntervalSince(checkedAt) < unavailablePlanCheckInterval
     }
 
+    private func unavailableMessage(for provider: AIProviderType) -> String {
+        "This account's plan does not currently include \(provider.rawValue)."
+    }
+
     private func unavailableUsageState(for account: Account) -> UsageErrorState {
-        UsageErrorState(
-            isExpired: true,
-            isRateLimited: false,
-            message: account.provider == .codex
-                ? "This Free account does not currently include Codex."
-                : "This Free account does not currently include Claude Code.",
-            cachedAt: nil
-        )
+        UsageErrorState(isExpired: true, isRateLimited: false, message: unavailableMessage(for: account.provider), cachedAt: nil)
     }
 
     /// Returns true only when Anthropic explicitly reports an inactive plan.
     private func refreshClaudeSubscriptionMetadata(accountID: UUID, accessToken: String) async -> Bool {
+        // Profile requests count against the same Anthropic allowance as
+        // usage requests; a skipped check is retried on a later refresh.
+        guard spendUsageRequest(.claudeCode, .background) else { return false }
+        lastProfileCheck[accountID] = Date()
         do {
             let live = try await claudeService.getLiveSubscription(accessToken: accessToken)
             guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { return false }
@@ -1362,319 +1552,6 @@ final class AppState: ObservableObject {
         saveAccounts(refreshWidget: true)
     }
 
-    private func noteClaudeRateLimit(accountID: UUID, retryAt: Date?) {
-        claudeUsageRetryAfter[accountID] = retryAt ?? Date().addingTimeInterval(15 * 60)
-        accountUsageErrors[accountID] = UsageErrorState(
-            isExpired: false,
-            isRateLimited: true,
-            message: accountUsage[accountID] == nil
-                ? String(localized: "API Rate Limited. Try again later.", bundle: L10n.bundle)
-                : "Usage refresh throttled. Showing the last known limits.",
-            cachedAt: accountUsageUpdatedAt[accountID]
-        )
-    }
-
-    // MARK: - Automatic Failover
-
-    private func evaluateFailover() async {
-        guard !isLoggingIn else { return }
-
-        for provider in AIProviderType.implementedProviders {
-            let policy = failoverConfig.policy(for: provider)
-            let providerAccounts = accounts.filter {
-                $0.provider == provider
-                    && !policy.excludedAccountIDs.contains($0.id)
-            }
-            guard (policy.enabled || policy.intelligentBalancingEnabled || policy.suspendAgentsWhenExhausted), !providerAccounts.isEmpty,
-                  let current = providerAccounts.first(where: \.isActive) else { continue }
-            guard !current.supportsProviderWorkloads || accountUsage[current.id] != nil else { continue }
-
-            if FailoverDecision.hasCapacity(
-                usage: accountUsage[current.id],
-                provider: provider,
-                policy: policy
-            ), !accountsAwaitingPostResetVerification.contains(current.id),
-               agentSuspension.hasSuspendedAgents(provider: provider) {
-                let resumed = await agentSuspension.resume(provider: provider)
-                failoverEvents.record(provider, "Capacity is available again; resumed \(resumed) suspended agent process(es).")
-            }
-
-            if let pending = pendingResetRecovery[provider],
-               pending.accountID == current.id,
-               !accountsAwaitingPostResetVerification.contains(current.id),
-               FailoverDecision.hasCapacity(
-                    usage: accountUsage[current.id],
-                    provider: provider,
-                    policy: policy
-               ) {
-                pendingResetRecovery[provider] = nil
-                exhaustedFailoverAccounts[provider, default: []].remove(current.id)
-                saveFailoverRuntime()
-                failoverStatus[provider] = "Capacity restored on \(current.effectiveDisplayName(obfuscated: true))."
-                failoverEvents.record(provider, "Capacity restored on \(current.effectiveDisplayName(obfuscated: true)).")
-                log.info("[failover] \(provider.rawValue): reset capacity confirmed")
-                continue
-            }
-
-            let hardExhausted = !current.supportsProviderWorkloads
-                || !FailoverDecision.hasCapacity(
-                    usage: accountUsage[current.id],
-                    provider: provider,
-                    policy: policy
-                )
-            let thresholdExceeded = policy.enabled && FailoverDecision.exceedsThreshold(
-                usage: accountUsage[current.id],
-                provider: provider,
-                policy: policy
-            )
-            let currentExceeded = (policy.enabled || policy.intelligentBalancingEnabled)
-                && (hardExhausted || thresholdExceeded)
-            let everyAccountExhausted = providerAccounts.allSatisfy {
-                !FailoverDecision.hasCapacity(
-                    usage: accountUsage[$0.id],
-                    provider: provider,
-                    policy: policy
-                )
-            }
-            if hardExhausted, everyAccountExhausted, policy.suspendAgentsWhenExhausted,
-               !agentSuspension.hasSuspendedAgents(provider: provider) {
-                let count = await agentSuspension.suspend(provider: provider)
-                failoverStatus[provider] = "All accounts exhausted; suspended \(count) running agent process(es) until capacity returns."
-                failoverEvents.record(provider, "Suspended \(count) agent process(es) because every included account is exhausted.")
-            }
-            if currentExceeded,
-               FailoverDecision.shouldWaitForImminentReset(
-                usage: accountUsage[current.id],
-                provider: provider,
-                policy: policy
-               ) {
-                failoverStatus[provider] = "Holding \(current.effectiveDisplayName(obfuscated: true)); its limiting window resets soon."
-                continue
-            }
-
-            if let lastSwitch = lastAutomaticFailover[provider],
-               Date().timeIntervalSince(lastSwitch) < 60 {
-                continue
-            }
-
-            if currentExceeded {
-                exhaustedFailoverAccounts[provider, default: []].insert(current.id)
-                saveFailoverRuntime()
-            }
-            let availableIDs = Set(providerAccounts.map(\.id))
-            let orderedIDs = policy.accountOrder.filter { availableIDs.contains($0) }
-                + providerAccounts.map(\.id).filter { !policy.accountOrder.contains($0) }
-            let candidateIDs = FailoverDecision.candidates(
-                orderedIDs: orderedIDs,
-                currentID: current.id,
-                loops: policy.loops
-            )
-            // A non-active Claude token may have an expired access token while
-            // its refresh token and last-confirmed quota remain usable. The
-            // switch transaction runs `claude auth status`, which refreshes and
-            // verifies that credential before any workload is resumed.
-            let viableAccountIDs = Set(providerAccounts.filter(\.supportsProviderWorkloads).map(\.id))
-            let eligibleIDs = FailoverDecision.eligibleCandidates(
-                candidateIDs,
-                usageByID: accountUsage,
-                provider: provider,
-                policy: policy,
-                unverifiedResetIDs: accountsAwaitingPostResetVerification
-            ).filter { viableAccountIDs.contains($0) }
-
-            let recoveredIDs = eligibleIDs.filter {
-                exhaustedFailoverAccounts[provider, default: []].contains($0)
-            }
-            func bestCapacity(in ids: [UUID]) -> UUID? {
-                guard policy.preferMostCapacity else { return ids.first }
-                return ids.max { lhs, rhs in
-                    FailoverDecision.capacityScore(
-                        usage: accountUsage[lhs],
-                        provider: provider,
-                        policy: policy
-                    ) < FailoverDecision.capacityScore(
-                        usage: accountUsage[rhs],
-                        provider: provider,
-                        policy: policy
-                    )
-                }
-            }
-            let balanceDwellSatisfied = lastAutomaticFailover[provider].map {
-                Date().timeIntervalSince($0) >= policy.balancingMinimumDwellMinutes * 60
-            } ?? true
-            let canProactivelySwitch = provider != .codex
-                || policy.codexSwitchMode != .safeRestart
-            let balancingTarget = !currentExceeded
-                && policy.intelligentBalancingEnabled
-                && balanceDwellSatisfied
-                && canProactivelySwitch
-                ? FailoverDecision.intelligentBalanceTarget(
-                    accountIDs: orderedIDs.filter { viableAccountIDs.contains($0) },
-                    currentID: current.id,
-                    usageByID: accountUsage,
-                    provider: provider,
-                    policy: policy,
-                    unverifiedResetIDs: accountsAwaitingPostResetVerification
-                )
-                : nil
-            let proposedID: UUID?
-            if currentExceeded {
-                // Reset awareness may prefer a previously exhausted account,
-                // but only after the active account itself crosses a threshold.
-                // A recovered account must never pull healthy work backwards
-                // through the ladder merely because its reset elapsed.
-                if policy.resetAware, let recovered = bestCapacity(in: recoveredIDs) {
-                    proposedID = recovered
-                } else {
-                    proposedID = bestCapacity(in: eligibleIDs)
-                }
-            } else if let balancingTarget {
-                proposedID = balancingTarget.id
-            } else {
-                proposedID = nil
-            }
-            guard currentExceeded || proposedID != nil else { continue }
-            var selectedID = proposedID
-            var waitingForReset = false
-            if selectedID == nil,
-               let earliest = providerAccounts.compactMap({ account -> (UUID, Date)? in
-                   guard account.supportsProviderWorkloads else { return nil }
-                   guard let date = FailoverDecision.blockingResetDate(
-                        usage: accountUsage[account.id],
-                        provider: provider,
-                        policy: policy
-                   ) else { return nil }
-                   return (account.id, date)
-               }).min(by: { $0.1 < $1.1 }) {
-                selectedID = earliest.0
-                waitingForReset = true
-                pendingResetRecovery[provider] = PendingResetRecovery(
-                    accountID: earliest.0,
-                    resetDate: earliest.1
-                )
-            }
-            guard let selectedID,
-                  let target = providerAccounts.first(where: { $0.id == selectedID }) else {
-                failoverStatus[provider] = "All configured accounts are at their limits; reset times are unavailable."
-                failoverEvents.record(provider, "All accounts are exhausted, but no reliable reset timestamp is available.")
-                if policy.suspendAgentsWhenExhausted {
-                    let count = await agentSuspension.suspend(provider: provider)
-                    failoverStatus[provider] = "All accounts exhausted; suspended \(count) running agent process(es) until capacity returns."
-                    failoverEvents.record(provider, "Suspended \(count) agent process(es) to prevent failed turns while no quota is available.")
-                }
-                log.warning("[failover] \(provider.rawValue): no eligible account or reset timestamp")
-                continue
-            }
-
-            if waitingForReset, current.id == target.id {
-                let resetText = pendingResetRecovery[provider]?.resetDate.formatted(date: .omitted, time: .shortened) ?? "soon"
-                failoverStatus[provider] = "All accounts exhausted. Waiting on \(target.effectiveDisplayName(obfuscated: true)), resetting at \(resetText)."
-                failoverEvents.record(provider, "All accounts exhausted. Waiting for \(target.effectiveDisplayName(obfuscated: true)) to reset at \(resetText).")
-                if policy.suspendAgentsWhenExhausted {
-                    let count = await agentSuspension.suspend(provider: provider)
-                    failoverEvents.record(provider, "Suspended \(count) agent process(es) until the earliest quota reset.")
-                }
-                continue
-            }
-
-            let runningCodexProcesses = provider == .codex
-                ? codexService.recoverableRunningProcesses()
-                : []
-            if provider == .codex,
-               policy.codexSwitchMode == .safeRestart,
-               !runningCodexProcesses.isEmpty,
-               !runningCodexProcesses.contains(where: \.hasUsageLimitError) {
-                let armedStatus = "Quota reported at the failover limit; waiting for a running Codex session to receive the usage-limit error."
-                if failoverStatus[provider] != armedStatus {
-                    failoverEvents.record(provider, "Failover armed by reported quota; waiting for a session-confirmed usage-limit error.")
-                }
-                failoverStatus[provider] = armedStatus
-                continue
-            }
-
-            let sourceName = current.effectiveDisplayName(obfuscated: true)
-            let targetName = target.effectiveDisplayName(obfuscated: true)
-            let isUsingCachedQuota = accountUsageErrors[target.id] != nil
-            failoverStatus[provider] = "Switching \(sourceName) → \(targetName)…"
-            let isBalancing = balancingTarget?.id == target.id && !currentExceeded
-            log.info("[failover] \(provider.rawValue): \(sourceName) -> \(targetName)\(isBalancing ? " (intelligent balance)" : "")")
-            failoverEvents.record(provider, isBalancing
-                ? "Reset-aware balancing selected \(targetName) with a \(Int(balancingTarget?.advantage ?? 0))-point utilization advantage over \(sourceName)."
-                : waitingForReset
-                ? "Preparing \(targetName), the earliest-resetting account."
-                : isUsingCachedQuota
-                    ? "Threshold reached; switching \(sourceName) → \(targetName) using its last-known available quota."
-                    : "Threshold reached; switching \(sourceName) → \(targetName).")
-            if !runningCodexProcesses.isEmpty {
-                log.info("[failover] Captured \(runningCodexProcesses.count) Codex process(es) for safe restart")
-            }
-            if provider == .codex {
-                switch policy.codexSwitchMode {
-                case .safeRestart:
-                    let affected = runningCodexProcesses.filter(\.hasUsageLimitError)
-                    let unaffected = runningCodexProcesses.filter { !affected.contains($0) }
-                    await switchTo(
-                        target,
-                        refreshAfter: false,
-                        safelyRestartingCodex: affected,
-                        liveReloadingCodex: unaffected
-                    )
-                case .forceRestart:
-                    await switchTo(
-                        target,
-                        refreshAfter: false,
-                        safelyRestartingCodex: runningCodexProcesses,
-                        closeCodexTerminalTabs: true
-                    )
-                case .withoutRestart:
-                    await switchTo(
-                        target,
-                        refreshAfter: false,
-                        liveReloadingCodex: runningCodexProcesses
-                    )
-                }
-            } else {
-                // Keep Claude's established automatic-failover behaviour:
-                // change credentials without restarting terminal sessions.
-                // Session restart/recovery methods are Codex-only.
-                await switchTo(target, refreshAfter: false)
-            }
-
-            if activeAccount(for: provider)?.id == target.id {
-                if !accountsAwaitingPostResetVerification.contains(target.id) {
-                    let resumed = await agentSuspension.resume(provider: provider)
-                    if resumed > 0 {
-                        failoverEvents.record(provider, "Resumed \(resumed) agent process(es) on the selected account.")
-                    }
-                }
-                exhaustedFailoverAccounts[provider, default: []].remove(target.id)
-                saveFailoverRuntime()
-                lastAutomaticFailover[provider] = Date()
-                if waitingForReset {
-                    let resetText = pendingResetRecovery[provider]?.resetDate.formatted(date: .omitted, time: .shortened) ?? "soon"
-                    failoverStatus[provider] = "All accounts exhausted. Prepared \(targetName), resetting at \(resetText)."
-                    failoverEvents.record(provider, "Prepared \(targetName); monitoring adaptively for restored capacity.")
-                } else {
-                    failoverStatus[provider] = isBalancing
-                        ? "Balanced to \(targetName); its allowance is more urgent to consume before reset."
-                        : "Switched to \(targetName)."
-                    if provider == .codex {
-                        failoverEvents.record(provider, isBalancing
-                            ? "Balancing switch completed. \(runningCodexProcesses.count) Codex process(es) were handed to the selected switch method."
-                            : "Switch completed. \(runningCodexProcesses.count) pre-switch process(es) were handed to the selected Codex switch method.")
-                    } else {
-                        failoverEvents.record(provider, isBalancing
-                            ? "Balancing switch completed; new Claude workloads will use the selected account without restarting existing sessions."
-                            : "Switch completed without restarting Claude sessions.")
-                    }
-                }
-            } else {
-                failoverStatus[provider] = "Automatic switch failed. AccountDock will retry later."
-                failoverEvents.record(provider, "Automatic credential switch failed; it will be retried.")
-            }
-        }
-    }
-
     // MARK: - Widget
 
     private func updateWidgetData() {
@@ -1697,9 +1574,11 @@ final class AppState: ObservableObject {
             )
         }
 
-        var combinedModelUsage = activityStats.modelUsage
-        for (model, count) in codexTodayModelActivity where count > 0 {
-            combinedModelUsage[model, default: 0] += count
+        var combinedModelUsage: [String: Int] = [:]
+        for (_, history) in providerCosts {
+            for (model, count) in history.todayModelActivity where count > 0 {
+                combinedModelUsage[model, default: 0] += count
+            }
         }
         let data = WidgetData(
             selectedProvider: nil,
@@ -1735,7 +1614,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func saveFailoverRuntime() {
+    func saveFailoverRuntime() {
         let stored = Dictionary(uniqueKeysWithValues:
             AIProviderType.implementedProviders.map { provider in
                 (provider.rawValue, Array(exhaustedFailoverAccounts[provider, default: []]))
@@ -1746,11 +1625,37 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func recordUsage(_ usage: UsageAPIResponse, for accountID: UUID) {
+    /// A provider's accounts in the order their usage is read: the active
+    /// account, then the oldest reading first. Every account of a provider
+    /// shares one request budget, so a fixed order would leave the accounts
+    /// at the end of the list unread whenever the budget runs short.
+    func accountsByReadUrgency(_ provider: AIProviderType) -> [Account] {
+        accounts.filter { $0.provider == provider }.sorted { a, b in
+            if a.isActive != b.isActive { return a.isActive }
+            return (accountUsageUpdatedAt[a.id] ?? .distantPast) < (accountUsageUpdatedAt[b.id] ?? .distantPast)
+        }
+    }
+
+    func recordUsage(
+        _ usage: UsageAPIResponse,
+        for accountID: UUID,
+        observedAt: Date = Date(),
+        confirmsReset: Bool = true
+    ) {
+        let previousUsage = accountUsage[accountID]
         let reconciled = usage.preservingEstablishedCountdowns(from: accountUsage[accountID])
         accountUsage[accountID] = reconciled.expiringPassedResets()
-        accountUsageUpdatedAt[accountID] = Date()
-        accountsAwaitingPostResetVerification.remove(accountID)
+        accountUsageUpdatedAt[accountID] = observedAt
+        if let provider = accounts.first(where: { $0.id == accountID })?.provider,
+           suspensionContexts[provider]?.accountID == accountID {
+            quotaTrends[accountID, default: QuotaTrend()].rebase(reconciled, at: observedAt)
+        } else {
+            quotaTrends[accountID, default: QuotaTrend()].record(reconciled, at: observedAt)
+        }
+        if confirmsReset { accountsAwaitingPostResetVerification.remove(accountID) }
+        if let account = accounts.first(where: { $0.id == accountID }) {
+            learnFromReading(reconciled, previous: previousUsage, account: account, at: observedAt)
+        }
         var warmup = pendingWindowWarmups.removeValue(forKey: accountID)
         if warmup == nil {
             warmup = bootstrapWarmupIfNeeded(for: accountID, usage: accountUsage[accountID] ?? usage)
@@ -1850,38 +1755,17 @@ final class AppState: ObservableObject {
     }
 
     private func verifyPostResetAccounts(_ ids: Set<UUID>) async {
+        // A failed or deferred read keeps the pending warm-up marker; the
+        // ordinary refresh retries within the shared request budget.
         for account in accounts where ids.contains(account.id) {
-            do {
-                let usage: UsageAPIResponse
-                if account.provider == .claudeCode {
-                    let tokenJSON = account.isActive
-                        ? keychain.readClaudeToken()
-                        : keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
-                    guard let tokenJSON,
-                          let token = ClaudeService.extractAccessToken(from: tokenJSON) else { continue }
-                    usage = try await claudeService.getUsageLimits(accessToken: token)
-                } else if account.provider == .codex {
-                    usage = try await codexService.getUsageLimits(codexHome: account.credentialLocation)
-                } else if account.provider == .kimi, let location = account.credentialLocation {
-                    usage = try await kimiService.getUsageLimits(location: location, isActive: account.isActive)
-                } else {
-                    continue
-                }
-                recordUsage(usage, for: account.id)
-            } catch {
-                // Keep the pending marker. The ordinary account refresh can
-                // refresh credentials or honor provider retry timing, then
-                // launch the warm-up once post-reset state is confirmed.
-                log.warning("[warmup] Post-reset verification deferred for \(account.id.uuidString): \(error.localizedDescription)")
-            }
+            await fetchUsageNow(account, priority: .background)
         }
     }
 
     private func performWindowWarmup(accountID: UUID, windows: PendingWindowWarmup) async {
         guard let account = accounts.first(where: { $0.id == accountID }) else { return }
         let policy = failoverConfig.policy(for: account.provider)
-        guard policy.keepWindowsWarm else { return }
-        guard account.provider != .kimi else { return }
+        guard policy.keepWindowsWarm, let probe = quotaWindowProbe(for: account) else { return }
 
         guard accountWarmupsInFlight.insert(accountID).inserted else {
             log.info("[warmup] Skipped duplicate in-flight probe for \(accountID.uuidString)")
@@ -1892,25 +1776,12 @@ final class AppState: ObservableObject {
             .compactMap { $0 }
             .joined(separator: " + ")
 
+        guard spendUsageRequest(account.provider, .background) else {
+            scheduleWarmupRetry(accountID: accountID, windows: windows)
+            return
+        }
         do {
-            let liveUsage: UsageAPIResponse
-            let claudeAccessToken: String?
-            if account.provider == .claudeCode {
-                let tokenJSON = account.isActive
-                    ? keychain.readClaudeToken()
-                    : keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
-                guard let tokenJSON,
-                      let accessToken = ClaudeService.extractAccessToken(from: tokenJSON) else {
-                    throw ClaudeService.UsageError.expired
-                }
-                claudeAccessToken = accessToken
-                liveUsage = try await claudeService.getUsageLimits(accessToken: accessToken)
-            } else {
-                claudeAccessToken = nil
-                liveUsage = try await codexService.getUsageLimits(
-                    codexHome: account.credentialLocation
-                )
-            }
+            let liveUsage = try await probe.liveUsage()
 
             // A queued reset task may race with real user activity, a manual
             // refresh, or another reset task. Only an explicit provider state
@@ -1932,28 +1803,11 @@ final class AppState: ObservableObject {
             let labels = [needed.session ? "session" : nil, needed.weekly ? "weekly" : nil]
                 .compactMap { $0 }
                 .joined(separator: " + ")
-            if let accessToken = claudeAccessToken {
-                try await claudeService.warmQuotaWindow(accessToken: accessToken)
-                try await forceRefreshWarmup(
-                    account: account,
-                    windows: needed,
-                    fetch: { try await self.claudeService.getUsageLimits(accessToken: accessToken) }
-                )
-            } else {
-                try await codexService.warmQuotaWindow(codexHome: account.credentialLocation)
-                try await forceRefreshWarmup(
-                    account: account,
-                    windows: needed,
-                    fetch: {
-                        try await self.codexService.getUsageLimits(
-                            codexHome: account.credentialLocation
-                        )
-                    }
-                )
-            }
+            try await probe.startWindow()
+            try await forceRefreshWarmup(account: account, windows: needed, fetch: probe.liveUsage)
             failoverEvents.record(
                 account.provider,
-                "Started the \(labels) reset countdown for \(account.effectiveDisplayName(obfuscated: true)); the probe session was non-persistent."
+                "Started the \(labels) reset countdown for \(messageName(account)); the probe session was non-persistent."
             )
             completeWarmupBootstrap(accountID: accountID, windows: needed)
             warmupRetryAttempts[accountID] = nil
@@ -1962,7 +1816,7 @@ final class AppState: ObservableObject {
             releaseWarmupBootstrap(accountID: accountID, windows: windows)
             failoverEvents.record(
                 account.provider,
-                "Could not start the \(requestedLabels) reset countdown for \(account.effectiveDisplayName(obfuscated: true)): \(error.localizedDescription)"
+                "Could not start the \(requestedLabels) reset countdown for \(messageName(account)): \(error.localizedDescription)"
             )
             log.warning("[warmup] Probe failed for \(account.id.uuidString): \(error.localizedDescription)")
             scheduleWarmupRetry(accountID: accountID, windows: windows)
@@ -2000,7 +1854,7 @@ final class AppState: ObservableObject {
             let usage = self.accountUsage[accountID]
             let sessionStillNeedsWarmup = windows.session
                 && usage?.sevenDay?.utilization.map({ $0 < 100 }) == true
-                && usage?.fiveHour?.isUnusedUnstartedWindow != false
+                && (usage == nil || usage?.fiveHour?.isUnusedUnstartedWindow == true)
             let weeklyStillNeedsWarmup = windows.weekly
                 && usage?.sevenDay?.isUnusedUnstartedWindow != false
             guard sessionStillNeedsWarmup || weeklyStillNeedsWarmup else {
@@ -2049,6 +1903,7 @@ final class AppState: ObservableObject {
         for delay in [2.0, 8.0, 20.0] {
             try? await Task.sleep(for: .seconds(delay))
             let usage: UsageAPIResponse
+            guard spendUsageRequest(account.provider, .background) else { continue }
             do {
                 usage = try await fetch()
             } catch {
@@ -2060,7 +1915,7 @@ final class AppState: ObservableObject {
             latestUsage = usage
             recordUsage(usage, for: account.id)
 
-            let sessionConfirmed = !windows.session || usage.fiveHour?.resetsAtDate != nil
+            let sessionConfirmed = !windows.session || usage.fiveHour == nil || usage.fiveHour?.resetsAtDate != nil
             let weeklyConfirmed = !windows.weekly || usage.sevenDay?.resetsAtDate != nil
             if sessionConfirmed && weeklyConfirmed {
                 log.info("[warmup] Forced usage refresh confirmed countdown for \(account.id.uuidString)")
@@ -2127,7 +1982,7 @@ final class AppState: ObservableObject {
         log.info("[loadAccounts] Loaded \(decoded.count) accounts")
     }
 
-    private func saveAccounts(refreshWidget: Bool = false) {
+    func saveAccounts(refreshWidget: Bool = false) {
         if let data = try? JSONEncoder().encode(accounts) {
             UserDefaults.standard.set(data, forKey: accountsKey)
             log.debug("[saveAccounts] Saved \(self.accounts.count) accounts to UserDefaults")
@@ -2139,6 +1994,25 @@ final class AppState: ObservableObject {
 
     private func updateActiveAccount(from status: AuthStatus) {
         guard status.loggedIn, let email = status.email else { return }
+
+        // `claude auth status` reports the identity in `~/.claude.json`,
+        // which a session `SessionSlots` started on another account rewrites
+        // to its own. The live credential's owner decides instead.
+        if let owner = liveCredentialOwner(.claudeCode),
+           let ownerIndex = accounts.firstIndex(where: { $0.id == owner }),
+           accounts[ownerIndex].email.caseInsensitiveCompare(email) != .orderedSame {
+            let restored = credentialModule(for: .claudeCode)?.liveCredential?
+                .restoreSignedInIdentity(of: accounts[ownerIndex]) ?? false
+            if !accounts[ownerIndex].isActive {
+                for i in accounts.indices where accounts[i].provider == .claudeCode {
+                    accounts[i].isActive = (i == ownerIndex)
+                }
+                activeAccount = accounts[ownerIndex]
+                saveAccounts()
+            }
+            log.warning("[updateActiveAccount] Signed-in identity names another account than the live credential's owner; kept the owner active, identity restored: \(restored)")
+            return
+        }
 
         if let index = accounts.firstIndex(where: { $0.provider == .claudeCode && $0.email == email }) {
             for i in accounts.indices where accounts[i].provider == .claudeCode {
@@ -2168,6 +2042,37 @@ final class AppState: ObservableObject {
             log.info("[updateActiveAccount] Auto-created first account, id=\(account.id)")
         } else {
             log.info("[updateActiveAccount] Logged-in account not in our list (might be new)")
+        }
+    }
+
+    // MARK: - Adding accounts
+
+    /// Whether the provider's CLI is installed here, so a new account can
+    /// sign in through it.
+    func canLoginNewAccount(_ provider: AIProviderType) -> Bool {
+        switch provider {
+        case .claudeCode: true
+        case .codex: codexAvailable
+        case .kimi: kimiAvailable
+        case .gemini: false
+        }
+    }
+
+    /// Signs in a new account through the provider's CLI and adds it.
+    func loginNewAccount(_ provider: AIProviderType) async {
+        switch provider {
+        case .claudeCode: await loginNewAccount()
+        case .codex, .kimi: await loginNewManagedAccount(provider: provider)
+        case .gemini: break
+        }
+    }
+
+    /// Adds the account the provider's CLI is signed in to now.
+    func captureCurrentAccount(_ provider: AIProviderType) async {
+        switch provider {
+        case .claudeCode: await addAccount()
+        case .codex, .kimi: await captureCurrentManagedAccount(provider: provider)
+        case .gemini: break
         }
     }
 
@@ -2217,6 +2122,9 @@ final class AppState: ObservableObject {
                     toManagedHome: currentLocation,
                     expectedEmail: current.email
                 )
+            }
+            if let current = activeAccount(for: .codex), liveProcesses.isEmpty, processes.isEmpty {
+                lastSwitchedAway[current.id] = Date()
             }
             try codexService.promoteToSystem(homePath: location)
             guard codexService.systemIdentity()?.email.caseInsensitiveCompare(account.email) == .orderedSame else {

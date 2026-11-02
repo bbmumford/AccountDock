@@ -120,6 +120,69 @@ final class UsageDatabase: @unchecked Sendable {
         return result
     }
 
+    func providerFiles(_ provider: AIProviderType) -> [String: StoredFileMetadata] {
+        var result: [String: StoredFileMetadata] = [:]
+        query("SELECT path, mtime, byte_count FROM provider_files WHERE provider=?", bindings: [.text(provider.rawValue)]) { row in
+            result[row.text(0)] = StoredFileMetadata(
+                modificationTime: row.double(1),
+                byteCount: UInt64(max(0, row.int64(2)))
+            )
+        }
+        return result
+    }
+
+    func replaceProviderFile(
+        _ provider: AIProviderType,
+        path: String,
+        modificationTime: Double,
+        byteCount: UInt64,
+        aggregates: [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate]
+    ) {
+        transaction {
+            run("DELETE FROM provider_files WHERE path=?", [.text(path)])
+            run("INSERT INTO provider_files(path,provider,mtime,byte_count) VALUES(?,?,?,?)", [
+                .text(path), .text(provider.rawValue), .double(modificationTime), .int64(Int64(byteCount))
+            ])
+            for (key, value) in aggregates {
+                run("""
+                    INSERT INTO provider_aggregates(file_path,date,model,input,cached_input,cache_write,output,events)
+                    VALUES(?,?,?,?,?,?,?,?)
+                    """, [
+                        .text(path), .text(key.day), .text(key.model),
+                        .int64(Int64(value.input)), .int64(Int64(value.cachedInput)),
+                        .int64(Int64(value.cacheWrite)), .int64(Int64(value.output)),
+                        .int64(Int64(value.events))
+                    ])
+            }
+        }
+    }
+
+    func removeProviderFiles(_ provider: AIProviderType, notIn livePaths: Set<String>) -> Int {
+        var removed = 0
+        for path in providerFiles(provider).keys where !livePaths.contains(path) {
+            transaction { run("DELETE FROM provider_files WHERE path=?", [.text(path)]) }
+            removed += 1
+        }
+        return removed
+    }
+
+    func providerAggregates(_ provider: AIProviderType) -> [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] {
+        var result: [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] = [:]
+        query("""
+            SELECT a.date,a.model,SUM(a.input),SUM(a.cached_input),SUM(a.cache_write),SUM(a.output),SUM(a.events)
+            FROM provider_aggregates a JOIN provider_files f ON f.path=a.file_path
+            WHERE f.provider=? GROUP BY a.date,a.model
+            """, bindings: [.text(provider.rawValue)]) { row in
+            result[CostParser.CodexAggregateKey(day: row.text(0), model: row.text(1), reasoningEffort: nil)] =
+                CostParser.CodexTokenAggregate(
+                    input: Int(row.int64(2)), cachedInput: Int(row.int64(3)),
+                    cacheWrite: Int(row.int64(4)), output: Int(row.int64(5)),
+                    events: Int(row.int64(6))
+                )
+        }
+        return result
+    }
+
     func replaceClaudeFile(path: String, parsed: CachedFile) {
         transaction {
             deleteClaudeRows(path: path)
@@ -237,6 +300,16 @@ final class UsageDatabase: @unchecked Sendable {
           events INTEGER NOT NULL, lines_changed INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS codex_aggregate_date ON codex_aggregates(date);
+        CREATE TABLE IF NOT EXISTS provider_files(
+          path TEXT PRIMARY KEY, provider TEXT NOT NULL, mtime REAL NOT NULL, byte_count INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS provider_aggregates(
+          file_path TEXT NOT NULL REFERENCES provider_files(path) ON DELETE CASCADE,
+          date TEXT NOT NULL, model TEXT NOT NULL,
+          input INTEGER NOT NULL, cached_input INTEGER NOT NULL, cache_write INTEGER NOT NULL,
+          output INTEGER NOT NULL, events INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS provider_aggregate_date ON provider_aggregates(date);
         """)
         var codexColumns = Set<String>()
         query("PRAGMA table_info(codex_aggregates)") { codexColumns.insert($0.text(1)) }

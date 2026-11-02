@@ -42,7 +42,7 @@ struct AccountSwitcherView: View {
             }
             .measureUsageContentHeight()
         }
-        .alert("Choose Codex switch method", isPresented: $showingCodexSwitchMethods) {
+        .alert("Choose \(pendingSwitchAccount?.provider.rawValue ?? "") switch method", isPresented: $showingCodexSwitchMethods) {
             Button("Force Restart Sessions", role: .destructive) {
                 guard let account = pendingSwitchAccount else { return }
                 let processes = pendingCodexProcesses
@@ -88,7 +88,7 @@ struct AccountSwitcherView: View {
             Text("No Accounts")
                 .font(.headline)
 
-            Text("Add a Claude Code, Codex, or Kimi account to get started.")
+            Text("Add a \(AIProviderType.implementedNames(conjunction: "or")) account to get started.")
                 .font(.caption)
                 .foregroundStyle(.textSecondary)
                 .multilineTextAlignment(.center)
@@ -207,12 +207,13 @@ struct AccountSwitcherView: View {
                         if account.isActive {
                             Badge(text: String(localized: "Active", bundle: L10n.bundle), color: .brand)
                         }
+                        if appState.needsSignIn(account) {
+                            Badge(text: String(localized: "Needs sign-in", bundle: L10n.bundle), color: .orange)
+                        }
                     }
                 }
 
-                Text(account.displayEmail(obfuscated: !showFullEmail))
-                    .font(.caption)
-                    .foregroundStyle(.textSecondary)
+                AccountEmailLabel(email: account.email, alwaysVisible: showFullEmail)
 
                 HStack(spacing: 8) {
                     if let sub = account.displaySubscriptionType {
@@ -299,14 +300,13 @@ struct AccountSwitcherView: View {
     }
 
     private func requestSwitch(to account: Account) {
-        if account.provider == .codex {
+        if account.provider.capabilities.supportsSelectableSwitchMode {
             pendingSwitchAccount = account
             pendingCodexProcesses = appState.runningCodexProcesses()
             showingCodexSwitchMethods = true
             return
         }
-        // Claude retains its original single-action account switch. Session
-        // restart choices are intentionally exclusive to Codex.
+        // A provider without selectable switch methods switches in one action.
         Task { await appState.switchTo(account) }
     }
 
@@ -366,39 +366,18 @@ struct AccountSwitcherView: View {
             )
         } else {
             Menu {
-                Menu {
-                    Button("Login new account") {
-                        Task { await appState.loginNewAccount() }
+                ForEach(AIProviderType.implementedProviders) { provider in
+                    Menu {
+                        Button("Login new account") {
+                            Task { await appState.loginNewAccount(provider) }
+                        }
+                        .disabled(!appState.canLoginNewAccount(provider))
+                        Button("Capture current account") {
+                            Task { await appState.captureCurrentAccount(provider) }
+                        }
+                    } label: {
+                        Label(provider.capabilities.displayName, systemImage: provider.iconName)
                     }
-                    Button("Capture current account") {
-                        Task { await appState.addAccount() }
-                    }
-                } label: {
-                    Label("Claude", systemImage: AIProviderType.claudeCode.iconName)
-                }
-
-                Menu {
-                    Button("Login new account") {
-                        Task { await appState.loginNewCodexAccount() }
-                    }
-                    .disabled(!appState.codexAvailable)
-                    Button("Capture current account") {
-                        Task { await appState.addCurrentCodexAccount() }
-                    }
-                } label: {
-                    Label("Codex", systemImage: AIProviderType.codex.iconName)
-                }
-
-                Menu {
-                    Button("Login new account") {
-                        Task { await appState.loginNewKimiAccount() }
-                    }
-                    .disabled(!appState.kimiAvailable)
-                    Button("Capture current account") {
-                        Task { await appState.addCurrentKimiAccount() }
-                    }
-                } label: {
-                    Label("Kimi", systemImage: AIProviderType.kimi.iconName)
                 }
             } label: {
                 Label("Add Provider", systemImage: "person.crop.circle.badge.plus")

@@ -75,9 +75,15 @@ struct MainMenuView: View {
     @AppStorage("disableCardShadows") private var disableCardShadows = false
     @AppStorage("showProviderLabels") private var showProviderLabels = true
     @AppStorage("preferMonochromeIcons") private var preferMonochromeIcons = false
-    @AppStorage("showClaudeProvider") private var showClaudeProvider = true
-    @AppStorage("showCodexProvider") private var showCodexProvider = true
-    @State private var selectedTab: Tab = .usage
+    @AppStorage(ProviderVisibility.storageKey) private var hiddenProviders = ""
+    @State private var selectedTab: Tab
+    /// Height limit used instead of the screen's, for rendering off screen.
+    private let maximumHeight: CGFloat?
+
+    init(initialTab: Tab = .usage, maximumHeight: CGFloat? = nil) {
+        _selectedTab = State(initialValue: initialTab)
+        self.maximumHeight = maximumHeight
+    }
 
     // Measured heights driving the popover frame.
     // Defaults are reasonable fallbacks for the first render pass, before
@@ -111,7 +117,7 @@ struct MainMenuView: View {
             headerView
                 .measureChromeHeight()
 
-            if showClaudeProvider && isPromoActive() {
+            if !ProviderVisibility.hidden(in: hiddenProviders).contains(.claudeCode) && isPromoActive() {
                 promoBannerView
                     .measureChromeHeight()
             }
@@ -194,7 +200,7 @@ struct MainMenuView: View {
         // SwiftUI content. Reserving only a token margin lets that outer frame
         // exceed the visible screen and AppKit clips the header at full height.
         let popoverExteriorAllowance: CGFloat = 32
-        let maxHeight: CGFloat = max(
+        let maxHeight: CGFloat = maximumHeight ?? max(
             320,
             (activeScreen?.visibleFrame.height ?? 900) - popoverExteriorAllowance
         )
@@ -270,7 +276,7 @@ struct MainMenuView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("AccountDock")
                     .font(.headline)
-                Text("Claude and Codex accounts")
+                Text("\(AIProviderType.implementedNames(short: true)) accounts")
                     .font(.caption)
                     .foregroundStyle(.textSecondary)
             }

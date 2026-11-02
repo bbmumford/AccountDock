@@ -11,6 +11,12 @@ struct UsageAPIResponse: Codable {
     let sevenDayCowork: UsageWindow?
     let iguanaNecktie: UsageWindow?
     let extraUsage: ExtraUsage?
+    /// Every limit the provider applies, including weekly limits scoped to
+    /// one model. Absent from older responses and from other providers.
+    var limits: [UsageLimit]? = nil
+    /// The share of the weekly allowance each scoped limit may use, keyed by
+    /// the scoped limit's index in `limits`.
+    var weeklyScopedShares: [WeeklyScopedShare]? = nil
 
     enum CodingKeys: String, CodingKey {
         case fiveHour = "five_hour"
@@ -21,6 +27,8 @@ struct UsageAPIResponse: Codable {
         case sevenDayCowork = "seven_day_cowork"
         case iguanaNecktie = "iguana_necktie"
         case extraUsage = "extra_usage"
+        case limits
+        case weeklyScopedShares = "weekly_scoped_shares"
     }
 
     /// Clears utilization for windows whose last provider-confirmed reset has
@@ -37,7 +45,9 @@ struct UsageAPIResponse: Codable {
             sevenDaySonnet: sevenDaySonnet?.expiringPassedReset(at: date),
             sevenDayCowork: sevenDayCowork?.expiringPassedReset(at: date),
             iguanaNecktie: iguanaNecktie?.expiringPassedReset(at: date),
-            extraUsage: extraUsage
+            extraUsage: extraUsage,
+            limits: limits,
+            weeklyScopedShares: weeklyScopedShares
         )
     }
 
@@ -67,7 +77,9 @@ struct UsageAPIResponse: Codable {
             sevenDaySonnet: sevenDaySonnet,
             sevenDayCowork: sevenDayCowork,
             iguanaNecktie: iguanaNecktie,
-            extraUsage: extraUsage
+            extraUsage: extraUsage,
+            limits: limits,
+            weeklyScopedShares: weeklyScopedShares
         )
     }
 
@@ -84,9 +96,147 @@ struct UsageAPIResponse: Codable {
             sevenDaySonnet: sevenDaySonnet,
             sevenDayCowork: sevenDayCowork,
             iguanaNecktie: iguanaNecktie,
-            extraUsage: extraUsage
+            extraUsage: extraUsage,
+            limits: limits,
+            weeklyScopedShares: weeklyScopedShares
         )
     }
+}
+
+extension UsageAPIResponse {
+    /// Decodes the limit list leniently: a limit shape this version does not
+    /// know must never discard the windows the planner depends on.
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        fiveHour = try values.decodeIfPresent(UsageWindow.self, forKey: .fiveHour)
+        sevenDay = try values.decodeIfPresent(UsageWindow.self, forKey: .sevenDay)
+        sevenDayOauthApps = try? values.decodeIfPresent(UsageWindow.self, forKey: .sevenDayOauthApps)
+        sevenDayOpus = try? values.decodeIfPresent(UsageWindow.self, forKey: .sevenDayOpus)
+        sevenDaySonnet = try? values.decodeIfPresent(UsageWindow.self, forKey: .sevenDaySonnet)
+        sevenDayCowork = try? values.decodeIfPresent(UsageWindow.self, forKey: .sevenDayCowork)
+        iguanaNecktie = try? values.decodeIfPresent(UsageWindow.self, forKey: .iguanaNecktie)
+        extraUsage = try? values.decodeIfPresent(ExtraUsage.self, forKey: .extraUsage)
+        limits = (try? values.decodeIfPresent([LossyLimit].self, forKey: .limits))?.map(\.limit)
+        weeklyScopedShares = try? values.decodeIfPresent([WeeklyScopedShare].self, forKey: .weeklyScopedShares)
+    }
+
+    /// Whether a reading shows the account has no session window: it carries
+    /// the long window without one. The provider reports both together, so
+    /// the absence is the account's plan rather than a partial reading; a
+    /// later reading with a session window brings it back.
+    var reportsNoSessionWindow: Bool { fiveHour == nil && sevenDay != nil }
+
+    func replacingSevenDay(_ window: UsageWindow?) -> UsageAPIResponse {
+        UsageAPIResponse(
+            fiveHour: fiveHour, sevenDay: window, sevenDayOauthApps: sevenDayOauthApps,
+            sevenDayOpus: sevenDayOpus, sevenDaySonnet: sevenDaySonnet, sevenDayCowork: sevenDayCowork,
+            iguanaNecktie: iguanaNecktie, extraUsage: extraUsage,
+            limits: limits, weeklyScopedShares: weeklyScopedShares
+        )
+    }
+
+    /// Weekly limits that apply only to one model, with the share of the
+    /// whole weekly allowance each may use.
+    var modelWeeklyLimits: [ModelWeeklyLimit] {
+        guard let limits else { return [] }
+        return limits.enumerated().compactMap { index, limit in
+            guard limit.kind == "weekly_scoped",
+                  let model = limit.scope?.model?.displayName ?? limit.scope?.model?.id,
+                  let percent = limit.percent else { return nil }
+            let share = weeklyScopedShares?.first { $0.limitIndex == index }
+            return ModelWeeklyLimit(
+                model: model,
+                percent: percent,
+                resetsAt: limit.resetsAt,
+                allowancePercentOfWeekly: share?.allowancePercentOfWeekly ?? 100,
+                usedPercentOfWeekly: share?.usedPercentOfWeekly
+            )
+        }
+    }
+
+    /// The weekly window as it applies to work on `model`: the whole weekly
+    /// limit, or a model's own weekly limit when that leaves less room.
+    /// Room is measured in percent of the whole weekly allowance, the unit
+    /// `QuotaTrend` learns burn rates in, so the result plugs into the same
+    /// projection as the whole-allowance window.
+    func weeklyWindow(forModel model: String?) -> UsageWindow? {
+        guard let all = sevenDay, let used = all.utilization else { return sevenDay }
+        guard let model = model?.lowercased(), !model.isEmpty else { return all }
+        var room = 100 - used
+        var reset = all.resetsAt
+        for limit in modelWeeklyLimits where model.contains(limit.model.lowercased()) {
+            if let reset = UsageWindow(utilization: nil, resetsAt: limit.resetsAt).resetsAtDate, reset <= Date() { continue }
+            let scopedRoom = limit.usedPercentOfWeekly.map { limit.allowancePercentOfWeekly - $0 }
+                ?? (100 - limit.percent) * limit.allowancePercentOfWeekly / 100
+            if scopedRoom < room {
+                room = max(0, scopedRoom)
+                reset = limit.resetsAt ?? reset
+            }
+        }
+        return UsageWindow(utilization: min(100, 100 - room), resetsAt: reset, windowSeconds: all.windowSeconds)
+    }
+}
+
+struct UsageLimit: Codable {
+    let kind: String?
+    let group: String?
+    let percent: Double?
+    let severity: String?
+    let resetsAt: String?
+    let scope: Scope?
+    let isActive: Bool?
+
+    struct Scope: Codable {
+        let model: Model?
+    }
+
+    struct Model: Codable {
+        let id: String?
+        let displayName: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case displayName = "display_name"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case kind, group, percent, severity, scope
+        case resetsAt = "resets_at"
+        case isActive = "is_active"
+    }
+}
+
+/// One element of `limits`. An element that does not decode becomes an
+/// empty limit rather than failing the list, so `limit_index` positions in
+/// `weekly_scoped_shares` stay aligned.
+private struct LossyLimit: Decodable {
+    let limit: UsageLimit
+    init(from decoder: Decoder) throws {
+        limit = (try? UsageLimit(from: decoder)) ?? UsageLimit(
+            kind: nil, group: nil, percent: nil, severity: nil, resetsAt: nil, scope: nil, isActive: nil
+        )
+    }
+}
+
+struct WeeklyScopedShare: Codable {
+    let limitIndex: Int
+    let usedPercentOfWeekly: Double?
+    let allowancePercentOfWeekly: Double
+
+    enum CodingKeys: String, CodingKey {
+        case limitIndex = "limit_index"
+        case usedPercentOfWeekly = "used_percent_of_weekly"
+        case allowancePercentOfWeekly = "allowance_percent_of_weekly"
+    }
+}
+
+struct ModelWeeklyLimit: Equatable {
+    let model: String
+    let percent: Double
+    let resetsAt: String?
+    let allowancePercentOfWeekly: Double
+    let usedPercentOfWeekly: Double?
 }
 
 private extension Optional where Wrapped == UsageWindow {
@@ -229,12 +379,16 @@ struct ExtraUsage: Codable {
     let monthlyLimit: Double?
     let usedCredits: Double?
     let utilization: Double?
+    /// Decimal places of `usedCredits` and `monthlyLimit`, which are minor
+    /// currency units.
+    var decimalPlaces: Int? = nil
 
     enum CodingKeys: String, CodingKey {
         case isEnabled = "is_enabled"
         case monthlyLimit = "monthly_limit"
         case usedCredits = "used_credits"
         case utilization
+        case decimalPlaces = "decimal_places"
     }
 }
 

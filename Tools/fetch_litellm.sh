@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fetch_litellm.sh — Pull the latest LiteLLM model-pricing JSON, filter it
-# down to Anthropic/Claude and OpenAI/Codex rows, and write the result into
+# down to Anthropic/Claude, OpenAI/Codex and Moonshot/Kimi rows, and write the result into
 # AccountDock/Resources/ so
 # it bundles with the app.
 #
@@ -45,7 +45,8 @@ def is_supported(name: str) -> bool:
             or name.startswith('anthropic.claude-')
             or name.startswith('anthropic/claude-')
             or name.startswith('gpt-')
-            or name.startswith('openai/gpt-'))
+            or name.startswith('openai/gpt-')
+            or name.startswith('moonshot/'))
 
 supported = {k: v for k, v in data.items() if is_supported(k)}
 
@@ -56,7 +57,7 @@ wrapped = {
         'source_commit': source_hash,
         'fetched_at': fetched_at,
         'model_count': len(supported),
-        'providers': ['anthropic', 'openai'],
+        'providers': ['anthropic', 'openai', 'moonshot'],
     },
     'models': supported,
 }

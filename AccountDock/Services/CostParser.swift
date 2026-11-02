@@ -3,11 +3,61 @@ import Foundation
 /// Provides cost summaries from Claude Code session JSONL files.
 /// All actual parsing is done by the unified `UsageIndex`; this is a thin facade.
 final class CostParser: Sendable {
-    struct CodexCostHistory: Sendable {
+    /// A provider's cost by day and today's activity, from its CLI's local
+    /// records; the one shape every provider's usage is shown from.
+    struct ProviderCostHistory: Sendable, Equatable {
         let dailyCosts: [String: Double]
+        /// Model responses today, by model (Claude Code: turns by model).
         let todayModelActivity: [String: Int]
         let todayModelCosts: [String: Double]
         let todayLinesChanged: Int
+        /// Turns today: Claude Code's conversation turns, or the model
+        /// responses the provider records.
+        var todayTurns: Int
+        /// Input, output and cache tokens today.
+        var todayTokens: Int = 0
+        /// Sessions with usage today, when the records say.
+        var todaySessions: Int?
+        /// Minutes of active session time today, when the records say.
+        var todayActiveMinutes: Int?
+
+        init(
+            dailyCosts: [String: Double],
+            todayModelActivity: [String: Int],
+            todayModelCosts: [String: Double],
+            todayLinesChanged: Int,
+            todayTurns: Int? = nil,
+            todayTokens: Int = 0,
+            todaySessions: Int? = nil,
+            todayActiveMinutes: Int? = nil
+        ) {
+            self.dailyCosts = dailyCosts
+            self.todayModelActivity = todayModelActivity
+            self.todayModelCosts = todayModelCosts
+            self.todayLinesChanged = todayLinesChanged
+            self.todayTurns = todayTurns ?? todayModelActivity.values.reduce(0, +)
+            self.todayTokens = todayTokens
+            self.todaySessions = todaySessions
+            self.todayActiveMinutes = todayActiveMinutes
+        }
+
+        static let empty = ProviderCostHistory(dailyCosts: [:], todayModelActivity: [:], todayModelCosts: [:], todayLinesChanged: 0)
+
+        /// Claude Code's history, from its richer cost summary and today's
+        /// activity.
+        init(claude summary: CostSummary, activity: ActivityStats, today: String) {
+            let day = summary.dailyCosts.first { $0.date == today }
+            self.init(
+                dailyCosts: Dictionary(summary.dailyCosts.map { ($0.date, $0.totalCost) }, uniquingKeysWith: +),
+                todayModelActivity: activity.modelUsage,
+                todayModelCosts: day?.modelBreakdown ?? [:],
+                todayLinesChanged: activity.linesWritten,
+                todayTurns: activity.conversationTurns,
+                todayTokens: day?.totalTokens ?? 0,
+                todaySessions: day?.sessionCount,
+                todayActiveMinutes: activity.activeCodingMinutes
+            )
+        }
     }
     static let shared = CostParser()
     private init() {}
@@ -19,47 +69,104 @@ final class CostParser: Sendable {
         return await UsageIndex.shared.costSummary()
     }
 
-    /// Native Codex JSONL aggregation. This reads ~/.codex/sessions directly;
-    /// AccountDock does not invoke CodexBar.
-    func getCodexCostHistory() async -> CodexCostHistory {
+    /// The cost history of a provider whose usage is aggregated per model
+    /// and day; nil for Claude Code, whose history is built from
+    /// `getCostSummary` and today's activity, and for a provider without
+    /// usage records.
+    func costHistory(for provider: AIProviderType) async -> ProviderCostHistory? {
+        guard await UsageIndex.shared.aggregatesUsage(provider) else { return nil }
         await PricingService.shared.ensureLoaded()
-        let aggregates = await UsageIndex.shared.codexAggregates()
+        return await providerCostHistory(provider)
+    }
+
+    /// A provider's usage from its own CLI's records plus the Claude Code
+    /// turns the router served from it as a route target.
+    func providerCostHistory(_ provider: AIProviderType) async -> ProviderCostHistory {
+        var aggregates = await UsageIndex.shared.aggregates(provider)
+        for (key, routed) in await UsageIndex.shared.routedAggregates(provider) {
+            var aggregate = aggregates[key] ?? CodexTokenAggregate()
+            aggregate.input += routed.input
+            aggregate.cachedInput += routed.cachedInput
+            aggregate.cacheWrite += routed.cacheWrite
+            aggregate.output += routed.output
+            aggregate.events += routed.events
+            aggregates[key] = aggregate
+        }
+        return await Self.costHistory(aggregates, provider: provider)
+    }
+
+    static func costHistory(
+        _ aggregates: [CodexAggregateKey: CodexTokenAggregate],
+        provider: AIProviderType
+    ) async -> ProviderCostHistory {
         let today = DateFormatter.codexDay.string(from: Date())
         var dailyCosts: [String: Double] = [:]
         var todayModelCosts: [String: Double] = [:]
         var modelActivity: [String: Int] = [:]
         var todayLinesChanged = 0
+        var todayTokens = 0
         for (key, aggregate) in aggregates {
             if key.day == today {
                 modelActivity[key.displayKey, default: 0] += aggregate.events
                 todayLinesChanged += aggregate.linesChanged
+                todayTokens += aggregate.input + aggregate.cacheWrite + aggregate.output
             }
             guard let price = await PricingService.shared.pricing(
                 for: key.model,
-                provider: .codex,
+                provider: provider,
                 reasoningEffort: key.reasoningEffort
             ) else { continue }
-            let uncachedInput = max(0, aggregate.input - aggregate.cachedInput)
             let cost = price.cost(
-                input: uncachedInput,
+                input: max(0, aggregate.input - aggregate.cachedInput),
                 output: aggregate.output,
-                cacheCreate: 0,
+                cacheCreate: aggregate.cacheWrite,
                 cacheCreate1h: 0,
                 cacheRead: aggregate.cachedInput,
                 isFast: false
             )
             guard cost > 0 else { continue }
             dailyCosts[key.day, default: 0] += cost
-            if key.day == today {
-                todayModelCosts[key.displayKey, default: 0] += cost
-            }
+            if key.day == today { todayModelCosts[key.displayKey, default: 0] += cost }
         }
-        return CodexCostHistory(
+        return ProviderCostHistory(
             dailyCosts: dailyCosts,
             todayModelActivity: modelActivity,
             todayModelCosts: todayModelCosts,
-            todayLinesChanged: todayLinesChanged
+            todayLinesChanged: todayLinesChanged,
+            todayTokens: todayTokens
         )
+    }
+
+    /// Reads Kimi Code `usage.record` events. `inputOther` excludes cached
+    /// input, so the stored input total adds the cache reads back to match the
+    /// Codex aggregate convention of input including cached tokens.
+    static func scanKimiFile(_ url: URL) -> [CodexAggregateKey: CodexTokenAggregate] {
+        var aggregates: [CodexAggregateKey: CodexTokenAggregate] = [:]
+        let dayFormatter = DateFormatter()
+        dayFormatter.dateFormat = "yyyy-MM-dd"
+        JSONLStreamReader.read(path: url.path) { data in
+            guard let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  row["type"] as? String == "usage.record",
+                  let usage = row["usage"] as? [String: Any],
+                  let rawModel = row["model"] as? String,
+                  let millis = (row["time"] as? NSNumber)?.doubleValue else { return }
+            let model = rawModel.hasPrefix("kimi-code/") ? String(rawModel.dropFirst("kimi-code/".count)) : rawModel
+            guard isDisplayableCodexModel(model) else { return }
+            let key = CodexAggregateKey(
+                day: dayFormatter.string(from: Date(timeIntervalSince1970: millis / 1000)),
+                model: model,
+                reasoningEffort: nil
+            )
+            func int(_ name: String) -> Int { (usage[name] as? NSNumber)?.intValue ?? 0 }
+            var aggregate = aggregates[key] ?? CodexTokenAggregate()
+            aggregate.input += int("inputOther") + int("inputCacheRead")
+            aggregate.cachedInput += int("inputCacheRead")
+            aggregate.cacheWrite += int("inputCacheCreation")
+            aggregate.output += int("output")
+            aggregate.events += 1
+            aggregates[key] = aggregate
+        }
+        return aggregates
     }
 
     struct CodexAggregateKey: Hashable, Codable, Sendable {
@@ -76,6 +183,7 @@ final class CostParser: Sendable {
     struct CodexTokenAggregate: Codable, Sendable {
         var input = 0
         var cachedInput = 0
+        var cacheWrite = 0
         var output = 0
         var events = 0
         var linesChanged = 0

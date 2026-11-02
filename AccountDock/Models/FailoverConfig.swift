@@ -1,7 +1,7 @@
 import Foundation
 import Combine
 
-enum CodexFailoverSwitchMode: String, Codable, CaseIterable, Identifiable {
+enum FailoverSwitchMethod: String, Codable, CaseIterable, Identifiable {
     case safeRestart
     case forceRestart
     case withoutRestart
@@ -30,23 +30,106 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     var resetGraceMinutes = 5.0
     var keepWindowsWarm = true
     var intelligentBalancingEnabled = false
-    var balancingMinimumAdvantage = 5.0
+    /// Hours by which another account's latest feasible start must precede the
+    /// active account's before balancing moves the workload.
+    var balancingMinimumAdvantageHours = 6.0
     var balancingMinimumDwellMinutes = 30.0
     var suspendAgentsWhenExhausted = false
-    var codexSwitchMode = CodexFailoverSwitchMode.safeRestart
+    /// With `suspendAgentsWhenExhausted`, paused sessions continue a few at
+    /// a time as capacity returns, each where its forecast use fits, rather
+    /// than all at once on the first account that resets.
+    var resumeAsCapacityAllows = true
+    /// `RouteTarget` that serves this provider's requests, through
+    /// `AccountDockRouter`, while every included account is exhausted;
+    /// requests return once an account has capacity, and sessions keep
+    /// running throughout. Nil pauses sessions instead.
+    var routeTarget: String?
+    /// Model of the route target that serves routed requests; nil uses the
+    /// target's default.
+    var routeModel: String?
+    /// Sessions with more context than this stay on the provider's own
+    /// accounts instead of being routed; nil uses `defaultRouteMaxContextTokens`.
+    var routeMaxContextTokens: Int?
+    /// Share of the route target's window kept for its own provider's
+    /// sessions; routing stops before the window falls below it.
+    var routeReservePercent: Double = 25
+    /// Routing starts only when the target is expected to carry the current
+    /// demand at least this long.
+    var routeMinimumMinutes: Double = 15
+    /// Serves each session from its own account through the router, so
+    /// several accounts' 5-hour windows are used at the same time.
+    var distributeSessions = false
+    /// With `distributeSessions`, each account's sessions are paced to its
+    /// 5-hour window: new sessions go to the accounts with the most unused
+    /// rate, sessions keep their account while their prompt cache lasts, and
+    /// leave it only when it would reach its limit for longer than that.
+    var paceSessions = true
+    /// The router asks for the one-hour prompt cache for large contexts in
+    /// place of the client's five-minute one.
+    var extendCacheLifetime = true
+    /// Lets accounts with extra usage enabled keep serving past their plan
+    /// limit when every account is exhausted, up to this much spend per
+    /// month in the account's currency. Nil never uses extra usage.
+    var extraUsageMonthlyLimit: Double?
+    var switchMethod = FailoverSwitchMethod.safeRestart
     var accountOrder: [UUID] = []
     var excludedAccountIDs: Set<UUID> = []
+
+    /// Whether a setting needs the router: a route to another provider, or
+    /// sessions served from several accounts at once by a CLI that cannot
+    /// start each session on an account of its own (`SessionSlots`).
+    /// Failover, balancing and pausing switch the CLI's own account and send
+    /// no request through it, so with neither set the CLI reaches its
+    /// provider directly and the router does not run.
+    func usesRouter(for provider: AIProviderType) -> Bool {
+        routeTarget != nil || (distributeSessions && provider.capabilities.sessionSlots == nil)
+    }
 
     enum CodingKeys: String, CodingKey {
         case enabled, sessionEnabled, sessionThreshold, weeklyEnabled, weeklyThreshold
         case loops, resetAware, preferMostCapacity, waitForImminentReset
         case resetGraceMinutes, keepWindowsWarm, intelligentBalancingEnabled
-        case balancingMinimumAdvantage, balancingMinimumDwellMinutes
-        case suspendAgentsWhenExhausted
-        case codexSwitchMode, accountOrder, excludedAccountIDs
+        case balancingMinimumAdvantageHours, balancingMinimumDwellMinutes
+        case suspendAgentsWhenExhausted, resumeAsCapacityAllows, routeTarget, routeModel, distributeSessions, paceSessions, extendCacheLifetime, extraUsageMonthlyLimit
+        case routeMaxContextTokens, routeReservePercent, routeMinimumMinutes
+        case routeToKimiWhenExhausted, routeKimiModel
+        case switchMethod, accountOrder, excludedAccountIDs
+        case codexSwitchMode
     }
 
     init() {}
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(enabled, forKey: .enabled)
+        try values.encode(sessionEnabled, forKey: .sessionEnabled)
+        try values.encode(sessionThreshold, forKey: .sessionThreshold)
+        try values.encode(weeklyEnabled, forKey: .weeklyEnabled)
+        try values.encode(weeklyThreshold, forKey: .weeklyThreshold)
+        try values.encode(loops, forKey: .loops)
+        try values.encode(resetAware, forKey: .resetAware)
+        try values.encode(preferMostCapacity, forKey: .preferMostCapacity)
+        try values.encode(waitForImminentReset, forKey: .waitForImminentReset)
+        try values.encode(resetGraceMinutes, forKey: .resetGraceMinutes)
+        try values.encode(keepWindowsWarm, forKey: .keepWindowsWarm)
+        try values.encode(intelligentBalancingEnabled, forKey: .intelligentBalancingEnabled)
+        try values.encode(balancingMinimumAdvantageHours, forKey: .balancingMinimumAdvantageHours)
+        try values.encode(balancingMinimumDwellMinutes, forKey: .balancingMinimumDwellMinutes)
+        try values.encode(suspendAgentsWhenExhausted, forKey: .suspendAgentsWhenExhausted)
+        try values.encode(resumeAsCapacityAllows, forKey: .resumeAsCapacityAllows)
+        try values.encodeIfPresent(routeTarget, forKey: .routeTarget)
+        try values.encodeIfPresent(routeModel, forKey: .routeModel)
+        try values.encodeIfPresent(routeMaxContextTokens, forKey: .routeMaxContextTokens)
+        try values.encode(routeReservePercent, forKey: .routeReservePercent)
+        try values.encode(routeMinimumMinutes, forKey: .routeMinimumMinutes)
+        try values.encode(distributeSessions, forKey: .distributeSessions)
+        try values.encode(paceSessions, forKey: .paceSessions)
+        try values.encode(extendCacheLifetime, forKey: .extendCacheLifetime)
+        try values.encodeIfPresent(extraUsageMonthlyLimit, forKey: .extraUsageMonthlyLimit)
+        try values.encode(switchMethod, forKey: .switchMethod)
+        try values.encode(accountOrder, forKey: .accountOrder)
+        try values.encode(excludedAccountIDs, forKey: .excludedAccountIDs)
+    }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -62,13 +145,28 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         resetGraceMinutes = try values.decodeIfPresent(Double.self, forKey: .resetGraceMinutes) ?? 5
         keepWindowsWarm = try values.decodeIfPresent(Bool.self, forKey: .keepWindowsWarm) ?? true
         intelligentBalancingEnabled = try values.decodeIfPresent(Bool.self, forKey: .intelligentBalancingEnabled) ?? false
-        balancingMinimumAdvantage = try values.decodeIfPresent(Double.self, forKey: .balancingMinimumAdvantage) ?? 5
+        balancingMinimumAdvantageHours = try values.decodeIfPresent(Double.self, forKey: .balancingMinimumAdvantageHours) ?? 6
         balancingMinimumDwellMinutes = try values.decodeIfPresent(Double.self, forKey: .balancingMinimumDwellMinutes) ?? 30
         suspendAgentsWhenExhausted = try values.decodeIfPresent(Bool.self, forKey: .suspendAgentsWhenExhausted) ?? false
-        codexSwitchMode = try values.decodeIfPresent(
-            CodexFailoverSwitchMode.self,
-            forKey: .codexSwitchMode
-        ) ?? .safeRestart
+        resumeAsCapacityAllows = try values.decodeIfPresent(Bool.self, forKey: .resumeAsCapacityAllows) ?? true
+        routeTarget = try values.decodeIfPresent(String.self, forKey: .routeTarget)
+        routeModel = try values.decodeIfPresent(String.self, forKey: .routeModel)
+        routeMaxContextTokens = try values.decodeIfPresent(Int.self, forKey: .routeMaxContextTokens)
+        routeReservePercent = try values.decodeIfPresent(Double.self, forKey: .routeReservePercent) ?? 25
+        routeMinimumMinutes = try values.decodeIfPresent(Double.self, forKey: .routeMinimumMinutes) ?? 15
+        distributeSessions = try values.decodeIfPresent(Bool.self, forKey: .distributeSessions) ?? false
+        paceSessions = try values.decodeIfPresent(Bool.self, forKey: .paceSessions) ?? true
+        extendCacheLifetime = try values.decodeIfPresent(Bool.self, forKey: .extendCacheLifetime) ?? true
+        extraUsageMonthlyLimit = try values.decodeIfPresent(Double.self, forKey: .extraUsageMonthlyLimit)
+        // Settings saved when routing could only target Kimi.
+        if routeTarget == nil, try values.decodeIfPresent(Bool.self, forKey: .routeToKimiWhenExhausted) == true {
+            routeTarget = "kimi"
+            routeModel = try values.decodeIfPresent(String.self, forKey: .routeKimiModel)
+        }
+        // Settings saved when only Codex offered a switch method.
+        switchMethod = try values.decodeIfPresent(FailoverSwitchMethod.self, forKey: .switchMethod)
+            ?? values.decodeIfPresent(FailoverSwitchMethod.self, forKey: .codexSwitchMode)
+            ?? .safeRestart
         accountOrder = try values.decodeIfPresent([UUID].self, forKey: .accountOrder) ?? []
         excludedAccountIDs = try values.decodeIfPresent(Set<UUID>.self, forKey: .excludedAccountIDs) ?? []
     }
@@ -78,8 +176,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         if !provider.capabilities.supportsSessionQuota {
             policy.sessionEnabled = false
         }
-        if provider == .kimi {
-            // Kimi's CLI does not yet expose a non-persistent probe contract.
+        if !provider.capabilities.supportsWindowWarming {
             policy.keepWindowsWarm = false
         }
         return policy
@@ -143,6 +240,15 @@ final class FailoverConfigStore: ObservableObject {
         policies[provider] ?? .defaults(for: provider)
     }
 
+    /// The saved policy, read without the main actor for background work
+    /// such as hook installation.
+    nonisolated static func storedPolicy(for provider: AIProviderType) -> ProviderFailoverPolicy {
+        guard let data = UserDefaults.standard.data(forKey: "app.accountdock.failover.policies.v1"),
+              let stored = try? JSONDecoder().decode(ProviderPolicyStore.self, from: data),
+              let policy = stored.policies[provider] else { return .defaults(for: provider) }
+        return policy
+    }
+
     func update(_ provider: AIProviderType, _ change: (inout ProviderFailoverPolicy) -> Void) {
         var policy = policies[provider] ?? .defaults(for: provider)
         change(&policy)
@@ -167,250 +273,6 @@ final class FailoverConfigStore: ObservableObject {
         let stored = ProviderPolicyStore(policies: policies)
         if let data = try? JSONEncoder().encode(stored) {
             defaults.set(data, forKey: key)
-        }
-    }
-}
-
-enum FailoverDecision {
-    /// Adaptive active-account polling. Approaching a threshold increases
-    /// awareness, while an exhausted account with nowhere to fail over is
-    /// checked only when its reset or provider retry window becomes relevant.
-    static func pollInterval(
-        usage: UsageAPIResponse?,
-        provider: AIProviderType,
-        policy: ProviderFailoverPolicy,
-        noFailoverAvailable: Bool,
-        blockingReset: Date?,
-        retryAfter: Date?,
-        now: Date = Date()
-    ) -> TimeInterval {
-        if let retryAfter, retryAfter > now {
-            return max(60, retryAfter.timeIntervalSince(now) + 5)
-        }
-
-        if noFailoverAvailable && exceedsThreshold(
-            usage: usage,
-            provider: provider,
-            policy: policy
-        ) {
-            guard let reset = blockingReset, reset > now else { return 15 * 60 }
-            let remaining = reset.timeIntervalSince(now)
-            if remaining > 60 * 60 { return min(15 * 60, max(5 * 60, remaining - 10 * 60)) }
-            if remaining > 15 * 60 { return 5 * 60 }
-            if remaining > 5 * 60 { return 2 * 60 }
-            return 30
-        }
-
-        guard let usage else { return 5 * 60 }
-        var margins: [Double] = []
-        if provider.capabilities.supportsSessionQuota, policy.sessionEnabled,
-           let value = usage.fiveHour?.utilization {
-            margins.append(policy.sessionThreshold - value)
-        }
-        if policy.weeklyEnabled, let value = usage.sevenDay?.utilization {
-            margins.append(policy.weeklyThreshold - value)
-        }
-        guard let closest = margins.min() else { return 5 * 60 }
-        if closest <= 5 { return 15 }
-        if closest <= 10 { return 30 }
-        if closest <= 20 { return 60 }
-        if closest <= 40 { return 2 * 60 }
-        return 5 * 60
-    }
-
-    static func blockingResetDate(
-        usage: UsageAPIResponse?,
-        provider: AIProviderType,
-        policy: ProviderFailoverPolicy
-    ) -> Date? {
-        guard let usage else { return nil }
-        var blockingDates: [Date] = []
-        if provider.capabilities.supportsSessionQuota,
-           let value = usage.fiveHour?.utilization,
-           value >= 100 || (policy.sessionEnabled && value >= policy.sessionThreshold),
-           let date = usage.fiveHour?.resetsAtDate {
-            blockingDates.append(date)
-        }
-        if provider.capabilities.supportsWeeklyQuota,
-           let value = usage.sevenDay?.utilization,
-           value >= 100 || (policy.weeklyEnabled && value >= policy.weeklyThreshold),
-           let date = usage.sevenDay?.resetsAtDate {
-            blockingDates.append(date)
-        }
-        // Capacity returns only when every breached constraint has reset.
-        return blockingDates.max()
-    }
-
-    static func exceedsThreshold(
-        usage: UsageAPIResponse?,
-        provider: AIProviderType,
-        policy: ProviderFailoverPolicy
-    ) -> Bool {
-        guard let usage else { return false }
-        let sessionExceeded = provider.capabilities.supportsSessionQuota
-            && usage.fiveHour?.utilization.map {
-                $0 >= 100 || (policy.sessionEnabled && $0 >= policy.sessionThreshold)
-            } == true
-        let weeklyExceeded = provider.capabilities.supportsWeeklyQuota
-            && usage.sevenDay?.utilization.map {
-                $0 >= 100 || (policy.weeklyEnabled && $0 >= policy.weeklyThreshold)
-            } == true
-        return sessionExceeded || weeklyExceeded
-    }
-
-    static func hasCapacity(
-        usage: UsageAPIResponse?,
-        provider: AIProviderType,
-        policy: ProviderFailoverPolicy
-    ) -> Bool {
-        guard let usage else { return false }
-        // Destination safety is deliberately independent from trigger settings.
-        // A disabled/90% trigger may permit continued use, but a provider-reported
-        // exhausted window can never be selected as a destination.
-        if provider.capabilities.supportsSessionQuota {
-            if let value = usage.fiveHour?.utilization {
-                guard value < 100 else { return false }
-            } else if provider.capabilities.sessionQuotaMode == .required {
-                return false
-            }
-        }
-        if provider.capabilities.supportsWeeklyQuota {
-            guard let value = usage.sevenDay?.utilization, value < 100 else {
-                return false
-            }
-        }
-        return true
-    }
-
-    static func capacityScore(
-        usage: UsageAPIResponse?,
-        provider: AIProviderType,
-        policy: ProviderFailoverPolicy
-    ) -> Double {
-        guard let usage else { return -.infinity }
-        var margins: [Double] = []
-        if provider.capabilities.supportsSessionQuota,
-           let value = usage.fiveHour?.utilization {
-            margins.append(100 - value)
-        }
-        if provider.capabilities.supportsWeeklyQuota, let value = usage.sevenDay?.utilization {
-            margins.append(100 - value)
-        }
-        return margins.min() ?? -.infinity
-    }
-
-    /// Chooses the account whose long-window allowance is most at risk of being
-    /// wasted before its reset. Equal reset dates reduce to ordinary least-used
-    /// balancing; an earlier reset raises the utilization that account should
-    /// carry, allowing it to consume more before capacity disappears.
-    static func intelligentBalanceTarget(
-        accountIDs: [UUID],
-        currentID: UUID,
-        usageByID: [UUID: UsageAPIResponse],
-        provider: AIProviderType,
-        policy: ProviderFailoverPolicy,
-        unverifiedResetIDs: Set<UUID> = [],
-        now: Date = Date()
-    ) -> (id: UUID, advantage: Double)? {
-        guard provider.capabilities.supportsWeeklyQuota,
-              accountIDs.contains(currentID),
-              let currentUsage = usageByID[currentID],
-              hasCapacity(usage: currentUsage, provider: provider, policy: policy) else {
-            return nil
-        }
-        let eligible = accountIDs.filter {
-            !unverifiedResetIDs.contains($0)
-                && hasCapacity(usage: usageByID[$0], provider: provider, policy: policy)
-                && usageByID[$0]?.sevenDay?.utilization != nil
-        }
-        guard eligible.count > 1 else { return nil }
-
-        let horizons = eligible.compactMap { id -> TimeInterval? in
-            guard let reset = usageByID[id]?.sevenDay?.resetsAtDate else { return nil }
-            return max(0, reset.timeIntervalSince(now))
-        }
-        let normalizationHorizon = max(horizons.max() ?? 0, 1)
-
-        func score(_ id: UUID) -> Double {
-            guard let window = usageByID[id]?.sevenDay,
-                  let utilization = window.utilization else { return -.infinity }
-            // Missing reset times get no urgency credit, but remain comparable
-            // by utilization. A known imminent reset approaches the threshold.
-            let horizon = window.resetsAtDate.map { max(0, $0.timeIntervalSince(now)) }
-                ?? normalizationHorizon
-            let urgency = max(0, min(1, 1 - horizon / normalizationHorizon))
-            // Balancing consumes the complete allowance. The configured
-            // threshold is a failover trigger, not a quota ceiling.
-            let desiredUtilization = 100 * urgency
-            return desiredUtilization - utilization
-        }
-
-        let currentScore = score(currentID)
-        guard let best = eligible.max(by: { score($0) < score($1) }), best != currentID else {
-            return nil
-        }
-        let advantage = score(best) - currentScore
-        guard advantage >= policy.balancingMinimumAdvantage else { return nil }
-        return (best, advantage)
-    }
-
-    static func shouldWaitForImminentReset(
-        usage: UsageAPIResponse?,
-        provider: AIProviderType,
-        policy: ProviderFailoverPolicy,
-        now: Date = Date()
-    ) -> Bool {
-        guard policy.waitForImminentReset, let usage else { return false }
-        var breached: [UsageWindow] = []
-        if provider.capabilities.supportsSessionQuota, policy.sessionEnabled,
-           let window = usage.fiveHour,
-           let value = window.utilization,
-           value >= policy.sessionThreshold {
-            if value >= 100 { return false }
-            breached.append(window)
-        }
-        if policy.weeklyEnabled,
-           let window = usage.sevenDay,
-           let value = window.utilization,
-           value >= policy.weeklyThreshold {
-            if value >= 100 { return false }
-            breached.append(window)
-        }
-        guard !breached.isEmpty else { return false }
-        let grace = policy.resetGraceMinutes * 60
-        return breached.allSatisfy { window in
-            guard let reset = window.resetsAtDate else { return false }
-            let remaining = reset.timeIntervalSince(now)
-            return remaining > 0 && remaining <= grace
-        }
-    }
-
-    static func candidates(
-        orderedIDs: [UUID],
-        currentID: UUID,
-        loops: Bool
-    ) -> [UUID] {
-        guard let currentIndex = orderedIDs.firstIndex(of: currentID) else {
-            return orderedIDs.filter { $0 != currentID }
-        }
-        let after = Array(orderedIDs.dropFirst(currentIndex + 1))
-        guard loops else { return after }
-        return after + Array(orderedIDs.prefix(currentIndex))
-    }
-
-    /// Filters destinations by quota only. Authentication probe errors are not
-    /// accepted here because a Claude switch verifies and refreshes the target
-    /// credential transactionally; callers may therefore use last-good quota.
-    static func eligibleCandidates(
-        _ candidateIDs: [UUID],
-        usageByID: [UUID: UsageAPIResponse],
-        provider: AIProviderType,
-        policy: ProviderFailoverPolicy,
-        unverifiedResetIDs: Set<UUID> = []
-    ) -> [UUID] {
-        candidateIDs.filter {
-            !unverifiedResetIDs.contains($0) &&
-            hasCapacity(usage: usageByID[$0], provider: provider, policy: policy)
         }
     }
 }

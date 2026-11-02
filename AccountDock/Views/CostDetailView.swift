@@ -33,9 +33,6 @@ struct CostDetailView: View {
     // MARK: - Summary Cards
 
     private var todayCard: some View {
-        let summary = appState.costSummary
-        let today = summary.dailyCosts.first(where: { $0.date == todayString() })
-
         return VStack(spacing: 8) {
             HStack {
                 Text("Today")
@@ -53,19 +50,16 @@ struct CostDetailView: View {
                 .foregroundStyle(.brand)
 
             HStack(spacing: 10) {
-                providerTodayCost(
-                    name: "Claude",
-                    icon: AIProviderType.claudeCode.iconName,
-                    cost: summary.todayCost
-                )
-                providerTodayCost(
-                    name: "Codex",
-                    icon: AIProviderType.codex.iconName,
-                    cost: max(0, appState.combinedTodayCost - summary.todayCost)
-                )
+                ForEach(todayProviders) { provider in
+                    providerTodayCost(
+                        name: provider.capabilities.displayName,
+                        icon: provider.iconName,
+                        cost: appState.todayCost(for: provider)
+                    )
+                }
             }
 
-            let modelCosts = combinedTodayModelCosts(claude: today?.modelBreakdown ?? [:])
+            let modelCosts = combinedTodayModelCosts()
             if !modelCosts.isEmpty {
                 Divider()
                 VStack(spacing: 4) {
@@ -87,46 +81,50 @@ struct CostDetailView: View {
                     }
                 }
 
-                if let today {
+                ForEach(todayProviders) { provider in
                     HStack {
-                        Label("Claude: \(today.sessionCount) sessions", systemImage: "terminal")
+                        Label("\(provider.capabilities.displayName): \(appState.todaySessions(for: provider)) sessions", systemImage: "terminal")
                             .font(.caption2)
                             .foregroundStyle(.textSecondary)
                         Spacer()
-                        Text("\(formatTokenCount(today.totalTokens)) tokens")
+                        Text("\(formatTokenCount(appState.todayTokens(for: provider))) tokens")
                             .font(.caption2)
                             .foregroundStyle(.textSecondary)
                     }
-                    .padding(.top, 2)
                 }
+                .padding(.top, 2)
             }
         }
         .cardStyle()
         .sectionPadding()
     }
 
-    private func combinedTodayModelCosts(claude: [String: Double]) -> [ProviderModelCost] {
-        let claudeRows = claude.compactMap { model, cost -> ProviderModelCost? in
-            guard cost > 0 else { return nil }
-            return ProviderModelCost(
-                id: "claude-\(model)",
-                provider: "Claude",
-                icon: AIProviderType.claudeCode.iconName,
-                model: model,
-                cost: cost
-            )
+    /// Providers with sessions, tokens or cost today, in registry order.
+    private var todayProviders: [AIProviderType] {
+        costProviders.filter { provider in
+            appState.todayCost(for: provider) > 0 || appState.todayTokens(for: provider) > 0
+                || appState.todaySessions(for: provider) > 0
         }
-        let codexRows = appState.codexTodayModelCosts.compactMap { model, cost -> ProviderModelCost? in
-            guard cost > 0 else { return nil }
-            return ProviderModelCost(
-                id: "codex-\(model)",
-                provider: "Codex",
-                icon: AIProviderType.codex.iconName,
-                model: model,
-                cost: cost
-            )
-        }
-        return (claudeRows + codexRows).sorted { $0.cost > $1.cost }
+    }
+
+    /// Providers with any recorded cost history, in registry order.
+    private var costProviders: [AIProviderType] {
+        AIProviderType.implementedProviders.filter { !appState.dailyCosts(for: $0).isEmpty }
+    }
+
+    private func combinedTodayModelCosts() -> [ProviderModelCost] {
+        costProviders.flatMap { provider in
+            appState.todayModelCosts(for: provider).compactMap { model, cost -> ProviderModelCost? in
+                guard cost > 0 else { return nil }
+                return ProviderModelCost(
+                    id: "\(provider.rawValue)-\(model)",
+                    provider: provider.capabilities.displayName,
+                    icon: provider.iconName,
+                    model: model,
+                    cost: cost
+                )
+            }
+        }.sorted { $0.cost > $1.cost }
     }
 
     private func providerTodayCost(name: String, icon: String, cost: Double) -> some View {
@@ -233,8 +231,9 @@ struct CostDetailView: View {
                     .foregroundStyle(.textSecondary)
                 Spacer()
                 HStack(spacing: 8) {
-                    legendDot(color: .brand, label: "Claude")
-                    legendDot(color: Color.brand.opacity(0.48), label: "Codex")
+                    ForEach(Array(costProviders.enumerated()), id: \.element) { index, provider in
+                        legendDot(color: segmentColor(index, isToday: true), label: provider.capabilities.displayName)
+                    }
                 }
                 Text("Total: \(formatCost(visibleCosts.reduce(0) { $0 + $1.total }))")
                     .font(.caption2.weight(.medium).monospacedDigit())
@@ -276,25 +275,27 @@ struct CostDetailView: View {
 
     private struct CombinedDailyCost: Identifiable {
         let date: String
-        let claude: Double
-        let codex: Double
-        var total: Double { claude + codex }
+        let costs: [AIProviderType: Double]
+        var total: Double { costs.values.reduce(0, +) }
         var id: String { date }
     }
 
     private var combinedDailyCosts: [CombinedDailyCost] {
-        let claude = Dictionary(
-            uniqueKeysWithValues: appState.costSummary.dailyCosts.map { ($0.date, $0.totalCost) }
-        )
-        return Set(claude.keys).union(appState.codexDailyCosts.keys)
-            .map {
-                CombinedDailyCost(
-                    date: $0,
-                    claude: claude[$0] ?? 0,
-                    codex: appState.codexDailyCosts[$0] ?? 0
-                )
-            }
-            .sorted { $0.date > $1.date }
+        let byProvider = Dictionary(uniqueKeysWithValues: costProviders.map { ($0, appState.dailyCosts(for: $0)) })
+        let dates = byProvider.values.reduce(into: Set<String>()) { $0.formUnion($1.keys) }
+        return dates.map { date in
+            CombinedDailyCost(
+                date: date,
+                costs: byProvider.compactMapValues { $0[date] }
+            )
+        }
+        .sorted { $0.date > $1.date }
+    }
+
+    /// Each provider's segment is a lighter step of the accent colour.
+    private func segmentColor(_ index: Int, isToday: Bool) -> Color {
+        let base = isToday ? 1.0 : 0.72
+        return Color.brand.opacity(max(0.2, base - Double(index) * 0.28))
     }
 
     private func legendDot(color: Color, label: String) -> some View {
@@ -308,8 +309,6 @@ struct CostDetailView: View {
 
     private func dailyRow(day: CombinedDailyCost, maxCost: Double) -> some View {
         let isToday = day.date == todayString()
-        let claudeRatio = maxCost > 0 ? day.claude / maxCost : 0
-        let codexRatio = maxCost > 0 ? day.codex / maxCost : 0
 
         return HStack(spacing: 8) {
             Text(shortDate(day.date))
@@ -324,12 +323,12 @@ struct CostDetailView: View {
 
             GeometryReader { geo in
                 HStack(spacing: 0) {
-                    Rectangle()
-                        .fill(isToday ? Color.brand : Color.brand.opacity(0.72))
-                        .frame(width: max(0, geo.size.width * claudeRatio))
-                    Rectangle()
-                        .fill(Color.brand.opacity(isToday ? 0.48 : 0.34))
-                        .frame(width: max(0, geo.size.width * codexRatio))
+                    ForEach(Array(costProviders.enumerated()), id: \.element) { index, provider in
+                        let ratio = maxCost > 0 ? (day.costs[provider] ?? 0) / maxCost : 0
+                        Rectangle()
+                            .fill(segmentColor(index, isToday: isToday))
+                            .frame(width: max(0, geo.size.width * ratio))
+                    }
                 }
                 .frame(height: 8)
                 .clipShape(RoundedRectangle(cornerRadius: 2))
@@ -337,11 +336,10 @@ struct CostDetailView: View {
             .frame(height: 8)
 
             HStack(spacing: 4) {
-                if day.claude > 0 {
-                    Text("C \(formatWholeCost(day.claude))")
-                }
-                if day.codex > 0 {
-                    Text("X \(formatWholeCost(day.codex))")
+                ForEach(costProviders) { provider in
+                    if let cost = day.costs[provider], cost > 0 {
+                        Text("\(provider.capabilities.shortBadge) \(formatWholeCost(cost))")
+                    }
                 }
             }
             .font(.system(size: 8))

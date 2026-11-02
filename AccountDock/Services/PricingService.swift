@@ -243,6 +243,9 @@ actor PricingService {
     ) -> LiteLLMModelPricing? {
         let providerPrefixes = provider.capabilities.pricingPrefixes
         let providerPrefix = providerPrefixes.first ?? ""
+        if let alias = provider.capabilities.pricingAliases[model], let value = pricing[alias] {
+            return value
+        }
         let effort = reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let effort, !effort.isEmpty {
             for candidate in [
@@ -437,6 +440,7 @@ actor PricingService {
                 || name.hasPrefix("anthropic.claude-")
                 || name.hasPrefix("gpt-")
                 || name.hasPrefix("openai/gpt-")
+                || name.hasPrefix("moonshot/")
         }
         return supported.compactMapValues { $0.toPricing() }
     }

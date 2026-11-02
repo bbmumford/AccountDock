@@ -2,6 +2,37 @@ import XCTest
 @testable import AccountDock
 
 final class AccountModelTests: XCTestCase {
+    func testPlanNameComesFromThePlanAndTier() {
+        var account = Account(email: "a@mail.example", displayName: "A", subscriptionType: "max")
+        XCTAssertEqual(account.displaySubscriptionType, "Max")
+        account.rateLimitTier = "default_claude_max_20x"
+        XCTAssertEqual(account.displaySubscriptionType, "Ultra")
+        account.rateLimitTier = "default_claude_max_5x"
+        XCTAssertEqual(account.displaySubscriptionType, "Max")
+        // A team seat on the same tier is not an individual plan.
+        account.subscriptionType = "team"
+        XCTAssertEqual(account.displaySubscriptionType, "Team")
+    }
+
+    func testMessageNameAddsTheEmailOnlyWhenAnotherAccountSharesTheName() {
+        let work = Account(email: "brandon@orbtr.example", displayName: "Org", customLabel: "ORBTR")
+        let system = Account(email: "system@mail.example", displayName: "Org", customLabel: "ORBTR")
+        let personal = Account(email: "me@mail.example", displayName: "Org", customLabel: "Personal")
+        let sameNameOtherProvider = Account(email: "x@mail.example", displayName: "Org", provider: .codex, customLabel: "Personal")
+        let all = [work, system, personal, sameNameOtherProvider]
+        XCTAssertEqual(work.messageName(among: all), "ORBTR (\(work.obfuscatedEmail))")
+        XCTAssertEqual(system.messageName(among: all), "ORBTR (\(system.obfuscatedEmail))")
+        XCTAssertNotEqual(work.messageName(among: all), system.messageName(among: all))
+        XCTAssertEqual(personal.messageName(among: all), "Personal")
+    }
+
+    func testMessageNameUsesTheFullEmailWhenTheObfuscatedFormsCollide() {
+        let first = Account(email: "brandon.a@mail.example", displayName: "Org", customLabel: "Team")
+        let second = Account(email: "brandon.b@mail.example", displayName: "Org", customLabel: "Team")
+        XCTAssertEqual(first.obfuscatedEmail, second.obfuscatedEmail)
+        XCTAssertEqual(first.messageName(among: [first, second]), "Team (brandon.a@mail.example)")
+    }
+
     func testProviderRegistryDefinesImplementedProvidersAndQuotaCapabilities() {
         XCTAssertEqual(AIProviderType.implementedProviders, [.claudeCode, .codex, .kimi])
         XCTAssertTrue(AIProviderType.claudeCode.capabilities.supportsSessionQuota)
@@ -98,29 +129,32 @@ final class AccountModelTests: XCTestCase {
 
     func testMenuBarCatalogUsesProductDefaultOrder() {
         XCTAssertEqual(MenuBarModule.allCases, [
-            .claudeSession,
-            .claudeWeekly,
-            .codexSession,
-            .codexWeekly,
-            .claudeSessionPercent,
-            .claudeWeeklyPercent,
-            .claudePercentages,
-            .codexSessionPercent,
-            .codexWeeklyPercent,
-            .codexPercentages,
-            .claudeWeeklyReset,
-            .codexWeeklyReset,
-            .claudeSessionReset,
-            .codexSessionReset,
-            .kimiSession,
-            .kimiMonthly,
-            .kimiSessionPercent,
-            .kimiMonthlyPercent,
-            .kimiPercentages,
-            .kimiSessionReset,
-            .kimiMonthlyReset,
+            .claudeSession, .claudeWeekly, .codexSession, .codexWeekly, .kimiSession, .kimiMonthly,
+            .claudeSessionPercent, .claudeWeeklyPercent, .claudePercentages,
+            .codexSessionPercent, .codexWeeklyPercent, .codexPercentages,
+            .kimiSessionPercent, .kimiMonthlyPercent, .kimiPercentages,
+            .claudeWeeklyReset, .codexWeeklyReset, .kimiMonthlyReset,
+            .claudeSessionReset, .codexSessionReset, .kimiSessionReset,
             .dailyCost
         ])
+    }
+
+    func testStoredMenuBarModuleNamesRoundTrip() {
+        let stored = [
+            "claudeSession", "claudeWeekly", "claudeSessionPercent", "claudeWeeklyPercent", "claudePercentages",
+            "claudeSessionReset", "claudeWeeklyReset", "codexSession", "codexWeekly", "codexSessionPercent",
+            "codexWeeklyPercent", "codexPercentages", "codexSessionReset", "codexWeeklyReset", "kimiSession",
+            "kimiMonthly", "kimiSessionPercent", "kimiMonthlyPercent", "kimiPercentages", "kimiSessionReset",
+            "kimiMonthlyReset", "claudeUsage", "codexUsage", "account", "sessionBar", "sessionBarPlain",
+            "weeklyBar", "weeklyBarPlain", "dailyCost", "sessionReset", "weeklyReset",
+        ]
+        for name in stored {
+            XCTAssertEqual(MenuBarModule(rawValue: name)?.rawValue, name, name)
+        }
+        XCTAssertEqual(MenuBarModule(rawValue: "kimiMonthlyReset"), .provider(.kimi, .longReset))
+        XCTAssertNil(MenuBarModule(rawValue: "kimiWeekly"))
+        let data = MenuBarModuleStore.encode([.claudeSession, .kimiMonthlyPercent, .dailyCost])
+        XCTAssertEqual(MenuBarModuleStore.decode(data), [.claudeSession, .kimiMonthlyPercent, .dailyCost])
     }
 
     func testCachedUsageClearsAfterKnownResetPasses() {

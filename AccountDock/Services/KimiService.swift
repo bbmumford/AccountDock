@@ -12,6 +12,10 @@ enum KimiServiceError: LocalizedError {
     case credentialsNotFound
     case invalidCredentials
     case requestFailed(String)
+    case rateLimited
+    /// The token endpoint refused the refresh token: the account must sign
+    /// in again.
+    case credentialRejected
 
     var errorDescription: String? {
         switch self {
@@ -19,6 +23,8 @@ enum KimiServiceError: LocalizedError {
         case .credentialsNotFound: "Kimi Code credentials were not found. Run `kimi login` first."
         case .invalidCredentials: "The Kimi credential is incomplete or unreadable."
         case .requestFailed(let detail): "Kimi request failed: \(detail)"
+        case .rateLimited: "Kimi temporarily rate-limited usage refresh."
+        case .credentialRejected: "Kimi rejected this account's saved sign-in. Reauthenticate this account."
         }
     }
 }
@@ -171,9 +177,85 @@ final class KimiService: @unchecked Sendable {
         try fileManager.removeItem(at: URL(fileURLWithPath: location).deletingLastPathComponent())
     }
 
+    /// An access token valid for at least `minimumLifetime`, for the request
+    /// router. The active account's CLI copy is used when it is newer, since
+    /// the Kimi CLI renews it itself; the token is renewed here only when
+    /// neither copy lasts long enough.
+    func freshAccessToken(location: String, isActive: Bool, minimumLifetime: TimeInterval) async throws -> (String, Date) {
+        let managedURL = URL(fileURLWithPath: location)
+        var credential = try newestCredential(at: managedURL, isActive: isActive)
+        if credential.expiresAt.map({ Date(timeIntervalSince1970: $0) <= Date().addingTimeInterval(minimumLifetime) }) != false {
+            credential = try await refresh(credential)
+            try writeCredential(credential, to: managedURL)
+            if isActive { try writeCredential(credential, to: activeCredentialURL(in: home)) }
+        }
+        return (credential.accessToken, Date(timeIntervalSince1970: credential.expiresAt ?? Date().timeIntervalSince1970))
+    }
+
+    /// Starts the account's 5-hour window with a one-token request to the
+    /// coding endpoint, which is what Kimi Code itself calls.
+    func warmQuotaWindow(location: String, isActive: Bool) async throws {
+        let (accessToken, _) = try await freshAccessToken(location: location, isActive: isActive, minimumLifetime: 60)
+        var request = URLRequest(url: apiRoot.appendingPathComponent("messages"))
+        request.httpMethod = "POST"
+        applyHeaders(to: &request, accessToken: accessToken)
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "kimi-for-coding",
+            "max_tokens": 1,
+            "messages": [["role": "user", "content": "Reply with exactly: OK"]],
+        ])
+        request.timeoutInterval = 60
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let reply = String(decoding: data.prefix(200), as: UTF8.self)
+            throw KimiServiceError.requestFailed("warm-up request returned \(status): \(reply)")
+        }
+    }
+
+    /// Renews an inactive account's managed credential and saves it there,
+    /// without touching the credential slot Kimi's running sessions use.
+    /// Called by `KimiCredentialModule`.
+    func renewCredential(location: String) async -> CredentialRenewal {
+        let managedURL = URL(fileURLWithPath: location)
+        do {
+            let renewed = try await refresh(try readCredential(at: managedURL))
+            try writeCredential(renewed, to: managedURL)
+            return .renewed
+        } catch KimiServiceError.credentialRejected {
+            return .rejected
+        } catch KimiServiceError.invalidCredentials {
+            return .rejected
+        } catch {
+            return .unavailable
+        }
+    }
+
+    /// Whether the managed credential's access token stays valid `interval`
+    /// from now; one without an expiry counts as expiring.
+    func credentialLasts(location: String, for interval: TimeInterval, now: Date = Date()) -> Bool {
+        guard let credential = try? readCredential(at: URL(fileURLWithPath: location)),
+              let expiresAt = credential.expiresAt else { return false }
+        return Date(timeIntervalSince1970: expiresAt) > now.addingTimeInterval(interval)
+    }
+
+    /// The managed credential, replaced by the CLI's copy for the active
+    /// account when that is newer: the Kimi CLI renews its own copy, which
+    /// revokes the managed copy's refresh token, so `refresh` on the older
+    /// one is refused though the account is still signed in.
+    private func newestCredential(at managedURL: URL, isActive: Bool) throws -> Credential {
+        let credential = try readCredential(at: managedURL)
+        guard isActive, let activeURL = try? activeCredentialURL(in: home),
+              let active = try? readCredential(at: activeURL),
+              (active.expiresAt ?? 0) > (credential.expiresAt ?? 0) else { return credential }
+        try writeCredential(active, to: managedURL)
+        return active
+    }
+
     func getUsageLimits(location: String, isActive: Bool) async throws -> UsageAPIResponse {
         let managedURL = URL(fileURLWithPath: location)
-        var credential = try readCredential(at: managedURL)
+        var credential = try newestCredential(at: managedURL, isActive: isActive)
         if credential.expiresAt.map({ Date(timeIntervalSince1970: $0) <= Date().addingTimeInterval(60) }) != false {
             credential = try await refresh(credential)
             try writeCredential(credential, to: managedURL)
@@ -184,6 +266,7 @@ final class KimiService: @unchecked Sendable {
         applyHeaders(to: &request, accessToken: credential.accessToken)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            if (response as? HTTPURLResponse)?.statusCode == 429 { throw KimiServiceError.rateLimited }
             throw KimiServiceError.requestFailed("usage endpoint returned \((response as? HTTPURLResponse)?.statusCode ?? 0)")
         }
         let body = try JSONDecoder().decode(UsageEnvelope.self, from: data)
@@ -258,8 +341,12 @@ final class KimiService: @unchecked Sendable {
             "\(formEncode(key))=\(formEncode(value))"
         }.sorted().joined(separator: "&").data(using: .utf8)
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw KimiServiceError.requestFailed("token endpoint rejected the grant")
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        // A refused grant is answered with 400 or 401; anything else says
+        // nothing about the refresh token.
+        if status == 400 || status == 401 { throw KimiServiceError.credentialRejected }
+        guard status == 200 else {
+            throw KimiServiceError.requestFailed("token endpoint returned \(status)")
         }
         var fresh = try JSONDecoder().decode(Credential.self, from: data)
         if let seconds = fresh.expiresIn { fresh.expiresAt = Date().timeIntervalSince1970 + seconds }

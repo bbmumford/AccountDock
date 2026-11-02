@@ -78,6 +78,20 @@ struct MenuBarStripView: View {
         HStack(spacing: 5) {
             Image(systemName: provider.iconName)
                 .font(.system(size: 14.3, weight: .semibold))
+                .overlay(alignment: .bottomTrailing) {
+                    // Paused sessions: the strip is re-read on every tick.
+                    if appState.routedStatus[provider] != nil {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.blue)
+                            .offset(x: 3, y: 3)
+                    } else if appState.agentPauseStatus[provider] != nil {
+                        Image(systemName: "pause.circle.fill")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.orange)
+                            .offset(x: 3, y: 3)
+                    }
+                }
             ForEach(config.modules.filter { $0.provider == provider }) { module in
                 MenuBarModuleView(
                     module: module,
