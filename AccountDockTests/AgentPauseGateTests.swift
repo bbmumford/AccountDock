@@ -54,7 +54,7 @@ final class AgentPauseGateTests: XCTestCase {
 
     /// Runs the installed gate script against a pause file in a scratch home.
     private func runGate(event: String, session: String, home: URL, output: Pipe? = nil,
-                         arguments: [String] = ["claude", "60"], errors: Pipe? = nil) throws -> Process {
+                         arguments: [String] = ["claude", "60"], errors: Pipe? = nil, fields: String = "") throws -> Process {
         let script = home.appendingPathComponent("gate.sh")
         try Data(AgentPauseGate.script.utf8).write(to: script)
         let process = Process()
@@ -66,7 +66,7 @@ final class AgentPauseGateTests: XCTestCase {
         process.standardOutput = output ?? FileHandle.nullDevice
         process.standardError = errors ?? FileHandle.nullDevice
         try process.run()
-        input.fileHandleForWriting.write(Data(#"{"session_id":"\#(session)","hook_event_name":"\#(event)"}"#.utf8))
+        input.fileHandleForWriting.write(Data(#"{"session_id":"\#(session)","hook_event_name":"\#(event)"\#(fields)}"#.utf8))
         try input.fileHandleForWriting.close()
         return process
     }
@@ -99,6 +99,32 @@ final class AgentPauseGateTests: XCTestCase {
         let unlisted = try runGate(event: "PostToolUse", session: "other", home: directory)
         XCTAssertTrue(waitForExit(unlisted, within: 3), "without the flag only listed sessions wait")
         AgentPauseGate.release(.claudeCode, directory: pauseDirectory)
+    }
+
+    func testACompactingSessionWaitsBeforeAndAfterTheCompaction() throws {
+        XCTAssertEqual(AgentPauseGate.gateEvents(.claudeCode), ["PostToolUse", "UserPromptSubmit", "PreCompact", "SessionStart"])
+        XCTAssertEqual(AgentPauseGate.gateEvents(.codex), ["PostToolUse", "UserPromptSubmit"])
+        let pauseDirectory = directory.appendingPathComponent("Library/Application Support/AccountDock/Pause")
+        try FileManager.default.createDirectory(at: pauseDirectory, withIntermediateDirectories: true)
+        AgentPauseGate.write(.init(sessions: [], reason: "limit", pausedAt: Date(), resumeAt: nil, holdsNewTurns: true),
+                             for: .claudeCode, directory: pauseDirectory)
+
+        let output = Pipe()
+        let compaction = try runGate(event: "PreCompact", session: "s", home: directory, output: output, fields: #","trigger":"auto""#)
+        XCTAssertFalse(waitForExit(compaction, within: 1.5), "the compaction's request waits")
+        let continuation = try runGate(event: "SessionStart", session: "s", home: directory, fields: #","source":"compact""#)
+        XCTAssertFalse(waitForExit(continuation, within: 1.5), "the request continuing after compaction waits")
+        for source in ["startup", "resume", "clear"] {
+            let start = try runGate(event: "SessionStart", session: "s", home: directory, fields: #","source":"\#(source)""#)
+            XCTAssertTrue(waitForExit(start, within: 3), "a session's \(source) is not held")
+        }
+
+        AgentPauseGate.release(.claudeCode, directory: pauseDirectory)
+        XCTAssertTrue(waitForExit(compaction, within: 5))
+        XCTAssertTrue(waitForExit(continuation, within: 5))
+        let reply = try JSONSerialization.jsonObject(with: output.fileHandleForReading.readDataToEndOfFile()) as? [String: Any]
+        XCTAssertNotNil(reply?["systemMessage"])
+        XCTAssertNil(reply?["hookSpecificOutput"], "PreCompact takes no added context")
     }
 
     func testANarrowedPauseHoldsOnlyItsSessionsIncludingTheirNewTurns() throws {
@@ -193,7 +219,7 @@ final class AgentPauseGateTests: XCTestCase {
 
     func testOnlyProvidersThatReadTheReplyAreAnswered() {
         let script = AgentPauseGate.script
-        XCTAssertTrue(script.contains(#"claude) printf '{"systemMessage""#))
+        XCTAssertTrue(script.contains(#"claude) if [ "$event" = PreCompact ]; then printf '{"systemMessage""#))
         XCTAssertTrue(script.contains(#"kimi) printf '{"message""#))
         XCTAssertFalse(script.contains("codex)"))
         XCTAssertFalse(script.contains("@REPLIES@"))

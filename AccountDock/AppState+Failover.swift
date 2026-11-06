@@ -574,15 +574,21 @@ extension AppState {
                 : rounded.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())
             await holdWork(provider, policy: policy, current: current, because: "every included account is exhausted until \(resetText)")
             // A switch that reaches running sessions would restart or reload
-            // the paused sessions, so such a destination is only switched to
-            // once its reset has happened.
+            // the paused sessions, and one that moves them to a live
+            // credential (`moveRunningSessions`) would send the requests no
+            // gate holds, such as one already under way or one a teammate's
+            // message starts, to a destination that refuses them, while the
+            // current account may still serve them from its in-flight
+            // reserve. Such a destination is only switched to once its reset
+            // has happened, when `plan` moves to it.
+            let target = accounts.first(where: { $0.id == accountID })
             if accountID != current.id, !provider.capabilities.switchReachesRunningSessions,
-               policy.enabled || policy.intelligentBalancingEnabled,
-               let target = accounts.first(where: { $0.id == accountID }) {
+               credentialModule(for: provider)?.liveCredential == nil,
+               policy.enabled || policy.intelligentBalancingEnabled, let target {
                 updateStatus(provider, "All accounts exhausted. Preparing \(messageName(target)), which resets at \(resetText).\(signInNote(ladder))")
                 await performAutomaticSwitch(provider: provider, policy: policy, from: current, to: target, reason: .exhausted)
             } else {
-                updateStatus(provider, "All accounts exhausted. Waiting for \(messageName(current)) to reset at \(resetText).\(signInNote(ladder))")
+                updateStatus(provider, "All accounts exhausted. Waiting for \(messageName(target ?? current)) to reset at \(resetText).\(signInNote(ladder))")
             }
 
         case .noCapacity:

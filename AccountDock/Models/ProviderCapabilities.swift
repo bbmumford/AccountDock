@@ -193,6 +193,12 @@ struct PauseGateSupport: Sendable {
     /// The event the CLI waits for after a model response, where a held
     /// session waits before its next request.
     let gateEvent: String
+    /// Further events after which the CLI sends a model request with no tool
+    /// call or prompt in between, where a held session waits too. Claude
+    /// Code compacts a conversation (`PreCompact`) and then continues it
+    /// (`SessionStart` with source `compact`); the gate script lets every
+    /// other `SessionStart` through.
+    var continuationEvents: [String] = []
     /// How the CLI reads the gate's reply, so a resumed session reports the
     /// pause and its agent is told to check the background work it started;
     /// nil when the CLI ignores the reply.
@@ -240,7 +246,8 @@ extension AIProviderType {
                 supportsSelectableSwitchMode: false,
                 pricingPrefixes: ["anthropic/", "anthropic."],
                 pauseGate: PauseGateSupport(key: "claude", hookFile: ".claude/settings.json", format: .jsonHooks,
-                                            gateEvent: "PostToolUse", reply: .systemMessageAndContext),
+                                            gateEvent: "PostToolUse", continuationEvents: ["PreCompact", "SessionStart"],
+                                            reply: .systemMessageAndContext),
                 lifecycleHooks: LifecycleHookSupport(events: ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"],
                                                      hookFile: ".claude/settings.json", format: .jsonHooks,
                                                      timeout: 0, bundledScript: "accountdock-claude-hook"),
