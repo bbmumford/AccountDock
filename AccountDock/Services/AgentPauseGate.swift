@@ -19,7 +19,9 @@ private let gateLog = FileLog("PauseGate")
 /// file's session list counts the sessions for display and orders the steps
 /// released within headroom. A `UserPromptSubmit` hook runs the same script,
 /// so a turn started during the pause waits before its first request instead
-/// of being refused at the limit.
+/// of being refused at the limit. The CLI's `continuationEvents` run it too,
+/// so a session that compacts its conversation waits before the compaction's
+/// request and before the request that continues the turn afterwards.
 enum AgentPauseGate {
     static let marker = "# accountdock-gate"
     /// A session waits at most this long in one hook call.
@@ -88,7 +90,7 @@ enum AgentPauseGate {
 
     /// Every event the gate hook is installed for.
     static func gateEvents(_ provider: AIProviderType) -> [String] {
-        [gateEvent(provider), "UserPromptSubmit"]
+        [gateEvent(provider), "UserPromptSubmit"] + (provider.capabilities.pauseGate?.continuationEvents ?? [])
     }
 
     // MARK: - Pause file
@@ -422,7 +424,9 @@ enum AgentPauseGate {
         let replies = providers.compactMap { $0.capabilities.pauseGate }.compactMap { gate -> String? in
             switch gate.reply {
             case .systemMessageAndContext:
-                #"\#(gate.key)) printf '{"systemMessage":"AccountDock paused this session for %s min; it continues %s.","hookSpecificOutput":{"hookEventName":"%s","additionalContext":"%s"}}\n' "$minutes" "$where" "${event:-PostToolUse}" "$note" ;;"#
+                // `PreCompact` takes no added context; the agent is told at
+                // the `SessionStart` that follows the compaction.
+                #"\#(gate.key)) if [ "$event" = PreCompact ]; then printf '{"systemMessage":"AccountDock paused this session for %s min; it continues %s."}\n' "$minutes" "$where"; else printf '{"systemMessage":"AccountDock paused this session for %s min; it continues %s.","hookSpecificOutput":{"hookEventName":"%s","additionalContext":"%s"}}\n' "$minutes" "$where" "${event:-PostToolUse}" "$note"; fi ;;"#
             case .message:
                 #"\#(gate.key)) printf '{"message":"%s"}\n' "$note" ;;"#
             case nil:
@@ -436,8 +440,9 @@ enum AgentPauseGate {
 
     private static let scriptTemplate = #"""
     #!/bin/sh
-    # accountdock-gate: holds a paused session after a tool call, and a new
-    # turn at its start while the pause holds new turns, or that session's.
+    # accountdock-gate: holds a paused session after a tool call or around a
+    # compaction, and a new turn at its start while the pause holds new
+    # turns, or that session's.
     provider="$1"
     limit="${2:-86400}"
     refuse=0
@@ -449,6 +454,11 @@ enum AgentPauseGate {
     sid=$(printf '%s' "$payload" | /usr/bin/sed -n 's/.*"session_\{0,1\}[iI]d"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9._:-]*\)".*/\1/p' | /usr/bin/head -n 1)
     [ -n "$sid" ] || exit 0
     event=$(printf '%s' "$payload" | /usr/bin/sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([A-Za-z]*\)".*/\1/p' | /usr/bin/head -n 1)
+    # A session starting, resuming or cleared is not held; one continuing
+    # after compaction is about to send its next request.
+    if [ "$event" = "SessionStart" ]; then
+        printf '%s' "$payload" | /usr/bin/grep -Eq '"source"[[:space:]]*:[[:space:]]*"compact"' || exit 0
+    fi
     newturn=0
     [ "$event" = "UserPromptSubmit" ] && newturn=1
     resumed="$dir/$provider-$sid.resumed"
