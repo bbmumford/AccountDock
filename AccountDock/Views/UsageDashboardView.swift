@@ -443,35 +443,36 @@ struct UsageDashboardView: View {
         }
     }
 
-    /// One row per limit reset the account still holds: what it refills, how
-    /// many are left and the last day it can be used. A reset that cannot be
-    /// used yet, or is paused, is shown dimmed.
+    /// One row per kind of limit reset the account still holds, with resets
+    /// that end the same day counted together: what they refill, how many
+    /// are left and the last day they can be used. Resets that cannot be used
+    /// yet, or are paused, are shown dimmed.
     @ViewBuilder
     private func limitResetRows(_ resets: LimitResets?) -> some View {
         if let resets {
-            ForEach(resets.available) { grant in
-                let ready = grant.usableNow && !grant.paused
+            ForEach(resets.availableGroups) { group in
+                let ready = group.ready
                 HStack(spacing: 6) {
                     Image(systemName: ready ? "arrow.counterclockwise.circle.fill" : "arrow.counterclockwise.circle")
                         .font(.caption)
                         .foregroundStyle(ready ? Color.green : Color.gray)
-                    Text(LocalizedStringKey(grant.kind))
+                    Text(LocalizedStringKey(group.kind))
                         .font(.caption)
                         .foregroundStyle(.textSecondary)
                     Spacer()
-                    Text(limitResetDetail(grant, ready: ready))
+                    Text(limitResetDetail(group))
                         .font(.caption)
                         .foregroundStyle(ready ? Color.green : Color.gray)
                 }
-                .help(grant.label)
+                .help(group.labels.joined(separator: "\n"))
             }
         }
     }
 
-    private func limitResetDetail(_ grant: LimitResets.Grant, ready: Bool) -> String {
-        var parts = [grant.resetsTotal > 1 ? "\(grant.resetsLeft) of \(grant.resetsTotal) left" : "\(grant.resetsLeft) left"]
-        if !ready { parts.append(grant.paused ? "paused" : "not yet usable") }
-        if let end = grant.endsAtDate {
+    private func limitResetDetail(_ group: LimitResets.Group) -> String {
+        var parts = [group.resetsTotal > group.resetsLeft ? "\(group.resetsLeft) of \(group.resetsTotal) left" : "\(group.resetsLeft) left"]
+        if !group.ready { parts.append("not usable yet") }
+        if let end = group.endDay {
             parts.append("use by \(end.formatted(.dateTime.day().month(.abbreviated)))")
         }
         return parts.joined(separator: " · ")
