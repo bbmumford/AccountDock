@@ -165,7 +165,8 @@ extension UsageAPIResponse {
             iguanaNecktie: newer.iguanaNecktie ?? iguanaNecktie,
             extraUsage: newer.extraUsage ?? extraUsage,
             limits: newer.limits ?? limits,
-            weeklyScopedShares: newer.weeklyScopedShares ?? weeklyScopedShares
+            weeklyScopedShares: newer.weeklyScopedShares ?? weeklyScopedShares,
+            limitResets: newer.limitResets ?? limitResets
         )
     }
 }
@@ -188,7 +189,8 @@ extension UsageAPIResponse {
             iguanaNecktie: iguanaNecktie,
             extraUsage: extraUsage,
             limits: limits,
-            weeklyScopedShares: weeklyScopedShares
+            weeklyScopedShares: weeklyScopedShares,
+            limitResets: limitResets
         )
     }
 }

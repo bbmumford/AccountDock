@@ -144,6 +144,7 @@ struct UsageDashboardView: View {
                 if account.provider.capabilities.supportsExtraUsage {
                     extraUsageRow(usage.extraUsage)
                 }
+                limitResetRows(usage.limitResets)
                 staleUsageNotice(account)
             } else if let errorState = appState.accountUsageErrors[account.id] {
                 HStack {
@@ -440,6 +441,40 @@ struct UsageDashboardView: View {
                     .foregroundStyle(statusColor)
             }
         }
+    }
+
+    /// One row per limit reset the account still holds: what it refills, how
+    /// many are left and the last day it can be used. A reset that cannot be
+    /// used yet, or is paused, is shown dimmed.
+    @ViewBuilder
+    private func limitResetRows(_ resets: LimitResets?) -> some View {
+        if let resets {
+            ForEach(resets.available) { grant in
+                let ready = grant.usableNow && !grant.paused
+                HStack(spacing: 6) {
+                    Image(systemName: ready ? "arrow.counterclockwise.circle.fill" : "arrow.counterclockwise.circle")
+                        .font(.caption)
+                        .foregroundStyle(ready ? Color.green : Color.gray)
+                    Text(LocalizedStringKey(grant.kind))
+                        .font(.caption)
+                        .foregroundStyle(.textSecondary)
+                    Spacer()
+                    Text(limitResetDetail(grant, ready: ready))
+                        .font(.caption)
+                        .foregroundStyle(ready ? Color.green : Color.gray)
+                }
+                .help(grant.label)
+            }
+        }
+    }
+
+    private func limitResetDetail(_ grant: LimitResets.Grant, ready: Bool) -> String {
+        var parts = [grant.resetsTotal > 1 ? "\(grant.resetsLeft) of \(grant.resetsTotal) left" : "\(grant.resetsLeft) left"]
+        if !ready { parts.append(grant.paused ? "paused" : "not yet usable") }
+        if let end = grant.endsAtDate {
+            parts.append("use by \(end.formatted(.dateTime.day().month(.abbreviated)))")
+        }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: - Usage Row
