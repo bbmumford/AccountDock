@@ -1294,10 +1294,14 @@ final class AppState: ObservableObject {
     /// Reads `account`'s usage with its provider's reader. With
     /// `includeMetadata`, the reader also refreshes the plan and identity
     /// the provider reports, which costs some providers another request.
-    func readUsage(_ account: Account, forced: Bool, includeMetadata: Bool) async -> UsageReadOutcome {
+    /// `resetDetails` asks a provider whose usage reply only counts the
+    /// account's limit resets for their details too; Claude's reply always
+    /// holds them.
+    func readUsage(_ account: Account, forced: Bool, includeMetadata: Bool,
+                   resetDetails: Bool = false) async -> UsageReadOutcome {
         switch account.provider {
         case .claudeCode: await readClaudeUsage(account, forced: forced, includeMetadata: includeMetadata)
-        case .codex: await readCodexUsage(account)
+        case .codex: await readCodexUsage(account, resetDetails: resetDetails)
         case .kimi: await readKimiUsage(account, includeMetadata: includeMetadata)
         case .gemini: .skipped
         }
@@ -1361,10 +1365,11 @@ final class AppState: ObservableObject {
     /// Codex reports the plan with every reading. The active account's live
     /// credential is the system copy the CLI refreshes; its managed copy can
     /// hold a rotated-out token.
-    private func readCodexUsage(_ account: Account) async -> UsageReadOutcome {
+    private func readCodexUsage(_ account: Account, resetDetails: Bool) async -> UsageReadOutcome {
         do {
             let snapshot = try await codexService.getUsageSnapshot(
-                codexHome: account.isActive ? nil : account.credentialLocation
+                codexHome: account.isActive ? nil : account.credentialLocation,
+                resetDetails: resetDetails
             )
             setSubscriptionType(snapshot.planType, for: account.id)
             guard Account.supportsProviderWorkloads(provider: .codex, subscriptionType: snapshot.planType) else {

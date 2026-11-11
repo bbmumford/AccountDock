@@ -11,7 +11,7 @@ struct CodexIdentity: Sendable {
 }
 
 struct CodexUsageSnapshot: Sendable {
-    let usage: UsageAPIResponse
+    var usage: UsageAPIResponse
     let planType: String?
 }
 
@@ -439,7 +439,10 @@ final class CodexService: @unchecked Sendable {
         }.value
     }
 
-    func getUsageSnapshot(codexHome: String?) async throws -> CodexUsageSnapshot {
+    /// With `resetDetails`, an account whose reply counts reset credits is
+    /// asked for each credit's expiry too (`CodexLimitResets.Details`), one
+    /// request more; the count stands if that request fails.
+    func getUsageSnapshot(codexHome: String?, resetDetails: Bool = false) async throws -> CodexUsageSnapshot {
         let home = codexHome.map(URL.init(fileURLWithPath:)) ?? systemHome
         let authURL = home.appendingPathComponent("auth.json")
         let authData = try Data(contentsOf: authURL)
@@ -479,7 +482,16 @@ final class CodexService: @unchecked Sendable {
               let accessToken = tokens["access_token"] as? String else {
             throw CodexServiceError.invalidCredentials
         }
-        let responseSnapshot = try Self.decodeUsageSnapshot(result.data)
+        LimitResetShapes.note(.codex, reply: result.data)
+        var responseSnapshot = try Self.decodeUsageSnapshot(result.data)
+        if resetDetails, (responseSnapshot.usage.limitResets?.available.first?.resetsLeft ?? 0) > 0,
+           let details = try? await fetchResponse(Self.resetCreditsURL, tokens: tokens), (200...299).contains(details.statusCode) {
+            LimitResetShapes.note(.codex, whole: details.data, name: "rate-limit-reset-credits")
+            if let decoded = try? JSONDecoder().decode(CodexLimitResets.Details.self, from: details.data),
+               let resets = CodexLimitResets.resets(from: decoded) {
+                responseSnapshot.usage.limitResets = resets
+            }
+        }
         let credentialPlan = Self.planType(fromJWT: accessToken)
             ?? (tokens["id_token"] as? String).flatMap(Self.planType(fromJWT:))
         return CodexUsageSnapshot(
@@ -494,14 +506,24 @@ final class CodexService: @unchecked Sendable {
         )
     }
 
+    static let usageURL = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+    static let resetCreditsURL = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")!
+
     private func fetchUsageResponse(
         tokens: [String: Any]
+    ) async throws -> (data: Data, statusCode: Int) {
+        try await fetchResponse(Self.usageURL, tokens: tokens)
+    }
+
+    /// A GET of one of the account's endpoints with its access token.
+    private func fetchResponse(
+        _ url: URL, tokens: [String: Any]
     ) async throws -> (data: Data, statusCode: Int) {
         guard let accessToken = tokens["access_token"] as? String,
               !accessToken.isEmpty else {
             throw CodexServiceError.invalidCredentials
         }
-        var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/usage")!)
+        var request = URLRequest(url: url)
         request.timeoutInterval = 20
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("AccountDock", forHTTPHeaderField: "User-Agent")

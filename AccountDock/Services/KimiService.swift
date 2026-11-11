@@ -269,6 +269,7 @@ final class KimiService: @unchecked Sendable {
             if (response as? HTTPURLResponse)?.statusCode == 429 { throw KimiServiceError.rateLimited }
             throw KimiServiceError.requestFailed("usage endpoint returned \((response as? HTTPURLResponse)?.statusCode ?? 0)")
         }
+        LimitResetShapes.note(.kimi, reply: data)
         let body = try JSONDecoder().decode(UsageEnvelope.self, from: data)
         let month = body.usages.monthCode.usedRatio > body.usages.monthTotal.usedRatio
             ? body.usages.monthCode : body.usages.monthTotal

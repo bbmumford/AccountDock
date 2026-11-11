@@ -263,4 +263,40 @@ final class ClaudeServiceTests: XCTestCase {
         XCTAssertTrue(AIProviderType.codex.capabilities.reportsLimitResets)
         XCTAssertFalse(AIProviderType.kimi.capabilities.reportsLimitResets)
     }
+
+    func testCodexCreditDetailsGiveEachCreditItsExpiryAndStatus() throws {
+        let reply = #"""
+        {"available_count":2,"credits":[
+          {"id":"c1","reset_type":"codex","status":"available","granted_at":"2026-11-01T00:00:00Z","expires_at":"2026-12-01T00:00:00Z"},
+          {"id":"c2","status":"redeemed","expires_at":1796083200},
+          {"id":"c3","status":"available","expires_at":1798761600},
+          {"status":"available"}
+        ]}
+        """#
+        let details = try JSONDecoder().decode(CodexLimitResets.Details.self, from: Data(reply.utf8))
+        let resets = try XCTUnwrap(CodexLimitResets.resets(from: details))
+        XCTAssertEqual(resets.grants.map(\.id), ["c1", "c2", "c3"], "a credit without an id is dropped")
+        XCTAssertEqual(resets.grants.map(\.resetsLeft), [1, 0, 1])
+        XCTAssertNotNil(resets.grants[2].endsAtDate, "a Unix expiry reads as a date")
+        XCTAssertEqual(resets.availableGroups.map(\.resetsLeft), [1, 1], "each expiry day is its own row")
+        XCTAssertNil(CodexLimitResets.resets(from: try JSONDecoder().decode(CodexLimitResets.Details.self, from: Data(#"{"credits":[]}"#.utf8))),
+                     "no readable credit leaves the summary's count in place")
+    }
+
+    func testTheResetShapeLogNeverRecordsAValue() throws {
+        let reply = try JSONSerialization.jsonObject(with: Data(#"{"grants":[{"id":"secret-id","resets_left":3,"paused":false,"ends_at":null}],"eligible":true}"#.utf8))
+        let shape = LimitResetShapes.describe(reply)
+        XCTAssertEqual(shape, "{eligible: bool, grants: [1× {ends_at: null, id: string, paused: bool, resets_left: number}]}")
+        XCTAssertFalse(shape.contains("secret-id") || shape.contains("3"))
+    }
+
+    func testCodexCreditsHeldForLaterShowApartFromTheOnesThatApplyNow() throws {
+        let summary = try JSONDecoder().decode(CodexLimitResets.Summary.self,
+                                               from: Data(#"{"available_count":3,"applicable_available_count":1}"#.utf8))
+        let groups = CodexLimitResets.resets(from: summary).availableGroups
+        XCTAssertEqual(groups.map(\.resetsLeft), [1, 2])
+        XCTAssertEqual(groups.map(\.ready), [true, false])
+        let all = try JSONDecoder().decode(CodexLimitResets.Summary.self, from: Data(#"{"available_count":2}"#.utf8))
+        XCTAssertEqual(CodexLimitResets.resets(from: all).availableGroups.map(\.ready), [true], "without the field every credit applies")
+    }
 }

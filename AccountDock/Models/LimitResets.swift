@@ -1,5 +1,7 @@
 import Foundation
 
+private let resetShapeLog = FileLog("LimitResets")
+
 /// The limit resets an account holds, in the same form for every provider:
 /// each grant refills one or more of its limits on request, a number of
 /// times before its end date. A provider's module (`AnthropicLimitResets`,
@@ -162,17 +164,149 @@ enum AnthropicLimitResets {
 enum CodexLimitResets {
     struct Summary: Decodable {
         let availableCount: Int?
+        /// The credits that apply to the account's limits now; the rest are
+        /// held for later.
+        var applicableCount: Int? = nil
 
         enum CodingKeys: String, CodingKey {
             case availableCount = "available_count"
+            case applicableCount = "applicable_available_count"
         }
     }
 
+    /// The credits `/wham/rate-limit-reset-credits` lists, read when the
+    /// summary counts any (`CodexService.getUsageSnapshot`). Each refills
+    /// every Codex limit and can be used until it expires.
+    struct Details: Decodable {
+        var credits: [Lossy<Credit>]?
+
+        struct Credit: Decodable {
+            let id: String
+            let resetType: String?
+            let status: String?
+            let expiresAt: String?
+
+            enum CodingKeys: String, CodingKey {
+                case id, status
+                case resetType = "reset_type"
+                case expiresAt = "expires_at"
+            }
+
+            /// The expiry as an ISO 8601 time, whether the reply gives one or
+            /// a Unix time in seconds.
+            init(from decoder: Decoder) throws {
+                let values = try decoder.container(keyedBy: CodingKeys.self)
+                id = try values.decode(String.self, forKey: .id)
+                resetType = try? values.decodeIfPresent(String.self, forKey: .resetType)
+                status = try? values.decodeIfPresent(String.self, forKey: .status)
+                if let text = try? values.decodeIfPresent(String.self, forKey: .expiresAt) {
+                    expiresAt = text
+                } else if let seconds = try? values.decodeIfPresent(Double.self, forKey: .expiresAt) {
+                    expiresAt = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: seconds))
+                } else {
+                    expiresAt = nil
+                }
+            }
+        }
+    }
+
+    /// Nil when no credit could be read, so the summary's count stands.
+    static func resets(from details: Details) -> LimitResets? {
+        let credits = (details.credits ?? []).compactMap(\.value)
+        guard !credits.isEmpty else { return nil }
+        return LimitResets(grants: credits.map { credit in
+            let available = credit.status == nil || credit.status == "available"
+            return LimitResets.Grant(
+                id: credit.id,
+                label: "Codex rate-limit reset" + (credit.resetType.map { " (\($0))" } ?? ""),
+                resetsTotal: 1,
+                resetsLeft: available || credit.status == "redeeming" ? 1 : 0,
+                endsAt: credit.expiresAt,
+                refills: [.all],
+                usableNow: available
+            )
+        })
+    }
+
+    /// Credits that apply now and credits held for later are separate rows,
+    /// the latter dimmed as not usable yet.
     static func resets(from summary: Summary) -> LimitResets {
         guard let count = summary.availableCount, count > 0 else { return LimitResets(grants: []) }
-        return LimitResets(grants: [
-            LimitResets.Grant(id: "codex-reset-credits", label: "Codex rate-limit reset credits",
-                              resetsTotal: count, resetsLeft: count, refills: [.all]),
-        ])
+        let applicable = min(count, summary.applicableCount ?? count)
+        var grants: [LimitResets.Grant] = []
+        if applicable > 0 {
+            grants.append(LimitResets.Grant(id: "codex-reset-credits", label: "Codex rate-limit reset credits",
+                                            resetsTotal: applicable, resetsLeft: applicable, refills: [.all]))
+        }
+        if count > applicable {
+            grants.append(LimitResets.Grant(id: "codex-reset-credits-held", label: "Codex rate-limit reset credits that do not apply yet",
+                                            resetsTotal: count - applicable, resetsLeft: count - applicable,
+                                            refills: [.all], usableNow: false))
+        }
+        return LimitResets(grants: grants)
+    }
+}
+
+// MARK: - Watching providers' replies
+
+/// Records once per launch, for each provider, the shape of whatever its
+/// usage reply holds about limit resets: field names, value types and list
+/// lengths, never a value. A module is written or corrected from it, as for
+/// a provider whose resets have not been seen yet. Fed by each provider's
+/// usage request.
+enum LimitResetShapes {
+    /// Fields that name resets in a reply, beside the ones modules read.
+    private static let hint = try? NSRegularExpression(pattern: "reset_?credit|reset_?grant|resets_?left|coupon|voucher|cedar_ember|limit_?reset", options: [.caseInsensitive])
+    private static let seen = Seen()
+
+    private final class Seen: @unchecked Sendable {
+        private let lock = NSLock()
+        private var shapes: [String: String] = [:]
+        func isNew(_ key: String, _ shape: String) -> Bool {
+            lock.withLock {
+                guard shapes[key] != shape else { return false }
+                shapes[key] = shape
+                return true
+            }
+        }
+    }
+
+    static func note(_ provider: AIProviderType, reply data: Data) {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        let fields = root.keys.filter { key in
+            hint?.firstMatch(in: key, range: NSRange(key.startIndex..., in: key)) != nil
+        }.sorted()
+        for field in fields {
+            let shape = describe(root[field] as Any)
+            if seen.isNew("\(provider.rawValue).\(field)", shape) {
+                resetShapeLog.info("\(provider.rawValue) usage reply field \(field): \(shape)")
+            }
+        }
+    }
+
+    /// Records the shape of a whole reply that is about resets, under
+    /// `name`.
+    static func note(_ provider: AIProviderType, whole data: Data, name: String) {
+        guard let root = try? JSONSerialization.jsonObject(with: data) else { return }
+        let shape = describe(root)
+        if seen.isNew("\(provider.rawValue).\(name)", shape) {
+            resetShapeLog.info("\(provider.rawValue) \(name) reply: \(shape)")
+        }
+    }
+
+    /// The structure of a JSON value without its values.
+    static func describe(_ value: Any, depth: Int = 0) -> String {
+        guard depth < 4 else { return "…" }
+        switch value {
+        case let object as [String: Any]:
+            return "{" + object.keys.sorted().map { "\($0): \(describe(object[$0] as Any, depth: depth + 1))" }.joined(separator: ", ") + "}"
+        case let list as [Any]:
+            return "[\(list.count)× " + (list.first.map { describe($0, depth: depth + 1) } ?? "") + "]"
+        case is NSNull: return "null"
+        case let number as NSNumber:
+            return CFGetTypeID(number) == CFBooleanGetTypeID() ? "bool" : "number"
+        case is String: return "string"
+        default: return "?"
+        }
     }
 }

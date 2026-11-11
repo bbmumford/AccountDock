@@ -79,9 +79,12 @@ extension AppState {
             await refreshRouteTargetReading(maximumAge: 60)
         }
         await maintainRouter()
+        // Before sessions are counted, so one started on a slot since the
+        // last cycle is counted on the slot's account from its first cycle.
+        await refreshSlotProcesses()
         refreshSessions()
         await ingestTranscriptRequests()
-        await maintainSessionSlots()
+        await maintainSessionSlots(processesRead: true)
         await evaluateFailover()
         saveLearningIfDue()
         for provider in AgentPauseGate.providers { prunePausedSessions(provider) }
@@ -126,7 +129,7 @@ extension AppState {
         guard let account = Self.accountDueForLimitResets(candidates, checkedAt: limitResetsCheckedAt, now: now) else { return }
         // A reading not taken, as when the background allowance is spent or
         // the request fails, is tried again after `limitResetsRetry`.
-        let read = await fetchUsageNow(account, priority: .background)
+        let read = await fetchUsageNow(account, priority: .background, resetDetails: true)
         limitResetsLastReadAt = now
         limitResetsCheckedAt[account.id] = read ? now : now.addingTimeInterval(Self.limitResetsRetry - Self.limitResetsInterval)
     }
@@ -324,12 +327,14 @@ extension AppState {
     /// Reads one account's usage immediately. Returns whether a fresh
     /// reading was recorded.
     @discardableResult
-    func fetchUsageNow(_ account: Account, priority: UsageRequestBudget.Priority) async -> Bool {
+    func fetchUsageNow(_ account: Account, priority: UsageRequestBudget.Priority,
+                       resetDetails: Bool = false) async -> Bool {
         if let retryAt = usageRetryAfter[account.id], retryAt > Date() {
             return false
         }
         guard spendUsageRequest(account.provider, priority) else { return false }
-        return applyUsageRead(await readUsage(account, forced: false, includeMetadata: false), for: account)
+        return applyUsageRead(await readUsage(account, forced: false, includeMetadata: false,
+                                              resetDetails: resetDetails), for: account)
     }
 
     /// Checks the destinations the plan switches to until one's sign-in is
