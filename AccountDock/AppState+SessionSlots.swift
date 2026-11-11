@@ -25,11 +25,12 @@ extension AppState {
     /// Runs on every quota cycle: keeps the launcher, each account's slot and
     /// the pool file current while sessions are distributed, and afterwards
     /// removes them, keeping the slots running sessions still read.
-    func maintainSessionSlots(now: Date = Date()) async {
+    /// `processesRead` says `refreshSlotProcesses` has just run, as the
+    /// quota cycle runs it before counting sessions.
+    func maintainSessionSlots(now: Date = Date(), processesRead: Bool = false) async {
         guard let provider = AIProviderType.routedProvider, let slots = SessionSlots(provider) else { return }
-        let byProcess = await Task.detached(priority: .utility) { slots.directoriesByProcess() }.value
-        slotDirectoryByProcess = byProcess
-        let inUse = Set(byProcess.values)
+        if !processesRead { await refreshSlotProcesses() }
+        let inUse = Set(slotDirectoryByProcess.values)
         guard sessionSlotsWanted else {
             if slots.launcherInstalled || FileManager.default.fileExists(atPath: slots.launcher.path) {
                 slots.removeLauncher()
@@ -77,6 +78,13 @@ extension AppState {
             return served.contains(id) || spares.contains(id) ? (slots.directory(for: id).path, member.weight) : nil
         }
         await Task.detached(priority: .utility) { slots.writePool(entries) }.value
+    }
+
+    /// Reads which slot each running process reads, for `refreshSessions`
+    /// and `maintainSessionSlots`; run first on every quota cycle.
+    func refreshSlotProcesses() async {
+        guard let provider = AIProviderType.routedProvider, let slots = SessionSlots(provider) else { return }
+        slotDirectoryByProcess = await Task.detached(priority: .utility) { slots.directoriesByProcess() }.value
     }
 
     /// The account serving the slot a running session reads, when the
