@@ -48,6 +48,21 @@ struct SessionSlots: Sendable {
     var root: URL { base.appendingPathComponent("\(executable)-slots", isDirectory: true) }
     var binDirectory: URL { base.appendingPathComponent("bin", isDirectory: true) }
     var launcher: URL { binDirectory.appendingPathComponent(executable) }
+
+    /// The CLI itself rather than `launcher`, which would pick an account of
+    /// its own: `preferred` when it is the CLI, or else the first on the
+    /// usual install paths. Read by `AppState.sessionLaunch`.
+    func realExecutable(preferred: String?) -> String? {
+        let fm = FileManager.default
+        let launcherPath = launcher.resolvingSymlinksInPath().path
+        let candidates = [preferred].compactMap { $0 } + [
+            "/opt/homebrew/bin", "/usr/local/bin", home.appendingPathComponent(".local/bin").path,
+            home.appendingPathComponent(".claude/local").path,
+        ].map { ($0 as NSString).appendingPathComponent(executable) }
+        return candidates.first { path in
+            fm.isExecutableFile(atPath: path) && URL(fileURLWithPath: path).resolvingSymlinksInPath().path != launcherPath
+        }
+    }
     var poolFile: URL { root.appendingPathComponent("pool.tsv") }
     /// One line per recent session: its ID, a tab, and the slot directory of
     /// the account its history ran on, or `activeEntry`. The launcher starts
@@ -61,6 +76,10 @@ struct SessionSlots: Sendable {
     var sessionRoot: URL { root.appendingPathComponent("session", isDirectory: true) }
     static let accountFile = "account"
     static let claimedMarker = "claimed"
+    /// Marks a slot claimed for a session the user asked AccountDock to
+    /// start on one account (`claimRequested`), which may begin later than
+    /// a session the launcher claims for.
+    static let requestedMarker = "requested"
 
     /// A one-session slot as it stands on disk.
     struct SessionSlot: Equatable {
@@ -71,6 +90,8 @@ struct SessionSlots: Sendable {
         var claimedAt: Date?
         /// When its account was last written, by filling or moving it.
         var assignedAt: Date? = nil
+        /// Claimed by `claimRequested` rather than the launcher.
+        var requested = false
     }
 
     func directory(for account: UUID) -> URL {
@@ -97,7 +118,9 @@ struct SessionSlots: Sendable {
                 .flatMap { UUID(uuidString: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
             let claimed = (try? fm.attributesOfItem(atPath: directory.appendingPathComponent(Self.claimedMarker).path))?[.creationDate] as? Date
             let assigned = (try? fm.attributesOfItem(atPath: directory.appendingPathComponent(Self.accountFile).path))?[.modificationDate] as? Date
-            return SessionSlot(directory: directory, account: account, claimedAt: claimed, assignedAt: assigned)
+            let requested = fm.fileExists(atPath: directory.appendingPathComponent(Self.requestedMarker).path)
+            return SessionSlot(directory: directory, account: account, claimedAt: claimed, assignedAt: assigned,
+                               requested: requested)
         }
     }
 
@@ -121,9 +144,29 @@ struct SessionSlots: Sendable {
     /// last, so the launcher never claims a slot without its credential.
     @discardableResult
     func makeSpare(for account: UUID, credential: String) -> Bool {
+        makeSlot(for: account, credential: credential) != nil
+    }
+
+    /// Fills a new one-session slot for `account`; nil when it could not be
+    /// written.
+    func makeSlot(for account: UUID, credential: String) -> URL? {
         let directory = sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        guard serve(directory, credential: credential) else { return false }
-        return assign(directory, to: account)
+        guard serve(directory, credential: credential), assign(directory, to: account) else { return nil }
+        return directory
+    }
+
+    /// Claims a filled slot for one session started on request, so the
+    /// launcher never hands it to another session; the session names the
+    /// slot itself through the CLI's slot variable.
+    func claimRequested(_ directory: URL) -> Bool {
+        let fm = FileManager.default
+        do {
+            try fm.createDirectory(at: directory.appendingPathComponent(Self.claimedMarker), withIntermediateDirectories: false)
+            return fm.createFile(atPath: directory.appendingPathComponent(Self.requestedMarker).path, contents: nil)
+        } catch {
+            log.error("[claimRequested] Slot not claimed: \(error.localizedDescription)")
+            return false
+        }
     }
 
     /// Records the account a one-session slot serves.
