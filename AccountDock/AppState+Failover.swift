@@ -111,17 +111,18 @@ extension AppState {
     /// readings are otherwise due for.
     nonisolated static let limitResetsInterval: TimeInterval = 60 * 60
 
-    /// Reads one account whose limit resets are due, so every subscription
-    /// tile shows them: a spent account's readings are otherwise taken
-    /// rarely, yet a reset matters most there. Only the provider's own usage
-    /// endpoint reports resets, so the reading is a full one; it spends only
-    /// background allowance, never what the active account's readings need.
+    /// Reads one account whose limit resets are due, of any provider that
+    /// reports them, so every subscription tile shows them: a spent account's
+    /// readings are otherwise taken rarely, yet a reset matters most there.
+    /// Only the provider's own usage endpoint reports resets, so the reading
+    /// is a full one; it spends only background allowance, never what the
+    /// active account's readings need.
     func refreshLimitResetsIfDue(now: Date) async {
         // One reading at a time across all accounts: the provider throttles
         // the client as a whole, and a throttle stops every account's
         // readings, the active account's included.
         if let last = limitResetsLastReadAt, now.timeIntervalSince(last) < Self.limitResetsSpacing { return }
-        let candidates = accounts.filter { $0.provider == .claudeCode && !needsSignIn($0) }
+        let candidates = accounts.filter { $0.provider.capabilities.reportsLimitResets && !needsSignIn($0) }
         guard let account = Self.accountDueForLimitResets(candidates, checkedAt: limitResetsCheckedAt, now: now) else { return }
         // A reading not taken, as when the background allowance is spent or
         // the request fails, is tried again after `limitResetsRetry`.

@@ -65,6 +65,10 @@ struct ProviderCapabilities: Sendable {
     /// Whether an account can keep serving past its plan limit on paid
     /// extra usage.
     var supportsExtraUsage = false
+    /// Whether the provider's usage reply lists the limit resets an account
+    /// holds, which its module reads into `LimitResets`; such accounts are
+    /// read for them hourly (`AppState.refreshLimitResetsIfDue`).
+    var reportsLimitResets = false
     /// The CLI's executable name, for finding its running processes.
     var cliExecutableName: String?
     /// Window percent a request is assumed to cost while the provider has no
@@ -270,6 +274,7 @@ extension AIProviderType {
                     accountCommands: ["auth", "login", "logout", "setup-token"]
                 ),
                 supportsExtraUsage: true,
+                reportsLimitResets: true,
                 cliExecutableName: "claude",
                 storageKey: "claude",
                 shortBadge: "C",
@@ -298,6 +303,7 @@ extension AIProviderType {
                 usageRequestBudget: (capacity: 3, refillInterval: 20),
                 supportsWindowWarming: true,
                 switchReachesRunningSessions: true,
+                reportsLimitResets: true,
                 cliExecutableName: "codex",
                 storageKey: "codex",
                 shortBadge: "X",

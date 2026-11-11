@@ -645,7 +645,8 @@ final class CodexService: @unchecked Sendable {
             sevenDaySonnet: nil,
             sevenDayCowork: nil,
             iguanaNecktie: nil,
-            extraUsage: nil
+            extraUsage: nil,
+            limitResets: payload.resetCredits?.value.map(CodexLimitResets.resets(from:))
         )
         let trimmedPlan = payload.planType?.trimmingCharacters(in: .whitespacesAndNewlines)
         return CodexUsageSnapshot(
@@ -852,10 +853,13 @@ final class CodexService: @unchecked Sendable {
 private struct CodexUsagePayload: Decodable {
     let planType: String?
     let rateLimit: RateLimit?
+    /// Read leniently: an unknown shape never costs the windows.
+    let resetCredits: Lossy<CodexLimitResets.Summary>?
 
     enum CodingKeys: String, CodingKey {
         case planType = "plan_type"
         case rateLimit = "rate_limit"
+        case resetCredits = "rate_limit_reset_credits"
     }
 
     func window(matchingSeconds target: Int) -> Window? {
