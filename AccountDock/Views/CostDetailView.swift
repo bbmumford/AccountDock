@@ -138,18 +138,25 @@ struct CostDetailView: View {
         }.sorted { $0.cost > $1.cost }
     }
 
+    /// The name on its own line, so the cost and its tokens fit on one line
+    /// beneath it however narrow three chips leave each.
     private func providerTodayCost(name: String, icon: String, cost: Double, tokens: Int) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: icon)
-            Text(name)
-            Spacer()
-            VStack(alignment: .trailing, spacing: 1) {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                Text(name)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(formatCost(cost))
-                Text("\(formatTokenCount(tokens)) tokens")
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 2)
+                Text("\(formatTokenCount(tokens)) tok")
                     .font(.system(size: 8))
             }
             .monospacedDigit()
         }
+        .lineLimit(1)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .font(.caption2)
         .foregroundStyle(.secondary)
         .padding(7)

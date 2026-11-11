@@ -15,13 +15,13 @@ final class AccountModelTests: XCTestCase {
     }
 
     func testMessageNameAddsTheEmailOnlyWhenAnotherAccountSharesTheName() {
-        let work = Account(email: "brandon@orbtr.example", displayName: "Org", customLabel: "ORBTR")
-        let system = Account(email: "system@mail.example", displayName: "Org", customLabel: "ORBTR")
+        let work = Account(email: "work@mail.example", displayName: "Org", customLabel: "Work")
+        let system = Account(email: "system@mail.example", displayName: "Org", customLabel: "Work")
         let personal = Account(email: "me@mail.example", displayName: "Org", customLabel: "Personal")
         let sameNameOtherProvider = Account(email: "x@mail.example", displayName: "Org", provider: .codex, customLabel: "Personal")
         let all = [work, system, personal, sameNameOtherProvider]
-        XCTAssertEqual(work.messageName(among: all), "ORBTR (\(work.obfuscatedEmail))")
-        XCTAssertEqual(system.messageName(among: all), "ORBTR (\(system.obfuscatedEmail))")
+        XCTAssertEqual(work.messageName(among: all), "Work (\(work.obfuscatedEmail))")
+        XCTAssertEqual(system.messageName(among: all), "Work (\(system.obfuscatedEmail))")
         XCTAssertNotEqual(work.messageName(among: all), system.messageName(among: all))
         XCTAssertEqual(personal.messageName(among: all), "Personal")
     }

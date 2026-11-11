@@ -13,8 +13,8 @@ own before a limit stops you.
 </p>
 
 <p align="center">
-  <img src="docs/images/menu-usage.png" width="300" alt="Usage tab: today's activity and every account's session and weekly quota">
-  <img src="docs/images/menu-costs.png" width="300" alt="Costs tab: today's cost by provider and model, and daily history">
+  <img src="docs/images/menu-usage.png" width="300" alt="Usage tab: today's activity, every account's session and weekly quota, and the limit resets each holds">
+  <img src="docs/images/menu-costs.png" width="300" alt="Costs tab: today's cost and tokens by provider and model, period summaries and daily history">
   <img src="docs/images/menu-accounts.png" width="300" alt="Accounts tab: accounts grouped by provider, with switch, re-authenticate and remove">
 </p>
 
@@ -27,9 +27,15 @@ own before a limit stops you.
 - **Quota at a glance.** Session, weekly and monthly windows for every account,
   with reset times, in the menu and the menu bar. Model-scoped weekly limits
   are read and planned for.
-- **Costs and activity.** API-equivalent cost per provider and model, daily and
-  30-day history, turns, active time and lines changed, all computed locally
-  from session logs.
+- **Costs and activity.** API-equivalent cost per provider and model, with the
+  tokens each cost was priced from, daily and 30-day history, turns, active
+  time and lines changed, all computed locally from session logs.
+- **Limit resets.** Every subscription shows the limit resets it holds (an
+  all-models reset, a Fable reset, Codex reset credits), how many are left and
+  the last day to use them.
+- **A session on the subscription you choose.** Start Claude Code on one
+  subscription from its card, in agterm, Terminal or as a copied command; it
+  stays there until failover or balancing moves it.
 - **Automatic failover.** Each provider rotates through its own accounts on
   thresholds you set, plans ahead with learned usage rates, and never switches
   to an account that would run out straight away.
@@ -42,14 +48,47 @@ own before a limit stops you.
   cost modules, in any order.
 - **Private by design.** No prompts or transcripts are stored or sent anywhere.
   Credentials stay in the macOS Keychain and in memory.
+- **Updates in one click.** AccountDock finds new releases, checks each
+  download's SHA-256 and signature, and replaces itself.
 
 ## Usage and costs
 
 The **Usage** tab lists every account by provider, in the order you set in
 **Accounts**: its plan, the session (5-hour) window, the weekly or monthly
-window, and when each resets. Today's activity across all providers sits on
-top. The **Costs** tab totals today's API-equivalent spend by provider and
-model, with 7-day, 30-day and all-time summaries and a daily history.
+window, and when each resets, then the limit resets the account holds and
+whether Extra usage is on. Today's activity across all providers sits on top.
+The **Costs** tab totals today's API-equivalent spend by provider and model,
+with 7-day, 30-day and all-time summaries and a daily history; every figure
+shows the input, output and cache tokens it was priced from.
+
+### Limit resets
+
+Providers sometimes grant resets that refill a limit on request: Claude's
+monthly full reset and its Fable resets for a model launch, and Codex's
+rate-limit reset credits. Each card lists the ones its account holds, by what
+they refill (all models, Fable or session), with how many are left and the
+last day to use them; resets of one offer that end the same day are counted
+together. A reset that cannot be used yet is dimmed. AccountDock reads each
+account's resets once an hour, one account at a time, so even a spent
+account that is otherwise read rarely shows them. Resets are used from the
+CLI itself (`/usage-credits` in Claude Code).
+
+Each provider has a small module that reads its own reply into one shared
+form, so adding another provider's resets means adding its module. The first
+time a provider's reply carries a reset field, or the field changes shape,
+AccountDock logs the field's structure, never its values.
+
+### Opening a session on one subscription
+
+The button beside a Claude card's plan opens a session on that subscription:
+choose agterm (when it is installed), Terminal or **Copy command**, then the
+folder to start in. The session reads a slot of its own holding that
+account's sign-in, so it stays on the subscription until failover or
+balancing moves it, the same rule every distributed session follows. The
+button is dimmed, with the reason on hover, while the subscription needs
+signing in or is at its limit, since failover would move the session straight
+away. A session opened on the active account uses the CLI's own sign-in and
+follows the active account.
 
 Usage comes first from what the CLIs already record (Claude Code's status line
 and cache, Codex rollouts, the router's response headers). Provider usage
@@ -259,19 +298,37 @@ cleared from the app.
 
 ## Install
 
-The repository is private, so sign in once with `gh auth login`, then run:
+Download and install the latest release:
 
 ```bash
-install_dir="$(mktemp -d)" && gh release download --repo bbmumford/AccountDock --pattern 'AccountDock.pkg*' --dir "$install_dir" --clobber && (cd "$install_dir" && shasum -a 256 -c AccountDock.pkg.sha256) && sudo installer -pkg "$install_dir/AccountDock.pkg" -target / && osascript -e 'tell application "System Events" to if not (exists login item "AccountDock") then make login item at end with properties {name:"AccountDock", path:"/Applications/AccountDock.app", hidden:false}' && rm -rf "$install_dir" && open -a AccountDock
+install_dir="$(mktemp -d)" && cd "$install_dir" && curl -fsSLO https://github.com/bbmumford/AccountDock/releases/latest/download/AccountDock.pkg && curl -fsSLO https://github.com/bbmumford/AccountDock/releases/latest/download/AccountDock.pkg.sha256 && shasum -a 256 -c AccountDock.pkg.sha256 && sudo installer -pkg AccountDock.pkg -target / && osascript -e 'tell application "System Events" to if not (exists login item "AccountDock") then make login item at end with properties {name:"AccountDock", path:"/Applications/AccountDock.app", hidden:false}' && cd - >/dev/null && rm -rf "$install_dir" && open -a AccountDock
 ```
 
-The command downloads the latest release, verifies its SHA-256 checksum,
-installs it in `/Applications`, adds the Claude Code and Codex session hooks to
-the current user's settings, adds AccountDock to Login Items and opens it. On
-first launch the app offers to install the remaining hooks.
+The command verifies the package's SHA-256 checksum, installs AccountDock in
+`/Applications`, adds the Claude Code and Codex session hooks for the current
+user, adds AccountDock to Login Items and opens it. On first launch the app
+offers to install the remaining hooks.
 
-AccountDock checks GitHub for newer releases and shows the same kind of command
-in Settings → About. It never downloads or runs an update itself.
+Releases are signed with AccountDock's own certificate rather than an Apple
+Developer ID and are not notarized, so install them with the command above
+rather than by double-clicking the package.
+
+## Updates
+
+AccountDock looks for a newer release when it starts and every six hours.
+When one is out, the menu's footer shows **Update to …** and Settings → About
+shows **Install**. AccountDock then:
+
+1. downloads the release's `AccountDock.zip`;
+2. checks it against the release's published SHA-256;
+3. checks that it is AccountDock at the release's version, signed by the same
+   certificate as the copy that is running, so it keeps its Keychain access
+   and login item;
+4. quits, swaps the new app in, keeps the previous copy in
+   `~/Library/Application Support/AccountDock/Updates/previous` and reopens.
+
+If any check fails nothing is installed, and Settings → About offers the
+install command instead.
 
 ## Build and test
 
@@ -287,7 +344,14 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 ```
 
 `project.yml` is the source of truth; regenerate the project after changing it.
-Release builds, packaging and versioning are in [BUILD_GUIDE.md](BUILD_GUIDE.md).
+GitHub Actions runs the tests on every push and pull request. Releases are
+built, signed and published from a Mac with one command:
+
+```bash
+./scripts/publish-release.sh patch   # or minor, major, or a version number
+```
+
+Packaging, signing and versioning are in [BUILD_GUIDE.md](BUILD_GUIDE.md).
 
 The screenshots above are rendered from the app's own views with sample
 accounts, never real ones:
@@ -336,13 +400,16 @@ needs no change.
 - [docs/KIMI_PROVIDER_ASSESSMENT.md](docs/KIMI_PROVIDER_ASSESSMENT.md): the Kimi
   provider design.
 
+## License
+
+AccountDock is released under the [MIT License](LICENSE).
+
 ## Upstream attribution
 
 AccountDock began as a hard fork of
 [XueshiQiao/CCSwitcher](https://github.com/XueshiQiao/CCSwitcher) and was
 informed by the account-isolation and telemetry approaches in
-[steipete/CodexBar](https://github.com/steipete/CodexBar).
-
-The reviewed CCSwitcher revision did not contain a repository license. Public
-redistribution requires permission from its copyright holder. Archived upstream
+[steipete/CodexBar](https://github.com/steipete/CodexBar). Both are published
+under the MIT License; their notices are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Archived upstream
 documentation is kept under `docs/upstream/`.

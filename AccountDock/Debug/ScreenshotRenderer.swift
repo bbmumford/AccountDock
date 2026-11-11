@@ -162,13 +162,25 @@ extension AppState {
         let kimi = Account(email: "alex@example.com", displayName: "Alex Rivera", provider: .kimi,
                            subscriptionType: "Moderato", isActive: true, lastUsed: now, customLabel: "Kimi Coding",
                            credentialLocation: "kimi-coding")
+        func resets(_ grants: [(kind: [LimitResets.RefilledLimit], left: Int, days: Double)]) -> LimitResets {
+            LimitResets(grants: grants.enumerated().map { index, grant in
+                LimitResets.Grant(id: "sample-\(index)", label: "Sample reset", resetsTotal: grant.left,
+                                  resetsLeft: grant.left, endsAt: iso(grant.days * day), refills: grant.kind)
+            })
+        }
         accounts = [claudePersonal, claudeWork, claudeLab, codex, codexTeam, kimi]
         activeAccount = claudePersonal
+        var personalUsage = usage(64, 2.2 * hour, 41, 3.5 * day)
+        personalUsage.limitResets = resets([([.weekly, .model("Fable")], 1, 29), ([.model("Fable")], 1, 118)])
+        var workUsage = usage(8, 4.6 * hour, 72, 1.2 * day)
+        workUsage.limitResets = resets([([.model("Fable")], 2, 118)])
+        var codexUsage = usage(37, 3.1 * hour, 55, 2.4 * day)
+        codexUsage.limitResets = resets([([.all], 1, 20)])
         accountUsage = [
-            claudePersonal.id: usage(64, 2.2 * hour, 41, 3.5 * day),
-            claudeWork.id: usage(8, 4.6 * hour, 72, 1.2 * day),
+            claudePersonal.id: personalUsage,
+            claudeWork.id: workUsage,
             claudeLab.id: usage(0, 5 * hour, 18, 5.8 * day),
-            codex.id: usage(37, 3.1 * hour, 55, 2.4 * day),
+            codex.id: codexUsage,
             codexTeam.id: usage(nil, 0, 12, 6.1 * day),
             kimi.id: usage(22, 1.4 * hour, 30, 19 * day, weeklySeconds: 30 * 24 * 3600),
         ]
@@ -193,16 +205,22 @@ extension AppState {
         var claudeDaily: [DailyCost] = []
         var codexDaily: [String: Double] = [:]
         var kimiDaily: [String: Double] = [:]
+        var codexTokens: [String: Int] = [:]
+        var kimiTokens: [String: Int] = [:]
         for (index, cost) in claudeDays.enumerated() {
             let key = formatter.string(from: now.addingTimeInterval(-Double(claudeDays.count - 1 - index) * day))
             claudeDaily.append(DailyCost(
                 date: key, totalCost: cost,
                 modelBreakdown: ["claude-opus-4-8": cost * 0.71, "claude-sonnet-4-6": cost * 0.24, "claude-haiku-4-5": cost * 0.05],
                 sessionCount: 6 + index, inputTokens: 180_000 * (index + 2), outputTokens: 95_000 * (index + 3),
-                cacheWriteTokens: 1_400_000 * (index + 1), cacheReadTokens: 21_000_000 * (index + 2)
+                cacheWriteTokens: 1_400_000 * (index + 1), cacheReadTokens: 21_000_000 * (index + 2),
+                modelTokens: ["claude-opus-4-8": 16_000_000 * (index + 2), "claude-sonnet-4-6": 5_500_000 * (index + 2),
+                              "claude-haiku-4-5": 1_100_000 * (index + 2)]
             ))
             codexDaily[key] = codexDays[index]
             kimiDaily[key] = kimiDays[index]
+            codexTokens[key] = Int(codexDays[index] * 310_000)
+            kimiTokens[key] = Int(kimiDays[index] * 2_400_000)
         }
         costSummary = CostSummary(todayCost: claudeDays.last ?? 0, dailyCosts: claudeDaily)
         let codexToday = codexDays.last ?? 0
@@ -212,13 +230,19 @@ extension AppState {
                 dailyCosts: codexDaily,
                 todayModelActivity: ["gpt-5.5-codex": 214],
                 todayModelCosts: ["gpt-5.5-codex": codexToday * 0.86, "gpt-5.5-mini": codexToday * 0.14],
-                todayLinesChanged: 1_284
+                todayLinesChanged: 1_284,
+                todayTokens: codexTokens.values.max() ?? 0,
+                dailyTokens: codexTokens,
+                todayModelTokens: ["gpt-5.5-codex": Int(codexToday * 270_000), "gpt-5.5-mini": Int(codexToday * 40_000)]
             ),
             .kimi: CostParser.ProviderCostHistory(
                 dailyCosts: kimiDaily,
                 todayModelActivity: ["k3": 88],
                 todayModelCosts: ["k3": kimiToday],
-                todayLinesChanged: 0
+                todayLinesChanged: 0,
+                todayTokens: Int(kimiToday * 2_400_000),
+                dailyTokens: kimiTokens,
+                todayModelTokens: ["k3": Int(kimiToday * 2_400_000)]
             ),
         ]
         combinedTodayCost = (claudeDays.last ?? 0) + codexToday + kimiToday
@@ -227,6 +251,9 @@ extension AppState {
             toolUsage: ["Edit": 412, "Read": 655, "Bash": 298, "Grep": 141],
             linesWritten: 3_916,
             modelUsage: ["Opus": 271, "Sonnet": 64]
+        )
+        providerCosts[.claudeCode] = CostParser.ProviderCostHistory(
+            claude: costSummary, activity: activityStats, today: formatter.string(from: now)
         )
         routedStatus = [:]
         agentPauseStatus = [:]
