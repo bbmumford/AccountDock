@@ -215,20 +215,52 @@ final class ClaudeServiceTests: XCTestCase {
     }
 
     func testResetsOfOneOfferEndingTheSameDayAreCountedTogether() {
-        let resets = LimitResets(eligible: true, grants: [
+        let resets = LimitResets(grants: [
             .init(id: "fable", label: "Fable reset", resetsTotal: 1, resetsLeft: 1, endsAt: "2027-03-09T07:59:00+00:00",
-                  clears: ["seven_day_overage_included"], usableNow: true),
+                  refills: [.model("Fable")]),
             .init(id: "fable-6mo", label: "Fable reset, six months", resetsTotal: 1, resetsLeft: 1, endsAt: "2027-03-09T07:59:00+00:00",
-                  clears: ["seven_day_overage_included"], usableNow: true),
+                  refills: [.model("Fable")]),
             .init(id: "full", label: "Full reset", resetsTotal: 1, resetsLeft: 1, endsAt: "2026-12-10T22:00:00+00:00",
-                  clears: ["seven_day", "seven_day_overage_included"], usableNow: true),
+                  refills: [.weekly, .model("Fable")]),
             .init(id: "fable-later", resetsTotal: 1, resetsLeft: 1, endsAt: "2027-06-01T00:00:00+00:00",
-                  clears: ["seven_day_overage_included"], usableNow: true),
+                  refills: [.model("Fable")]),
         ])
         let groups = resets.availableGroups
         XCTAssertEqual(groups.map(\.kind), ["All-models reset", "Fable reset", "Fable reset"])
         XCTAssertEqual(groups.map(\.resetsLeft), [1, 2, 1])
         XCTAssertEqual(groups[1].labels, ["Fable reset", "Fable reset, six months"])
         XCTAssertEqual(groups[1].resetsTotal, 2, "two whole grants read as 2 left, not 2 of 2")
+    }
+
+    func testASavedReadingKeepsItsResetsInTheSharedFormAndOldSavedReadingsStillRead() throws {
+        let anthropic = #"{"seven_day":{"utilization":5},"cedar_ember":{"grants":[{"id":"g","resets_left":1,"clears":["seven_day"],"usable_now":true}]}}"#
+        let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(anthropic.utf8))
+        XCTAssertEqual(usage.limitResets?.grants.first?.refills, [.weekly])
+        let saved = try JSONEncoder().encode(usage)
+        let text = String(decoding: saved, as: UTF8.self)
+        XCTAssertTrue(text.contains("limit_resets") && !text.contains("cedar_ember"), "saved in the provider-neutral form")
+        XCTAssertEqual(try JSONDecoder().decode(UsageAPIResponse.self, from: saved).limitResets, usage.limitResets)
+    }
+
+    func testCodexResetCreditsReadIntoTheSharedFormWithoutCostingItsWindows() throws {
+        let reply = #"""
+        {"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":40,"limit_window_seconds":18000,"reset_at":1794000000,"reset_after_seconds":600},
+         "secondary_window":{"used_percent":70,"limit_window_seconds":604800,"reset_at":1794500000,"reset_after_seconds":6000}},
+         "rate_limit_reset_credits":{"available_count":2}}
+        """#
+        let usage = try CodexService.decodeUsage(Data(reply.utf8))
+        XCTAssertNotNil(usage.sevenDay)
+        let groups = try XCTUnwrap(usage.limitResets).availableGroups
+        XCTAssertEqual(groups.map(\.kind), ["Full reset"])
+        XCTAssertEqual(groups.first?.resetsLeft, 2)
+        let odd = try CodexService.decodeUsage(Data(#"{"rate_limit":{"secondary_window":{"used_percent":1,"limit_window_seconds":604800,"reset_at":1794500000}},"rate_limit_reset_credits":"surprise"}"#.utf8))
+        XCTAssertNotNil(odd.sevenDay, "an unknown reset shape never costs the windows")
+        XCTAssertNil(odd.limitResets)
+    }
+
+    func testOnlyProvidersThatReportResetsAreReadForThem() {
+        XCTAssertTrue(AIProviderType.claudeCode.capabilities.reportsLimitResets)
+        XCTAssertTrue(AIProviderType.codex.capabilities.reportsLimitResets)
+        XCTAssertFalse(AIProviderType.kimi.capabilities.reportsLimitResets)
     }
 }
