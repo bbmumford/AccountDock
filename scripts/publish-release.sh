@@ -50,8 +50,12 @@ if [ -z "$identity" ]; then
 fi
 [ -n "$identity" ] || die "No signing identity. Set ACCOUNTDOCK_SIGNING_IDENTITY to a codesigning identity's hash or name."
 
-# 1. Version and tag (local only).
-if $assume_yes; then
+# 1. Version and tag (local only). A run that stopped before publishing left
+#    HEAD tagged with the current version; it is published as it is.
+current="$(awk -F'"' '/^[[:space:]]*MARKETING_VERSION:/ { print $2; exit }' project.yml)"
+if [ "$(git tag --points-at HEAD | grep -cx "v$current")" = 1 ]; then
+    echo "HEAD is already tagged v$current; publishing it without a new version."
+elif $assume_yes; then
     ./scripts/release.sh "$bump" --yes
 else
     ./scripts/release.sh "$bump"
@@ -78,6 +82,8 @@ ditto "$derived/Build/Products/Release/AccountDock.app" "$app"
 #    would break the signature the in-app updater checks.
 cp scripts/configure-claude-hooks.js scripts/configure-codex-hooks.js "$app/Contents/Resources/"
 chmod +x "$app/Contents/Resources/"*.sh
+# Files copied from a synced folder carry extended attributes codesign refuses.
+xattr -cr "$app"
 for appex in "$app"/Contents/Extensions/*.appex; do
     [ -d "$appex" ] && codesign --force --sign "$identity" "$appex"
 done
