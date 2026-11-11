@@ -84,6 +84,8 @@ struct DailyCost: Identifiable {
     let outputTokens: Int
     let cacheWriteTokens: Int
     let cacheReadTokens: Int
+    /// Input, output and cache tokens per model, keyed like `modelBreakdown`.
+    var modelTokens: [String: Int] = [:]
 
     var id: String { date }
 

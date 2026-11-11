@@ -15,6 +15,7 @@ struct CostDetailView: View {
         let icon: String
         let model: String
         let cost: Double
+        let tokens: Int
     }
 
     var body: some View {
@@ -49,12 +50,17 @@ struct CostDetailView: View {
                 .monospacedDigit()
                 .foregroundStyle(.brand)
 
+            Text("\(formatTokenCount(todayProviders.reduce(0) { $0 + appState.todayTokens(for: $1) })) tokens")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.textSecondary)
+
             HStack(spacing: 10) {
                 ForEach(todayProviders) { provider in
                     providerTodayCost(
                         name: provider.capabilities.displayName,
                         icon: provider.iconName,
-                        cost: appState.todayCost(for: provider)
+                        cost: appState.todayCost(for: provider),
+                        tokens: appState.todayTokens(for: provider)
                     )
                 }
             }
@@ -73,6 +79,9 @@ struct CostDetailView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.textSecondary)
                             Spacer()
+                            Text(formatTokenCount(item.tokens))
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.textSecondary)
                             Text(formatCost(item.cost))
                                 .font(.caption2.weight(.medium).monospacedDigit())
                                 .foregroundStyle(.textSecondary)
@@ -114,26 +123,32 @@ struct CostDetailView: View {
 
     private func combinedTodayModelCosts() -> [ProviderModelCost] {
         costProviders.flatMap { provider in
-            appState.todayModelCosts(for: provider).compactMap { model, cost -> ProviderModelCost? in
+            let tokens = appState.todayModelTokens(for: provider)
+            return appState.todayModelCosts(for: provider).compactMap { model, cost -> ProviderModelCost? in
                 guard cost > 0 else { return nil }
                 return ProviderModelCost(
                     id: "\(provider.rawValue)-\(model)",
                     provider: provider.capabilities.displayName,
                     icon: provider.iconName,
                     model: model,
-                    cost: cost
+                    cost: cost,
+                    tokens: tokens[model] ?? 0
                 )
             }
         }.sorted { $0.cost > $1.cost }
     }
 
-    private func providerTodayCost(name: String, icon: String, cost: Double) -> some View {
+    private func providerTodayCost(name: String, icon: String, cost: Double, tokens: Int) -> some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
             Text(name)
             Spacer()
-            Text(formatCost(cost))
-                .monospacedDigit()
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(formatCost(cost))
+                Text("\(formatTokenCount(tokens)) tokens")
+                    .font(.system(size: 8))
+            }
+            .monospacedDigit()
         }
         .font(.caption2)
         .foregroundStyle(.secondary)
@@ -146,10 +161,9 @@ struct CostDetailView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
 
-        let last7 = combinedCostForLastDays(7, today: todayStr, formatter: formatter)
-        let last30 = combinedCostForLastDays(30, today: todayStr, formatter: formatter)
-
-        let allTime = combinedDailyCosts.reduce(0) { $0 + $1.total }
+        let last7 = combinedDaysInLast(7, today: todayStr, formatter: formatter)
+        let last30 = combinedDaysInLast(30, today: todayStr, formatter: formatter)
+        let allTime = combinedDailyCosts
 
         return VStack(spacing: 10) {
             HStack {
@@ -173,38 +187,39 @@ struct CostDetailView: View {
             if showLast7Days || showLast30Days {
                 HStack(spacing: 10) {
                     if showLast7Days {
-                        periodCard(title: "Last 7 Days", cost: last7)
+                        periodCard(title: "Last 7 Days", days: last7)
                     }
                     if showLast30Days {
-                        periodCard(title: "Last 30 Days", cost: last30)
+                        periodCard(title: "Last 30 Days", days: last30)
                     }
                 }
             }
 
             if showAllTime {
-                periodCard(title: "All Time", cost: allTime)
+                periodCard(title: "All Time", days: allTime)
             }
         }
         .sectionPadding()
     }
 
-    private func combinedCostForLastDays(_ days: Int, today: String, formatter: DateFormatter) -> Double {
-        guard let todayDate = formatter.date(from: today) else { return 0 }
+    private func combinedDaysInLast(_ days: Int, today: String, formatter: DateFormatter) -> [CombinedDailyCost] {
+        guard let todayDate = formatter.date(from: today) else { return [] }
         let startDate = Calendar.current.date(byAdding: .day, value: -(days - 1), to: todayDate)!
         let start = formatter.string(from: startDate)
-        return combinedDailyCosts
-            .filter { $0.date >= start && $0.date <= today }
-            .reduce(0) { $0 + $1.total }
+        return combinedDailyCosts.filter { $0.date >= start && $0.date <= today }
     }
 
-    private func periodCard(title: LocalizedStringKey, cost: Double) -> some View {
+    private func periodCard(title: LocalizedStringKey, days: [CombinedDailyCost]) -> some View {
         VStack(spacing: 4) {
             Text(title)
                 .font(.caption2)
                 .foregroundStyle(.textSecondary)
-            Text(formatCost(cost))
+            Text(formatCost(days.reduce(0) { $0 + $1.total }))
                 .font(.title3.weight(.semibold).monospacedDigit())
                 .foregroundStyle(.primary)
+            Text("\(formatTokenCount(days.reduce(0) { $0 + $1.totalTokens })) tokens")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.textSecondary)
         }
         .frame(maxWidth: .infinity)
         .cardStyle()
@@ -235,7 +250,7 @@ struct CostDetailView: View {
                         legendDot(color: segmentColor(index, isToday: true), label: provider.capabilities.displayName)
                     }
                 }
-                Text("Total: \(formatCost(visibleCosts.reduce(0) { $0 + $1.total }))")
+                Text("Total: \(formatCost(visibleCosts.reduce(0) { $0 + $1.total })) · \(formatTokenCount(visibleCosts.reduce(0) { $0 + $1.totalTokens }))")
                     .font(.caption2.weight(.medium).monospacedDigit())
                     .foregroundStyle(.textSecondary)
             }
@@ -276,17 +291,21 @@ struct CostDetailView: View {
     private struct CombinedDailyCost: Identifiable {
         let date: String
         let costs: [AIProviderType: Double]
+        let tokens: [AIProviderType: Int]
         var total: Double { costs.values.reduce(0, +) }
+        var totalTokens: Int { tokens.values.reduce(0, +) }
         var id: String { date }
     }
 
     private var combinedDailyCosts: [CombinedDailyCost] {
         let byProvider = Dictionary(uniqueKeysWithValues: costProviders.map { ($0, appState.dailyCosts(for: $0)) })
+        let tokensByProvider = Dictionary(uniqueKeysWithValues: costProviders.map { ($0, appState.dailyTokens(for: $0)) })
         let dates = byProvider.values.reduce(into: Set<String>()) { $0.formUnion($1.keys) }
         return dates.map { date in
             CombinedDailyCost(
                 date: date,
-                costs: byProvider.compactMapValues { $0[date] }
+                costs: byProvider.compactMapValues { $0[date] },
+                tokens: tokensByProvider.compactMapValues { $0[date] }
             )
         }
         .sorted { $0.date > $1.date }
@@ -320,6 +339,11 @@ struct CostDetailView: View {
                 .font(.caption2.weight(.medium).monospacedDigit())
                 .foregroundStyle(isToday ? .brand : .primary)
                 .frame(width: 56, alignment: .trailing)
+
+            Text(formatTokenCount(day.totalTokens))
+                .font(.system(size: 9).monospacedDigit())
+                .foregroundStyle(.textSecondary)
+                .frame(width: 40, alignment: .trailing)
 
             GeometryReader { geo in
                 HStack(spacing: 0) {
@@ -409,7 +433,9 @@ struct CostDetailView: View {
     }
 
     private func formatTokenCount(_ count: Int) -> String {
-        if count >= 1_000_000 {
+        if count >= 1_000_000_000 {
+            return String(format: "%.1fB", Double(count) / 1_000_000_000)
+        } else if count >= 1_000_000 {
             return String(format: "%.1fM", Double(count) / 1_000_000)
         } else if count >= 1_000 {
             return String(format: "%.1fK", Double(count) / 1_000)

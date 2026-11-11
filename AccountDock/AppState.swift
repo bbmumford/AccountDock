@@ -337,6 +337,17 @@ final class AppState: ObservableObject {
         providerCosts[provider]?.todayTokens ?? 0
     }
 
+    /// Per-day input, output and cache tokens of one provider, keyed by
+    /// `yyyy-MM-dd`.
+    func dailyTokens(for provider: AIProviderType) -> [String: Int] {
+        providerCosts[provider]?.dailyTokens ?? [:]
+    }
+
+    /// Today's input, output and cache tokens per model for one provider.
+    func todayModelTokens(for provider: AIProviderType) -> [String: Int] {
+        providerCosts[provider]?.todayModelTokens ?? [:]
+    }
+
     /// Sessions with activity today: the usage records' count, or the
     /// sessions the provider's lifecycle hooks recorded today.
     func todaySessions(for provider: AIProviderType) -> Int {
