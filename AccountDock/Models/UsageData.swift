@@ -492,6 +492,37 @@ struct LimitResets: Codable, Equatable {
         grants.filter { $0.resetsLeft > 0 }
             .sorted { ($0.endsAtDate ?? .distantFuture) < ($1.endsAtDate ?? .distantFuture) }
     }
+
+    /// Resets the account can use alike, counted together: the provider
+    /// issues separate grants for one offer, which refill the same limits
+    /// and end the same day. Soonest to expire first.
+    struct Group: Equatable, Identifiable {
+        let kind: String
+        let endDay: Date?
+        let ready: Bool
+        var resetsLeft: Int
+        var resetsTotal: Int
+        var labels: [String]
+        var id: String { "\(kind)|\(endDay?.timeIntervalSince1970 ?? -1)|\(ready)" }
+    }
+
+    var availableGroups: [Group] {
+        var groups: [Group] = []
+        for grant in available {
+            let endDay = grant.endsAtDate.map { Calendar.current.startOfDay(for: $0) }
+            let ready = grant.usableNow && !grant.paused
+            if let index = groups.firstIndex(where: { $0.kind == grant.kind && $0.endDay == endDay && $0.ready == ready }) {
+                groups[index].resetsLeft += grant.resetsLeft
+                groups[index].resetsTotal += max(grant.resetsTotal, grant.resetsLeft)
+                if !grant.label.isEmpty { groups[index].labels.append(grant.label) }
+            } else {
+                groups.append(Group(kind: grant.kind, endDay: endDay, ready: ready, resetsLeft: grant.resetsLeft,
+                                    resetsTotal: max(grant.resetsTotal, grant.resetsLeft),
+                                    labels: grant.label.isEmpty ? [] : [grant.label]))
+            }
+        }
+        return groups
+    }
 }
 
 struct ExtraUsage: Codable {

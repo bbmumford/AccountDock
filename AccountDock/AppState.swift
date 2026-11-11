@@ -21,6 +21,11 @@ final class AppState: ObservableObject {
     @Published var activeAccount: Account?
     @Published var accountUsage: [UUID: UsageAPIResponse] = [:]
     @Published private(set) var accountUsageUpdatedAt: [UUID: Date] = [:]
+    /// When each account's limit resets were last asked for, by
+    /// `refreshLimitResetsIfDue`.
+    var limitResetsCheckedAt: [UUID: Date] = [:]
+    /// When `refreshLimitResetsIfDue` last read any account.
+    var limitResetsLastReadAt: Date?
     @Published var usageSummary: UsageSummary = .empty
     @Published var recentActivity: [DailyActivity] = []
     @Published var activeSessions: [SessionInfo] = []

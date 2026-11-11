@@ -74,6 +74,7 @@ extension AppState {
                 await fetchUsageNow(account, priority: .critical)
             }
         }
+        await refreshLimitResetsIfDue(now: now)
         if let routed = AIProviderType.routedProvider, routedStatus[routed] != nil {
             await refreshRouteTargetReading(maximumAge: 60)
         }
@@ -104,6 +105,43 @@ extension AppState {
     /// Providers whose sessions AccountDock pauses at the limit.
     var pausingProviders: Set<AIProviderType> {
         Set(AgentPauseGate.providers.filter { failoverConfig.policy(for: $0).suspendAgentsWhenExhausted })
+    }
+
+    /// How often each account's limit resets are asked for, whatever its
+    /// readings are otherwise due for.
+    nonisolated static let limitResetsInterval: TimeInterval = 60 * 60
+
+    /// Reads one account whose limit resets are due, so every subscription
+    /// tile shows them: a spent account's readings are otherwise taken
+    /// rarely, yet a reset matters most there. Only the provider's own usage
+    /// endpoint reports resets, so the reading is a full one; it spends only
+    /// background allowance, never what the active account's readings need.
+    func refreshLimitResetsIfDue(now: Date) async {
+        // One reading at a time across all accounts: the provider throttles
+        // the client as a whole, and a throttle stops every account's
+        // readings, the active account's included.
+        if let last = limitResetsLastReadAt, now.timeIntervalSince(last) < Self.limitResetsSpacing { return }
+        let candidates = accounts.filter { $0.provider == .claudeCode && !needsSignIn($0) }
+        guard let account = Self.accountDueForLimitResets(candidates, checkedAt: limitResetsCheckedAt, now: now) else { return }
+        // A reading not taken, as when the background allowance is spent or
+        // the request fails, is tried again after `limitResetsRetry`.
+        let read = await fetchUsageNow(account, priority: .background)
+        limitResetsLastReadAt = now
+        limitResetsCheckedAt[account.id] = read ? now : now.addingTimeInterval(Self.limitResetsRetry - Self.limitResetsInterval)
+    }
+
+    /// The least time between two readings `refreshLimitResetsIfDue` takes.
+    nonisolated static let limitResetsSpacing: TimeInterval = 5 * 60
+
+    /// How soon a reset reading that was not taken is tried again.
+    nonisolated static let limitResetsRetry: TimeInterval = 5 * 60
+
+    /// The account whose resets were asked for longest ago, once
+    /// `limitResetsInterval` has passed; one never asked for comes first.
+    nonisolated static func accountDueForLimitResets(_ accounts: [Account], checkedAt: [UUID: Date], now: Date) -> Account? {
+        accounts
+            .filter { checkedAt[$0.id].map { now.timeIntervalSince($0) >= limitResetsInterval } ?? true }
+            .min { (checkedAt[$0.id] ?? .distantPast) < (checkedAt[$1.id] ?? .distantPast) }
     }
 
     /// The active account is read when its newest reading is older than half

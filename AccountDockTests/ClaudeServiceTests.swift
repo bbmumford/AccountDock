@@ -198,4 +198,37 @@ final class ClaudeServiceTests: XCTestCase {
         XCTAssertEqual(usage.sevenDay?.utilization, 10)
         XCTAssertNil(usage.limitResets)
     }
+
+    func testEveryAccountsLimitResetsAreAskedForHourlyOldestFirst() {
+        let now = Date()
+        let never = Account(email: "never@mail.example", displayName: "Never")
+        let old = Account(email: "old@mail.example", displayName: "Old")
+        let recent = Account(email: "recent@mail.example", displayName: "Recent")
+        let accounts = [recent, old, never]
+        var checked: [UUID: Date] = [old.id: now.addingTimeInterval(-2 * 3600), recent.id: now.addingTimeInterval(-600)]
+        XCTAssertEqual(AppState.accountDueForLimitResets(accounts, checkedAt: checked, now: now)?.id, never.id, "one never asked comes first")
+        checked[never.id] = now
+        XCTAssertEqual(AppState.accountDueForLimitResets(accounts, checkedAt: checked, now: now)?.id, old.id)
+        checked[old.id] = now
+        XCTAssertNil(AppState.accountDueForLimitResets(accounts, checkedAt: checked, now: now), "none is asked twice within the hour")
+        XCTAssertEqual(AppState.accountDueForLimitResets(accounts, checkedAt: checked, now: now.addingTimeInterval(3000))?.id, recent.id)
+    }
+
+    func testResetsOfOneOfferEndingTheSameDayAreCountedTogether() {
+        let resets = LimitResets(eligible: true, grants: [
+            .init(id: "fable", label: "Fable reset", resetsTotal: 1, resetsLeft: 1, endsAt: "2027-03-09T07:59:00+00:00",
+                  clears: ["seven_day_overage_included"], usableNow: true),
+            .init(id: "fable-6mo", label: "Fable reset, six months", resetsTotal: 1, resetsLeft: 1, endsAt: "2027-03-09T07:59:00+00:00",
+                  clears: ["seven_day_overage_included"], usableNow: true),
+            .init(id: "full", label: "Full reset", resetsTotal: 1, resetsLeft: 1, endsAt: "2026-12-10T22:00:00+00:00",
+                  clears: ["seven_day", "seven_day_overage_included"], usableNow: true),
+            .init(id: "fable-later", resetsTotal: 1, resetsLeft: 1, endsAt: "2027-06-01T00:00:00+00:00",
+                  clears: ["seven_day_overage_included"], usableNow: true),
+        ])
+        let groups = resets.availableGroups
+        XCTAssertEqual(groups.map(\.kind), ["All-models reset", "Fable reset", "Fable reset"])
+        XCTAssertEqual(groups.map(\.resetsLeft), [1, 2, 1])
+        XCTAssertEqual(groups[1].labels, ["Fable reset", "Fable reset, six months"])
+        XCTAssertEqual(groups[1].resetsTotal, 2, "two whole grants read as 2 left, not 2 of 2")
+    }
 }
