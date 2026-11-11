@@ -42,4 +42,37 @@ final class TranscriptRequestFeedTests: XCTestCase {
         let again = await feed.newRequests(.claudeCode, configDirectory: config.path, now: now)
         XCTAssertTrue(again.isEmpty, "each line is read once")
     }
+
+    func testATranscriptAddedUnderAQuietSubagentDirectoryIsStillRead() async throws {
+        let fm = FileManager.default
+        let config = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fm.removeItem(at: config) }
+        let subagents = config.appendingPathComponent("projects/p/s1/subagents", isDirectory: true)
+        let run = subagents.appendingPathComponent("workflows/run", isDirectory: true)
+        try fm.createDirectory(at: run, withIntermediateDirectories: true)
+        let now = Date()
+        let old = now.addingTimeInterval(-3 * 60 * 60)
+        let oldStamp = ISO8601DateFormatter().string(from: old)
+        let stamp = ISO8601DateFormatter().string(from: now.addingTimeInterval(-60))
+        for (directory, name) in [(subagents, "agent-old.jsonl"), (run, "agent-old-run.jsonl")] {
+            let file = directory.appendingPathComponent(name)
+            try assistant(name, at: oldStamp, read: 1, sidechain: true).write(to: file, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.modificationDate: old], ofItemAtPath: file.path)
+        }
+
+        let feed = TranscriptRequestFeed()
+        let first = await feed.newRequests(.claudeCode, configDirectory: config.path, now: now)
+        XCTAssertTrue(first.isEmpty, "transcripts older than the lookback hold nothing current")
+
+        try assistant("n1", at: stamp, read: 300, sidechain: true)
+            .write(to: run.appendingPathComponent("agent-new-run.jsonl"), atomically: true, encoding: .utf8)
+        let nested = await feed.newRequests(.claudeCode, configDirectory: config.path, now: now.addingTimeInterval(20))
+        XCTAssertEqual(nested.map(\.contextTokens), [301], "a quiet directory's subdirectories are still visited")
+
+        try assistant("n2", at: stamp, read: 500, sidechain: true)
+            .write(to: subagents.appendingPathComponent("agent-new.jsonl"), atomically: true, encoding: .utf8)
+        let added = await feed.newRequests(.claudeCode, configDirectory: config.path, now: now.addingTimeInterval(40))
+        XCTAssertEqual(added.map(\.contextTokens), [501], "a file added to a quiet directory changes its time, so it is listed again")
+        XCTAssertEqual(Set(added.map(\.session)), ["s1"])
+    }
 }

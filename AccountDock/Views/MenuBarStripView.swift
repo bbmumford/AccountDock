@@ -29,8 +29,10 @@ struct MenuBarStripView: View {
     // Polled refresh. ObservableObject change delivery is unreliable for a
     // SwiftUI view hosted in an NSStatusItem, so we re-read AppState/config on
     // a short interval (the pattern menu-bar monitors like iStats/Stats use).
-    // This also keeps the reset countdowns current.
-    private let tickTimer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
+    // This also keeps the reset countdowns current; they show whole minutes,
+    // and each tick lays out the whole strip, so the interval stays well
+    // under a minute without being shorter than the quota cycle needs.
+    private let tickTimer = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
 
     var body: some View {
         HStack(spacing: 13) {
