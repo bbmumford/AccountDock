@@ -1,6 +1,6 @@
 # AccountDock release notes
 
-## Unreleased
+## 1.3.0
 
 Smarter failover, sessions that survive the last account running out, and a
 local request router for Claude Code.
