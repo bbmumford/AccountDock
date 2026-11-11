@@ -5,6 +5,11 @@ import ServiceManagement
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var updateChecker: UpdateChecker
+
+    private var isUpdateFailed: Bool {
+        if case .failed = updateChecker.installState { return true }
+        return false
+    }
     @AppStorage("refreshInterval") private var refreshInterval: Double = 300
     @AppStorage("showFullEmail") private var showFullEmail = false
     @AppStorage("showInDock") private var showInDock = false
@@ -215,14 +220,31 @@ struct SettingsView: View {
                     .disabled(updateChecker.isChecking)
 
                     if let update = updateChecker.availableUpdate {
-                        Button("Copy Safe Install Command") {
-                            updateChecker.copyInstallCommand()
+                        Button("Install \(update.version)") {
+                            Task { await updateChecker.installUpdate() }
                         }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(updateChecker.installState != .idle && !isUpdateFailed)
                         Link("View Release", destination: update.releaseURL)
                     }
                 }
             }
             .padding(.top, 4)
+
+            switch updateChecker.installState {
+            case .working(let step):
+                Text(step).font(.caption).foregroundStyle(.secondary)
+            case .failed(let reason):
+                VStack(spacing: 4) {
+                    Text(reason).font(.caption).foregroundStyle(.orange).multilineTextAlignment(.center)
+                    if updateChecker.availableUpdate?.installCommand != nil {
+                        Button("Copy Safe Install Command") { updateChecker.copyInstallCommand() }
+                            .font(.caption)
+                    }
+                }
+            case .idle:
+                EmptyView()
+            }
 
             Spacer()
 
