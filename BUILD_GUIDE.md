@@ -101,45 +101,66 @@ The script updates both targets, regenerates the project, creates a local
 commit and a `v<version>` tag. It never pushes. Update
 [RELEASE_NOTES.md](RELEASE_NOTES.md) and commit it before running it.
 
-## GitHub Actions
+## Continuous integration
 
-`.github/workflows/ci-release.yml` has two jobs:
+`.github/workflows/ci.yml` generates the project and runs the tests for every
+push to `main`, every pull request and on manual dispatch. It builds nothing
+for release.
 
-1. `test` runs for pull requests, `main`, tags and manual dispatch.
-2. `release` runs only for a `v*` tag after the tests pass. It checks that the
-   tag matches `MARKETING_VERSION`, builds an Installer package with
-   `scripts/package/postinstall`, writes its SHA-256 digest and publishes the
-   GitHub release.
+## Publishing a release
 
-The pipeline produces an unsigned development installer because no Apple
-Developer signing identities or notarization credentials are configured.
-Before public distribution, add Developer ID Application and Installer signing,
-notarization, stapling and a Gatekeeper check to the release job.
-
-Publishing is manual and separate:
+Releases are built, signed and published from a Mac, so every release is
+signed by the same identity and an in-app update keeps the installed app's
+Keychain access and login item. Update [RELEASE_NOTES.md](RELEASE_NOTES.md)
+with a `## <version>` section, commit it, then run:
 
 ```bash
-git push origin main
-git push origin v<version>
+./scripts/publish-release.sh patch   # or minor, major, or a version number
 ```
 
-Do not push until redistribution rights are resolved and the push has been
-approved.
+The script:
+
+1. runs `scripts/release.sh` to set the version in `project.yml`, commit it
+   and tag `v<version>` locally;
+2. runs the tests and builds the Release app outside the source tree;
+3. adds the installer's hook configurators to the app, then signs the widget
+   extension and the app with `ACCOUNTDOCK_SIGNING_IDENTITY`, by default the
+   "AccountDock Local" certificate in the login keychain;
+4. writes `AccountDock.zip`, which the app updates from, and
+   `AccountDock.pkg`, for a first install, each with a `.sha256` file;
+5. asks, then pushes `main` and the tag and publishes the GitHub release with
+   the version's release notes.
+
+`--yes` skips both confirmations. `ACCOUNTDOCK_GH_USER` names the `gh`
+account to publish as when it is not the active one; only that account then
+answers git's credential requests for the push.
+
+The releases are not Developer ID signed or notarized. Before distributing
+beyond people who install with the README's command, add Developer ID
+Application and Installer signing, notarization, stapling and a Gatekeeper
+check to the script, and sign every release with the Developer ID from then
+on: an update signed by a different identity is refused.
 
 ## Installer and update safety
 
-The app queries GitHub's latest-release API but never modifies itself. It
-shows a command for the user to inspect and run, which:
+The README's install command downloads `AccountDock.pkg` and its digest over
+HTTPS, checks the digest, runs Apple's `installer`, which asks for
+administrator approval, and adds the login item. The package's `postinstall`
+adds AccountDock's Claude Code and Codex session hooks for the console user,
+keeping existing hook groups and one-time settings backups. The app installs
+the remaining hooks (status line, pause gate, Kimi Code) after asking, and
+manages the router itself.
 
-1. creates a temporary directory;
-2. downloads `AccountDock.pkg` over HTTPS;
-3. checks it against `AccountDock.pkg.sha256`;
-4. runs Apple's `installer`, which asks for administrator approval;
-5. runs the package's `postinstall`, which adds AccountDock's Claude Code and
-   Codex session hooks for the console user, keeping existing hook groups and
-   one-time settings backups;
-6. registers AccountDock as a login item.
+In-app updates (`UpdateChecker`, `UpdateInstaller`) install a release only
+when:
 
-The app installs the remaining hooks (status line, pause gate, Kimi Code) after
-asking, and manages the router itself. A public release must also be Developer
-ID signed and notarized.
+1. its `AccountDock.zip` matches the release's published SHA-256;
+2. the archive holds `app.accountdock.mac` at the release's version;
+3. it satisfies the running app's designated requirement, which names the
+   certificate that signed it. A copy signed ad hoc names only its own code
+   hash, so it cannot vouch for an update and offers the install command
+   instead.
+
+A helper then waits for AccountDock to quit, moves the running copy to
+`~/Library/Application Support/AccountDock/Updates/previous`, moves the update
+into its place and opens it, putting the previous copy back if the move fails.

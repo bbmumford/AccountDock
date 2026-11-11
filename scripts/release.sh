@@ -5,8 +5,10 @@ set -euo pipefail
 # Updates the version, commits, and tags locally. It never pushes.
 #
 # Usage:
-#   ./scripts/release.sh <version>
-#   ./scripts/release.sh patch|minor|major
+#   ./scripts/release.sh <version> [--yes]
+#   ./scripts/release.sh patch|minor|major [--yes]
+#
+# --yes skips the confirmation, for ./scripts/publish-release.sh.
 #
 # Examples:
 #   ./scripts/release.sh 1.3.0
@@ -62,7 +64,10 @@ UNTRACKED=$(git ls-files --others --exclude-standard AccountDock/ AccountDockWid
 CURRENT_VERSION=$(get_current_version)
 CURRENT_BUILD=$(get_current_build)
 
-if [ $# -ne 1 ]; then
+ASSUME_YES=false
+if [ "${2:-}" = "--yes" ]; then ASSUME_YES=true; fi
+
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
     echo "Current: v${CURRENT_VERSION} (build ${CURRENT_BUILD})"
     echo ""
     echo "Usage: $0 <version|patch|minor|major>"
@@ -93,8 +98,10 @@ if git tag -l "$TAG" | grep -q .; then
     die "Tag $TAG already exists locally. Delete it first: git tag -d $TAG"
 fi
 
-read -p "Proceed? [y/N] " confirm
-[[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+if ! $ASSUME_YES; then
+    read -p "Proceed? [y/N] " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+fi
 
 # --- Execute ---
 

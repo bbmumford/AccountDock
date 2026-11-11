@@ -1,0 +1,32 @@
+name: CI
+
+# Releases are built, signed and published from a Mac with
+# scripts/publish-release.sh, so every release carries the same signature.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Test
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -project AccountDock.xcodeproj \
+            -scheme AccountDock \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO
