@@ -270,13 +270,29 @@ struct UsageWindow: Codable {
         self.windowSeconds = windowSeconds
     }
 
-    var resetsAtDate: Date? {
-        guard let resetsAt else { return nil }
+    /// Shared because `resetsAtDate` runs for every window on each menu-bar
+    /// redraw and planner pass, and building a formatter costs far more than
+    /// parsing with one. `ISO8601DateFormatter` is thread-safe and these are
+    /// never changed after they are made.
+    nonisolated(unsafe) private static let fractionalResetFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: resetsAt) { return date }
+        return formatter
+    }()
+    nonisolated(unsafe) private static let wholeSecondResetFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: resetsAt)
+        return formatter
+    }()
+
+    var resetsAtDate: Date? {
+        guard let resetsAt else { return nil }
+        return Self.parseProviderDate(resetsAt)
+    }
+
+    /// A provider timestamp, with or without fractional seconds.
+    static func parseProviderDate(_ text: String) -> Date? {
+        fractionalResetFormatter.date(from: text) ?? wholeSecondResetFormatter.date(from: text)
     }
 
     /// A provider-confirmed window that has not yet been started. This is the

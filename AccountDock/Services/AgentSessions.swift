@@ -32,18 +32,89 @@ enum AgentSessions {
     /// when a process with its recorded ID still runs.
     static let liveLifetime: TimeInterval = 12 * 60 * 60
 
-    /// Every recorded session of `provider`, by session ID.
+    /// Every recorded session of `provider`, by session ID. A record file is
+    /// read again only when its modification time or size changed, since
+    /// several readers each refresh call this over thousands of records.
+    ///
+    /// The live directory's result is shared for `snapshotLifetime`, because
+    /// one refresh reaches this from `live`, `byProcess` and the pause checks
+    /// and each would otherwise stat every record again.
     static func records(_ provider: AIProviderType, directory: URL = directory) -> [String: AgentSession] {
+        guard directory == Self.directory else { return readRecords(provider, directory: directory) }
+        let now = Date()
+        if let shared = recordCache.snapshot(of: provider, at: now) { return shared }
+        let records = readRecords(provider, directory: directory)
+        recordCache.storeSnapshot(records, of: provider, at: now)
+        return records
+    }
+
+    /// How long `records` shares one read of the live directory; well under
+    /// the quota cycle that consumes it.
+    static let snapshotLifetime: TimeInterval = 5
+
+    private static func readRecords(_ provider: AIProviderType, directory: URL) -> [String: AgentSession] {
         guard let key = provider.capabilities.pauseGate?.key,
-              let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [:] }
+              let urls = try? FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
+              ) else { return [:] }
         var records: [String: AgentSession] = [:]
-        for name in names where name.hasPrefix("\(key)-") && name.hasSuffix(".json") {
-            guard let data = try? Data(contentsOf: directory.appendingPathComponent(name)),
-                  let record = try? decoder.decode(AgentSession.self, from: data) else { continue }
-            records[record.sessionID] = record
+        for url in urls where url.lastPathComponent.hasPrefix("\(key)-") && url.pathExtension == "json" {
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            let stamp = RecordCache.Stamp(modified: values?.contentModificationDate, size: values?.fileSize)
+            let record: AgentSession?
+            if let cached = recordCache.record(at: url.path, stamp: stamp) {
+                record = cached
+            } else {
+                record = (try? Data(contentsOf: url)).flatMap { try? decoder.decode(AgentSession.self, from: $0) }
+                recordCache.store(record, at: url.path, stamp: stamp)
+            }
+            if let record { records[record.sessionID] = record }
         }
         return records
     }
+
+    /// Decoded records by path with the file's modification time and size
+    /// when read, for `records`.
+    private final class RecordCache: @unchecked Sendable {
+        struct Stamp: Equatable {
+            let modified: Date?
+            let size: Int?
+        }
+
+        private let lock = NSLock()
+        private var entries: [String: (stamp: Stamp, record: AgentSession?)] = [:]
+        private var snapshots: [AIProviderType: (at: Date, records: [String: AgentSession])] = [:]
+
+        func snapshot(of provider: AIProviderType, at now: Date) -> [String: AgentSession]? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let entry = snapshots[provider], now.timeIntervalSince(entry.at) < snapshotLifetime else { return nil }
+            return entry.records
+        }
+
+        func storeSnapshot(_ records: [String: AgentSession], of provider: AIProviderType, at now: Date) {
+            lock.lock()
+            defer { lock.unlock() }
+            snapshots[provider] = (now, records)
+        }
+
+        /// The cached decode of `path`, wrapped so an unreadable record also
+        /// counts as cached; nil when the file changed since.
+        func record(at path: String, stamp: Stamp) -> AgentSession?? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let entry = entries[path], entry.stamp == stamp, stamp.modified != nil else { return nil }
+            return .some(entry.record)
+        }
+
+        func store(_ record: AgentSession?, at path: String, stamp: Stamp) {
+            lock.lock()
+            defer { lock.unlock() }
+            entries[path] = (stamp, record)
+        }
+    }
+
+    private static let recordCache = RecordCache()
 
     /// Sessions running now: the process is alive, the session has not
     /// ended, and it was heard from within `liveLifetime`.

@@ -89,6 +89,28 @@ actor UsageIndex {
     private var lastFilesystemRefresh: Date?
     private let minimumRefreshInterval: TimeInterval = 15 * 60
 
+    /// Results computed from the index, which change only when
+    /// `refreshFromFilesystem` rewrites it or the local day turns. Each
+    /// `AppState.refresh` asks for all of them, and computing them reads
+    /// every cost row in the database.
+    private struct IndexSummaries {
+        var indexedAt: Date?
+        var day: String
+        var cost: CostSummary?
+        var activity: ActivityStats?
+        var routed: [AIProviderType: [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate]] = [:]
+    }
+
+    private var summaries = IndexSummaries(indexedAt: nil, day: "")
+
+    /// Drops the kept results when the index or the day has changed.
+    private func currentSummaries() {
+        let day = Self.localDateString(Date())
+        if summaries.indexedAt != lastFilesystemRefresh || summaries.day != day {
+            summaries = IndexSummaries(indexedAt: lastFilesystemRefresh, day: day)
+        }
+    }
+
     private init() {
         self.claudeProjectsDir = NSHomeDirectory() + "/.claude/projects"
         self.codexSessionsDir = URL(fileURLWithPath: NSHomeDirectory())
@@ -172,6 +194,17 @@ actor UsageIndex {
     /// (date, model) level — which would let one fast or one 200k+ row
     /// contaminate every other row in its bucket.
     func costSummary() async -> CostSummary {
+        currentSummaries()
+        if let cost = summaries.cost { return cost }
+        let indexedAt = lastFilesystemRefresh
+        let cost = await computeCostSummary()
+        // The await lets a refresh run; its index is not what was summed.
+        currentSummaries()
+        if indexedAt != nil, indexedAt == lastFilesystemRefresh { summaries.cost = cost }
+        return cost
+    }
+
+    private func computeCostSummary() async -> CostSummary {
         await PricingService.shared.ensureLoaded()
 
         // (date, model) → running totals; cost is summed per-row.
@@ -293,6 +326,14 @@ actor UsageIndex {
     /// `provider`, by day and model, in the provider aggregate form: input
     /// includes cached input.
     func routedAggregates(_ provider: AIProviderType) -> [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] {
+        currentSummaries()
+        if let routed = summaries.routed[provider] { return routed }
+        let routed = computeRoutedAggregates(provider)
+        if lastFilesystemRefresh != nil { summaries.routed[provider] = routed }
+        return routed
+    }
+
+    private func computeRoutedAggregates(_ provider: AIProviderType) -> [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] {
         let models = RouteTarget.routedModels(for: provider)
         guard !models.isEmpty else { return [:] }
         var result: [CostParser.CodexAggregateKey: CostParser.CodexTokenAggregate] = [:]

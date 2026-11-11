@@ -51,9 +51,27 @@ actor TranscriptRequestFeed {
         var skipsPartialLine = false
     }
 
+    /// How often every subagent directory is listed again, quiet or not, so a
+    /// transcript appended to after the lookback is still read.
+    static let fullScanInterval: TimeInterval = 10 * 60
+
+    /// A subagent directory whose transcripts were all older than the
+    /// lookback when it was last listed. It is not listed again while its
+    /// modification time stays the same, which keeps the cost of each read
+    /// to the directories of sessions working now; its subdirectories are
+    /// still visited, since files added to them change only their own time.
+    /// They are kept as paths: a `URL` keeps the resource values read when
+    /// it was listed, which would hide a later change of their time.
+    private struct QuietDirectory {
+        var modified: Date
+        var subdirectories: [String]
+    }
+
     private var files: [String: FileState] = [:]
     private var counted: Set<String> = []
     private var countedOrder: [String] = []
+    private var quietDirectories: [String: QuietDirectory] = [:]
+    private var lastFullScan: Date?
 
     /// Requests appended to the provider's transcripts since the last call.
     /// `configDirectory` replaces the provider's own, for tests.
@@ -70,6 +88,11 @@ actor TranscriptRequestFeed {
         func list(_ directory: URL) -> [URL] {
             (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
         }
+        let fullScan = lastFullScan.map { now.timeIntervalSince($0) >= Self.fullScanInterval } ?? true
+        if fullScan {
+            lastFullScan = now
+            quietDirectories = [:]
+        }
         for project in projects {
             for entry in list(project) {
                 if entry.pathExtension == "jsonl" {
@@ -83,13 +106,27 @@ actor TranscriptRequestFeed {
                 guard (try? subagents.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
                 var pending = [subagents]
                 while let directory = pending.popLast() {
+                    let modified = (try? directory.resourceValues(forKeys: [.contentModificationDateKey]))?
+                        .contentModificationDate ?? .distantFuture
+                    if let quiet = quietDirectories[directory.path], quiet.modified == modified {
+                        pending += quiet.subdirectories.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                        continue
+                    }
+                    var subdirectories: [URL] = []
+                    var quiet = true
                     for item in list(directory) {
                         if item.pathExtension == "jsonl" {
                             requests += readIfChanged(item, session: entry.lastPathComponent, subagent: true, cutoff: cutoff)
+                            let itemModified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?
+                                .contentModificationDate ?? .distantFuture
+                            if itemModified > cutoff { quiet = false }
                         } else if (try? item.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
-                            pending.append(item)
+                            subdirectories.append(item)
                         }
                     }
+                    pending += subdirectories
+                    quietDirectories[directory.path] = quiet
+                        ? QuietDirectory(modified: modified, subdirectories: subdirectories.map(\.path)) : nil
                 }
             }
         }

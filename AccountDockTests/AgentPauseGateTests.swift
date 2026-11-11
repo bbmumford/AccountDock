@@ -20,6 +20,19 @@ final class AgentPauseGateTests: XCTestCase {
         try Data(json.utf8).write(to: directory.appendingPathComponent("\(provider)-\(session).json"))
     }
 
+    func testARewrittenSessionRecordIsReadAgain() throws {
+        try record("s", event: "UserPromptSubmit", pid: 10, at: "2026-10-17T09:00:00Z")
+        XCTAssertEqual(AgentSessions.records(.claudeCode, directory: directory)["s"]?.event, "UserPromptSubmit")
+        try record("s", event: "Stop", pid: 10, at: "2026-10-17T09:01:00Z")
+        XCTAssertEqual(AgentSessions.records(.claudeCode, directory: directory)["s"]?.event, "Stop")
+        // The same size, so only the modification time shows the change.
+        try record("s", event: "Stop", pid: 10, at: "2026-10-17T09:02:00Z")
+        let observed = try XCTUnwrap(AgentSessions.records(.claudeCode, directory: directory)["s"]?.observedAt)
+        XCTAssertEqual(observed, ISO8601DateFormatter().date(from: "2026-10-17T09:02:00Z"))
+        try FileManager.default.removeItem(at: directory.appendingPathComponent("claude-s.json"))
+        XCTAssertNil(AgentSessions.records(.claudeCode, directory: directory)["s"])
+    }
+
     func testOnlySessionsMidTurnWithALiveProcessArePaused() throws {
         try record("turning", event: "UserPromptSubmit", pid: 10, at: "2026-10-17T09:00:00.120Z")
         try record("finished", event: "Stop", pid: 11, at: "2026-10-17T09:01:00Z")
