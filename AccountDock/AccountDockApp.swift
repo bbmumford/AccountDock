@@ -26,7 +26,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct AccountDockApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appState = AppState()
-    @StateObject private var updateChecker = UpdateChecker()
+    @StateObject private var updateChecker = UpdateChecker.shared
     @StateObject private var menuBarConfig = MenuBarConfig.shared
     @AppStorage("refreshInterval") private var refreshInterval: Double = 300
     @AppStorage("appLanguage") private var appLanguage = "auto"
@@ -49,7 +49,7 @@ struct AccountDockApp: App {
                         return
                     }
                     #endif
-                    Task { await updateChecker.checkForUpdates() }
+                    updateChecker.startPeriodicChecks()
                     statusItemController.install(
                         appState: appState,
                         config: menuBarConfig,

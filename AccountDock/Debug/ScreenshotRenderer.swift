@@ -56,7 +56,7 @@ enum ScreenshotRenderer {
         var failed = false
         for (name, view, size) in pages {
             let url = directory.appendingPathComponent("\(name).png")
-            if await !write(view.environmentObject(appState).environmentObject(config), size: size, to: url) {
+            if await !write(view.environmentObject(appState).environmentObject(config).environmentObject(UpdateChecker.shared), size: size, to: url) {
                 FileHandle.standardError.write(Data("Could not render \(name)\n".utf8))
                 failed = true
             }
@@ -72,7 +72,7 @@ enum ScreenshotRenderer {
         }
         .padding(.vertical, 12)
         .frame(width: 440)
-        if await !write(banners.environmentObject(appState).environmentObject(config), size: CGSize(width: 440, height: 0),
+        if await !write(banners.environmentObject(appState).environmentObject(config).environmentObject(UpdateChecker.shared), size: CGSize(width: 440, height: 0),
                   to: directory.appendingPathComponent("failover-banners.png")) {
             failed = true
         }

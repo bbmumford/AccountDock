@@ -66,6 +66,7 @@ extension View {
 /// The main popover content shown when clicking the menubar icon.
 struct MainMenuView: View {
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var updateChecker: UpdateChecker
     @AppStorage("refreshInterval") private var refreshInterval: Double = 300
     @AppStorage("showFullEmail") private var showFullEmail = false
     @AppStorage("menuPanelWidth") private var menuPanelWidth = 440.0
@@ -344,7 +345,9 @@ struct MainMenuView: View {
 
     private var footerView: some View {
         HStack {
-            if let error = appState.errorMessage {
+            if let update = updateChecker.availableUpdate, appState.errorMessage == nil {
+                updateButton(update)
+            } else if let error = appState.errorMessage {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .font(.caption)
@@ -390,7 +393,31 @@ struct MainMenuView: View {
             .focusable(false)
             .help("Quit")
         }
-        .padding(.horizontal, 16)
+                .padding(.horizontal, 16)
         .padding(.vertical, 8)
+    }
+
+    /// Installs a release `UpdateChecker` found, or says how far it got.
+    @ViewBuilder
+    private func updateButton(_ update: UpdateChecker.AvailableUpdate) -> some View {
+        switch updateChecker.installState {
+        case .working(let step):
+            ProgressView().controlSize(.mini)
+            Text(step).font(.caption2).foregroundStyle(.textSecondary).lineLimit(1)
+        case .failed(let reason):
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).font(.caption)
+            Text("Update failed").font(.caption2).foregroundStyle(.textSecondary).help(reason)
+        case .idle:
+            Button {
+                Task { await updateChecker.installUpdate() }
+            } label: {
+                Label("Update to \(update.version)", systemImage: "arrow.down.circle.fill")
+                    .font(.caption2.weight(.medium))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.brand)
+            .focusable(false)
+            .help(update.notes.isEmpty ? "Install AccountDock \(update.version) and reopen." : update.notes)
+        }
     }
 }
