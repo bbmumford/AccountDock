@@ -159,4 +159,43 @@ final class ClaudeServiceTests: XCTestCase {
         XCTAssertFalse(arguments.contains("--bare"))
         XCTAssertTrue(arguments.contains("--no-session-persistence"))
     }
+
+    func testUsageReadingsIdentifyAsTheClaudeCodeClient() {
+        XCTAssertEqual(ClaudeService.usageUserAgent(version: "2.1.311"), "claude-cli/2.1.311 (external, cli)")
+    }
+
+    func testLimitResetsAreReadFromTheUsageReadingAndAnUnknownGrantIsDropped() throws {
+        let json = #"""
+        {"seven_day":{"utilization":94,"resets_at":"2026-11-17T10:59:59.650820+00:00"},
+         "extra_usage":{"is_enabled":false},
+         "cedar_ember":{"eligible":true,"at_limit":false,"next_grant_id":"full-reset-2611","grants":[
+          {"id":"launch-2610-fable","label":"New model launch: one Fable reset","resets_total":1,"resets_left":1,
+           "starts_at":"2026-11-09T18:00:00+00:00","ends_at":"2027-03-09T07:59:00+00:00",
+           "clears":["seven_day_overage_included"],"paused":false,"usable_now":true,"type":"full"},
+          {"id":"full-reset-2611","label":"One full limit reset (November 2026)","resets_total":1,"resets_left":1,
+           "ends_at":"2026-12-10T22:00:00+00:00","clears":["seven_day","seven_day_overage_included"],
+           "paused":false,"usable_now":true,"type":"weekly"},
+          {"id":"spent","label":"Used","resets_total":2,"resets_left":0,"clears":["five_hour"]},
+          {"label":"no id or count"}
+         ]}}
+        """#
+        let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(json.utf8))
+        XCTAssertEqual(usage.sevenDay?.utilization, 94, "a reset field never costs the windows")
+        let resets = try XCTUnwrap(usage.limitResets)
+        XCTAssertEqual(resets.grants.map(\.id), ["launch-2610-fable", "full-reset-2611", "spent"])
+        XCTAssertEqual(resets.available.map(\.id), ["full-reset-2611", "launch-2610-fable"], "soonest to expire first, none spent")
+        XCTAssertEqual(resets.available.map(\.kind), ["All-models reset", "Fable reset"])
+        XCTAssertTrue(resets.available.allSatisfy(\.usableNow))
+
+        let roundTrip = try JSONDecoder().decode(UsageAPIResponse.self, from: JSONEncoder().encode(usage))
+        XCTAssertEqual(roundTrip.limitResets, resets, "a saved reading keeps its resets")
+        XCTAssertEqual(usage.merged(withNewer: try JSONDecoder().decode(UsageAPIResponse.self, from: Data(#"{"seven_day":{"utilization":95}}"#.utf8))).limitResets,
+                       resets, "a reading without resets keeps the last known ones")
+    }
+
+    func testAMalformedResetFieldLeavesTheReadingIntact() throws {
+        let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(#"{"seven_day":{"utilization":10},"cedar_ember":"surprise"}"#.utf8))
+        XCTAssertEqual(usage.sevenDay?.utilization, 10)
+        XCTAssertNil(usage.limitResets)
+    }
 }

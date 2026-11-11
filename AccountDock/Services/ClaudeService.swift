@@ -67,6 +67,8 @@ final class ClaudeService: @unchecked Sendable {
     private var _claudePath: String
     /// Monotonic counter to detect out-of-order setPath completions.
     private var _setPathGeneration: UInt64 = 0
+    /// The installed CLI's version for `usageUserAgent`, and when it was read.
+    private var _usageCLIVersion: (version: String, readAt: Date)?
 
     /// Currently active path. Thread-safe.
     var claudePath: String {
@@ -379,11 +381,17 @@ final class ClaudeService: @unchecked Sendable {
     }
 
     /// Fetch usage for a specific access token
+    ///
+    /// `cedar_ember=1` adds the limit resets the account holds
+    /// (`UsageAPIResponse.limitResets`) to the same reading. The provider
+    /// lists them only to the Claude Code client, which it recognises by
+    /// `usageUserAgent`; any other client is answered as ineligible.
     func getUsageLimits(accessToken: String) async throws -> UsageAPIResponse {
-        guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else { throw UsageError.network("invalid url") }
+        guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage?cedar_ember=1") else { throw UsageError.network("invalid url") }
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.setValue(await usageUserAgent(), forHTTPHeaderField: "User-Agent")
 
         log.debug("[getUsageLimits] REQUEST URL: \(url.absoluteString)")
 
@@ -876,6 +884,21 @@ final class ClaudeService: @unchecked Sendable {
     }
 
     // MARK: - Version
+
+    /// The User-Agent the installed Claude Code CLI sends, for
+    /// `getUsageLimits`. The version is read again at most hourly, so an
+    /// update is picked up without running the CLI on every reading.
+    func usageUserAgent(now: Date = Date()) async -> String {
+        let cached = lock.withLock { _usageCLIVersion }
+        if let cached, now.timeIntervalSince(cached.readAt) < 3600 { return Self.usageUserAgent(version: cached.version) }
+        let version = await Self.readVersion(at: claudePath) ?? cached?.version ?? "2.1.0"
+        lock.withLock { _usageCLIVersion = (version, now) }
+        return Self.usageUserAgent(version: version)
+    }
+
+    static func usageUserAgent(version: String) -> String {
+        "claude-cli/\(version) (external, cli)"
+    }
 
     /// Run `<path> --version` and return the first semver-looking token.
     /// Returns nil on launch failure, non-zero exit, or no version found.

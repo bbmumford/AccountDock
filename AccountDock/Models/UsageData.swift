@@ -17,6 +17,9 @@ struct UsageAPIResponse: Codable {
     /// The share of the weekly allowance each scoped limit may use, keyed by
     /// the scoped limit's index in `limits`.
     var weeklyScopedShares: [WeeklyScopedShare]? = nil
+    /// The limit resets the account holds; nil when the reading did not ask
+    /// for them or the provider does not offer them.
+    var limitResets: LimitResets? = nil
 
     enum CodingKeys: String, CodingKey {
         case fiveHour = "five_hour"
@@ -29,6 +32,7 @@ struct UsageAPIResponse: Codable {
         case extraUsage = "extra_usage"
         case limits
         case weeklyScopedShares = "weekly_scoped_shares"
+        case limitResets = "cedar_ember"
     }
 
     /// Clears utilization for windows whose last provider-confirmed reset has
@@ -47,7 +51,8 @@ struct UsageAPIResponse: Codable {
             iguanaNecktie: iguanaNecktie?.expiringPassedReset(at: date),
             extraUsage: extraUsage,
             limits: limits,
-            weeklyScopedShares: weeklyScopedShares
+            weeklyScopedShares: weeklyScopedShares,
+            limitResets: limitResets
         )
     }
 
@@ -79,7 +84,8 @@ struct UsageAPIResponse: Codable {
             iguanaNecktie: iguanaNecktie,
             extraUsage: extraUsage,
             limits: limits,
-            weeklyScopedShares: weeklyScopedShares
+            weeklyScopedShares: weeklyScopedShares,
+            limitResets: limitResets
         )
     }
 
@@ -98,7 +104,8 @@ struct UsageAPIResponse: Codable {
             iguanaNecktie: iguanaNecktie,
             extraUsage: extraUsage,
             limits: limits,
-            weeklyScopedShares: weeklyScopedShares
+            weeklyScopedShares: weeklyScopedShares,
+            limitResets: limitResets
         )
     }
 }
@@ -118,6 +125,7 @@ extension UsageAPIResponse {
         extraUsage = try? values.decodeIfPresent(ExtraUsage.self, forKey: .extraUsage)
         limits = (try? values.decodeIfPresent([LossyLimit].self, forKey: .limits))?.map(\.limit)
         weeklyScopedShares = try? values.decodeIfPresent([WeeklyScopedShare].self, forKey: .weeklyScopedShares)
+        limitResets = try? values.decodeIfPresent(LimitResets.self, forKey: .limitResets)
     }
 
     /// Whether a reading shows the account has no session window: it carries
@@ -131,7 +139,8 @@ extension UsageAPIResponse {
             fiveHour: fiveHour, sevenDay: window, sevenDayOauthApps: sevenDayOauthApps,
             sevenDayOpus: sevenDayOpus, sevenDaySonnet: sevenDaySonnet, sevenDayCowork: sevenDayCowork,
             iguanaNecktie: iguanaNecktie, extraUsage: extraUsage,
-            limits: limits, weeklyScopedShares: weeklyScopedShares
+            limits: limits, weeklyScopedShares: weeklyScopedShares,
+            limitResets: limitResets
         )
     }
 
@@ -388,6 +397,101 @@ struct UsageWindow: Codable {
 enum RateLimitWindow {
     static let fiveHourSeconds: Double = 5 * 60 * 60       // 18,000
     static let sevenDaySeconds: Double = 7 * 24 * 60 * 60  // 604,800
+}
+
+/// The limit resets an account holds: each grant refills one or more of its
+/// limits on request, a number of times before its end date.
+struct LimitResets: Codable, Equatable {
+    let eligible: Bool?
+    var grants: [Grant] = []
+
+    enum CodingKeys: String, CodingKey {
+        case eligible, grants
+    }
+
+    init(eligible: Bool?, grants: [Grant]) {
+        self.eligible = eligible
+        self.grants = grants
+    }
+
+    /// A grant the provider adds in a shape this version does not read is
+    /// dropped rather than failing the whole reading.
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        eligible = try? values.decodeIfPresent(Bool.self, forKey: .eligible)
+        grants = ((try? values.decodeIfPresent([LossyGrant].self, forKey: .grants)) ?? []).compactMap(\.grant)
+    }
+
+    struct Grant: Codable, Equatable, Identifiable {
+        let id: String
+        var label: String = ""
+        var resetsTotal: Int = 0
+        let resetsLeft: Int
+        var endsAt: String?
+        /// The provider's names of the limits a reset refills, such as
+        /// `five_hour`, `seven_day` or `seven_day_overage_included`.
+        var clears: [String] = []
+        var paused: Bool = false
+        var usableNow: Bool = false
+
+        enum CodingKeys: String, CodingKey {
+            case id, label, clears, paused
+            case resetsTotal = "resets_total"
+            case resetsLeft = "resets_left"
+            case endsAt = "ends_at"
+            case usableNow = "usable_now"
+        }
+
+        init(id: String, label: String = "", resetsTotal: Int = 0, resetsLeft: Int, endsAt: String? = nil,
+             clears: [String] = [], paused: Bool = false, usableNow: Bool = false) {
+            self.id = id
+            self.label = label
+            self.resetsTotal = resetsTotal
+            self.resetsLeft = resetsLeft
+            self.endsAt = endsAt
+            self.clears = clears
+            self.paused = paused
+            self.usableNow = usableNow
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            id = try values.decode(String.self, forKey: .id)
+            resetsLeft = try values.decode(Int.self, forKey: .resetsLeft)
+            label = (try? values.decodeIfPresent(String.self, forKey: .label)) ?? ""
+            resetsTotal = (try? values.decodeIfPresent(Int.self, forKey: .resetsTotal)) ?? resetsLeft
+            endsAt = try? values.decodeIfPresent(String.self, forKey: .endsAt)
+            clears = (try? values.decodeIfPresent([String].self, forKey: .clears)) ?? []
+            paused = (try? values.decodeIfPresent(Bool.self, forKey: .paused)) ?? false
+            usableNow = (try? values.decodeIfPresent(Bool.self, forKey: .usableNow)) ?? false
+        }
+
+        /// The limits a reset refills, by its widest one: the all-models
+        /// weekly limit, the weekly limit of the models outside it
+        /// (`seven_day_overage_included`), or the session limit.
+        var kind: String {
+            if clears.contains("seven_day") { return "All-models reset" }
+            if clears.contains("seven_day_overage_included") { return "Fable reset" }
+            if clears.contains("five_hour") { return "Session reset" }
+            return "Limit reset"
+        }
+
+        var endsAtDate: Date? {
+            guard let endsAt else { return nil }
+            return UsageWindow.parseProviderDate(endsAt)
+        }
+    }
+
+    private struct LossyGrant: Decodable {
+        let grant: Grant?
+        init(from decoder: Decoder) throws { grant = try? Grant(from: decoder) }
+    }
+
+    /// Grants with a reset left, soonest to expire first.
+    var available: [Grant] {
+        grants.filter { $0.resetsLeft > 0 }
+            .sorted { ($0.endsAtDate ?? .distantFuture) < ($1.endsAtDate ?? .distantFuture) }
+    }
 }
 
 struct ExtraUsage: Codable {
