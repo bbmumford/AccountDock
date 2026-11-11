@@ -51,6 +51,25 @@ final class KimiCostTests: XCTestCase {
         XCTAssertGreaterThan(k3?.outputPerToken ?? 0, coding?.outputPerToken ?? 0)
     }
 
+    func testCostHistoryCarriesTheTokensEachCostWasPricedFrom() async {
+        await PricingService.shared.ensureLoaded()
+        let dayFormatter = DateFormatter()
+        dayFormatter.dateFormat = "yyyy-MM-dd"
+        let today = dayFormatter.string(from: Date())
+        let aggregate = CostParser.CodexTokenAggregate(input: 1_000, cachedInput: 400, cacheWrite: 50, output: 200, events: 1)
+        let history = await CostParser.costHistory(
+            [
+                CostParser.CodexAggregateKey(day: today, model: "k3", reasoningEffort: nil): aggregate,
+                CostParser.CodexAggregateKey(day: "2026-10-17", model: "k3", reasoningEffort: nil): aggregate,
+            ],
+            provider: .kimi
+        )
+        XCTAssertEqual(history.dailyTokens, [today: 1_250, "2026-10-17": 1_250])
+        XCTAssertEqual(history.todayModelTokens, ["k3": 1_250])
+        XCTAssertEqual(history.todayTokens, 1_250)
+        XCTAssertGreaterThan(history.dailyCosts[today] ?? 0, 0)
+    }
+
     func testProviderAggregatesArePersistedPerProviderAndEvicted() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("AccountDockKimi-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -16,6 +16,10 @@ final class CostParser: Sendable {
         var todayTurns: Int
         /// Input, output and cache tokens today.
         var todayTokens: Int = 0
+        /// Input, output and cache tokens per day, keyed like `dailyCosts`.
+        var dailyTokens: [String: Int] = [:]
+        /// Input, output and cache tokens today, keyed like `todayModelCosts`.
+        var todayModelTokens: [String: Int] = [:]
         /// Sessions with usage today, when the records say.
         var todaySessions: Int?
         /// Minutes of active session time today, when the records say.
@@ -28,6 +32,8 @@ final class CostParser: Sendable {
             todayLinesChanged: Int,
             todayTurns: Int? = nil,
             todayTokens: Int = 0,
+            dailyTokens: [String: Int] = [:],
+            todayModelTokens: [String: Int] = [:],
             todaySessions: Int? = nil,
             todayActiveMinutes: Int? = nil
         ) {
@@ -37,6 +43,8 @@ final class CostParser: Sendable {
             self.todayLinesChanged = todayLinesChanged
             self.todayTurns = todayTurns ?? todayModelActivity.values.reduce(0, +)
             self.todayTokens = todayTokens
+            self.dailyTokens = dailyTokens
+            self.todayModelTokens = todayModelTokens
             self.todaySessions = todaySessions
             self.todayActiveMinutes = todayActiveMinutes
         }
@@ -54,6 +62,8 @@ final class CostParser: Sendable {
                 todayLinesChanged: activity.linesWritten,
                 todayTurns: activity.conversationTurns,
                 todayTokens: day?.totalTokens ?? 0,
+                dailyTokens: Dictionary(summary.dailyCosts.map { ($0.date, $0.totalTokens) }, uniquingKeysWith: +),
+                todayModelTokens: day?.modelTokens ?? [:],
                 todaySessions: day?.sessionCount,
                 todayActiveMinutes: activity.activeCodingMinutes
             )
@@ -105,11 +115,16 @@ final class CostParser: Sendable {
         var modelActivity: [String: Int] = [:]
         var todayLinesChanged = 0
         var todayTokens = 0
+        var dailyTokens: [String: Int] = [:]
+        var todayModelTokens: [String: Int] = [:]
         for (key, aggregate) in aggregates {
+            let tokens = aggregate.input + aggregate.cacheWrite + aggregate.output
+            dailyTokens[key.day, default: 0] += tokens
             if key.day == today {
                 modelActivity[key.displayKey, default: 0] += aggregate.events
                 todayLinesChanged += aggregate.linesChanged
-                todayTokens += aggregate.input + aggregate.cacheWrite + aggregate.output
+                todayTokens += tokens
+                todayModelTokens[key.displayKey, default: 0] += tokens
             }
             guard let price = await PricingService.shared.pricing(
                 for: key.model,
@@ -133,7 +148,9 @@ final class CostParser: Sendable {
             todayModelActivity: modelActivity,
             todayModelCosts: todayModelCosts,
             todayLinesChanged: todayLinesChanged,
-            todayTokens: todayTokens
+            todayTokens: todayTokens,
+            dailyTokens: dailyTokens,
+            todayModelTokens: todayModelTokens
         )
     }
 

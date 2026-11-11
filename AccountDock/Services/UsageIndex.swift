@@ -259,11 +259,13 @@ actor UsageIndex {
         for (date, byModel) in bucket {
             var totalCost: Double = 0
             var modelBreakdown: [String: Double] = [:]
+            var modelTokens: [String: Int] = [:]
             var sumIn = 0, sumOut = 0, sumCW = 0, sumCR = 0
             for (model, acc) in byModel {
                 totalCost += acc.cost
                 let short = CostParser.shortModelName(model)
                 modelBreakdown[short, default: 0] += acc.cost
+                modelTokens[short, default: 0] += acc.input + acc.output + acc.cw + acc.cr
                 sumIn += acc.input; sumOut += acc.output
                 sumCW += acc.cw; sumCR += acc.cr
             }
@@ -275,7 +277,8 @@ actor UsageIndex {
                 inputTokens: sumIn,
                 outputTokens: sumOut,
                 cacheWriteTokens: sumCW,
-                cacheReadTokens: sumCR
+                cacheReadTokens: sumCR,
+                modelTokens: modelTokens
             ))
         }
         dailyCosts.sort { $0.date > $1.date }
@@ -289,10 +292,13 @@ actor UsageIndex {
     /// Today's activity stats. Sidechain (subagent) files are excluded to
     /// avoid subagent tool calls inflating the headline.
     func activityStatsToday() -> ActivityStats {
+        currentSummaries()
+        if let activity = summaries.activity { return activity }
         let today = Self.localDateString(Date())
         var stats = database.activity(on: today)
         stats.modelUsage = stats.modelUsage.filter { Self.isDisplayableModel($0.key) }
         log.info("activityStatsToday: turns=\(stats.conversationTurns) active=\(stats.activeCodingMinutes)m lines=\(stats.linesWritten)")
+        if lastFilesystemRefresh != nil { summaries.activity = stats }
         return stats
     }
 
