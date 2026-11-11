@@ -207,4 +207,52 @@ final class SessionSlotsTests: XCTestCase {
     func testShellQuotingSurvivesSingleQuotes() {
         XCTAssertEqual(SessionSlots.shellQuoted("a'b"), #"'a'\''b'"#)
     }
+
+    @MainActor
+    func testASlotClaimedOnRequestIsKnownAsSuchAndNeverClaimedTwice() throws {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let slots = try XCTUnwrap(SessionSlots(.claudeCode, home: temp))
+        let account = UUID()
+        let directory = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        XCTAssertTrue(slots.assign(directory, to: account))
+        XCTAssertEqual(slots.sessionSlots().first?.requested, false)
+        XCTAssertNil(slots.sessionSlots().first?.claimedAt)
+
+        XCTAssertTrue(slots.claimRequested(directory))
+        let slot = try XCTUnwrap(slots.sessionSlots().first)
+        XCTAssertEqual(slot.account, account)
+        XCTAssertTrue(slot.requested)
+        XCTAssertNotNil(slot.claimedAt, "the launcher cannot claim it for another session")
+        XCTAssertFalse(slots.claimRequested(directory), "a claimed slot is not claimed again")
+        XCTAssertGreaterThan(AppState.requestedClaimGrace, AppState.slotClaimGrace)
+    }
+
+    func testARequestedSessionRunsTheCLIItselfNotTheLauncher() throws {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let home = temp.appendingPathComponent("home", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let slots = try XCTUnwrap(SessionSlots(.claudeCode, home: home))
+        try slots.installLauncher()
+        let real = temp.appendingPathComponent("claude")
+        try "#!/bin/sh\n".write(to: real, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: real.path)
+
+        XCTAssertEqual(slots.realExecutable(preferred: real.path), real.path)
+        XCTAssertNotEqual(slots.realExecutable(preferred: slots.launcher.path), slots.launcher.path)
+    }
+
+    func testShellQuotingSurvivesQuotesAndSpaces() throws {
+        let text = "/Users/me/it's a \"folder\" $HOME"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "printf %s " + AppState.shellQuoted(text)]
+        let output = Pipe()
+        process.standardOutput = output
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self), text)
+    }
 }

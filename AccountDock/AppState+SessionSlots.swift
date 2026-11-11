@@ -140,6 +140,9 @@ extension AppState {
     /// A claimed one-session slot that no process reads this long after its
     /// claim has lost its session.
     static let slotClaimGrace: TimeInterval = 2 * 60
+    /// The same for a slot claimed by `sessionLaunch`, whose command may be
+    /// copied and run some minutes later.
+    static let requestedClaimGrace: TimeInterval = 30 * 60
     /// A session moved to balance load stays where it went at least this
     /// long, so it is not moved back before its new cache has paid off.
     static let balanceMoveInterval: TimeInterval = 30 * 60
@@ -202,7 +205,8 @@ extension AppState {
                 slotDirectoryMovedAt[path] = assigned
             }
             guard inUse.contains(path) else {
-                if now.timeIntervalSince(claimedAt) > Self.slotClaimGrace { remove.append(slot.directory) }
+                let grace = slot.requested ? Self.requestedClaimGrace : Self.slotClaimGrace
+                if now.timeIntervalSince(claimedAt) > grace { remove.append(slot.directory) }
                 else if let id = slot.account { slotDirectoryServing[path] = id }
                 continue
             }
@@ -256,6 +260,48 @@ extension AppState {
     /// it is refused and told to sign in again. The active account's slots
     /// hold the live credential's token, which its saved copy does not
     /// change. Called by `renewSavedCredential`.
+    /// The shell command that starts a session on `account` in `directory`.
+    /// It runs the CLI on a one-session slot of the account's own, claimed
+    /// for it, so the session stays on the account until failover or
+    /// balancing moves the slot (`serveSessionSlots`). The active account's
+    /// sessions read the default credential instead, which nothing copies
+    /// into a slot, and follow the active account. Nil when the account
+    /// cannot serve a session or its credential cannot be written.
+    /// Why a session cannot be started on `account` now, for the usage
+    /// tiles' session button: it needs signing in, or it is at its limit,
+    /// where failover would move the session as soon as it starts.
+    func sessionLaunchBlocker(_ account: Account, now: Date = Date()) -> String? {
+        if needsSignIn(account) { return "\(messageName(account)) needs signing in again." }
+        let planner = FailoverPlanner(settings: plannerSettings(account.provider))
+        if accountCannotServe(account.id, provider: account.provider, planner: planner, now: now) {
+            return "\(messageName(account)) is at its usage limit, so failover would move the session to another account straight away. Choose a subscription with room, or use one of its resets first."
+        }
+        return nil
+    }
+
+    func sessionLaunch(on account: Account, in directory: URL) async -> String? {
+        guard account.provider.capabilities.sessionSlots != nil, !needsSignIn(account),
+              let slots = SessionSlots(account.provider),
+              let cli = slots.realExecutable(preferred: ClaudeService.shared.claudePath) else { return nil }
+        let start = "cd \(Self.shellQuoted(directory.path)) && "
+        guard !account.isActive else { return start + Self.shellQuoted(cli) }
+        guard let json = await claudeCredential(account, minimumLifetime: 2 * 60 * 60),
+              let accessOnly = SessionSlots.accessOnly(json) else { return nil }
+        let id = account.id
+        guard let slot = await Task.detached(priority: .userInitiated, operation: { () -> URL? in
+            guard let slot = slots.makeSlot(for: id, credential: accessOnly), slots.claimRequested(slot) else { return nil }
+            return slot
+        }).value else { return nil }
+        slotDirectoryServing[slot.path] = id
+        slotCredentialAccounts.insert(id)
+        slotsLog.info("Slot claimed for a session started on \(messageName(account))")
+        return start + "CLAUDE_SECURESTORAGE_CONFIG_DIR=\(Self.shellQuoted(slot.path)) \(Self.shellQuoted(cli))"
+    }
+
+    nonisolated static func shellQuoted(_ text: String) -> String {
+        "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     func reissueSlotCredential(for account: Account) async {
         guard !account.isActive, account.provider == AIProviderType.routedProvider,
               let slots = SessionSlots(account.provider),

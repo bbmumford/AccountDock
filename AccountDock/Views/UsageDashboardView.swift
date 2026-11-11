@@ -25,6 +25,8 @@ struct UsageDashboardView: View {
     @EnvironmentObject private var appState: AppState
     @AppStorage("showFullEmail") private var showFullEmail = false
     @AppStorage(ProviderVisibility.storageKey) private var hiddenProviders = ""
+    @AppStorage("sessionLaunchDirectory") private var sessionLaunchDirectory = ""
+    @State private var sessionLaunchError: String?
 
     var body: some View {
         ScrollView {
@@ -106,6 +108,14 @@ struct UsageDashboardView: View {
             // size the popover frame to fit the Usage tab's content exactly.
             // See MainMenuView.swift for the measurement contract.
             .measureUsageContentHeight()
+        }
+        .alert("Session not started", isPresented: Binding(
+            get: { sessionLaunchError != nil },
+            set: { if !$0 { sessionLaunchError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(sessionLaunchError ?? "")
         }
     }
 
@@ -397,7 +407,68 @@ struct UsageDashboardView: View {
             if let unavailable = account.providerUnavailableLabel {
                 Badge(text: unavailable, color: .orange)
             }
+            sessionButton(account)
         }
+    }
+
+    /// Starts a session on this subscription in the terminal chosen from the
+    /// menu, in a folder chosen next. It stays on the subscription until
+    /// failover or balancing moves it (`AppState.sessionLaunch`).
+    @ViewBuilder
+    private func sessionButton(_ account: Account) -> some View {
+        if account.provider.capabilities.sessionSlots != nil {
+            Menu {
+                ForEach(SessionTerminal.available) { terminal in
+                    Button {
+                        Task { await openSession(on: account, using: terminal) }
+                    } label: {
+                        Label(terminal.title, systemImage: terminal.systemImage)
+                    }
+                }
+            } label: {
+                Image(systemName: "plus.rectangle.on.rectangle")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .disabled(appState.needsSignIn(account))
+            .help("Open a session on this subscription. It stays here until failover or balancing moves it.")
+        }
+    }
+
+    @MainActor
+    private func openSession(on account: Account, using terminal: SessionTerminal) async {
+        if let blocker = appState.sessionLaunchBlocker(account) {
+            sessionLaunchError = blocker
+            return
+        }
+        guard let directory = chooseSessionDirectory() else { return }
+        guard let command = await appState.sessionLaunch(on: account, in: directory) else {
+            sessionLaunchError = "\(appState.messageName(account)) cannot start a session right now. Check that it is signed in."
+            return
+        }
+        if let message = await terminal.start(command, in: directory, name: appState.messageName(account)) {
+            sessionLaunchError = message
+        }
+    }
+
+    /// The folder the session starts in, starting from the last one chosen.
+    @MainActor
+    private func chooseSessionDirectory() -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Start Session"
+        panel.message = "Choose the folder the session starts in."
+        if !sessionLaunchDirectory.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: sessionLaunchDirectory, isDirectory: true)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        sessionLaunchDirectory = url.path
+        return url
     }
 
     @ViewBuilder
