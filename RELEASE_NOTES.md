@@ -211,6 +211,48 @@ local request router for Claude Code.
 - README, architecture and build guide rewritten; screenshots rendered from
   sample data with `Tools/render_screenshots.sh`.
 
+### Limit resets
+
+- Every subscription card lists the limit resets its account holds, by what
+  they refill (all models, Fable or session), with how many are left and the
+  last day to use them. Resets of one offer that end the same day are counted
+  together, and one that cannot be used yet is dimmed.
+- Each account's resets are read hourly, one account at a time and at least
+  five minutes apart, so spent accounts show theirs too.
+- Resets are kept in one form that each provider's module reads into: Claude's
+  usage reply and Codex's reset credits. A new reset field in any provider's
+  reply is logged by its structure, never its values.
+
+### Sessions on a chosen subscription
+
+- A Claude card's session button opens Claude Code on that subscription, in
+  agterm, Terminal or as a copied command. The session stays there until
+  failover or balancing moves it; a subscription at its limit or needing
+  sign-in is refused with the reason.
+- A session started on a slot is counted on its account from its first cycle.
+
+### Costs
+
+- Every cost shows the input, output and cache tokens it was priced from:
+  today's total, each provider and model, the 7-day, 30-day and all-time
+  summaries and each day of the history.
+
+### Updates and releases
+
+- AccountDock checks for a new release at launch and every six hours, and
+  installs one from the menu or Settings after checking its SHA-256 and that
+  it is signed by the same certificate, keeping the previous copy.
+- Releases are built, signed and published from a Mac with
+  `scripts/publish-release.sh`; CI runs the tests.
+- AccountDock is published under the MIT License, with notices for
+  CCSwitcher and CodexBar.
+
+### Performance
+
+- Idle CPU use is down from about 8% to under 2%: transcripts, session
+  records and index summaries are read again only when they change, and the
+  menu bar redraws every 15 seconds.
+
 ## 1.2.0
 
 - Kimi Code accounts: capture or log in, isolated credentials, usage, costs,
