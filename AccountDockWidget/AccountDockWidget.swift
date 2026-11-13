@@ -627,7 +627,7 @@ private struct CircleWidgetEntryView: View {
 // MARK: - Helpers
 
 private func formatCost(_ cost: Double) -> String {
-    cost >= 1 ? String(format: "$%.2f", cost) : String(format: "$%.4f", cost)
+    UsageFormat.cost(cost)
 }
 
 private func providerIcon(_ account: WidgetAccountData) -> String {

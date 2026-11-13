@@ -101,7 +101,11 @@ Some data is the same for every provider by construction:
 - **Cost and activity.** `CostParser.ProviderCostHistory` holds each
   provider's daily cost and today's turns, models, lines, tokens, sessions and
   active time. Claude Code's is built from its per-request cost summary; the
-  others from their per-day, per-model aggregates.
+  others from their per-day, per-model aggregates. `TodaySummary` sums today's
+  figures over the providers the user has not hidden, each metric over the
+  providers whose `activityMetrics` report it; the usage dashboard, the cost
+  tab, the menu bar and the widget all read it and write costs and tokens with
+  `UsageFormat`.
 
 | Provider | Service | Credentials | Windows |
 | --- | --- | --- | --- |

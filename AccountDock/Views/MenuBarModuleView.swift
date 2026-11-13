@@ -175,10 +175,11 @@ struct MenuBarModuleView: View {
         .fixedSize()
     }
 
+    /// Today's cost of the shown providers, read from the stored hidden list
+    /// on each tick of the status item's timer.
     private var dailyCostText: String {
-        let cost = appState.combinedTodayCost
-        guard cost > 0 else { return "—" }
-        return String(format: "$%.2f", cost)
+        _ = tick
+        return UsageFormat.cost(appState.todaySummary().cost)
     }
 }
 

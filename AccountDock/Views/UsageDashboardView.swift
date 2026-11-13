@@ -204,13 +204,12 @@ struct UsageDashboardView: View {
     // MARK: - Today Activity Card
 
     private var todayActivityCard: some View {
-        func reporting(_ metric: ActivityMetric) -> [AIProviderType] {
-            visibleProviders.filter { $0.capabilities.activityMetrics.contains(metric) }
+        let summary = appState.todaySummary(hidden: ProviderVisibility.hidden(in: hiddenProviders))
+        func metricProviders(_ metric: ActivityMetric) -> String {
+            let names = summary.reporting(metric).map { $0.capabilities.displayName }
+            return names.isEmpty ? "none currently visible" : names.joined(separator: ", ")
         }
-        let combinedTurns = reporting(.turns).reduce(0) { $0 + appState.todayTurns(for: $1) }
-        let combinedCost = reporting(.cost).reduce(0) { $0 + todayCost(for: $1) }
-        let combinedLines = reporting(.linesChanged).reduce(0) { $0 + appState.todayLinesChanged(for: $1) }
-        let activeMinutes = reporting(.activeTime).reduce(0) { $0 + (appState.providerCosts[$1]?.todayActiveMinutes ?? 0) }
+        let models = todayModels(summary)
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "waveform.path.ecg")
@@ -223,19 +222,19 @@ struct UsageDashboardView: View {
 
             // Top stats row
             HStack(spacing: 0) {
-                activityStat(icon: "bubble.left.and.bubble.right", value: "\(combinedTurns)", label: "Turns",
+                activityStat(icon: "bubble.left.and.bubble.right", value: "\(summary.turns)", label: "Turns",
                              tooltip: "Providers: \(metricProviders(.turns)). Conversation turns, or the model responses a provider records, today.")
-                activityStat(icon: "clock", value: ActivityStats(activeCodingMinutes: activeMinutes).activeCodingTimeString, label: "Active",
+                activityStat(icon: "clock", value: ActivityStats(activeCodingMinutes: summary.activeMinutes).activeCodingTimeString, label: "Active",
                              tooltip: "Providers: \(metricProviders(.activeTime)). Active session timing from local session records.")
-                activityStat(icon: "doc.text", value: "\(combinedLines)", label: "Lines",
+                activityStat(icon: "doc.text", value: "\(summary.linesChanged)", label: "Lines",
                              tooltip: "Providers: \(metricProviders(.linesChanged)). Lines added and removed by file edits today.")
-                activityStat(icon: "dollarsign.circle", value: String(format: "$%.0f", combinedCost), label: "Cost",
+                activityStat(icon: "dollarsign.circle", value: UsageFormat.cost(summary.cost), label: "Cost",
                              tooltip: "Providers: \(metricProviders(.cost)). API-equivalent cost from local token records and provider pricing today.")
             }
 
-            if !todayModels.isEmpty {
+            if !models.isEmpty {
                 HStack(spacing: 0) {
-                    ForEach(todayModels) { model in
+                    ForEach(models) { model in
                         modelStat(
                             name: model.name,
                             count: model.count,
@@ -256,33 +255,22 @@ struct UsageDashboardView: View {
         let tooltip: LocalizedStringKey
     }
 
-    private var todayModels: [TodayModel] {
-        visibleProviders.flatMap(todayModels(for:))
-    }
-
-    private func todayCost(for provider: AIProviderType) -> Double {
-        appState.todayCost(for: provider)
-    }
-
-    private func todayModels(for provider: AIProviderType) -> [TodayModel] {
-        appState.todayModelActivity(for: provider)
-            .filter { $0.value > 0 && isDisplayableModel($0.key) }
-            .sorted { $0.key < $1.key }
-            .map {
-                TodayModel(
-                    id: "\(provider.rawValue)-\($0.key)",
-                    name: provider.displayModelName($0.key),
-                    count: $0.value,
-                    tooltip: "\(provider.capabilities.displayName) \($0.key) activity today"
-                )
-            }
-    }
-
-    private func metricProviders(_ metric: ActivityMetric) -> String {
-        let names = visibleProviders
-            .filter { $0.capabilities.activityMetrics.contains(metric) }
-            .map { $0.capabilities.displayName }
-        return names.isEmpty ? "none currently visible" : names.joined(separator: ", ")
+    /// Today's models of the providers `summary` counts, provider by provider.
+    private func todayModels(_ summary: TodaySummary) -> [TodayModel] {
+        summary.byProvider.flatMap { entry -> [TodayModel] in
+            let provider = entry.provider
+            return entry.day.modelActivity
+                .filter { $0.value > 0 && isDisplayableModel($0.key) }
+                .sorted { $0.key < $1.key }
+                .map {
+                    TodayModel(
+                        id: "\(provider.rawValue)-\($0.key)",
+                        name: provider.displayModelName($0.key),
+                        count: $0.value,
+                        tooltip: "\(provider.capabilities.displayName) \($0.key) activity today"
+                    )
+                }
+        }
     }
 
     private func isDisplayableModel(_ model: String) -> Bool {
