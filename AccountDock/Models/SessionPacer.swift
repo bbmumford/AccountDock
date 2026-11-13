@@ -396,30 +396,43 @@ struct SessionPacer {
             }
         }
         // A session started now is expected to use what the running ones
-        // use on average. An account that could not carry one more such
-        // session for `newSessionRunway` takes none while another account
-        // can: the session would be refused there, or moved and made to
-        // write its cache again, within the hour. `key` adds the allowance
-        // of the model the session uses.
+        // use on average, or `defaultSessionRate` when none is running. An
+        // account that could not carry one more such session for
+        // `newSessionRunway` takes none while another account can: the
+        // session would be refused there, or moved and made to write its
+        // cache again, within the hour. `key` adds the allowance of the
+        // model the session uses.
         let rates = active.map(\.tokensPerHour).filter { $0 > 0 }
-        let typical = rates.isEmpty ? nil : rates.reduce(0, +) / Double(rates.count)
-        func carriesAnother(_ account: Account, _ key: String? = nil) -> Bool {
-            guard let typical else { return true }
+        let typical = rates.isEmpty ? Self.defaultSessionRate : rates.reduce(0, +) / Double(rates.count)
+        // How long the account carries one more such session before it
+        // reaches a limit; nil when it reaches none before its resets.
+        func runway(_ account: Account, _ key: String?) -> TimeInterval? {
             let rate = percent(typical, on: account)
             let whole = outlook(account, spent: spent[account.id] ?? 0, burn: (burn[account.id] ?? 0) + rate, now: now)
             let scoped = key.flatMap { currentScoped(account, $0, burning: rate) }
-            return !([whole] + [scoped].compactMap { $0 }).contains { outlook in
-                outlook.limitAt.map { $0.timeIntervalSince(now) < Self.newSessionRunway } ?? false
-            }
+            return ([whole] + [scoped].compactMap { $0 }).compactMap { $0.limitAt?.timeIntervalSince(now) }.min()
         }
-        // Weights for the accounts that carry another session, or for all of
-        // them when none does, so a new session always has somewhere to go.
+        // `weight` for the accounts that carry another session. When none
+        // of those it gives a weight to does, the session goes where it
+        // lasts longest, among every account that takes new sessions: one
+        // lasting under half as long as the best takes none. All zero only
+        // when `weight` is, which the caller answers with another rule.
         func weighted(_ key: String? = nil, _ weight: (Account) -> Double) -> [UUID: Double] {
             let all = accounts.reduce(into: [UUID: Double]()) { $0[$1.id] = weight($1) }
-            let carrying = all.filter { id, value in
-                value > 0 && accounts.first { $0.id == id }.map { carriesAnother($0, key) } == true
+            guard all.values.contains(where: { $0 > 0 }) else { return all }
+            let runways = accounts.reduce(into: [UUID: TimeInterval]()) {
+                $0[$1.id] = min(runway($1, key) ?? Self.newSessionRunway, Self.newSessionRunway)
             }
-            return carrying.isEmpty ? all : all.mapValues { _ in 0 }.merging(carrying) { $1 }
+            let carrying = all.filter { $0.value > 0 && (runways[$0.key] ?? 0) >= Self.newSessionRunway }
+            if !carrying.isEmpty { return all.mapValues { _ in 0 }.merging(carrying) { $1 } }
+            let taking = accounts.filter { $0.baseWeight > 0 }
+            let among = taking.isEmpty ? accounts : taking
+            let best = among.compactMap { runways[$0.id] }.max() ?? 0
+            return accounts.reduce(into: [UUID: Double]()) { result, account in
+                let lasts = runways[account.id] ?? 0
+                let eligible = best > 0 && lasts >= best / 2 && among.contains { $0.id == account.id }
+                result[account.id] = eligible ? max(account.baseWeight, 0.01) * lasts / Self.newSessionRunway : 0
+            }
         }
         // New sessions go by unused rate to accounts that stay within their
         // windows. When every account would reach a limit before its reset,
@@ -468,6 +481,9 @@ struct SessionPacer {
     /// running sessions' average rate to take a new one: the default
     /// lifetime of the cache the session would write there.
     static let newSessionRunway: TimeInterval = defaultCacheLifetime
+    /// Weighted tokens per hour assumed of a session with no history, as
+    /// one about to start.
+    static let defaultSessionRate = 20_000_000.0
 
     /// The share of its present rate an account's allowance sustains until
     /// its window resets, at most `maximumSustainedShare`: an account barely

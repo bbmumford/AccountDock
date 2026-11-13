@@ -995,7 +995,7 @@ extension AppState {
 
     /// Typical weighted tokens per hour of a session with no history, such
     /// as one started during the pause, when no paused session has one.
-    static let defaultSessionDemand = 20_000_000.0
+    static let defaultSessionDemand = SessionPacer.defaultSessionRate
 
     /// Lets paused sessions continue where their forecast use fits
     /// (`SessionPacer.admit`): on the router's pool accounts while sessions

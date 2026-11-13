@@ -314,4 +314,22 @@ final class SessionPacerTests: XCTestCase {
                                        sessions: [busy], now: now)
         XCTAssertTrue(plan.weights.values.contains { $0 > 0 })
     }
+
+    func testWhenNoAccountCarriesAnotherSessionItGoesWhereItLastsLongest() {
+        // a is busy with 45 minutes of Fable left for one more session; b
+        // is idle with 12. By unused rate only the idle b has a weight.
+        var busy = session("busy", on: a, burn: 20)
+        busy.model = "claude-fable-5-2"
+        let plan = SessionPacer().plan(accounts: [weekly(a, left: 4000, fable: 30), weekly(b, left: 4000, fable: 4)],
+                                       sessions: [busy], now: now)
+        XCTAssertGreaterThan(plan.modelWeights["fable"]?[a] ?? 0, 0)
+        XCTAssertEqual(plan.modelWeights["fable"]?[b] ?? -1, 0, accuracy: 0.001)
+    }
+
+    func testWithNoSessionRunningAnAlmostSpentAccountTakesNoNewOne() {
+        let plan = SessionPacer().plan(accounts: [weekly(a, left: 4000, fable: 4000), weekly(b, left: 6, fable: 4000)],
+                                       sessions: [], now: now)
+        XCTAssertGreaterThan(plan.weights[a] ?? 0, 0)
+        XCTAssertEqual(plan.weights[b] ?? -1, 0, accuracy: 0.001)
+    }
 }
