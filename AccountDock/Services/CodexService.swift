@@ -48,9 +48,14 @@ enum CodexServiceError: LocalizedError {
     /// The token endpoint refused the refresh token: the account must sign
     /// in again.
     case credentialRejected
+    /// A session restart could not prepare the resume of every session it
+    /// would stop, so it stopped none.
+    case restartUnavailable(String)
 
     var errorDescription: String? {
         switch self {
+        case let .restartUnavailable(reason):
+            return "Codex sessions were not restarted: \(reason)"
         case .binaryNotFound:
             return "Codex CLI not found. Install Codex or choose its path in Settings."
         case .notLoggedIn:
@@ -158,34 +163,79 @@ final class CodexService: @unchecked Sendable {
         }
     }
 
-    func resumeAfterSafeRestart(_ processes: [RunningCodexProcess], codexHome: String? = nil) {
-        guard let binaryPath else { return }
-        for process in processes {
-            guard !process.isHostManaged,
-                  let sessionID = process.sessionID else {
-                if process.isHostManaged {
-                    codexLog.info("[safeRestart] \(process.label) left to its host to reconnect")
+    /// The shell command that reopens session `sessionID` in `directory`,
+    /// against the credential in `codexHome` when one is given.
+    static func resumeCommand(binary: String, sessionID: String, directory: String, codexHome: String?) -> String {
+        let scope = codexHome.map { "CODEX_HOME=\(shellQuote($0)) " } ?? ""
+        return "\(scope)\(shellQuote(binary)) resume \(shellQuote(sessionID)) -C \(shellQuote(directory))"
+    }
+
+    /// Sessions `stopForRestart` stopped, each terminal session with the
+    /// Terminal launch that reopens it. Host-managed sessions and sessions
+    /// without an ID have none: their host reconnects them, or they cannot
+    /// be resumed.
+    struct StoppedSessions: Sendable {
+        /// Processes still running after the grace period.
+        let survivors: [RunningCodexProcess]
+        let resumes: [(process: RunningCodexProcess, launch: SessionTerminal.PreparedLaunch)]
+
+        /// Reopens every stopped session that has a launch, and discards the
+        /// launches of sessions that did not stop. Returns how many reopened.
+        @discardableResult
+        func resume() -> Int {
+            let surviving = Set(survivors.map(\.id))
+            var reopened = 0
+            for (process, launch) in resumes {
+                if surviving.contains(process.id) {
+                    launch.discard()
                 } else {
-                    codexLog.warning("[safeRestart] No session ID available for pid \(process.id)")
+                    launch.open()
+                    reopened += 1
+                    codexLog.info("[safeRestart] Reopened session \(process.sessionID?.prefix(8) ?? "")… in Terminal")
                 }
-                continue
             }
-            let directory = process.workingDirectory ?? NSHomeDirectory()
-            let scope = codexHome.map { "CODEX_HOME=\(Self.shellQuote($0)) " } ?? ""
-            let command = "\(scope)\(Self.shellQuote(binaryPath)) resume \(Self.shellQuote(sessionID)) -C \(Self.shellQuote(directory))"
-            let script = "tell application \"Terminal\" to do script \(Self.appleScriptQuote(command))"
-            let launcher = Process()
-            launcher.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            launcher.arguments = ["-e", script]
-            launcher.standardOutput = FileHandle.nullDevice
-            launcher.standardError = FileHandle.nullDevice
-            do {
-                try launcher.run()
-                codexLog.info("[safeRestart] Requested CLI resume for session \(sessionID.prefix(8))…")
-            } catch {
-                codexLog.warning("[safeRestart] Could not resume CLI session: \(error.localizedDescription)")
-            }
+            return reopened
         }
+    }
+
+    /// Stops `processes` to restart them, after preparing the Terminal
+    /// launch that resumes each terminal session (`resumeCommand`, scoped to
+    /// `codexHome`). When any launch cannot be prepared, nothing is stopped
+    /// and the error is thrown. The caller resumes the result with
+    /// `StoppedSessions.resume()` whether or not what it does while they are
+    /// stopped succeeds. `prepare` and `binary` are replaced in tests.
+    func stopForRestart(
+        _ processes: [RunningCodexProcess],
+        codexHome: String?,
+        shouldCloseTerminalTabs: Bool = false,
+        binary: String? = nil,
+        prepare: @Sendable (String) throws -> SessionTerminal.PreparedLaunch = { try SessionTerminal.prepareTerminalLaunch($0) }
+    ) async throws -> StoppedSessions {
+        var resumes: [(process: RunningCodexProcess, launch: SessionTerminal.PreparedLaunch)] = []
+        do {
+            for process in processes {
+                guard !process.isHostManaged, let sessionID = process.sessionID else {
+                    if process.isHostManaged {
+                        codexLog.info("[safeRestart] \(process.label) left to its host to reconnect")
+                    } else {
+                        codexLog.warning("[safeRestart] No session ID available for pid \(process.id)")
+                    }
+                    continue
+                }
+                guard let executable = binary ?? binaryPath else { throw CodexServiceError.binaryNotFound }
+                let command = Self.resumeCommand(
+                    binary: executable, sessionID: sessionID,
+                    directory: process.workingDirectory ?? NSHomeDirectory(), codexHome: codexHome
+                )
+                resumes.append((process, try prepare(command)))
+            }
+        } catch {
+            resumes.forEach { $0.launch.discard() }
+            codexLog.warning("[safeRestart] Resume not prepared; no session stopped: \(error.localizedDescription)")
+            throw CodexServiceError.restartUnavailable(error.localizedDescription)
+        }
+        let survivors = await terminateForSafeRestart(processes, shouldCloseTerminalTabs: shouldCloseTerminalTabs)
+        return StoppedSessions(survivors: survivors, resumes: resumes)
     }
 
     private struct CodexProcess {

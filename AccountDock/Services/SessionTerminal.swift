@@ -66,21 +66,66 @@ enum SessionTerminal: String, CaseIterable, Identifiable {
     /// Terminal runs a `.command` file it is asked to open, in a new window,
     /// with no automation permission; the file deletes itself when it starts.
     private static func startInTerminal(_ command: String) -> String? {
-        let script = FileManager.default.temporaryDirectory
-            .appendingPathComponent("accountdock-session-\(UUID().uuidString).command")
-        let body = "#!/bin/zsh -l\nrm -f -- \"$0\"\n\(command)\nexec /bin/zsh -l\n"
         do {
-            try body.write(to: script, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+            try prepareTerminalLaunch(command).open()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// A command written to a `.command` file, with the Terminal app that
+    /// opens it. Preparing one before stopping the sessions it resumes
+    /// (`CodexService.stopForRestart`) means a session is stopped only when
+    /// its resume can be started.
+    struct PreparedLaunch: Sendable {
+        let script: URL
+        let terminal: URL
+
+        func open() {
+            NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
+        }
+
+        /// Removes the file of a launch that will not be opened.
+        func discard() {
+            try? FileManager.default.removeItem(at: script)
+        }
+    }
+
+    enum LaunchError: LocalizedError, Equatable {
+        case scriptNotWritten
+        case terminalNotFound
+
+        var errorDescription: String? {
+            switch self {
+            case .scriptNotWritten: "The session could not be prepared."
+            case .terminalNotFound: "Terminal was not found."
+            }
+        }
+    }
+
+    /// The text of the `.command` file that runs `command`: it deletes
+    /// itself, runs the command, and leaves a login shell open.
+    static func scriptBody(for command: String) -> String {
+        "#!/bin/zsh -l\nrm -f -- \"$0\"\n\(command)\nexec /bin/zsh -l\n"
+    }
+
+    /// Writes the `.command` file for `command` into `directory` and finds
+    /// Terminal; throws when either fails, leaving no file behind.
+    static func prepareTerminalLaunch(
+        _ command: String,
+        directory: URL = FileManager.default.temporaryDirectory,
+        terminal: () -> URL? = { NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") }
+    ) throws -> PreparedLaunch {
+        guard let terminal = terminal() else { throw LaunchError.terminalNotFound }
+        let script = directory.appendingPathComponent("accountdock-session-\(UUID().uuidString).command")
+        do {
+            try PrivateFile.writeAtomically(Data(scriptBody(for: command).utf8), to: script, mode: 0o700)
         } catch {
             log.error("Session script not written: \(error.localizedDescription)")
-            return "The session could not be prepared."
+            throw LaunchError.scriptNotWritten
         }
-        guard let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") else {
-            return "Terminal was not found."
-        }
-        NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
-        return nil
+        return PreparedLaunch(script: script, terminal: terminal)
     }
 
     /// agterm starts a session through its control socket, which answers
