@@ -501,7 +501,12 @@ extension AppState {
             return pacerAccount(id, state: state, weight: member.weight, planner: planner, now: now)
         }
         let plan = SessionPacer().plan(accounts: paced, sessions: pacerSessions(provider, now: now), now: now)
-        var moves = plan.moves
+        // A session is never moved to an account without allowance for the
+        // model it uses.
+        var moves = plan.moves.filter { session, destination in
+            guard let model = sessionModel(session, now: now) else { return true }
+            return !accountCannotServe(destination, provider: provider, planner: planner, now: now, model: model)
+        }
         for (id, account) in pendingPlacements(provider) where moves[id] == nil { moves[id] = account }
         routerSessionMoves = movesSessions ? moves : [:]
         slotSessionMoves = movesSessions ? [:] : moves

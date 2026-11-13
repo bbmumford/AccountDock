@@ -150,6 +150,9 @@ final class AppState: ObservableObject {
     /// Sessions `SessionPacer` moves to another account to balance load,
     /// applied to one-session slots by `maintainSessionSlots`.
     var slotSessionMoves: [String: UUID] = [:]
+    /// Sessions `handleExternalRequests` was asked to move, by destination;
+    /// `serveSessionSlots` moves each at once and forgets it.
+    var requestedSlotMoves: [String: UUID] = [:]
     /// Guards `maintainSessionSlots` against running twice at once, and
     /// records a call that arrived meanwhile, which is then run after.
     var slotMaintenanceRunning = false

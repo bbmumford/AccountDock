@@ -59,6 +59,9 @@ extension AppState {
 
     func runQuotaCycle() async {
         defer { scheduleQuotaCycle() }
+        // The paused-session display follows the pause files on every tick,
+        // skipped cycles included, so sessions are never held unseen.
+        for provider in AgentPauseGate.providers { refreshPauseStatus(provider) }
         guard !isMonitoringFailover, !isLoading, !isLoggingIn else { return }
         isMonitoringFailover = true
         defer { isMonitoringFailover = false }
@@ -83,6 +86,7 @@ extension AppState {
         // last cycle is counted on the slot's account from its first cycle.
         await refreshSlotProcesses()
         refreshSessions()
+        await handleExternalRequests()
         await ingestTranscriptRequests()
         await maintainSessionSlots(processesRead: true)
         await evaluateFailover()
@@ -873,6 +877,13 @@ extension AppState {
     /// Drops sessions that ended after the pause started, and refreshes the
     /// paused-session display.
     func prunePausedSessions(_ provider: AIProviderType) {
+        // A pause left behind while pausing is turned off for the provider
+        // has nothing that would end it.
+        if AgentPauseGate.read(provider) != nil, !pausingProviders.contains(provider) {
+            let released = endPause(provider)
+            failoverEvents.record(provider, "Released \(released) paused session(s): pausing at the limit is turned off for \(provider.capabilities.displayName).")
+            return
+        }
         if var pause = AgentPauseGate.read(provider) {
             let held = AgentPauseGate.stillHeld(pause, records: AgentSessions.records(provider))
             if held != pause.sessions {
