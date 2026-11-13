@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 /// Lists all configured accounts with switching and management.
 struct AccountSwitcherView: View {
     @EnvironmentObject private var appState: AppState
+    @ObservedObject private var failoverStore = FailoverConfigStore.shared
     @AppStorage("showFullEmail") private var showFullEmail = false
     @State private var editingAccountId: UUID?
     @State private var editingLabel = ""
@@ -236,6 +237,19 @@ struct AccountSwitcherView: View {
             Spacer()
 
             // Actions
+            if account.isActive {
+                let locked = failoverStore.policy(for: account.provider).activeAccountLocked
+                Button {
+                    failoverStore.update(account.provider) { $0.activeAccountLocked.toggle() }
+                } label: {
+                    Image(systemName: locked ? "lock.fill" : "lock.open")
+                        .foregroundStyle(locked ? providerTint(account.provider) : Color.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help(locked
+                    ? "Locked: failover will not switch away from this account. Click to unlock."
+                    : "Lock this account as the active one, so failover does not switch away from it.")
+            }
             if !account.isActive && account.supportsProviderWorkloads {
                 Button {
                     requestSwitch(to: account)

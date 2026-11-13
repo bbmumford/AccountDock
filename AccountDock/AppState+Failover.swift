@@ -339,6 +339,9 @@ extension AppState {
                                               resetDetails: resetDetails), for: account)
     }
 
+    /// How long failover leaves an account the user switched to themselves.
+    static let userSwitchHold: TimeInterval = 5 * 60
+
     /// Reads one account's usage from the provider at once, for an action
     /// the user just took on it: neither a throttle the provider answered
     /// an earlier reading with nor the request allowance holds it back, and
@@ -1236,10 +1239,32 @@ extension AppState {
         reason: FailoverPlan.SwitchReason
     ) async {
         if let last = lastAutomaticFailover[provider], Date().timeIntervalSince(last) < 60 { return }
+        if policy.activeAccountLocked {
+            if lockedSwitchNoted[provider] != target.id {
+                lockedSwitchNoted[provider] = target.id
+                failoverEvents.record(provider, "\(messageName(current)) is locked as the active account, so no switch to \(messageName(target)) was made.")
+            }
+            return
+        }
         let sourceName = messageName(current)
         let targetName = messageName(target)
+        // Every switch moves the sessions on the shared credential, which
+        // rebuild their whole prompt cache on the other account, so failover
+        // does not undo a switch the user just made, and stops when it keeps
+        // leaving one account: something is putting it back.
+        let now = Date()
+        if let chosen = userSwitchedAt[provider], now.timeIntervalSince(chosen) < Self.userSwitchHold { return }
+        let recent = (automaticSwitchesAway[current.id] ?? []).filter { now.timeIntervalSince($0) < FailoverPlanner.switchLoopWindow }
+        if FailoverPlanner.isSwitchLoop(recent, now: now) {
+            if lockedSwitchNoted[provider] != current.id {
+                lockedSwitchNoted[provider] = current.id
+                failoverEvents.record(provider, "Failover has switched away from \(sourceName) \(recent.count) times in \(Int(FailoverPlanner.switchLoopWindow / 60)) minutes and it keeps becoming active again, so it stays active. Switch manually or lock it.")
+            }
+            return
+        }
 
         if !(await credentialIsUsable(target)) { return }
+        automaticSwitchesAway[current.id] = recent + [now]
 
         let hadSuspendedAgents = hasPausedAgents(provider)
         let reachesSessions = provider.capabilities.switchReachesRunningSessions

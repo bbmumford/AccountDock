@@ -70,13 +70,19 @@ final class UsageRequestBudget {
         consecutiveThrottles = 0
     }
 
-    /// Applies provider throttling to every account of the provider. A
-    /// Retry-After header is honoured; without one the cool-down doubles from
-    /// one minute up to fifteen so repeated 429s stop compounding.
+    /// The longest any throttle holds back the provider's readings. The
+    /// provider's Retry-After can run to an hour while a reading made
+    /// minutes later is answered, and failover decides on these readings.
+    static let longestCooldown: TimeInterval = 5 * 60
+
+    /// Applies provider throttling to every account of the provider: the
+    /// cool-down doubles from thirty seconds, or lasts as long as a
+    /// Retry-After header asks, and never exceeds `longestCooldown`.
     func recordThrottle(retryAfter: Date?, now: Date = Date()) {
         consecutiveThrottles += 1
-        let backoff = min(15 * 60, 60 * pow(2, Double(consecutiveThrottles - 1)))
-        let until = max(retryAfter ?? .distantPast, now.addingTimeInterval(backoff))
+        let backoff = 30 * pow(2, Double(consecutiveThrottles - 1))
+        let asked = max(retryAfter?.timeIntervalSince(now) ?? 0, backoff)
+        let until = now.addingTimeInterval(min(Self.longestCooldown, asked))
         blockedUntil = max(blockedUntil ?? .distantPast, until)
         tokens = 0
         lastRefill = now

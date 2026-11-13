@@ -56,9 +56,18 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     /// Routing starts only when the target is expected to carry the current
     /// demand at least this long.
     var routeMinimumMinutes: Double = 15
+    /// Sends the model requests of a CLI with a bridged request hold
+    /// (`RequestHoldSupport.bridgedProtocol`) through `AccountDockRouter`,
+    /// so `routeTarget` can serve them. While off, `ProviderRequestHold`
+    /// leaves that CLI's base URL alone and `routeTarget` is not used.
+    var routeThroughBridge = false
     /// Serves each session from its own account through the router, so
     /// several accounts' 5-hour windows are used at the same time.
     var distributeSessions = false
+    /// The active account stays active: `AppState.performAutomaticSwitch`
+    /// makes no switch away from it until the user unlocks it or switches
+    /// themselves. Sessions with a slot of their own still move.
+    var activeAccountLocked = false
     /// With `distributeSessions`, each account's sessions are paced to its
     /// 5-hour window: new sessions go to the accounts with the most unused
     /// rate, sessions keep their account while their prompt cache lasts, and
@@ -85,15 +94,22 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         routeTarget != nil || (distributeSessions && provider.capabilities.sessionSlots == nil)
     }
 
+    /// Whether the provider's CLI is to reach the router through its bridged
+    /// request hold: the user turned it on and chose a target to serve it.
+    func usesBridge(for provider: AIProviderType) -> Bool {
+        routeThroughBridge && routeTarget != nil && provider.capabilities.requestRouter == nil
+            && provider.capabilities.requestHold?.bridgedProtocol != nil
+    }
+
     enum CodingKeys: String, CodingKey {
         case enabled, sessionEnabled, sessionThreshold, weeklyEnabled, weeklyThreshold
         case loops, resetAware, preferMostCapacity, waitForImminentReset
         case resetGraceMinutes, keepWindowsWarm, intelligentBalancingEnabled
         case balancingMinimumAdvantageHours, balancingMinimumDwellMinutes
         case suspendAgentsWhenExhausted, resumeAsCapacityAllows, routeTarget, routeModel, distributeSessions, paceSessions, extendCacheLifetime, extraUsageMonthlyLimit
-        case routeMaxContextTokens, routeReservePercent, routeMinimumMinutes
+        case routeMaxContextTokens, routeReservePercent, routeMinimumMinutes, routeThroughBridge
         case routeToKimiWhenExhausted, routeKimiModel
-        case switchMethod, accountOrder, excludedAccountIDs
+        case switchMethod, accountOrder, excludedAccountIDs, activeAccountLocked
         case codexSwitchMode
     }
 
@@ -122,7 +138,9 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         try values.encodeIfPresent(routeMaxContextTokens, forKey: .routeMaxContextTokens)
         try values.encode(routeReservePercent, forKey: .routeReservePercent)
         try values.encode(routeMinimumMinutes, forKey: .routeMinimumMinutes)
+        try values.encode(routeThroughBridge, forKey: .routeThroughBridge)
         try values.encode(distributeSessions, forKey: .distributeSessions)
+        try values.encode(activeAccountLocked, forKey: .activeAccountLocked)
         try values.encode(paceSessions, forKey: .paceSessions)
         try values.encode(extendCacheLifetime, forKey: .extendCacheLifetime)
         try values.encodeIfPresent(extraUsageMonthlyLimit, forKey: .extraUsageMonthlyLimit)
@@ -154,7 +172,9 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         routeMaxContextTokens = try values.decodeIfPresent(Int.self, forKey: .routeMaxContextTokens)
         routeReservePercent = try values.decodeIfPresent(Double.self, forKey: .routeReservePercent) ?? 25
         routeMinimumMinutes = try values.decodeIfPresent(Double.self, forKey: .routeMinimumMinutes) ?? 15
+        routeThroughBridge = try values.decodeIfPresent(Bool.self, forKey: .routeThroughBridge) ?? false
         distributeSessions = try values.decodeIfPresent(Bool.self, forKey: .distributeSessions) ?? false
+        activeAccountLocked = try values.decodeIfPresent(Bool.self, forKey: .activeAccountLocked) ?? false
         paceSessions = try values.decodeIfPresent(Bool.self, forKey: .paceSessions) ?? true
         extendCacheLifetime = try values.decodeIfPresent(Bool.self, forKey: .extendCacheLifetime) ?? true
         extraUsageMonthlyLimit = try values.decodeIfPresent(Double.self, forKey: .extraUsageMonthlyLimit)
