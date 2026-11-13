@@ -98,6 +98,16 @@ struct ProviderCapabilities: Sendable {
     /// Directory under the config directory holding the CLI's session
     /// transcripts, read by `TranscriptRequestFeed`.
     var transcriptDirectory: String? { requestRouter?.transcriptDirectory }
+
+    /// The long window's name for one reading, shown by the usage cards and
+    /// the widget: `weeklyQuotaLabel`, or, when `longWindowReportsLength`,
+    /// "Weekly" for a seven-day window and "N-day quota" for another length.
+    func longWindowLabel(for window: UsageWindow) -> String {
+        guard longWindowReportsLength else { return weeklyQuotaLabel }
+        guard let seconds = window.windowSeconds else { return "Weekly" }
+        let days = seconds / 86_400
+        return days == 7 ? "Weekly" : "\(days)-day quota"
+    }
 }
 
 enum CredentialStore: Sendable { case keychain, files }
