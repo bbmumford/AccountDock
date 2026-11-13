@@ -50,6 +50,9 @@ struct RecentRouterRequest: Equatable {
     var backend: String
     var context: Int
     var output: Int
+    /// The pause-gate key of the bridged provider whose request this was
+    /// (`RouterEvent.client`); nil for the routed provider's.
+    var client: String? = nil
 }
 
 /// Whether a route target can take the current demand, from its window, the

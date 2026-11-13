@@ -164,6 +164,18 @@ struct RequestHoldSupport: Sendable {
     /// at the router. When it does not, `ProviderRequestHold` never points
     /// it there and only writes back a base URL it finds pointed there.
     var keepsCredentialAtRouter = true
+    /// Whether the CLI's config has no such key until one is set, so
+    /// restoring `defaultUpstream` removes the key instead of writing it.
+    var keyAbsentByDefault = false
+    /// Whether the router holds the CLI's requests while its pause holds
+    /// the session (`ProviderPassthrough.Entry.holdsRequests`). False for a
+    /// CLI whose gate hook waits for a whole pause by itself.
+    var holdsPausedRequests = true
+    /// The protocol of the route targets that can serve the CLI's model
+    /// requests through the router's `ResponsesBridge`; nil when the router
+    /// only forwards them. A bridged hold is installed by the provider's
+    /// `ProviderFailoverPolicy.routeThroughBridge` and not by its pause.
+    var bridgedProtocol: RouterProtocol?
 }
 
 /// A provider CLI's session lifecycle hooks, installed by
@@ -297,6 +309,16 @@ extension AIProviderType {
                 pricingPrefixes: ["openai/"],
                 pauseGate: PauseGateSupport(key: "codex", hookFile: ".codex/hooks.json", format: .jsonHooks,
                                             gateEvent: "PostToolUse", reply: nil),
+                // Codex reads `openai_base_url`, a key before any table, as
+                // the base URL of its built-in provider and sends its sign-in
+                // there; its requests carry the session as
+                // `prompt_cache_key`. Its gate hook has no timeout limit, so
+                // the router need not hold its requests.
+                requestHold: RequestHoldSupport(settingsFile: ".codex/config.toml", table: "",
+                                                key: "openai_base_url", sessionField: "prompt_cache_key",
+                                                defaultUpstream: "https://chatgpt.com/backend-api/codex",
+                                                keyAbsentByDefault: true, holdsPausedRequests: false,
+                                                bridgedProtocol: .anthropicMessages),
                 lifecycleHooks: LifecycleHookSupport(events: ["SessionStart", "UserPromptSubmit", "Stop"],
                                                      hookFile: ".codex/hooks.json", format: .jsonHooks,
                                                      timeout: 5, bundledScript: "accountdock-codex-hook"),

@@ -51,13 +51,23 @@ enum RequestRouterController {
     /// itself stops once no request has arrived for `retireAfter`, because
     /// sessions started while it was configured still send their requests to
     /// it until they end.
-    static func reconcile(wanted: Bool, retireAfter: TimeInterval = 30 * 60) async throws {
+    ///
+    /// `bridgeWanted`: a provider's CLI reaches the router through its
+    /// bridged request hold, so the agent runs although the routed CLI is
+    /// not pointed at it. `ProviderRequestHold` points the bridged CLI there
+    /// once the agent is installed, and back when neither is wanted.
+    static func reconcile(wanted: Bool, bridgeWanted: Bool = false, retireAfter: TimeInterval = 30 * 60) async throws {
         removeLegacyTokenFiles()
         if wanted {
             if !isInstalled() { try install() } else { await ensureCurrent() }
             return
         }
         if configuredBaseURL() == RouterConfig.baseURL { try configureEnv("uninstall") }
+        if bridgeWanted {
+            if !agentInstalled { try installAgent() } else { await ensureCurrent() }
+            ProviderRequestHold.synchronize(enabledFor: [], routerRunning: false)
+            return
+        }
         // Every CLI sent here is pointed back at its provider before the
         // router can be retired.
         ProviderRequestHold.synchronize(enabledFor: [], routerRunning: false)
@@ -126,19 +136,25 @@ enum RequestRouterController {
     }
 
     static func install() throws {
-        guard let executable = executableURL, FileManager.default.isExecutableFile(atPath: executable.path) else {
-            throw InstallError.missingExecutable
-        }
         if let existing = configuredBaseURL(), existing != RouterConfig.baseURL {
             throw InstallError.conflictingBaseURL(existing)
+        }
+        try installAgent()
+        try configureEnv("install")
+        routerLog.info("Router installed; new \(clientName) sessions send requests through \(RouterConfig.baseURL)")
+    }
+
+    /// Installs and starts the launch agent without pointing the routed CLI
+    /// at it, for `reconcile`'s `bridgeWanted`.
+    static func installAgent() throws {
+        guard let executable = executableURL, FileManager.default.isExecutableFile(atPath: executable.path) else {
+            throw InstallError.missingExecutable
         }
         try FileManager.default.createDirectory(at: RouterConfig.directory, withIntermediateDirectories: true)
         _ = try controlKey()
         removeLegacyTokenFiles()
         try writeAgent(executable: executable)
         try restartAgent()
-        try configureEnv("install")
-        routerLog.info("Router installed; new \(clientName) sessions send requests through \(RouterConfig.baseURL)")
     }
 
     /// New sessions stop using the router. The agent keeps running so sessions

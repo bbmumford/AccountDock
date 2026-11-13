@@ -643,6 +643,33 @@ enum RouterLogic {
                            cacheRead: read, output: int("output_tokens"))
     }
 
+    /// Token use of one streamed Messages reply, from the `usage` of its
+    /// `message_start` and `message_delta` events. `SSEScanner` and
+    /// `ResponsesStreamTranslator` both count with it, so a stream yields the
+    /// same counts whichever of them reads it.
+    struct StreamUsage: Equatable {
+        private(set) var counts = TokenCounts()
+
+        /// The `usage` of `message_start`.
+        mutating func start(_ usage: [String: Any]) {
+            counts = RouterLogic.tokenCounts(usage)
+        }
+
+        /// The `usage` of a `message_delta`. Some Anthropic-compatible
+        /// backends report input only here.
+        mutating func update(_ usage: [String: Any]) {
+            let late = RouterLogic.tokenCounts(usage)
+            if late.context > 0 {
+                // The closing totals carry no `cache_creation` breakdown;
+                // the opening one's long part stands.
+                let long = usage["cache_creation"] != nil ? late.cacheWriteLong : counts.cacheWriteLong
+                counts.context = late.context; counts.cacheWrite = late.cacheWrite
+                counts.cacheWriteLong = min(long, late.cacheWrite); counts.cacheRead = late.cacheRead
+            }
+            if let value = (usage["output_tokens"] as? NSNumber)?.intValue { counts.output = value }
+        }
+    }
+
     /// The request with every prompt-cache mark asking for the one-hour
     /// cache, and whether any mark changed. Every mark gets the same lifetime,
     /// which keeps the API's rule that longer-lived marks come first.
@@ -756,7 +783,8 @@ enum RouterLogic {
 final class SSEScanner {
     private var buffer = Data()
     private var partial: [Int: String] = [:]
-    private(set) var counts = RouterLogic.TokenCounts()
+    private var usage = RouterLogic.StreamUsage()
+    var counts: RouterLogic.TokenCounts { usage.counts }
 
     func feed(_ data: Data) -> [String] {
         buffer.append(data)
@@ -771,22 +799,11 @@ final class SSEScanner {
             let index = event["index"] as? Int ?? 0
             switch event["type"] as? String {
             case "message_start":
-                if let message = event["message"] as? [String: Any], let usage = message["usage"] as? [String: Any] {
-                    counts = RouterLogic.tokenCounts(usage)
+                if let message = event["message"] as? [String: Any], let start = message["usage"] as? [String: Any] {
+                    usage.start(start)
                 }
             case "message_delta":
-                // Some Anthropic-compatible backends report input only here.
-                if let usage = event["usage"] as? [String: Any] {
-                    let late = RouterLogic.tokenCounts(usage)
-                    if late.context > 0 {
-                        // The closing totals carry no `cache_creation`
-                        // breakdown; the opening one's long part stands.
-                        let long = usage["cache_creation"] != nil ? late.cacheWriteLong : counts.cacheWriteLong
-                        counts.context = late.context; counts.cacheWrite = late.cacheWrite
-                        counts.cacheWriteLong = min(long, late.cacheWrite); counts.cacheRead = late.cacheRead
-                    }
-                    if let value = (usage["output_tokens"] as? NSNumber)?.intValue { counts.output = value }
-                }
+                if let late = event["usage"] as? [String: Any] { usage.update(late) }
             case "content_block_start":
                 if let block = event["content_block"] as? [String: Any] {
                     if let signature = block["signature"] as? String, !signature.isEmpty { partial[index] = signature }
@@ -835,6 +852,21 @@ enum ProviderPassthrough {
         var upstream: String
         /// The request-body field carrying the CLI's session ID.
         var sessionField: String
+        /// Whether a request waits here while the provider's pause holds
+        /// its session. False for a CLI whose own hook waits for the whole
+        /// pause and which gives up on a reply that stays silent.
+        var holdsRequests = true
+
+        init(upstream: String, sessionField: String, holdsRequests: Bool = true) {
+            self.upstream = upstream; self.sessionField = sessionField; self.holdsRequests = holdsRequests
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            upstream = try values.decode(String.self, forKey: .upstream)
+            sessionField = try values.decode(String.self, forKey: .sessionField)
+            holdsRequests = try values.decodeIfPresent(Bool.self, forKey: .holdsRequests) ?? true
+        }
     }
 
     static var entriesURL: URL { RouterConfig.directory.appendingPathComponent("passthrough.json") }
@@ -926,12 +958,23 @@ enum ProviderPassthrough {
     /// streamed request waits so the connection is not timed out.
     static let keepAlive = Data(": paused by AccountDock\n\n".utf8)
 
+    /// Whether `rest`, the upstream path of a request, is the Responses
+    /// endpoint, whose streams carry Responses events.
+    static func isResponsesPath(_ rest: String) -> Bool {
+        (rest.split(separator: "?", omittingEmptySubsequences: false).first.map(String.init) ?? rest) == "/responses"
+    }
+
     /// An error delivered inside an event stream whose 200 head was already
-    /// sent while the request was held.
-    static func streamError(status: Int, body: Data) -> Data {
-        let message = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])
-            .flatMap { ($0["error"] as? [String: Any])?["message"] as? String }
-            ?? String(decoding: body.prefix(500), as: UTF8.self)
+    /// sent while the request was held: a `response.failed` event for a
+    /// Responses request, and a chat-completions error chunk otherwise.
+    static func streamError(status: Int, body: Data, responses: Bool = false) -> Data {
+        let error = (try? JSONSerialization.jsonObject(with: body) as? [String: Any]).flatMap { $0["error"] as? [String: Any] }
+        let message = error?["message"] as? String ?? String(decoding: body.prefix(500), as: UTF8.self)
+        if responses {
+            let named = (error?["code"] as? String) ?? (error?["type"] as? String)
+            let code = named ?? (status == 429 ? "rate_limit_exceeded" : status >= 500 ? "server_error" : "invalid_request_error")
+            return ResponsesBridge.failedEvent(id: ResponsesBridge.newResponseID(), code: code, message: message)
+        }
         let payload: [String: Any] = ["error": ["message": message, "type": "upstream_error", "code": status]]
         let json = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
         return Data("data: ".utf8) + json + Data("\n\n".utf8)

@@ -603,6 +603,16 @@ final class CodexService: @unchecked Sendable {
         }
     }
 
+    /// The access token in a Codex home's `auth.json`, which the CLI sends
+    /// with its requests; `AppState.currentAccessToken` fingerprints it.
+    static func accessToken(codexHome: String) -> String? {
+        let authURL = URL(fileURLWithPath: codexHome, isDirectory: true).appendingPathComponent("auth.json")
+        guard let data = try? Data(contentsOf: authURL),
+              let auth = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = auth["tokens"] as? [String: Any] else { return nil }
+        return tokens["access_token"] as? String
+    }
+
     /// Whether the access token in a Codex home stays valid `interval` from
     /// now, by its signed expiry.
     func credentialLasts(codexHome: String, for interval: TimeInterval, now: Date = Date()) -> Bool {

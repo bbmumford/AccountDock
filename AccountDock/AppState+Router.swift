@@ -5,7 +5,9 @@ private let routingLog = FileLog("Routing")
 /// Drives `AccountDockRouter` for the provider it serves
 /// (`AIProviderType.routedProvider`): which backend serves new turns, which
 /// accounts serve sessions in parallel, and the usage and events the router
-/// reports back.
+/// reports back. For each provider reaching the router through a bridged
+/// request hold (`bridgedProviders`) it publishes the `PassthroughRoute`
+/// that lets the route target serve that provider's requests.
 extension AppState {
     // MARK: - Configuration
 
@@ -22,28 +24,56 @@ extension AppState {
         routerWanted && RequestRouterController.isInstalled()
     }
 
+    /// Providers whose CLI reaches the router through a bridged request
+    /// hold and whose policy routes them to a target
+    /// (`ProviderFailoverPolicy.usesBridge(for:)`).
+    var bridgedProviders: [AIProviderType] {
+        AIProviderType.implementedProviders.filter { routeTarget(for: $0) != nil && $0 != AIProviderType.routedProvider }
+    }
+
+    /// Whether the router serves `provider`'s CLI now: the routed provider
+    /// while its base URL names the router, and a bridged provider while
+    /// the agent is installed and its CLI's config points there.
+    func routerServes(_ provider: AIProviderType) -> Bool {
+        if provider == AIProviderType.routedProvider { return RequestRouterController.isInstalled() }
+        return failoverConfig.policy(for: provider).usesBridge(for: provider)
+            && RequestRouterController.agentInstalled && ProviderRequestHold.pointsAtRouter(provider)
+    }
+
+    /// The `RouterEvent.client` of `provider`'s requests: nil for the routed
+    /// provider, the pause-gate key for a bridged one.
+    func routerClient(_ provider: AIProviderType) -> String? {
+        provider == AIProviderType.routedProvider ? nil : provider.capabilities.pauseGate?.key
+    }
+
+    /// The target the policy names, for the routed provider and for a
+    /// provider whose policy routes it through the bridge.
     func routeTarget(for provider: AIProviderType) -> RouteTarget? {
-        let id = failoverConfig.policy(for: provider).routeTarget
-        return RouteTarget.available(for: provider).first { $0.id == id }
+        let policy = failoverConfig.policy(for: provider)
+        guard provider.capabilities.requestRouter != nil || policy.usesBridge(for: provider) else { return nil }
+        return RouteTarget.available(for: provider).first { $0.id == policy.routeTarget }
     }
 
     /// The target's backing account when it can serve routed requests: its
     /// window has room above the share kept for its own sessions, and it is
     /// expected to carry the demand at least the configured time.
-    func routeTargetAccount(_ target: RouteTarget, now: Date = Date()) -> Account? {
+    func routeTargetAccount(_ target: RouteTarget, for provider: AIProviderType? = AIProviderType.routedProvider,
+                            now: Date = Date()) -> Account? {
         if let until = routeTargetRefusedUntil[target.id], until > now { return nil }
         guard let account = accounts.first(where: { $0.provider == target.provider && $0.isActive }) else { return nil }
         let planner = FailoverPlanner(settings: plannerSettings(target.provider))
         guard planner.tier(quotaState(for: account, now: now), now: now) <= .usable else { return nil }
-        let verdict = routeCapacity(target, account: account, now: now)
+        let verdict = routeCapacity(target, account: account, for: provider, now: now)
         if routeTargetVerdicts[target.id] != verdict { routeTargetVerdicts[target.id] = verdict }
         return verdict.serves ? account : nil
     }
 
-    /// Whether `target` can take the busiest recent demand of the sessions
-    /// within its context cap.
-    func routeCapacity(_ target: RouteTarget, account: Account, now: Date = Date()) -> RouteCapacity.Verdict {
-        let policy = AIProviderType.routedProvider.map { failoverConfig.policy(for: $0) } ?? ProviderFailoverPolicy()
+    /// Whether `target` can take the busiest recent demand of `provider`'s
+    /// sessions within its context cap.
+    func routeCapacity(_ target: RouteTarget, account: Account, for provider: AIProviderType? = AIProviderType.routedProvider,
+                       now: Date = Date()) -> RouteCapacity.Verdict {
+        let policy = provider.map { failoverConfig.policy(for: $0) } ?? ProviderFailoverPolicy()
+        let client = provider.flatMap { routerClient($0) }
         let cap = policy.routeMaxContextTokens ?? target.defaultMaxContextTokens(model: policy.routeModel)
         let cost = routeTargetCosts[target.id] ?? RouteTargetCostModel()
         let reading = accountUsage[account.id]?.fiveHour?.utilization ?? 0
@@ -51,7 +81,8 @@ extension AppState {
             targetName: target.displayName,
             sessionPercent: cost.estimatedSession(reading: reading, defaultRatio: target.defaultPercentPerMillion),
             reservePercent: policy.routeReservePercent,
-            tokensPerMinute: RouteCapacity.peakTokensPerMinute(recentRouterRequests, maxContext: cap, now: now),
+            tokensPerMinute: RouteCapacity.peakTokensPerMinute(recentRouterRequests.filter { $0.client == client },
+                                                               maxContext: cap, now: now),
             percentPerMillion: cost.ratio(default: target.defaultPercentPerMillion),
             minimumMinutes: policy.routeMinimumMinutes
         )
@@ -59,8 +90,8 @@ extension AppState {
 
     /// Reads the target's backing account when its reading is older than
     /// `maximumAge`: a target can fill its window within minutes.
-    func refreshRouteTargetReading(maximumAge: TimeInterval) async {
-        guard let provider = AIProviderType.routedProvider, let target = routeTarget(for: provider),
+    func refreshRouteTargetReading(maximumAge: TimeInterval, for provider: AIProviderType? = AIProviderType.routedProvider) async {
+        guard let provider, let target = routeTarget(for: provider),
               let account = accounts.first(where: { $0.provider == target.provider && $0.isActive }) else { return }
         let age = accountUsageUpdatedAt[account.id].map { Date().timeIntervalSince($0) } ?? .infinity
         if age > maximumAge { _ = await fetchUsageNow(account, priority: .critical) }
@@ -90,7 +121,11 @@ extension AppState {
                 ? keychain.readClaudeToken()
                 : keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
             return json.flatMap(ClaudeService.extractAccessToken(from:))
-        case .codex, .kimi, .gemini:
+        case .codex:
+            let homes = [account.isActive ? (account.provider.configDirectory as NSString).expandingTildeInPath : nil,
+                         account.credentialLocation]
+            return homes.compactMap { $0 }.lazy.compactMap(CodexService.accessToken(codexHome:)).first
+        case .kimi, .gemini:
             return nil
         }
     }
@@ -128,10 +163,9 @@ extension AppState {
         current: Account,
         because reason: String
     ) async -> Bool {
-        guard provider == AIProviderType.routedProvider, RequestRouterController.isInstalled(),
-              let target = routeTarget(for: provider) else { return false }
-        await refreshRouteTargetReading(maximumAge: 2 * 60)
-        guard let account = routeTargetAccount(target),
+        guard let target = routeTarget(for: provider), routerServes(provider) else { return false }
+        await refreshRouteTargetReading(maximumAge: 2 * 60, for: provider)
+        guard let account = routeTargetAccount(target, for: provider),
               await refreshRouteTargetToken(target, account: account) else { return false }
         if let until = routeOverrideUntil[provider], until > Date() { return false }
         if suspensionContexts[provider] == nil {
@@ -203,7 +237,7 @@ extension AppState {
     /// moves back at the start of its next turn.
     @discardableResult
     func routeBack(_ provider: AIProviderType, announce: Bool = true) -> Bool {
-        guard provider == AIProviderType.routedProvider, let status = routedStatus.removeValue(forKey: provider) else { return false }
+        guard let status = routedStatus.removeValue(forKey: provider) else { return false }
         applyRouterState()
         if announce {
             let minutes = Int(Date().timeIntervalSince(status.since) / 60)
@@ -229,34 +263,57 @@ extension AppState {
     /// events it reported.
     func maintainRouter(now: Date = Date()) async {
         let wanted = routerWanted
+        let bridged = bridgedProviders
         // The router exists only while a feature uses it: installed or
         // updated when wanted, retired once unwanted and idle.
         if routerCheckedAt.map({ now.timeIntervalSince($0) >= 2 * 60 }) ?? true {
             routerCheckedAt = now
             do {
-                try await RequestRouterController.reconcile(wanted: wanted)
+                try await RequestRouterController.reconcile(wanted: wanted, bridgeWanted: !bridged.isEmpty)
                 routerProblem = nil
             } catch {
                 routerProblem = error.localizedDescription
                 routingLog.warning("Router could not be set up: \(error.localizedDescription)")
             }
         }
-        guard let provider = AIProviderType.routedProvider else { return }
-        let policy = failoverConfig.policy(for: provider)
-        guard wanted, RequestRouterController.isInstalled() else {
-            if routedStatus[provider] != nil { routedStatus[provider] = nil }
-            return
+        let routed = AIProviderType.routedProvider.flatMap { wanted && RequestRouterController.isInstalled() ? $0 : nil }
+        // A provider the router no longer serves is no longer routed.
+        for provider in Array(routedStatus.keys) where provider != routed && !bridged.contains(provider) {
+            routedStatus[provider] = nil
         }
-        if let target = routeTarget(for: provider), let account = routeTargetAccount(target) {
-            _ = await refreshRouteTargetToken(target, account: account)
+        guard routed != nil || (!bridged.isEmpty && RequestRouterController.agentInstalled) else { return }
+        for provider in bridged {
+            if let target = routeTarget(for: provider), let account = routeTargetAccount(target, for: provider) {
+                _ = await refreshRouteTargetToken(target, account: account)
+            }
         }
-        routerPoolMembers = policy.distributeSessions
-            ? await buildPool(provider, now: now) : await activePool(provider, now: now)
+        if let provider = routed {
+            let policy = failoverConfig.policy(for: provider)
+            if let target = routeTarget(for: provider), let account = routeTargetAccount(target) {
+                _ = await refreshRouteTargetToken(target, account: account)
+            }
+            routerPoolMembers = policy.distributeSessions
+                ? await buildPool(provider, now: now) : await activePool(provider, now: now)
+        }
         refreshCredentialFingerprints(now: now)
         applyRouterState()
         await RequestRouterController.pushCredentials()
-        applyRouterEvents(provider, now: now)
-        ingestRouterUsage()
+        applyRouterEvents(routed: routed, now: now)
+        if routed != nil { ingestRouterUsage() }
+    }
+
+    /// Reconciles the router and the request holds at once, for a change to
+    /// a bridged provider's routing settings: the agent is installed or
+    /// retired first, since `ProviderRequestHold` points a bridged CLI at
+    /// the router only while the agent is installed.
+    func applyBridgeSettings() async {
+        routerCheckedAt = nil
+        await maintainRouter()
+        let pausing = pausingProviders
+        let routerRunning = routerInUse
+        await Task.detached(priority: .userInitiated) {
+            ProviderRequestHold.synchronize(enabledFor: pausing, routerRunning: routerRunning)
+        }.value
     }
 
     /// Publishes a new active account to the router straight away, so
@@ -277,27 +334,54 @@ extension AppState {
     /// then cleared its state, and `routerPoolMembers` holds the accounts
     /// `maintainSessionSlots` serves, which have no router tokens.
     func applyRouterState() {
-        guard routerWanted, let provider = AIProviderType.routedProvider else { return }
-        let policy = failoverConfig.policy(for: provider)
-        let target = routeTarget(for: provider)
+        let routed = AIProviderType.routedProvider.flatMap { routerWanted ? $0 : nil }
+        let bridged = bridgedProviders
+        guard routed != nil || !bridged.isEmpty else { return }
         var state = RouterState()
-        var tokenFiles = Set(routerPoolMembers.map(\.tokenFile))
-        if let target {
-            state.backends.append(target.backend(model: policy.routeModel, maxContextTokens: policy.routeMaxContextTokens))
-            let usable = (RequestRouterController.token(target.tokenFile)?.expiresAt ?? .distantPast) > Date().addingTimeInterval(60)
+        var tokenFiles = Set<String>()
+        func usable(_ target: RouteTarget) -> Bool {
+            (RequestRouterController.token(target.tokenFile)?.expiresAt ?? .distantPast) > Date().addingTimeInterval(60)
+        }
+        if let provider = routed {
+            let policy = failoverConfig.policy(for: provider)
+            tokenFiles.formUnion(routerPoolMembers.map(\.tokenFile))
+            if let target = routeTarget(for: provider) {
+                state.backends.append(target.backend(model: policy.routeModel, maxContextTokens: policy.routeMaxContextTokens))
+                let overridden = routeOverrideUntil[provider].map { $0 > Date() } ?? false
+                if usable(target), !overridden, routeTargetAccount(target) != nil { state.fallback = target.id }
+                if routedStatus[provider] != nil { state.route = target.id }
+                tokenFiles.insert(target.tokenFile)
+            }
+            state.pool = routerPoolMembers
+            state.sessionsFollowPreferred = !policy.distributeSessions
+            state.cacheAwareSessions = policy.distributeSessions && policy.paceSessions
+            state.extendedCacheMinimumContext = policy.extendCacheLifetime ? 0 : nil
+            if state.cacheAwareSessions {
+                state.moves = routerSessionMoves.mapValues(\.uuidString)
+            }
+            state.reason = routedStatus[provider].map { "every \(provider.capabilities.displayName) account is exhausted; served by \($0.target)" }
+        }
+        for provider in bridged {
+            guard let key = provider.capabilities.pauseGate?.key, let target = routeTarget(for: provider) else { continue }
+            let policy = failoverConfig.policy(for: provider)
             let overridden = routeOverrideUntil[provider].map { $0 > Date() } ?? false
-            if usable, !overridden, routeTargetAccount(target) != nil { state.fallback = target.id }
-            if routedStatus[provider] != nil { state.route = target.id }
+            let serves = usable(target) && !overridden && routeTargetAccount(target, for: provider) != nil
+            // The router has no pool of this provider's accounts, so a
+            // refused request is the target's only while no other account
+            // could take the work; otherwise the refusal reaches the CLI
+            // and failover switches accounts as it does without the router.
+            let planner = FailoverPlanner(settings: plannerSettings(provider))
+            let anotherAccountServes = accounts.contains { account in
+                account.provider == provider && !account.isActive && !policy.excludedAccountIDs.contains(account.id)
+                    && planner.tier(quotaState(for: account), now: Date()) <= .usable
+            }
+            state.passthroughRoutes[key] = PassthroughRoute(
+                backend: target.backend(model: policy.routeModel, maxContextTokens: policy.routeMaxContextTokens),
+                routed: routedStatus[provider] != nil && usable(target),
+                fallback: serves && !anotherAccountServes
+            )
             tokenFiles.insert(target.tokenFile)
         }
-        state.pool = routerPoolMembers
-        state.sessionsFollowPreferred = !policy.distributeSessions
-        state.cacheAwareSessions = policy.distributeSessions && policy.paceSessions
-        state.extendedCacheMinimumContext = policy.extendCacheLifetime ? 0 : nil
-        if state.cacheAwareSessions {
-            state.moves = routerSessionMoves.mapValues(\.uuidString)
-        }
-        state.reason = routedStatus[provider].map { "every \(provider.capabilities.displayName) account is exhausted; served by \($0.target)" }
         RequestRouterController.apply(state)
         RequestRouterController.retainTokens(tokenFiles, allowedCredentials: Set(credentialFingerprints.keys))
     }
@@ -601,7 +685,8 @@ extension AppState {
         if let built = credentialFingerprintsBuiltAt, now.timeIntervalSince(built) < 5 * 60 { return }
         if credentialFingerprintsBuiltAt == nil, credentialFingerprintSeen.isEmpty { loadCredentialFingerprints(now: now) }
         credentialFingerprintsBuiltAt = now
-        for account in accounts where account.provider == AIProviderType.routedProvider {
+        let served = Set(bridgedProviders + [AIProviderType.routedProvider].compactMap { $0 })
+        for account in accounts where served.contains(account.provider) {
             if let token = currentAccessToken(account) {
                 let fingerprint = RouterLogic.fingerprint(token)
                 credentialFingerprints[fingerprint] = account.id
@@ -662,7 +747,13 @@ extension AppState {
         }
     }
 
-    private func applyRouterEvents(_ provider: AIProviderType, now: Date) {
+    /// Applies the router's new events: those of `routed`, the routed
+    /// provider when the router serves it, and those a bridged provider's
+    /// requests caused (`RouterEvent.client`).
+    private func applyRouterEvents(routed: AIProviderType?, now: Date) {
+        let bridgedByKey = Dictionary(bridgedProviders.compactMap { provider in
+            provider.capabilities.pauseGate.map { ($0.key, provider) }
+        }, uniquingKeysWith: { first, _ in first })
         // The first read after launch starts at the top of the file; events
         // applied before the restart are skipped, or their token counts would
         // be learned twice and old failures reported again. With no record
@@ -674,6 +765,11 @@ extension AppState {
         if let last = events.last?.at { UserDefaults.standard.set(last, forKey: Self.routerEventsAppliedKey) }
         for event in events {
             if let appliedThrough, event.at <= appliedThrough { continue }
+            if let client = event.client {
+                if let provider = bridgedByKey[client] { applyBridgeEvent(event, provider: provider, now: now) }
+                continue
+            }
+            guard let provider = routed else { continue }
             let accountID = event.accountID.flatMap(UUID.init(uuidString:))
                 ?? event.detail.flatMap { credentialFingerprints[$0] }
             if let session = event.session, let accountID, event.kind == .assigned || event.kind == .turnUsage {
@@ -724,12 +820,44 @@ extension AppState {
         routedSessionSeen = routedSessionSeen.filter { $0.value.at > cutoff }
         let demandCutoff = now.addingTimeInterval(-RouteCapacity.demandLookback)
         recentRouterRequests.removeAll { $0.at < demandCutoff }
+        guard let provider = routed else { return }
         let shown = Self.sessionsWithTranscripts(Set(routedSessionSeen.keys), provider: provider)
         var grouped: [UUID: Set<String>] = [:]
         for (session, seen) in routedSessionSeen where shown.contains(session) {
             grouped[seen.account, default: []].insert(session)
         }
         if grouped != routedSessions { routedSessions = grouped }
+    }
+
+    /// One event of a bridged provider's request. Its route target's use
+    /// is learned as the routed provider's is; nothing is attributed to the
+    /// provider's own accounts, whose usage the router does not read.
+    private func applyBridgeEvent(_ event: RouterEvent, provider: AIProviderType, now: Date) {
+        let name = provider.capabilities.displayName
+        switch event.kind {
+        case .replayed:
+            if lastRouterFailureNote.map({ now.timeIntervalSince($0) > 5 * 60 }) ?? true {
+                lastRouterFailureNote = now
+                failoverEvents.record(provider, "A \(name) request reached a plan limit; the router served it from the route target.")
+            }
+        case .backendFailed:
+            if lastRouterFailureNote.map({ now.timeIntervalSince($0) > 10 * 60 }) ?? true {
+                lastRouterFailureNote = now
+                failoverEvents.record(provider, "A request routed to \(event.backend ?? "the route target") failed: \(event.detail ?? "unknown error").")
+            }
+        case .servedByRoute:
+            routedStatus[provider]?.turns += 1
+        case .turnUsage:
+            guard let backend = event.backend else { break }
+            recentRouterRequests.append(RecentRouterRequest(
+                at: event.at, session: event.session, backend: backend,
+                context: event.contextTokens ?? 0, output: event.outputTokens ?? 0, client: event.client
+            ))
+            routeTargetCosts[backend, default: RouteTargetCostModel()]
+                .recordRouted(tokens: (event.contextTokens ?? 0) + (event.outputTokens ?? 0))
+        case .assigned, .held:
+            break
+        }
     }
 
     /// The sessions the CLI keeps a transcript for, under the directory its

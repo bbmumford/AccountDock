@@ -123,10 +123,13 @@ struct RouteTarget: Identifiable, Equatable, Sendable {
     }
 
     /// Targets for routing `provider`'s requests: other providers' services
-    /// that accept the protocol the router serves `provider` with and offer a
-    /// model holding `minimumModelContext`.
+    /// that accept the protocol the router serves `provider` with, or the one
+    /// it bridges the provider's requests to
+    /// (`RequestHoldSupport.bridgedProtocol`), and offer a model holding
+    /// `minimumModelContext`.
     static func available(for provider: AIProviderType) -> [RouteTarget] {
-        guard let router = provider.capabilities.requestRouter else { return [] }
-        return all.filter { $0.provider != provider && $0.clientProtocol == router.clientProtocol && !$0.routableModels.isEmpty }
+        let capabilities = provider.capabilities
+        guard let served = capabilities.requestRouter?.clientProtocol ?? capabilities.requestHold?.bridgedProtocol else { return [] }
+        return all.filter { $0.provider != provider && $0.clientProtocol == served && !$0.routableModels.isEmpty }
     }
 }

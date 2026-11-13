@@ -462,7 +462,9 @@ and the session shows a status message and terminal title while it waits.
   base URL (for Kimi Code, `base_url` in `[providers."managed:kimi-code"]`)
   points at `/__provider/<key>`, the previous value is kept in
   `Router/passthrough.json` as the upstream, and it is written back when
-  pausing is turned off or the router is no longer wanted. A provider whose
+  pausing is turned off or the router is no longer wanted. A hold with
+  `bridgedProtocol` (Codex) follows its own setting instead and holds no
+  request (`holdsPausedRequests: false`). A provider whose
   CLI stops signing its requests at another base URL declares
   `keepsCredentialAtRouter: false` and is never pointed there; only a base
   URL found pointed there is written back. Kimi Code is one: it attaches its
@@ -574,9 +576,9 @@ three things:
   prompt, and lets every other waiting session continue on the target. When
   an account can serve again the route ends and the held sessions resume as
   capacity allows. Only models of at least `RouteTarget.minimumModelContext`
-  (1M tokens) are offered (`routableModels`). A target is offered only for a
-  provider whose CLI the router speaks; Codex, which it does not serve, shows
-  why and pauses instead.
+  (1M tokens) are offered (`routableModels`). A target is offered for a
+  provider whose CLI the router speaks, and for one whose requests it bridges
+  (see [Serving a Responses CLI from a route target](#serving-a-responses-cli-from-a-route-target)).
 
 ### Session pacing
 
@@ -808,6 +810,62 @@ capability, and a case in `AppState.accessCredential` that supplies its token.
 It is offered to the routed provider when it accepts the protocol the router
 serves that provider with. The router itself needs no change.
 
+### Serving a Responses CLI from a route target
+
+Codex speaks the OpenAI Responses API, which no route target accepts.
+`ResponsesBridge` rewrites a Responses request as a Messages request and the
+backend's streamed reply as Responses events, so a target can serve Codex
+sessions while every Codex account is exhausted. It is off unless the user
+turns on **Send Codex requests through AccountDock's router**
+(`ProviderFailoverPolicy.routeThroughBridge`) and chooses a target
+(`usesBridge(for:)`); while off nothing of Codex's is read or written for it.
+
+- **Reaching the router.** Codex's `requestHold` capability names
+  `openai_base_url`, a key before any table in `~/.codex/config.toml`: the
+  base URL of Codex's built-in provider, which keeps sending the account's
+  sign-in there. A hold with `bridgedProtocol` is installed by that setting
+  alone, never by pausing (`ProviderRequestHold.wantsRouter`): the key is set
+  to `/__provider/codex` once the router's agent is installed, the upstream
+  (`https://chatgpt.com/backend-api/codex` when the key was absent) is kept in
+  `Router/passthrough.json`, and the key is removed again when the setting is
+  turned off. `RequestRouterController.reconcile(wanted:bridgeWanted:)` runs
+  the agent for the bridge without pointing Claude Code at it. Codex first
+  asks for a websocket; the router answers 426 and Codex uses HTTP for the
+  rest of the session. Its requests carry the session as `prompt_cache_key`
+  and the `thread-id` header. Only sessions started after the key is set
+  reach the router, and those started from another `CODEX_HOME` do not.
+- **Until a route starts** every request is forwarded unchanged to the
+  upstream with the client's own credential (`ProviderPassthrough`). Codex's
+  entry has `holdsRequests: false`: its gate hook waits for a whole pause, and
+  Codex gives up on a reply that stays silent for five minutes.
+- **Routing.** The app chooses the target as for Claude Code
+  (`routeTarget(for:)`, `routeTargetAccount`, `RouteCapacity`) and publishes
+  `RouterState.passthroughRoutes[<key>]`: `routed` while the provider's
+  accounts are exhausted (`holdWork` → `routeToTarget`), `fallback` while the
+  target can take a request the provider refuses with 429 and no other
+  account of the provider could (the router holds no pool of its accounts,
+  so the refusal otherwise reaches the CLI and failover switches). The route is used
+  only for a client whose credential fingerprint is one of the user's
+  accounts, and only for `POST /responses`; every other path goes upstream.
+- **The request.** `instructions` and leading developer messages become the
+  system prompt; function, namespace and free-form tools become Messages
+  tools (`ToolNames` maps flat names back; a free-form tool takes one `input`
+  string), read from `tools` and from `additional_tools` input items; tool
+  calls and outputs become `tool_use` and `tool_result`, each call answered;
+  images are kept; encrypted reasoning and hosted tools are left out.
+- **The reply.** `ResponsesStreamTranslator` writes `response.created`, each
+  item's `added` and `done`, text deltas, and exactly one closing event:
+  `response.completed`, `response.incomplete` when the backend stopped at its
+  output cap, or `response.failed` (with the response's own ID) when the
+  backend reported an error, its stream ended without `message_stop`, or the
+  connection dropped. A tool call still open at a failure is not reported
+  done. An error after a held Responses stream's head is a `response.failed`
+  event too (`ProviderPassthrough.streamError`). Token use is counted by
+  `RouterLogic.StreamUsage`, which `SSEScanner` shares.
+- **Events.** The router's events for these requests carry `client`, the
+  provider's key; the app applies them to that provider (`applyBridgeEvent`)
+  and to the target's learned cost, never to Claude sessions.
+
 ### When a route target serves
 
 A target can fill its window far faster than a Claude account, because it
@@ -844,7 +902,7 @@ required when its CLI is installed and the feature is on.
 | Claude request router | `~/.claude/settings.json` (`env`) | `ANTHROPIC_BASE_URL`, only while a router feature is on |
 | Codex session hooks and pause gate | `~/.codex/hooks.json` and managed homes | Same, for Codex builds with lifecycle hooks |
 | Kimi Code session hooks and pause gate | `~/.kimi-code/config.toml` | Marked `[[hooks]]` tables |
-| Request hold (no provider uses it today) | The CLI's config (`base_url`) and `Router/passthrough.json` | Holding model requests for a whole pause |
+| Request hold (Codex, only with its bridge setting on) | The CLI's config (`openai_base_url` in `~/.codex/config.toml`) and `Router/passthrough.json` | Sending model requests through the router: a route target for Codex; holding requests for a whole pause for a CLI that needs it (none today) |
 
 Session records contain no prompt or transcript content.
 
