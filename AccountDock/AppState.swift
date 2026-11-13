@@ -157,6 +157,10 @@ final class AppState: ObservableObject {
     /// records a call that arrived meanwhile, which is then run after.
     var slotMaintenanceRunning = false
     var slotMaintenanceRequested = false
+    /// What `serveSlot` last wrote to each slot directory and when it last
+    /// read the slot's item back, so a slot already holding the credential
+    /// is not read from the Keychain again on every quota cycle.
+    var slotCredentialWritten: [String: (digest: String, at: Date)] = [:]
     /// Watches the one-session slot directory for a launcher's request for a
     /// spare; installed by `watchSpareRequests`.
     var spareRequestWatcher: DispatchSourceFileSystemObject?

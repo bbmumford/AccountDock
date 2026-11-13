@@ -309,4 +309,23 @@ final class SessionSlotsTests: XCTestCase {
         XCTAssertFalse(slots.removeSpare(directory), "a claimed slot is not removed as a spare")
         XCTAssertTrue(slots.assign(directory, to: UUID()))
     }
+
+    func testSparesCoverEverySessionSeenRunningAtOnce() {
+        XCTAssertEqual(AppState.spareTarget(peakSessions: 0), AppState.minimumSpares)
+        XCTAssertEqual(AppState.spareTarget(peakSessions: 12), 14, "a restart restoring twelve sessions finds a slot for each")
+        XCTAssertEqual(AppState.spareTarget(peakSessions: 200), AppState.maximumSpares)
+    }
+
+    func testTheSessionPeakOutlivesARestartAndExpiresAfterADay() {
+        let now = Date()
+        let hour: TimeInterval = 60 * 60
+        XCTAssertEqual(AppState.sessionPeak(stored: nil, running: 4, now: now).count, 4)
+        // Right after a restart nothing runs yet; the peak stands.
+        let before = (count: 12, at: now.addingTimeInterval(-2 * hour))
+        XCTAssertEqual(AppState.sessionPeak(stored: before, running: 0, now: now).count, 12)
+        XCTAssertEqual(AppState.sessionPeak(stored: before, running: 0, now: now).at, before.at, "an unchanged peak is not written again")
+        XCTAssertEqual(AppState.sessionPeak(stored: before, running: 15, now: now).count, 15)
+        XCTAssertEqual(AppState.sessionPeak(stored: before, running: 12, now: now).at, now, "a peak still matched is kept current")
+        XCTAssertEqual(AppState.sessionPeak(stored: (12, now.addingTimeInterval(-25 * hour)), running: 2, now: now).count, 2)
+    }
 }
