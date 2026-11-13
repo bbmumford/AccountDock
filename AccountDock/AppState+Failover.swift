@@ -62,7 +62,8 @@ extension AppState {
         // The paused-session display follows the pause files on every tick,
         // skipped cycles included, so sessions are never held unseen.
         for provider in AgentPauseGate.providers { refreshPauseStatus(provider) }
-        guard !isMonitoringFailover, !isLoading, !isLoggingIn else { return }
+        guard Self.quotaCycleMayStart(monitoring: isMonitoringFailover, credentialWorkBusy: credentialGate.isBusy,
+                                      loggingIn: isLoggingIn) else { return }
         isMonitoringFailover = true
         defer { isMonitoringFailover = false }
 
@@ -92,6 +93,12 @@ extension AppState {
         await evaluateFailover()
         saveLearningIfDue()
         for provider in AgentPauseGate.providers { prunePausedSessions(provider) }
+    }
+
+    /// Whether a quota cycle may start: none is running, no credential work
+    /// is under way (`credentialGate`) and no sign-in is.
+    nonisolated static func quotaCycleMayStart(monitoring: Bool, credentialWorkBusy: Bool, loggingIn: Bool) -> Bool {
+        !monitoring && !credentialWorkBusy && !loggingIn
     }
 
     /// Keeps the pause hook installed exactly for the providers that pause
@@ -174,22 +181,39 @@ extension AppState {
             PassiveUsageTelemetry.shared.collect(codexHomes: codexHomes, now: Date())
         }.value
         let now = Date()
+        let servedCutoff = now.addingTimeInterval(-SessionAttribution.servedLifetime)
+        sessionServedBy = sessionServedBy.filter { $0.value.at > servedCutoff }
+        var attributions: [AIProviderType: (SessionAttribution, [String: Int32])] = [:]
         for observation in observations {
+            let provider = observation.source.provider
             let noSessionWindow = observation.usage.reportsNoSessionWindow
             // A window whose reset has passed describes the window before it.
             let usage = observation.usage.droppingPassedWindows(at: now)
             guard usage.fiveHour != nil || usage.sevenDay != nil else { continue }
             let observation = observation.with(usage: usage)
             if let model = observation.model {
-                workloadModels[observation.source.provider] = (model, observation.observedAt)
+                workloadModels[provider] = (model, observation.observedAt)
                 if let session = observation.processKey { noteSessionModel(session, model: model, at: observation.observedAt) }
             }
             // A session in a slot reports its slot's account; others are
             // matched by their reset times.
-            if sessionSlotIsSettling(observation.processKey, provider: observation.source.provider,
+            if sessionSlotIsSettling(observation.processKey, provider: provider,
                                      reportedAt: observation.observedAt) { continue }
-            guard let accountID = slotAccount(forSession: observation.processKey, provider: observation.source.provider)
-                    ?? attribute(observation) else { continue }
+            let (attribution, processes) = attributions[provider]
+                ?? (sessionAttribution(provider, now: now), sessionProcesses(provider))
+            attributions[provider] = (attribution, processes)
+            let decision = attribution.decide(session: observation.processKey,
+                                              process: observation.processKey.flatMap { processes[$0] })
+            let slot = decision?.source == .slot ? decision?.account : nil
+            let attributed = slot == nil ? attribute(observation) : nil
+            // What a session's own reading matched by reset times names the
+            // account its token belongs to (`SessionAttribution.lastServed`).
+            if let session = observation.processKey, let attributed, attributed.byResets,
+               observation.observedAt > servedCutoff,
+               sessionServedBy[session].map({ $0.at < observation.observedAt }) ?? true {
+                sessionServedBy[session] = SessionAttribution.Observation(account: attributed.account, at: observation.observedAt)
+            }
+            guard let accountID = slot ?? attributed?.account else { continue }
             if let updatedAt = accountUsageUpdatedAt[accountID], observation.observedAt <= updatedAt { continue }
             if Self.describesSupersededWindow(observation.usage, stored: accountUsage[accountID]) { continue }
             let merged = accountUsage[accountID].map {
@@ -208,32 +232,34 @@ extension AppState {
     }
 
     /// The account a passive reading belongs to: the one it names, or the
-    /// one whose reset times it matches.
-    private func attribute(_ observation: PassiveUsageObservation) -> UUID? {
+    /// one whose reset times it matches. `byResets` says the reset times
+    /// matched it, which `ingestPassiveTelemetry` alone takes to name the
+    /// account serving the reporting session.
+    private func attribute(_ observation: PassiveUsageObservation) -> (account: UUID, byResets: Bool)? {
         let provider = observation.source.provider
         switch observation.accountKey {
         case .providerAccountID(let id):
-            return accountID(forProviderAccountID: id, provider: provider)
+            return accountID(forProviderAccountID: id, provider: provider).map { ($0, false) }
         case .credentialLocation(let location):
-            return accounts.first { $0.provider == provider && $0.credentialLocation == location }?.id
+            return accounts.first { $0.provider == provider && $0.credentialLocation == location }.map { ($0.id, false) }
         case nil:
             return observation.source.alwaysNamesAccount ? nil : matchByResets(observation.usage, provider: provider)
         }
     }
 
-    /// The account the provider identifies by `id`.
+    /// The account the provider identifies by `id`: the one whose saved
+    /// copy the provider's credential module names so.
     private func accountID(forProviderAccountID id: String, provider: AIProviderType) -> UUID? {
-        switch provider {
-        case .claudeCode: claudeAccountID(forUUID: id)
-        case .codex, .kimi, .gemini: nil
-        }
+        guard let live = credentialModule(for: provider)?.liveCredential else { return nil }
+        return accounts.first { $0.provider == provider && live.providerAccountID(ofSavedCopy: $0) == id }?.id
     }
 
     /// Every account's quota window resets at its own moment, so a reading
     /// whose reset times match exactly one known account belongs to it. When
     /// nothing matches, the reading is attributed to the active account only
-    /// while that account has no established window of its own.
-    private func matchByResets(_ usage: UsageAPIResponse, provider: AIProviderType) -> UUID? {
+    /// while that account has no established window of its own; `byResets`
+    /// is then false.
+    private func matchByResets(_ usage: UsageAPIResponse, provider: AIProviderType) -> (account: UUID, byResets: Bool)? {
         func close(_ a: Date?, _ b: Date?) -> Bool {
             guard let a, let b else { return false }
             return abs(a.timeIntervalSince(b)) <= 120
@@ -250,38 +276,18 @@ extension AppState {
             close(accountUsage[$0.id]?.sevenDay?.resetsAtDate, usage.sevenDay?.resetsAtDate)
                 && !sessionContradicts($0)
         }
-        if weeklyMatches.count == 1 { return weeklyMatches[0].id }
+        if weeklyMatches.count == 1 { return (weeklyMatches[0].id, true) }
         let pool = weeklyMatches.isEmpty ? candidates : weeklyMatches
         let sessionMatches = pool.filter {
             close(accountUsage[$0.id]?.fiveHour?.resetsAtDate, usage.fiveHour?.resetsAtDate)
         }
-        if sessionMatches.count == 1 { return sessionMatches[0].id }
+        if sessionMatches.count == 1 { return (sessionMatches[0].id, true) }
         if weeklyMatches.isEmpty, sessionMatches.isEmpty,
            let active = activeAccount(for: provider),
            accountUsage[active.id]?.sevenDay?.resetsAtDate == nil {
-            return active.id
+            return (active.id, false)
         }
         return nil
-    }
-
-    private func claudeAccountID(forUUID uuid: String) -> UUID? {
-        if let id = claudeAccountUUIDs[uuid] { return id }
-        if let builtAt = claudeAccountUUIDsBuiltAt, Date().timeIntervalSince(builtAt) < 10 * 60 { return nil }
-        var map: [String: UUID] = [:]
-        for account in accounts where account.provider == .claudeCode {
-            if let value = keychain.getAccountBackup(forAccountId: account.id.uuidString)?
-                .oauthAccount["accountUuid"]?.value as? String {
-                map[value] = account.id
-            }
-        }
-        if let active = activeAccount(for: .claudeCode),
-           let value = keychain.readOAuthAccount()?["accountUuid"]?.value as? String {
-            map[value] = active.id
-        }
-        claudeAccountUUIDs = map
-        // An incomplete map is rebuilt as soon as the saved accounts are read.
-        claudeAccountUUIDsBuiltAt = keychain.backupStoreAvailable ? Date() : nil
-        return map[uuid]
     }
 
     // MARK: - Request budget
@@ -657,9 +663,7 @@ extension AppState {
         let pooled = provider == AIProviderType.routedProvider && policy.distributeSessions && routerInUse
         let poolHasRoom = pooled && ladder.contains { account in
             guard account.id != current.id else { return false }
-            let state = quotaState(for: account, now: now)
-            return planner.tier(state, now: now) <= .usable
-                && (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) >= Self.suspensionLead
+            return servingVerdict(account, planner: planner, now: now) == .canServe
         }
         if pooled {
             await holdSessionsForImminentReset(provider, policy: policy, ladder: ladder, planner: planner)
@@ -670,8 +674,10 @@ extension AppState {
                 ladder: ladder.map { quotaState(for: $0, now: now) },
                 now: now
             )
-        let exhaustionSoon = (planner.secondsUntilExhaustion(currentState, now: now) ?? .infinity) < Self.suspensionLead
-            || planner.tier(currentState, now: now) == .exhausted
+        // The active account is judged as it serves the work already on it,
+        // as `FailoverPlanner.plan` judges it.
+        let exhaustionSoon = currentState.refusedAtLimit
+            || planner.servingVerdict(planner.servingView(currentState), now: now, lead: Self.suspensionLead).atOrNearLimit
 
         switch plan {
         case .waitForReset, .noCapacity, .verify: break
@@ -1058,8 +1064,8 @@ extension AppState {
     private func admissionAccounts(_ provider: AIProviderType, planner: FailoverPlanner, now: Date) -> [SessionPacer.Account] {
         let policy = failoverConfig.policy(for: provider)
         func usable(_ state: QuotaAccountState) -> Bool {
-            planner.canSwitchWithoutReading(state, now: now) && planner.tier(state, now: now) <= .usable
-                && (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) >= Self.suspensionLead
+            planner.canSwitchWithoutReading(state, now: now)
+                && planner.servingVerdict(state, now: now, lead: Self.suspensionLead) == .canServe
         }
         if provider == AIProviderType.routedProvider, policy.distributeSessions, routerInUse {
             return routerPoolMembers.compactMap { member in
@@ -1085,15 +1091,19 @@ extension AppState {
         let resumed = AgentPauseGate.resumedSessions(provider)
         let surplus = Set(admissions.values.filter(\.surplus).map(\.session))
         let others = pacerSessions(provider, now: now).filter { !surplus.contains($0.id) }
+        let attribution = sessionAttribution(provider, now: now)
+        let processes = sessionProcesses(provider)
         var reheld = 0
         for (id, admission) in admissions {
             guard resumed.contains(id) else { admissions[id] = nil; continue }
-            let accountID = sessionRates.entries[id].flatMap { $0.requests.contains { $0.at > admission.at } ? $0.account : nil }
-                ?? admission.account
+            // The account seen serving it since it was resumed, else the
+            // one it was placed on.
+            let accountID = attribution.decide(session: id, process: processes[id]).flatMap { decision in
+                decision.observedAt.map { $0 > admission.at } == true ? decision.account : nil
+            } ?? admission.account
             guard let account = accounts.first(where: { $0.id == accountID }) else { continue }
             let state = quotaState(for: account, now: now)
-            let nearLimit = planner.tier(state, now: now) == .exhausted
-                || (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) < Self.suspensionLead
+            let nearLimit = planner.servingVerdict(state, now: now, lead: Self.suspensionLead).atOrNearLimit
             let surplusSpent = admission.surplus && !SessionPacer().covers(
                 pacerAccount(account.id, state: state, weight: 1, planner: planner, now: now), sessions: others, now: now)
             guard nearLimit || surplusSpent else { continue }
@@ -1135,8 +1145,8 @@ extension AppState {
             } else if let account = accounts.first(where: { $0.id == id }) {
                 let state = quotaState(for: account, now: now)
                 let reset = (pause.resumeAt ?? now) <= now
-                let usable = planner.isFresh(state, now: now) && planner.tier(state, now: now) <= .usable
-                    && (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) >= Self.suspensionLead
+                let usable = planner.isFresh(state, now: now)
+                    && planner.servingVerdict(state, now: now, lead: Self.suspensionLead) == .canServe
                 if reset && usable || (pause.resumeAt ?? now).addingTimeInterval(Self.accountHoldGrace) <= now {
                     let resumed = await releasePausedAgents(provider)
                     failoverEvents.record(provider, "\(messageName(account)) reset; \(resumed) held session(s) continue on it.")
@@ -1149,9 +1159,7 @@ extension AppState {
         let working = Set(AgentPauseGate.turningSessions(provider))
         for account in ladder {
             let state = quotaState(for: account, now: now)
-            let nearLimit = planner.tier(state, now: now) == .exhausted
-                || (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) < Self.suspensionLead
-            guard nearLimit else { continue }
+            guard planner.servingVerdict(state, now: now, lead: Self.suspensionLead).atOrNearLimit else { continue }
             let paced = pacerAccount(account.id, state: state, weight: 1, planner: planner, now: now)
             let pacer = SessionPacer()
             let reset = pacer.outlook(paced, burn: max(paced.burnPerHour, 1), now: now).windowEndsAt
@@ -1178,18 +1186,22 @@ extension AppState {
         }
     }
 
-    /// Whether `account` is at its limit or within `suspensionLead` of it.
-    func isNearLimit(_ account: Account, planner: FailoverPlanner, now: Date = Date()) -> Bool {
-        let state = quotaState(for: account, now: now)
-        return planner.tier(state, now: now) == .exhausted
-            || (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) < Self.suspensionLead
+    /// Whether `account` can take work now, with `suspensionLead` as the
+    /// lead (`FailoverPlanner.servingVerdict`).
+    func servingVerdict(_ account: Account, planner: FailoverPlanner, now: Date = Date(),
+                        model: String? = nil) -> ServingVerdict {
+        planner.servingVerdict(quotaState(for: account, now: now, model: model), now: now, lead: Self.suspensionLead)
     }
 
-    /// The account serving a session now: the one its last request went to
-    /// through the router, else the provider's active account.
+    /// Whether `account` is at its limit, refused at it, or within
+    /// `suspensionLead` of it.
+    func isNearLimit(_ account: Account, planner: FailoverPlanner, now: Date = Date()) -> Bool {
+        servingVerdict(account, planner: planner, now: now).atOrNearLimit
+    }
+
+    /// The account serving a session now (`SessionAttribution`).
     func servingAccount(_ provider: AIProviderType, session: String) -> Account? {
-        sessionRates.entries[session].flatMap { entry in accounts.first { $0.id == entry.account } }
-            ?? activeAccount(for: provider)
+        servingDecision(provider, session: session).flatMap { decision in accounts.first { $0.id == decision.account } }
     }
 
     /// Holds again, at its next tool call, every session the user resumed
@@ -1242,8 +1254,7 @@ extension AppState {
             state.weeklyBurnPerHour = max(state.weeklyBurnPerHour, context.weeklyBurnPerHour)
         }
         guard planner.isFresh(state, now: now),
-              planner.tier(state, now: now) <= .usable,
-              (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) >= Self.suspensionLead else { return }
+              planner.servingVerdict(state, now: now, lead: Self.suspensionLead) == .canServe else { return }
         let resumed = await releasePausedAgents(provider)
         if resumed > 0 {
             pendingResetRecovery[provider] = nil

@@ -62,7 +62,7 @@ extension AppState {
         if let until = routeTargetRefusedUntil[target.id], until > now { return nil }
         guard let account = accounts.first(where: { $0.provider == target.provider && $0.isActive }) else { return nil }
         let planner = FailoverPlanner(settings: plannerSettings(target.provider))
-        guard planner.tier(quotaState(for: account, now: now), now: now) <= .usable else { return nil }
+        guard planner.servingVerdict(quotaState(for: account, now: now), now: now, lead: 0) == .canServe else { return nil }
         let verdict = routeCapacity(target, account: account, for: provider, now: now)
         if routeTargetVerdicts[target.id] != verdict { routeTargetVerdicts[target.id] = verdict }
         return verdict.serves ? account : nil
@@ -106,23 +106,26 @@ extension AppState {
             return await currentClaudeToken(account, minimumLifetime: minimumLifetime)
         case .kimi:
             guard let location = account.credentialLocation else { return nil }
-            return try? await kimiService.freshAccessToken(location: location, isActive: account.isActive, minimumLifetime: minimumLifetime)
+            return try? await kimiService.freshAccessToken(location: location, isActive: readsLiveCredential(account),
+                                                          minimumLifetime: minimumLifetime)
         case .codex, .gemini:
             return nil
         }
     }
 
     /// The access token `account` holds now, without renewing it, for
-    /// recognising which account a session's credential belongs to.
+    /// recognising which account a session's credential belongs to: the
+    /// live one only when `readsLiveCredential`.
     func currentAccessToken(_ account: Account) -> String? {
+        let readsLive = readsLiveCredential(account)
         switch account.provider {
         case .claudeCode:
-            let json = account.isActive
+            let json = readsLive
                 ? keychain.readClaudeToken()
                 : keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
             return json.flatMap(ClaudeService.extractAccessToken(from:))
         case .codex:
-            let homes = [account.isActive ? (account.provider.configDirectory as NSString).expandingTildeInPath : nil,
+            let homes = [readsLive ? (account.provider.configDirectory as NSString).expandingTildeInPath : nil,
                          account.credentialLocation]
             return homes.compactMap { $0 }.lazy.compactMap(CodexService.accessToken(codexHome:)).first
         case .kimi, .gemini:
@@ -373,7 +376,7 @@ extension AppState {
             let planner = FailoverPlanner(settings: plannerSettings(provider))
             let anotherAccountServes = accounts.contains { account in
                 account.provider == provider && !account.isActive && !policy.excludedAccountIDs.contains(account.id)
-                    && planner.tier(quotaState(for: account), now: Date()) <= .usable
+                    && planner.servingVerdict(quotaState(for: account), now: Date(), lead: 0) == .canServe
             }
             state.passthroughRoutes[key] = PassthroughRoute(
                 backend: target.backend(model: policy.routeModel, maxContextTokens: policy.routeMaxContextTokens),
@@ -418,7 +421,8 @@ extension AppState {
         for account in [active] + others {
             if account.id != active.id {
                 let state = quotaState(for: account, now: now)
-                guard planner.tier(state, now: now) <= .usable, planner.canSwitchWithoutReading(state, now: now) else { continue }
+                guard planner.servingVerdict(state, now: now, lead: 0) == .canServe,
+                      planner.canSwitchWithoutReading(state, now: now) else { continue }
             }
             let name = Self.poolTokenFile(account)
             if forRouter {
@@ -593,14 +597,23 @@ extension AppState {
     }
 
     /// The provider's running sessions for `SessionPacer`: paused ones are
-    /// left out, as they use nothing, and resumed ones count on the account
-    /// they were placed on.
+    /// left out, as they use nothing, resumed ones count on the account
+    /// they were placed on, and the others on the account serving them
+    /// (`SessionAttribution`).
     func pacerSessions(_ provider: AIProviderType, now: Date) -> [SessionPacer.Session] {
         let held = heldSessions(provider)
         let placed = pendingPlacements(provider)
+        let attribution = sessionAttribution(provider, now: now)
+        let processes = sessionProcesses(provider)
+        // `sessionRates` holds every provider's sessions; only this
+        // provider's are attributed among its accounts.
+        let own = Set(accounts.filter { $0.provider == provider }.map(\.id))
         return sessionRates.entries.compactMap { id, entry in
             guard !held.contains(id) else { return nil }
-            return SessionPacer.Session(id: id, account: placed[id] ?? entry.account,
+            let serving = own.contains(entry.account)
+                ? attribution.decide(session: id, process: processes[id])?.account ?? entry.account
+                : entry.account
+            return SessionPacer.Session(id: id, account: placed[id] ?? serving,
                                         tokensPerHour: sessionRates.tokensPerHour(id, now: now),
                                         contextTokens: entry.contextTokens, lastSeen: entry.lastSeen, cacheLifetime: entry.cacheLifetime,
                                         lastTurnStart: entry.lastTurnStart, model: sessionModel(id, now: now))
@@ -629,14 +642,14 @@ extension AppState {
     }
 
     /// The account's Claude Code credential JSON, valid for at least
-    /// `minimumLifetime`: the live Keychain copy for the active account,
+    /// `minimumLifetime`: the live Keychain copy when `readsLiveCredential`,
     /// which needs only a minute, and the stored copy, renewed here when
-    /// needed, for the others. Claude Code renews the live copy itself, but
+    /// needed, otherwise. Claude Code renews the live copy itself, but
     /// only from a session that reads it; while session slots hold its
     /// access token it is renewed here once it has less than
     /// `liveCredentialSlotLifetime` left, since a slot's session cannot.
     func claudeCredential(_ account: Account, minimumLifetime: TimeInterval) async -> String? {
-        if account.isActive, liveCredentialOwner(.claudeCode).map({ $0 == account.id }) ?? true {
+        if readsLiveCredential(account) {
             guard let json = keychain.readClaudeToken(), let token = Self.claudeAccessToken(json) else { return nil }
             if Self.liveRenewalIsDue(expiry: token.1, slotsHoldIt: slotCredentialAccounts.contains(account.id), now: Date()),
                let renewed = await renewLiveClaudeCredential(account, current: json) {
@@ -858,7 +871,7 @@ extension AppState {
                 }
             }
         }
-        let cutoff = now.addingTimeInterval(-10 * 60)
+        let cutoff = now.addingTimeInterval(-SessionAttribution.routerWindow)
         routedSessionSeen = routedSessionSeen.filter { $0.value.at > cutoff }
         let demandCutoff = now.addingTimeInterval(-RouteCapacity.demandLookback)
         recentRouterRequests.removeAll { $0.at < demandCutoff }
