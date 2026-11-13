@@ -72,7 +72,7 @@ final class KeychainService: Sendable {
     private let claudeAccount: String
     private let backupsFilePath: String
     private let legacyBackupsFilePath: String
-    private let claudeJsonPath: String
+    private let identityFile: ClaudeIdentityFile
 
     private init() {
         self.claudeAccount = NSUserName()
@@ -81,7 +81,7 @@ final class KeychainService: Sendable {
         let dir = home + "/.accountdock"
         self.backupsFilePath = dir + "/backups.json"
         self.legacyBackupsFilePath = home + "/.ccswitcher/backups.json"
-        self.claudeJsonPath = home + "/.claude.json"
+        self.identityFile = ClaudeIdentityFile(url: URL(fileURLWithPath: home + "/.claude.json"))
 
         // Ensure directory exists
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -129,11 +129,8 @@ final class KeychainService: Sendable {
     // MARK: - ~/.claude.json oauthAccount Operations
 
     func readOAuthAccount() -> [String: AnyCodable]? {
-        guard let data = FileManager.default.contents(atPath: claudeJsonPath),
-              let json = try? JSONDecoder().decode([String: AnyCodable].self, from: data),
-              let oauthEntry = json["oauthAccount"],
-              let dict = oauthEntry.value as? [String: AnyCodable] else {
-            log.error("[readOAuthAccount] Failed to read oauthAccount from \(claudeJsonPath)")
+        guard let dict = identityFile.readOAuthAccount() else {
+            log.error("[readOAuthAccount] Failed to read oauthAccount from \(identityFile.url.path)")
             return nil
         }
         let email = (dict["emailAddress"]?.value as? String) ?? "?"
@@ -142,19 +139,8 @@ final class KeychainService: Sendable {
     }
 
     func writeOAuthAccount(_ oauthAccount: [String: AnyCodable]) -> Bool {
-        guard let data = FileManager.default.contents(atPath: claudeJsonPath),
-              var json = try? JSONDecoder().decode([String: AnyCodable].self, from: data) else {
-            log.error("[writeOAuthAccount] Failed to read \(claudeJsonPath)")
-            return false
-        }
-
-        json["oauthAccount"] = AnyCodable(oauthAccount)
-
         do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let newData = try encoder.encode(json)
-            try newData.write(to: URL(fileURLWithPath: claudeJsonPath), options: .atomic)
+            try identityFile.writeOAuthAccount(oauthAccount)
             let email = (oauthAccount["emailAddress"]?.value as? String) ?? "?"
             log.info("[writeOAuthAccount] Written: email=\(email)")
             return true
