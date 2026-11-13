@@ -100,51 +100,28 @@ final class KeychainService: Sendable {
 
     // MARK: - Claude Code Token Operations (keychain via `security` CLI)
 
+    /// The CLI's live credential item, through the same `security` wrapper
+    /// as the saved accounts.
+    private var claudeSlot: SecurityToolKeychain { SecurityToolKeychain(service: claudeService) }
+
     func readClaudeToken() -> String? {
-        let token = runSecurity(args: [
-            "find-generic-password",
-            "-s", claudeService,
-            "-a", claudeAccount,
-            "-w"
-        ])
-        
-        if let token {
-            // Clean up possible trailing newlines from security CLI output
-            let sanitized = token.trimmingCharacters(in: .whitespacesAndNewlines)
-            log.info("[readClaudeToken] Found via security CLI, length=\(sanitized.count)")
-            return sanitized
-        } else {
+        guard let token = claudeSlot.read(account: claudeAccount)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
             log.error("[readClaudeToken] No token found!")
             return nil
         }
+        log.info("[readClaudeToken] Found via security CLI, length=\(token.count)")
+        return token
     }
 
     /// Replaces the credential in place with `-U`, so Claude Code sessions
     /// never observe a moment without one, and confirms the write by reading
-    /// it back.
-    ///
-    /// The command is sent to `security -i` on standard input, because
-    /// process arguments are visible to every process on the Mac.
-    /// `security -i` refuses input lines over 4,096 bytes; a longer
-    /// credential is passed as an argument instead.
+    /// it back. The value travels on the standard input of `security -i`
+    /// only: a credential too long for it is refused, never passed as a
+    /// process argument, which every process on the Mac can read.
     func writeClaudeToken(_ token: String) -> Bool {
-        func quoted(_ value: String) -> String {
-            "\"" + value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
-        }
-        let expected = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        let command = "add-generic-password -U -s \(quoted(claudeService)) -a \(quoted(claudeAccount)) -w \(quoted(token))\n"
-        if command.utf8.count < 4_000, runSecurityInteractive(command), readClaudeToken() == expected {
-            log.info("[writeClaudeToken] Result: true")
-            return true
-        }
-        let ran = runSecurityStatus(args: [
-            "add-generic-password",
-            "-U",
-            "-s", claudeService,
-            "-a", claudeAccount,
-            "-w", token
-        ])
-        let written = ran && readClaudeToken() == expected
+        let value = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let written = claudeSlot.apply(writes: [(account: claudeAccount, value: value)])
         log.info("[writeClaudeToken] Result: \(written)")
         return written
     }
@@ -446,73 +423,5 @@ final class KeychainService: Sendable {
             log.error("[saveBackupStore] Failed to save \(store.count) entries")
         }
         return success
-    }
-
-    // MARK: - `security` CLI (only for Claude's keychain entry)
-
-    private func runSecurity(args: [String]) -> String? {
-        let process = Process()
-        let pipe = Pipe()
-
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = args
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
-                log.debug("[runSecurity] Exit \(process.terminationStatus) for: security \(args.prefix(3).joined(separator: " "))...")
-                return nil
-            }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return output?.isEmpty == true ? nil : output
-        } catch {
-            log.error("[runSecurity] Launch failed: \(error.localizedDescription)")
-            return nil
-        }
-    }
-
-    private func runSecurityInteractive(_ command: String) -> Bool {
-        let process = Process()
-        let input = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["-i"]
-        process.standardInput = input
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            input.fileHandleForWriting.write(Data(command.utf8))
-            try input.fileHandleForWriting.close()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            log.error("[runSecurityInteractive] Launch failed: \(error.localizedDescription)")
-            return false
-        }
-    }
-
-    private func runSecurityStatus(args: [String]) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = args
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let ok = process.terminationStatus == 0
-            if !ok {
-                log.debug("[runSecurityStatus] Exit \(process.terminationStatus) for: security \(args.prefix(3).joined(separator: " "))...")
-            }
-            return ok
-        } catch {
-            log.error("[runSecurityStatus] Launch failed: \(error.localizedDescription)")
-            return false
-        }
     }
 }

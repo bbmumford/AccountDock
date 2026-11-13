@@ -488,17 +488,15 @@ final class ClaudeService: @unchecked Sendable {
         } catch {
             throw UsageError.network(error.localizedDescription)
         }
-        // Only a rejection of the grant means the stored credential is dead;
-        // throttling and server errors leave it usable later.
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode),
-           http.statusCode == 429 || http.statusCode >= 500 {
-            throw UsageError.network("token endpoint returned \(http.statusCode)")
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200...299).contains(status) else {
+            if Self.refreshRejectsGrant(status: status, body: responseData) { throw UsageError.expired }
+            throw UsageError.network("token endpoint returned \(status)")
         }
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
-              let refreshed = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+        guard let refreshed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
               let accessToken = refreshed["access_token"] as? String,
               !accessToken.isEmpty else {
-            throw UsageError.expired
+            throw UsageError.network("token endpoint reply could not be read")
         }
         oauth["accessToken"] = accessToken
         if let rotated = refreshed["refresh_token"] as? String, !rotated.isEmpty {
@@ -513,6 +511,17 @@ final class ClaudeService: @unchecked Sendable {
         let encoded = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
         guard let result = String(data: encoded, encoding: .utf8) else { throw UsageError.decode("token encoding") }
         return result
+    }
+
+    /// Whether a failed token-endpoint reply means the refresh token itself
+    /// is dead: a 401, or a 400 whose error is `invalid_grant`. Throttling,
+    /// server errors, other refusals and unreadable replies leave the stored
+    /// credential usable later, so `ClaudeCredentialModule` reports them as
+    /// unavailable rather than rejected and the account keeps its sign-in.
+    static func refreshRejectsGrant(status: Int, body: Data) -> Bool {
+        if status == 401 { return true }
+        guard status == 400, let reply = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return false }
+        return reply["error"] as? String == "invalid_grant"
     }
 
     /// Starts a fresh quota countdown without creating resumable history.

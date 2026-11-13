@@ -851,7 +851,9 @@ final class AppState: ObservableObject {
         guard let index = accounts.firstIndex(where: { $0.id == account.id }) else { return }
         let trimmed = label?.trimmingCharacters(in: .whitespaces)
         accounts[index].customLabel = (trimmed?.isEmpty == true) ? nil : trimmed
-        if accounts[index].isActive {
+        // `activeAccount` is the active Claude Code account only; every
+        // provider has an active account of its own.
+        if accounts[index].id == activeAccount?.id {
             activeAccount = accounts[index]
         }
         saveAccounts()
