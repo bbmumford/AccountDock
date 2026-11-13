@@ -113,8 +113,6 @@ struct FailoverSettingsView: View {
                 routingControls(provider, policy: policy)
             } else if provider.capabilities.requestHold?.bridgedProtocol != nil, !RouteTarget.available(for: provider).isEmpty {
                 bridgeControls(provider, policy: policy)
-            } else if provider.capabilities.pauseGate != nil {
-                unroutedNote(provider)
             }
 
             Toggle("Intelligent long-window balancing", isOn: binding(provider, \.intelligentBalancingEnabled))
@@ -288,21 +286,6 @@ struct FailoverSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(.leading, 20)
-        }
-    }
-
-    /// Why `provider`'s requests are not served elsewhere when its accounts
-    /// are out: the router speaks another CLI's protocol.
-    @ViewBuilder
-    private func unroutedNote(_ provider: AIProviderType) -> some View {
-        let destinations = RouteTarget.all.filter { $0.provider != provider && !$0.routableModels.isEmpty }
-        if !destinations.isEmpty {
-            LabeledContent("When every account is exhausted") {
-                Text(provider.capabilities.pauseGate != nil && store.policy(for: provider).suspendAgentsWhenExhausted
-                     ? "Pause sessions" : "Do nothing")
-                    .foregroundStyle(.secondary)
-            }
-            .help("Serving \(provider.rawValue)'s requests from \(destinations.map(\.displayName).joined(separator: " or ")) needs AccountDock's router, which speaks only \(AIProviderType.routedProvider?.rawValue ?? "another CLI")'s request format.")
         }
     }
 

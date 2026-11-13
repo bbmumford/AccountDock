@@ -11,6 +11,12 @@ enum ProviderVisibility {
         Set(stored.split(separator: ",").compactMap { AIProviderType(rawValue: String($0)) })
     }
 
+    /// The hidden providers as stored now, for code without an
+    /// `@AppStorage` binding: the menu bar and the widget projection.
+    static func storedHidden(_ defaults: UserDefaults = .standard) -> Set<AIProviderType> {
+        hidden(in: defaults.string(forKey: storageKey) ?? "")
+    }
+
     static func encode(_ hidden: Set<AIProviderType>) -> String {
         hidden.map(\.rawValue).sorted().joined(separator: ",")
     }

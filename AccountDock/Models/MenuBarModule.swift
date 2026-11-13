@@ -1,8 +1,7 @@
 import Foundation
 
 /// One configurable module rendered in the macOS menu bar: a metric of one
-/// provider's active account, the total daily cost, or a module of an
-/// earlier layout that `MenuBarModuleStore` retires.
+/// provider's active account, or the total daily cost.
 ///
 /// Display style matches iStats / Stats: two-line stacked module with a short
 /// uppercase label on top and either a bar (for percentages) or a value text
@@ -10,17 +9,20 @@ import Foundation
 ///
 /// Stored by `rawValue`: the provider's `storageKey` followed by the metric,
 /// such as `claudeSession` or `kimiMonthlyPercent`, so every provider,
-/// including one added later, offers the same metrics.
+/// including one added later, offers the metrics its capabilities allow.
 struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendable {
     /// What a provider module shows of the active account's windows.
     enum Metric: CaseIterable, Sendable {
         case sessionBar, longBar, sessionPercent, longPercent, percentages, sessionReset, longReset
+        /// The tightest weekly limit scoped to one model, labelled with the
+        /// model's name; offered where `reportsModelWeeklyLimits`.
+        case modelLimit
 
         var window: Window? {
             switch self {
             case .sessionBar, .sessionPercent, .sessionReset: .session
             case .longBar, .longPercent, .longReset: .long
-            case .percentages: nil
+            case .percentages, .modelLimit: nil
             }
         }
 
@@ -35,22 +37,16 @@ struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendabl
             case .percentages: "Percentages"
             case .sessionReset: "SessionReset"
             case .longReset: "\(long)Reset"
+            case .modelLimit: "ModelWeekly"
             }
         }
     }
 
     enum Window: Sendable { case session, long }
 
-    /// Modules of earlier layouts, read from stored preferences.
-    enum Legacy: String, CaseIterable, Sendable {
-        case claudeUsage, codexUsage, account
-        case sessionBar, sessionBarPlain, weeklyBar, weeklyBarPlain, sessionReset, weeklyReset
-    }
-
     enum Kind: Hashable, Sendable {
         case provider(AIProviderType, Metric)
         case dailyCost
-        case legacy(Legacy)
     }
 
     let kind: Kind
@@ -65,7 +61,6 @@ struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendabl
 
     init?(rawValue: String) {
         if rawValue == "dailyCost" { self.init(.dailyCost); return }
-        if let legacy = Legacy(rawValue: rawValue) { self.init(.legacy(legacy)); return }
         for provider in AIProviderType.allCases {
             let capabilities = provider.capabilities
             guard rawValue.hasPrefix(capabilities.storageKey) else { continue }
@@ -83,7 +78,6 @@ struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendabl
         case .provider(let provider, let metric):
             provider.capabilities.storageKey + metric.storageSuffix(long: provider.capabilities.longWindowStorageName)
         case .dailyCost: "dailyCost"
-        case .legacy(let legacy): legacy.rawValue
         }
     }
 
@@ -113,13 +107,16 @@ struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendabl
     }
 
     /// The modules offered in Settings, in the default order: bars and
-    /// percentages provider by provider, then reset countdowns window by
-    /// window, then the total daily cost. A provider offers the metrics of
-    /// the windows it reports.
+    /// percentages provider by provider, then model limits, then reset
+    /// countdowns window by window, then the total daily cost. A provider
+    /// offers the metrics of the windows it reports, and the model limit
+    /// where `reportsModelWeeklyLimits`.
     static var allCases: [MenuBarModule] {
         let providers = AIProviderType.implementedProviders
         func offered(_ provider: AIProviderType, _ metric: Metric) -> Bool {
-            metric.window != .session || provider.capabilities.supportsSessionQuota
+            let capabilities = provider.capabilities
+            if metric == .modelLimit { return capabilities.reportsModelWeeklyLimits }
+            return metric.window != .session || capabilities.supportsSessionQuota
         }
         func block(_ metrics: [Metric]) -> [MenuBarModule] {
             providers.flatMap { provider in metrics.filter { offered(provider, $0) }.map { Self.provider(provider, $0) } }
@@ -127,7 +124,8 @@ struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendabl
         let resets = [Metric.longReset, .sessionReset].flatMap { metric in
             providers.filter { offered($0, metric) }.map { Self.provider($0, metric) }
         }
-        return block([.sessionBar, .longBar]) + block([.sessionPercent, .longPercent, .percentages]) + resets + [.dailyCost]
+        return block([.sessionBar, .longBar]) + block([.sessionPercent, .longPercent, .percentages])
+            + block([.modelLimit]) + resets + [.dailyCost]
     }
 
     /// Short uppercase label shown on the top line of the module.
@@ -141,18 +139,9 @@ struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendabl
             case .percentages: return "%"
             case .sessionReset: return capabilities.sessionShortLabel + "↻"
             case .longReset: return capabilities.longShortLabel + "↻"
+            case .modelLimit: return "MODEL"
             }
         case .dailyCost: return "TOTAL"
-        case .legacy(let legacy):
-            switch legacy {
-            case .claudeUsage: return "CLAUDE"
-            case .codexUsage: return "CODEX"
-            case .account: return "@"
-            case .sessionBar, .sessionBarPlain: return "5H"
-            case .weeklyBar, .weeklyBarPlain: return "7D"
-            case .sessionReset: return "5H↻"
-            case .weeklyReset: return "7D↻"
-            }
         }
     }
 
@@ -172,21 +161,10 @@ struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendabl
             case .percentages: return "\(name) — session and \(long) percentages"
             case .sessionReset: return "\(name) — session reset"
             case .longReset: return "\(name) — \(long) reset"
+            case .modelLimit: return "\(name) — model weekly limit"
             }
         case .dailyCost:
             return String(localized: "Total daily cost — all accounts and providers", bundle: L10n.bundle)
-        case .legacy(let legacy):
-            switch legacy {
-            case .claudeUsage: return String(localized: "Claude — session and weekly usage", bundle: L10n.bundle)
-            case .codexUsage: return String(localized: "Codex — session and weekly usage", bundle: L10n.bundle)
-            case .account: return String(localized: "Account name", bundle: L10n.bundle)
-            case .sessionBar: return String(localized: "Session — usage vs time (5h)", bundle: L10n.bundle)
-            case .sessionBarPlain: return String(localized: "Session usage (5h)", bundle: L10n.bundle)
-            case .weeklyBar: return String(localized: "Weekly — usage vs time (7d)", bundle: L10n.bundle)
-            case .weeklyBarPlain: return String(localized: "Weekly usage (7d)", bundle: L10n.bundle)
-            case .sessionReset: return String(localized: "Session reset countdown", bundle: L10n.bundle)
-            case .weeklyReset: return String(localized: "Weekly reset countdown", bundle: L10n.bundle)
-            }
         }
     }
 }
@@ -199,6 +177,7 @@ extension MenuBarModule {
     static let claudePercentages = provider(.claudeCode, .percentages)
     static let claudeSessionReset = provider(.claudeCode, .sessionReset)
     static let claudeWeeklyReset = provider(.claudeCode, .longReset)
+    static let claudeModelWeekly = provider(.claudeCode, .modelLimit)
     static let codexSession = provider(.codex, .sessionBar)
     static let codexWeekly = provider(.codex, .longBar)
     static let codexSessionPercent = provider(.codex, .sessionPercent)
@@ -221,56 +200,80 @@ enum MenuBarModuleStore {
     static let settingsNormalizedKey = "menuBarSettingsNormalized"
     static let combinedPercentagesNormalizedKey = "menuBarCombinedPercentagesNormalized"
     static let combinedPercentagesCorrectionKey = "menuBarCombinedPercentagesCorrection"
-    static let legacyShowAccountNameKey = "showAccountName"
+
+    /// Stored names of reset countdowns that name no provider. They decode
+    /// to no module; `normalizedModules` replaces them with the provider
+    /// countdowns of the same windows while `settingsNormalizedKey` is unset.
+    private static let unscopedSessionReset = "sessionReset"
+    private static let unscopedWeeklyReset = "weeklyReset"
+
+    /// The modules shown when the stored list holds none.
+    static let defaultModules: [MenuBarModule] = [.claudeSession, .claudeWeekly, .codexWeekly]
 
     /// Decode resiliently: a single unknown/renamed rawValue (e.g. from a
     /// newer build or hand-edited prefs) must NOT wipe the whole list. We
     /// decode as `[String]` and keep the values that map to a known case.
     static func decode(_ data: Data) -> [MenuBarModule] {
-        guard let raw = try? JSONDecoder().decode([String].self, from: data) else { return [] }
-        return raw.compactMap(MenuBarModule.init(rawValue:))
+        storedNames(data).compactMap(MenuBarModule.init(rawValue:))
     }
 
     static func encode(_ modules: [MenuBarModule]) -> Data {
         (try? JSONEncoder().encode(modules)) ?? Data()
     }
 
-    /// Normalizes preferences written by earlier local builds while preserving
-    /// the user's ordering and enabled modules.
+    private static func storedNames(_ data: Data) -> [String] {
+        (try? JSONDecoder().decode([String].self, from: data)) ?? []
+    }
+
+    /// Rewrites the stored module list as `normalizedModules` reads it,
+    /// before `MenuBarConfig` loads it.
     static func normalizeSettingsIfNeeded() {
         let defaults = UserDefaults.standard
-        var current = decode(defaults.data(forKey: storageKey) ?? Data())
-        if current.isEmpty {
-            current = [.claudeSession, .claudeWeekly, .codexWeekly]
-        }
-
-        if !defaults.bool(forKey: settingsNormalizedKey) {
-            if current.contains(MenuBarModule(.legacy(.sessionReset))) {
-                current.append(.claudeSessionReset)
-            }
-            if current.contains(MenuBarModule(.legacy(.weeklyReset))) {
-                current.append(contentsOf: [.claudeWeeklyReset, .codexWeeklyReset])
-            }
-        }
-
-        let obsolete = Set(MenuBarModule.Legacy.allCases.map { MenuBarModule(.legacy($0)) })
-        var seen = Set<MenuBarModule>()
-        current = current.filter { !obsolete.contains($0) && seen.insert($0).inserted }
-
-        // One local build mistakenly replaced enabled individual percentage
-        // modules with the combined module. Restore those choices once; the
-        // three combined indicators remain available as additional options.
-        if defaults.bool(forKey: combinedPercentagesNormalizedKey),
-           !defaults.bool(forKey: combinedPercentagesCorrectionKey) {
-            let originals = Dictionary(uniqueKeysWithValues: AIProviderType.implementedProviders.map {
-                (MenuBarModule.provider($0, .percentages), [MenuBarModule.provider($0, .sessionPercent), .provider($0, .longPercent)])
-            })
-            current = current.flatMap { originals[$0] ?? [$0] }
-            var restored = Set<MenuBarModule>()
-            current = current.filter { restored.insert($0).inserted }
+        let splitCombined = defaults.bool(forKey: combinedPercentagesNormalizedKey)
+            && !defaults.bool(forKey: combinedPercentagesCorrectionKey)
+        let current = normalizedModules(
+            stored: storedNames(defaults.data(forKey: storageKey) ?? Data()),
+            replacingUnscopedResets: !defaults.bool(forKey: settingsNormalizedKey),
+            splittingCombinedPercentages: splitCombined
+        )
+        if splitCombined {
             defaults.set(true, forKey: combinedPercentagesCorrectionKey)
         }
         defaults.set(encode(current), forKey: storageKey)
         defaults.set(true, forKey: settingsNormalizedKey)
+    }
+
+    /// The modules a stored name list stands for: its known modules once
+    /// each, in order, or `defaultModules` when it has none.
+    /// `replacingUnscopedResets` appends the provider countdowns an unscoped
+    /// reset countdown stands for. `splittingCombinedPercentages` restores
+    /// separate session and long-window percentages where the list holds a
+    /// combined percentages module in their place, as
+    /// `combinedPercentagesNormalizedKey` marks.
+    static func normalizedModules(
+        stored: [String],
+        replacingUnscopedResets: Bool,
+        splittingCombinedPercentages: Bool
+    ) -> [MenuBarModule] {
+        var current = stored.compactMap(MenuBarModule.init(rawValue:))
+        let sessionReset = replacingUnscopedResets && stored.contains(unscopedSessionReset)
+        let weeklyReset = replacingUnscopedResets && stored.contains(unscopedWeeklyReset)
+        if current.isEmpty && !sessionReset && !weeklyReset {
+            current = defaultModules
+        }
+        if sessionReset {
+            current.append(.claudeSessionReset)
+        }
+        if weeklyReset {
+            current.append(contentsOf: [.claudeWeeklyReset, .codexWeeklyReset])
+        }
+        if splittingCombinedPercentages {
+            let separate = Dictionary(uniqueKeysWithValues: AIProviderType.implementedProviders.map {
+                (MenuBarModule.provider($0, .percentages), [MenuBarModule.provider($0, .sessionPercent), .provider($0, .longPercent)])
+            })
+            current = current.flatMap { separate[$0] ?? [$0] }
+        }
+        var seen = Set<MenuBarModule>()
+        return current.filter { seen.insert($0).inserted }
     }
 }

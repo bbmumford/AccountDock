@@ -41,7 +41,7 @@ releasing are in [BUILD_GUIDE.md](BUILD_GUIDE.md).
 | App | `AccountDock/` | Menu-bar UI, account management, usage and cost readers, failover, hooks, router control |
 | Router | `AccountDockRouter/` | Local HTTP proxy for Claude Code; serves requests from a pool of Claude accounts or a route target |
 | Router core | `AccountDockRouter/Core/` | Pure routing logic and shared types, compiled into both the router and the app |
-| Widget | `AccountDockWidget/` | WidgetKit extension fed by the projection in `Shared/` |
+| Widget | `AccountDockWidget/` | WidgetKit extension that renders `Shared/WidgetData.swift`: labels, icons and windows the app's `WidgetProjection` writes from the providers' capabilities |
 | Hook scripts | `AccountDock/Resources/`, generated at install | Session lifecycle records, the pause gate and Claude Code status-line telemetry |
 | Tests | `AccountDockTests/` | Unit tests for planning, routing, parsing, credentials and hooks |
 
@@ -58,7 +58,7 @@ feature its capabilities declare, and its settings appear with it:
 
 | Capability | Drives |
 | --- | --- |
-| Quota windows, labels, `longWindowReportsLength` | Usage cards, menu-bar modules (one set of metrics per provider), failover thresholds |
+| Quota windows, labels, `longWindowReportsLength` | Usage cards, menu-bar modules (one set of metrics per provider), the widget, failover thresholds |
 | `requiresPaidPlanForWorkloads`, `unavailableLabel` | Whether a plan can carry work |
 | `usageRequestBudget` | The provider's `UsageRequestBudget` |
 | `supportsWindowWarming` | Window warming and its setting |
@@ -69,6 +69,7 @@ feature its capabilities declare, and its settings appear with it:
 | `requestRouter` | Which provider's CLI the router serves (`AIProviderType.routedProvider`) and the routing settings |
 | `routeTarget` | The service the provider offers as a route target |
 | `supportsExtraUsage` | The extra-usage setting and card row |
+| `reportsModelWeeklyLimits` | The menu-bar module for the active account's tightest model-scoped weekly limit |
 | `activityMetrics`, `pricingPrefixes`, `pricingAliases`, `shortBadge` | Today's activity, cost and their labels |
 | `storageKey`, `longWindowStorageName`, short labels | Stored menu-bar module names (`claudeSession`, `kimiMonthlyReset`) |
 
@@ -101,7 +102,11 @@ Some data is the same for every provider by construction:
 - **Cost and activity.** `CostParser.ProviderCostHistory` holds each
   provider's daily cost and today's turns, models, lines, tokens, sessions and
   active time. Claude Code's is built from its per-request cost summary; the
-  others from their per-day, per-model aggregates.
+  others from their per-day, per-model aggregates. `TodaySummary` sums today's
+  figures over the providers the user has not hidden, each metric over the
+  providers whose `activityMetrics` report it; the usage dashboard, the cost
+  tab, the menu bar and the widget all read it and write costs and tokens with
+  `UsageFormat`.
 
 | Provider | Service | Credentials | Windows |
 | --- | --- | --- | --- |

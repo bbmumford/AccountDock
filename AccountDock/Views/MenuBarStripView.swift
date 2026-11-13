@@ -23,7 +23,6 @@ struct MenuBarStripView: View {
     let appState: AppState
     let config: MenuBarConfig
     let onWidth: (CGFloat) -> Void
-    @AppStorage("showFullEmail") private var showFullEmail = false
     @AppStorage("accentPalette") private var accentPalette = "softWhite"
     @State private var tick = Date()
     // Polled refresh. ObservableObject change delivery is unreliable for a
@@ -44,7 +43,6 @@ struct MenuBarStripView: View {
                 MenuBarModuleView(
                     module: module,
                     appState: appState,
-                    showFullEmail: showFullEmail,
                     tick: tick
                 )
             }
@@ -98,7 +96,6 @@ struct MenuBarStripView: View {
                 MenuBarModuleView(
                     module: module,
                     appState: appState,
-                    showFullEmail: showFullEmail,
                     tick: tick
                 )
             }
