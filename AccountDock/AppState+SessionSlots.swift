@@ -278,7 +278,12 @@ extension AppState {
             var target = slot.account.flatMap { cannotServe($0) ? nil : $0 }
                 ?? (modelSpent ? byWeight.first { !cannotServe($0) } : fallback)
             var balanced = false
-            if let session, let destination = slotSessionMoves[session.sessionID], destination != target,
+            var requested = false
+            if let session, let destination = requestedSlotMoves.removeValue(forKey: session.sessionID) {
+                target = destination
+                requested = true
+            }
+            if !requested, let session, let destination = slotSessionMoves[session.sessionID], destination != target,
                pooled.contains(destination), !session.isWorking, model == nil || !cannotServe(destination),
                slotDirectoryMovedAt[path].map({ now.timeIntervalSince($0) >= Self.balanceMoveInterval }) ?? true {
                 target = destination
@@ -301,7 +306,7 @@ extension AppState {
             let to = accounts.first { $0.id == target }.map { messageName($0) } ?? "another account"
             let place = session?.workingDirectory.map { " in " + ($0 as NSString).abbreviatingWithTildeInPath } ?? ""
             slotDirectoryMovedAt[path] = now
-            let why = modelSpent
+            let why = requested ? "a request asked for it" : modelSpent
                 ? "\(from) has no \(model.map { CostParser.shortModelName($0) } ?? "model") allowance left; its other sessions stay"
                 : "\(from) can no longer serve it"
             failoverEvents.record(provider, balanced

@@ -29,3 +29,4 @@ AccountDock.xcodeproj/
 # Unused local legacy/duplicate artwork; the asset catalogue is authoritative.
 AccountDock/Resources/AppIcon.png
 AccountDock/Resources/MenuBarIcon.png
+.claude/worktrees/

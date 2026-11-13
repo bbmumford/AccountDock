@@ -53,9 +53,9 @@ private final class LoginBrowserLauncher: @unchecked Sendable {
         opened = true
         lock.unlock()
         DispatchQueue.main.async { [log] in
-            let accepted = NSWorkspace.shared.open(url)
+            let accepted = LoginBrowser.open(url)
             if accepted {
-                log.info("Opened provider authorization URL in the default browser")
+                log.info("Opened provider authorization URL")
             } else {
                 log.error("macOS rejected the provider authorization URL")
             }
@@ -124,7 +124,6 @@ final class LoginProcessRunner: @unchecked Sendable {
 
                 process.executableURL = URL(fileURLWithPath: executable)
                 process.arguments = arguments
-                process.environment = environment
                 process.standardOutput = pipe
                 process.standardError = pipe
                 pipe.fileHandleForReading.readabilityHandler = { handle in
@@ -147,6 +146,9 @@ final class LoginProcessRunner: @unchecked Sendable {
                 self.cancelledProcess = nil
                 self.lock.unlock()
 
+                // After the process is registered, so a cancel made while the
+                // last-used browser is looked up still stops it.
+                process.environment = LoginBrowser.environment(environment)
                 do {
                     try process.run()
                 } catch {
