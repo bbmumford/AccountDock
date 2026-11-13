@@ -468,16 +468,11 @@ struct UsageDashboardView: View {
             usageRow(
                 label: LocalizedStringKey(provider.capabilities.longWindowLabel(for: weekly)),
                 resetText: weekly.resetLabelString,
-                utilization: weekly.utilization
-            )
-        }
-        // A model with a weekly limit of its own, which `AppState.plannedUsage`
-        // judges that model's sessions by.
-        ForEach(usage.modelWeeklyLimits, id: \.model) { limit in
-            usageRow(
-                label: LocalizedStringKey("\(limit.model) weekly limit"),
-                resetText: UsageWindow(utilization: limit.percent, resetsAt: limit.resetsAt).resetLabelString,
-                utilization: limit.percent
+                utilization: weekly.utilization,
+                inner: usage.modelWeeklyLimits.map { limit in
+                    ModelShare(name: limit.model, percent: limit.percent,
+                               fractionOfBar: (limit.usedPercentOfWeekly ?? limit.percent * limit.allowancePercentOfWeekly / 100) / 100)
+                }
             )
         }
     }
@@ -540,7 +535,17 @@ struct UsageDashboardView: View {
 
     // MARK: - Usage Row
 
-    private func usageRow(label: LocalizedStringKey, resetText: String?, utilization: Double?) -> some View {
+    /// A model's own weekly limit, drawn inside the bar of the whole weekly
+    /// limit: `fractionOfBar` is the part of the whole allowance the model
+    /// has used, and `percent` how much of its own limit that is.
+    struct ModelShare {
+        let name: String
+        let percent: Double
+        let fractionOfBar: Double
+    }
+
+    private func usageRow(label: LocalizedStringKey, resetText: String?, utilization: Double?,
+                          inner: [ModelShare] = []) -> some View {
         let level = UsageLevel(utilization: utilization)
         let color = level.color(normal: .brand)
         return VStack(spacing: 5) {
@@ -548,6 +553,16 @@ struct UsageDashboardView: View {
                 Text(label)
                     .font(.caption)
                     .foregroundStyle(.textSecondary)
+                ForEach(inner, id: \.name) { share in
+                    let shareLevel = UsageLevel(utilization: share.percent)
+                    HStack(spacing: 3) {
+                        Circle().fill(Color.purple).frame(width: 6, height: 6)
+                        Text("\(share.name) \(shareLevel.percentText)")
+                            .font(.caption)
+                            .foregroundStyle(shareLevel.color(normal: .textSecondary))
+                    }
+                    .help("\(share.name) has used \(shareLevel.percentText) of its own weekly limit; the purple part of the bar is its share of the whole weekly allowance.")
+                }
                 Spacer()
                 if let resetText {
                     Text(resetText)
@@ -566,6 +581,13 @@ struct UsageDashboardView: View {
                         RoundedRectangle(cornerRadius: 3)
                             .fill(color)
                             .frame(width: max(0, geo.size.width * level.fraction), height: 7)
+
+                        // Each model's part of what is used, from the leading edge.
+                        ForEach(inner, id: \.name) { share in
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Color.purple)
+                                .frame(width: max(0, geo.size.width * min(level.fraction, max(0, share.fractionOfBar))), height: 7)
+                        }
                     }
                 }
                 .frame(height: 7)
