@@ -42,7 +42,8 @@ enum CodexServiceError: LocalizedError {
     case notLoggedIn
     case invalidCredentials
     case subscriptionUnavailable
-    case rateLimited
+    /// The provider throttled the request, until `retryAt` when it said.
+    case rateLimited(retryAt: Date?)
     case loginFailed(String)
     case unsafeCredentialLocation
     /// The token endpoint refused the refresh token: the account must sign
@@ -51,9 +52,14 @@ enum CodexServiceError: LocalizedError {
     /// A session restart could not prepare the resume of every session it
     /// would stop, so it stopped none.
     case restartUnavailable(String)
+    /// The live credential in `~/.codex` needs renewing while Codex runs,
+    /// which renews it itself.
+    case liveCredentialExpired
 
     var errorDescription: String? {
         switch self {
+        case .liveCredentialExpired:
+            return "The Codex sign-in expired; Codex renews it with its next request."
         case let .restartUnavailable(reason):
             return "Codex sessions were not restarted: \(reason)"
         case .binaryNotFound:
@@ -439,8 +445,33 @@ final class CodexService: @unchecked Sendable {
         return base.appendingPathComponent("AccountDock/managed-codex-homes", isDirectory: true)
     }
 
-    var systemHome: URL {
-        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex", isDirectory: true)
+    /// The Codex home running sessions use, `~/.codex`, whose `auth.json`
+    /// holds the active account's live credential.
+    let systemHome: URL
+    /// Whether a Codex process is running, which renews the live credential
+    /// itself (`getUsageSnapshot`).
+    private let cliIsRunning: @Sendable () async -> Bool
+
+    /// `systemHome` and `cliIsRunning` default to the user's `~/.codex` and
+    /// a process scan; tests pass their own.
+    init(
+        systemHome: URL? = nil,
+        cliIsRunning: @escaping @Sendable () async -> Bool = { await CLIProcessScan.isRunning(.codex) }
+    ) {
+        self.systemHome = systemHome
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex", isDirectory: true)
+        self.cliIsRunning = cliIsRunning
+    }
+
+    /// Whether this reader may renew the credential in `home`. The live one
+    /// in `systemHome` is left to Codex while any Codex process runs: Codex
+    /// reloads `auth.json` before it renews, but takes no lock on it, so a
+    /// renewal here racing its own leaves one of them with a refresh token
+    /// the server has already used, and Codex then asks the user to sign in
+    /// again.
+    private func mayRenewCredential(in home: URL) async -> Bool {
+        guard home.standardizedFileURL.path == systemHome.standardizedFileURL.path else { return true }
+        return !(await cliIsRunning())
     }
 
     func isAvailable() async -> Bool {
@@ -503,6 +534,7 @@ final class CodexService: @unchecked Sendable {
         if Self.credentialsNeedRefresh(auth),
            let refreshToken = tokens["refresh_token"] as? String,
            !refreshToken.isEmpty {
+            guard await mayRenewCredential(in: home) else { throw CodexServiceError.liveCredentialExpired }
             tokens = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
             auth["tokens"] = tokens
             auth["last_refresh"] = ISO8601DateFormatter().string(from: Date())
@@ -515,6 +547,7 @@ final class CodexService: @unchecked Sendable {
             // Subscription changes can revoke a server-side access token well
             // before its signed JWT expiry. Refresh and retry once so an
             // upgrade/downgrade immediately publishes its new tier and windows.
+            guard await mayRenewCredential(in: home) else { throw CodexServiceError.liveCredentialExpired }
             codexLog.info("[usage] Access token rejected before expiry; refreshing and retrying")
             tokens = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
             auth["tokens"] = tokens
@@ -526,7 +559,7 @@ final class CodexService: @unchecked Sendable {
             throw CodexServiceError.subscriptionUnavailable
         }
         if result.statusCode == 429 {
-            throw CodexServiceError.rateLimited
+            throw CodexServiceError.rateLimited(retryAt: result.retryAt)
         }
         guard (200...299).contains(result.statusCode),
               let accessToken = tokens["access_token"] as? String else {
@@ -561,14 +594,15 @@ final class CodexService: @unchecked Sendable {
 
     private func fetchUsageResponse(
         tokens: [String: Any]
-    ) async throws -> (data: Data, statusCode: Int) {
+    ) async throws -> (data: Data, statusCode: Int, retryAt: Date?) {
         try await fetchResponse(Self.usageURL, tokens: tokens)
     }
 
-    /// A GET of one of the account's endpoints with its access token.
+    /// A GET of one of the account's endpoints with its access token, with
+    /// the time a `Retry-After` header names.
     private func fetchResponse(
         _ url: URL, tokens: [String: Any]
-    ) async throws -> (data: Data, statusCode: Int) {
+    ) async throws -> (data: Data, statusCode: Int, retryAt: Date?) {
         guard let accessToken = tokens["access_token"] as? String,
               !accessToken.isEmpty else {
             throw CodexServiceError.invalidCredentials
@@ -585,7 +619,7 @@ final class CodexService: @unchecked Sendable {
         guard let http = response as? HTTPURLResponse else {
             throw CodexServiceError.invalidCredentials
         }
-        return (data, http.statusCode)
+        return (data, http.statusCode, RetryAfter.date(in: http))
     }
 
     static func resolvedLivePlan(
@@ -618,7 +652,7 @@ final class CodexService: @unchecked Sendable {
         // A refused grant is answered with 400 or 401; anything else says
         // nothing about the refresh token.
         if status == 400 || status == 401 { throw CodexServiceError.credentialRejected }
-        if status == 429 { throw CodexServiceError.rateLimited }
+        if status == 429 { throw CodexServiceError.rateLimited(retryAt: RetryAfter.date(in: response)) }
         guard (200...299).contains(status),
               let refreshed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw CodexServiceError.invalidCredentials
