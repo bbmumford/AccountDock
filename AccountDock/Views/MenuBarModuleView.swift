@@ -21,6 +21,8 @@ struct MenuBarModuleView: View {
         switch module.kind {
         case .provider(let provider, .percentages):
             combinedPercentageView(provider: provider)
+        case .provider(let provider, .modelLimit):
+            modelLimitView(provider: provider)
         case .provider(let provider, let metric):
             if let window = metric.window {
                 switch metric {
@@ -63,6 +65,30 @@ struct MenuBarModuleView: View {
         case .session: return usage.fiveHour
         case .long: return usage.sevenDay
         }
+    }
+
+    /// The active account's tightest model-scoped weekly limit: the model's
+    /// name beside its percentage, or a dash when the account has none.
+    private func modelLimitView(provider: AIProviderType) -> some View {
+        _ = tick // a limit whose reset passes drops out
+        let limit = appState.activeAccount(for: provider)
+            .flatMap { appState.accountUsage[$0.id] }?
+            .tightestModelWeeklyLimit()
+        let level = UsageLevel(utilization: limit?.percent)
+        return HStack(spacing: 3) {
+            if let limit {
+                Text(limit.model)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            Text(level.percentText)
+                .font(.system(size: 13.2, weight: .regular).monospacedDigit())
+                .foregroundStyle(level.color(normal: .primary))
+        }
+        .frame(height: 22)
+        .fixedSize()
+        .help(limit.map { "\($0.model) weekly limit: \(level.percentText)" }
+              ?? "The active account has no weekly limit scoped to one model.")
     }
 
     @ViewBuilder

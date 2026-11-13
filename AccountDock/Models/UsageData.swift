@@ -173,6 +173,18 @@ extension UsageAPIResponse {
         }
     }
 
+    /// The model-scoped weekly limit with the most of its own allowance
+    /// used, among those whose reset has not passed at `date`; nil when the
+    /// reading has none. Shown by the menu bar's model-limit module.
+    func tightestModelWeeklyLimit(at date: Date = Date()) -> ModelWeeklyLimit? {
+        modelWeeklyLimits
+            .filter { limit in
+                guard let reset = limit.resetsAt.flatMap(UsageWindow.parseProviderDate) else { return true }
+                return reset > date
+            }
+            .max { $0.percent < $1.percent }
+    }
+
     /// The weekly window as it applies to sessions using `models` together:
     /// the tightest of their windows, and the whole weekly limit when none
     /// of them has a limit of its own.
