@@ -9,17 +9,20 @@ import Foundation
 ///
 /// Stored by `rawValue`: the provider's `storageKey` followed by the metric,
 /// such as `claudeSession` or `kimiMonthlyPercent`, so every provider,
-/// including one added later, offers the same metrics.
+/// including one added later, offers the metrics its capabilities allow.
 struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendable {
     /// What a provider module shows of the active account's windows.
     enum Metric: CaseIterable, Sendable {
         case sessionBar, longBar, sessionPercent, longPercent, percentages, sessionReset, longReset
+        /// The tightest weekly limit scoped to one model, labelled with the
+        /// model's name; offered where `reportsModelWeeklyLimits`.
+        case modelLimit
 
         var window: Window? {
             switch self {
             case .sessionBar, .sessionPercent, .sessionReset: .session
             case .longBar, .longPercent, .longReset: .long
-            case .percentages: nil
+            case .percentages, .modelLimit: nil
             }
         }
 
@@ -34,6 +37,7 @@ struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendabl
             case .percentages: "Percentages"
             case .sessionReset: "SessionReset"
             case .longReset: "\(long)Reset"
+            case .modelLimit: "ModelWeekly"
             }
         }
     }
@@ -103,13 +107,16 @@ struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendabl
     }
 
     /// The modules offered in Settings, in the default order: bars and
-    /// percentages provider by provider, then reset countdowns window by
-    /// window, then the total daily cost. A provider offers the metrics of
-    /// the windows it reports.
+    /// percentages provider by provider, then model limits, then reset
+    /// countdowns window by window, then the total daily cost. A provider
+    /// offers the metrics of the windows it reports, and the model limit
+    /// where `reportsModelWeeklyLimits`.
     static var allCases: [MenuBarModule] {
         let providers = AIProviderType.implementedProviders
         func offered(_ provider: AIProviderType, _ metric: Metric) -> Bool {
-            metric.window != .session || provider.capabilities.supportsSessionQuota
+            let capabilities = provider.capabilities
+            if metric == .modelLimit { return capabilities.reportsModelWeeklyLimits }
+            return metric.window != .session || capabilities.supportsSessionQuota
         }
         func block(_ metrics: [Metric]) -> [MenuBarModule] {
             providers.flatMap { provider in metrics.filter { offered(provider, $0) }.map { Self.provider(provider, $0) } }
@@ -117,7 +124,8 @@ struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendabl
         let resets = [Metric.longReset, .sessionReset].flatMap { metric in
             providers.filter { offered($0, metric) }.map { Self.provider($0, metric) }
         }
-        return block([.sessionBar, .longBar]) + block([.sessionPercent, .longPercent, .percentages]) + resets + [.dailyCost]
+        return block([.sessionBar, .longBar]) + block([.sessionPercent, .longPercent, .percentages])
+            + block([.modelLimit]) + resets + [.dailyCost]
     }
 
     /// Short uppercase label shown on the top line of the module.
@@ -131,6 +139,7 @@ struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendabl
             case .percentages: return "%"
             case .sessionReset: return capabilities.sessionShortLabel + "↻"
             case .longReset: return capabilities.longShortLabel + "↻"
+            case .modelLimit: return "MODEL"
             }
         case .dailyCost: return "TOTAL"
         }
@@ -152,6 +161,7 @@ struct MenuBarModule: RawRepresentable, Codable, Hashable, Identifiable, Sendabl
             case .percentages: return "\(name) — session and \(long) percentages"
             case .sessionReset: return "\(name) — session reset"
             case .longReset: return "\(name) — \(long) reset"
+            case .modelLimit: return "\(name) — model weekly limit"
             }
         case .dailyCost:
             return String(localized: "Total daily cost — all accounts and providers", bundle: L10n.bundle)
@@ -167,6 +177,7 @@ extension MenuBarModule {
     static let claudePercentages = provider(.claudeCode, .percentages)
     static let claudeSessionReset = provider(.claudeCode, .sessionReset)
     static let claudeWeeklyReset = provider(.claudeCode, .longReset)
+    static let claudeModelWeekly = provider(.claudeCode, .modelLimit)
     static let codexSession = provider(.codex, .sessionBar)
     static let codexWeekly = provider(.codex, .longBar)
     static let codexSessionPercent = provider(.codex, .sessionPercent)

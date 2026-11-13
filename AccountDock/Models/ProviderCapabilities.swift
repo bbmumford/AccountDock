@@ -69,6 +69,10 @@ struct ProviderCapabilities: Sendable {
     /// holds, which its module reads into `LimitResets`; such accounts are
     /// read for them hourly (`AppState.refreshLimitResetsIfDue`).
     var reportsLimitResets = false
+    /// Whether a reading can carry weekly limits scoped to one model
+    /// (`UsageAPIResponse.modelWeeklyLimits`); the menu bar then offers the
+    /// provider's model-limit module.
+    var reportsModelWeeklyLimits = false
     /// The CLI's executable name, for finding its running processes.
     var cliExecutableName: String?
     /// Window percent a request is assumed to cost while the provider has no
@@ -297,6 +301,7 @@ extension AIProviderType {
                 ),
                 supportsExtraUsage: true,
                 reportsLimitResets: true,
+                reportsModelWeeklyLimits: true,
                 cliExecutableName: "claude",
                 storageKey: "claude",
                 shortBadge: "C",

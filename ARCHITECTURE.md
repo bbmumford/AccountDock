@@ -69,6 +69,7 @@ feature its capabilities declare, and its settings appear with it:
 | `requestRouter` | Which provider's CLI the router serves (`AIProviderType.routedProvider`) and the routing settings |
 | `routeTarget` | The service the provider offers as a route target |
 | `supportsExtraUsage` | The extra-usage setting and card row |
+| `reportsModelWeeklyLimits` | The menu-bar module for the active account's tightest model-scoped weekly limit |
 | `activityMetrics`, `pricingPrefixes`, `pricingAliases`, `shortBadge` | Today's activity, cost and their labels |
 | `storageKey`, `longWindowStorageName`, short labels | Stored menu-bar module names (`claudeSession`, `kimiMonthlyReset`) |
 
