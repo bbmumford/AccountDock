@@ -452,7 +452,7 @@ extension AppState {
         var candidates: [(Account, QuotaTier, Date)] = []
         var states: [UUID: QuotaAccountState] = [:]
         for account in accounts where account.provider == provider && !policy.excludedAccountIDs.contains(account.id) {
-            let state = quotaState(for: account, now: now)
+            let state = quotaState(for: account, now: now, wholeAllowance: true)
             let tier = planner.tier(state, now: now)
             guard tier <= .usable, let observedAt = state.observedAt else { continue }
             let maximumAge = state.mayBeConsumedElsewhere ? FailoverPlanner.liveFreshness : FailoverPlanner.idleFallbackFreshness
@@ -479,11 +479,13 @@ extension AppState {
         guard !members.isEmpty else {
             routerSessionMoves = [:]
             pacingShedding = []
+            pacingScopedShedding = []
             return await activePool(provider, now: now, forRouter: forRouter)
         }
         guard policy.paceSessions else {
             routerSessionMoves = [:]
             pacingShedding = []
+            pacingScopedShedding = []
             return members
         }
         return paced(provider, members: members, states: states, planner: planner, movesSessions: forRouter, now: now)
@@ -529,9 +531,33 @@ extension AppState {
             failoverEvents.record(provider, "At its sessions' current rate \(messageName(account)) would reach its limit at \(time), \(wait) min before that window resets; \(outcome)")
         }
         pacingShedding = Set(plan.shedding.keys)
+        var scopedShedding = Set<String>()
+        for (id, byKey) in plan.scopedShedding {
+            for (key, outlook) in byKey {
+                let mark = id.uuidString + "|" + key
+                scopedShedding.insert(mark)
+                guard !pacingScopedShedding.contains(mark), let account = accounts.first(where: { $0.id == id }),
+                      let limitAt = outlook.limitAt else { continue }
+                let name = accountUsage[id]?.modelWeeklyLimits.first { $0.model.lowercased() == key }?.model ?? key
+                let moving = plan.moves.keys.filter {
+                    sessionRates.entries[$0]?.account == id && sessionModel($0, now: now)?.lowercased().contains(key) == true
+                }.count
+                let time = limitAt.formatted(date: .omitted, time: .shortened)
+                let wait = Int((outlook.waitAtLimit / 60).rounded())
+                failoverEvents.record(provider, "At its \(name) sessions' current rate \(messageName(account)) would use up its \(name) allowance at \(time), \(wait) min before it resets; \(moving) \(name) session(s) move to other accounts at their next turn, and new \(name) sessions start elsewhere.")
+            }
+        }
+        pacingScopedShedding = scopedShedding
+        // New sessions are weighted for the model most running sessions
+        // use, when that model has an allowance of its own and some account
+        // has part of it left; otherwise by the whole allowance.
+        let prevailing = Self.prevailingAllowance(models: runningSessionModels(provider, now: now),
+                                                  keys: Array(plan.modelWeights.keys))
+        let weights = prevailing.flatMap { plan.modelWeights[$0] }.flatMap { $0.values.contains { $0 > 0 } ? $0 : nil }
+            ?? plan.weights
         return members.map { member in
             var member = member
-            if let id = UUID(uuidString: member.accountID), let weight = plan.weights[id] { member.weight = weight }
+            if let id = UUID(uuidString: member.accountID), let weight = weights[id] { member.weight = weight }
             return member
         }
     }
@@ -544,6 +570,16 @@ extension AppState {
         let perWeekly = state.sessionPerWeekly ?? FailoverPlanner.defaultSessionPerWeekly
         let ratio = turnCostModel.ratio(for: id)
         let limit = SessionPacer().limit
+        // Each model's own weekly allowance, in the unit of
+        // `weeklyRemaining`, up to the same share of it as `limit`.
+        var scoped: [String: SessionPacer.ScopedAllowance] = [:]
+        for allowance in state.usage?.modelWeeklyLimits ?? [] {
+            guard let resetsAt = UsageWindow(utilization: nil, resetsAt: allowance.resetsAt).resetsAtDate
+                    ?? projection?.weeklyReset else { continue }
+            let used = allowance.usedPercentOfWeekly ?? allowance.percent * allowance.allowancePercentOfWeekly / 100
+            let left = max(0, allowance.allowancePercentOfWeekly * limit / 100 - used)
+            scoped[allowance.model.lowercased()] = SessionPacer.ScopedAllowance(remaining: left * perWeekly, resetsAt: resetsAt)
+        }
         return SessionPacer.Account(
             id: id, utilization: projection?.session ?? 0, resetsAt: projection?.sessionReset,
             burnPerHour: max(0, planner.expectedSessionBurn(of: state) - sessionRates.departed(id, now: now) / 1_000_000 * ratio),
@@ -551,7 +587,8 @@ extension AppState {
             weeklyRemaining: projection?.weekly.map { (limit - $0) * perWeekly },
             weeklyResetsAt: projection?.weeklyReset,
             percentPerMillion: ratio,
-            hasSessionWindow: state.usage?.fiveHour != nil
+            hasSessionWindow: state.usage?.fiveHour != nil,
+            scoped: scoped
         )
     }
 
@@ -566,7 +603,7 @@ extension AppState {
             return SessionPacer.Session(id: id, account: placed[id] ?? entry.account,
                                         tokensPerHour: sessionRates.tokensPerHour(id, now: now),
                                         contextTokens: entry.contextTokens, lastSeen: entry.lastSeen, cacheLifetime: entry.cacheLifetime,
-                                        lastTurnStart: entry.lastTurnStart)
+                                        lastTurnStart: entry.lastTurnStart, model: sessionModel(id, now: now))
         }
     }
 

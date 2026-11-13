@@ -418,7 +418,8 @@ extension AppState {
         return settings
     }
 
-    func quotaState(for account: Account, now: Date = Date(), model: String? = nil) -> QuotaAccountState {
+    func quotaState(for account: Account, now: Date = Date(), model: String? = nil,
+                    wholeAllowance: Bool = false) -> QuotaAccountState {
         let trend = quotaTrends[account.id] ?? QuotaTrend()
         let rates = trend.currentRates(now: now)
         let uncertainty = trend.currentUncertainty(now: now)
@@ -431,7 +432,7 @@ extension AppState {
         let expired = !account.isActive && rejectedCredentialAccounts.contains(account.id)
         return QuotaAccountState(
             id: account.id,
-            usage: plannedUsage(account, now: now, model: model),
+            usage: plannedUsage(account, now: now, model: model, wholeAllowance: wholeAllowance),
             observedAt: accountUsageUpdatedAt[account.id],
             sessionBurnPerHour: rates.session,
             weeklyBurnPerHour: rates.weekly,
@@ -458,9 +459,12 @@ extension AppState {
     /// so move together: the window is narrowed by the tightest limit among
     /// the models those sessions use, and left whole when none uses a
     /// limited model, so one session on a spent model moves alone.
-    func plannedUsage(_ account: Account, now: Date = Date(), model: String? = nil) -> UsageAPIResponse? {
+    /// `wholeAllowance` leaves the window as the provider reports it, for
+    /// `buildPool`, whose pacer weighs each model's allowance itself.
+    func plannedUsage(_ account: Account, now: Date = Date(), model: String? = nil,
+                      wholeAllowance: Bool = false) -> UsageAPIResponse? {
         guard let usage = accountUsage[account.id] else { return nil }
-        guard !usage.modelWeeklyLimits.isEmpty else { return usage }
+        guard !wholeAllowance, !usage.modelWeeklyLimits.isEmpty else { return usage }
         let models = model.map { [$0] } ?? sharedSessionModels(account.provider, now: now)
         return usage.replacingSevenDay(usage.weeklyWindow(forModels: models))
     }
@@ -482,6 +486,29 @@ extension AppState {
         guard let session, let known = sessionModels[session],
               now.timeIntervalSince(known.seenAt) < Self.sessionModelLifetime else { return nil }
         return known.model
+    }
+
+    /// The model allowance most of `models` draw on, among `keys`: where a
+    /// session started now is expected to need room. Nil when most draw on
+    /// none of them, or no session has said its model. A tie goes to the
+    /// allowance, since a session on a model without one runs anywhere.
+    nonisolated static func prevailingAllowance(models: [String], keys: [String]) -> String? {
+        var counts: [String: Int] = [:]
+        var unscoped = 0
+        for model in models.map({ $0.lowercased() }) {
+            if let key = keys.sorted().first(where: { model.contains($0) }) { counts[key, default: 0] += 1 } else { unscoped += 1 }
+        }
+        guard let most = counts.max(by: { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }),
+              most.value >= unscoped else { return nil }
+        return most.key
+    }
+
+    /// The models the provider's running sessions use, or the one a session
+    /// last reported when none of those running has said.
+    func runningSessionModels(_ provider: AIProviderType, now: Date) -> [String] {
+        let models = (liveSessions[provider] ?? []).compactMap { sessionModel($0.sessionID, now: now) }
+        if !models.isEmpty { return models }
+        return workloadModels[provider].flatMap { now.timeIntervalSince($0.seenAt) < 2 * 60 * 60 ? [$0.model] : nil } ?? []
     }
 
     /// The models used by the provider's running sessions that read no slot

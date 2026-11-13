@@ -125,6 +125,16 @@ extension AppState {
     func refreshSlotProcesses() async {
         guard let provider = AIProviderType.routedProvider, let slots = SessionSlots(provider) else { return }
         slotDirectoryByProcess = await Task.detached(priority: .utility) { slots.directoriesByProcess() }.value
+        // A slot in use that `serveSessionSlots` has not served yet, as on
+        // the first cycle after launch, serves the account the slot itself
+        // records; `refreshSessions` would otherwise count its session on
+        // the active account until the next cycle.
+        let unknown = Set(slotDirectoryByProcess.values).filter { slotDirectoryServing[$0] == nil }
+        guard !unknown.isEmpty else { return }
+        let recorded = await Task.detached(priority: .utility) {
+            unknown.reduce(into: [String: UUID]()) { $0[$1] = slots.recordedAccount(forSlotAt: $1) }
+        }.value
+        for (path, id) in recorded where slotDirectoryServing[path] == nil { slotDirectoryServing[path] = id }
     }
 
     /// The account serving the slot a running session reads, when the
@@ -176,11 +186,15 @@ extension AppState {
     func resumeTargets(_ provider: AIProviderType, now: Date) -> [String: UUID] {
         let planner = FailoverPlanner(settings: plannerSettings(provider))
         let running = Set((liveSessions[provider] ?? []).map(\.sessionID))
-        var usable: [UUID: Bool] = [:]
+        // By account and the model the session uses: an account can have
+        // room for one model and none for another.
+        var usable: [String: Bool] = [:]
         var targets: [String: UUID] = [:]
         for (session, entry) in sessionRates.entries where !running.contains(session) {
-            let canServe = usable[entry.account] ?? !accountCannotServe(entry.account, provider: provider, planner: planner, now: now)
-            usable[entry.account] = canServe
+            let model = sessionModel(session, now: now)
+            let key = entry.account.uuidString + "|" + (model ?? "")
+            let canServe = usable[key] ?? !accountCannotServe(entry.account, provider: provider, planner: planner, now: now, model: model)
+            usable[key] = canServe
             if canServe { targets[session] = entry.account }
         }
         return targets
