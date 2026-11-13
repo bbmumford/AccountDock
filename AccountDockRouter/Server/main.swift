@@ -752,15 +752,19 @@ enum Router {
             await writer.complete(426, json: RouterLogic.errorBody(type: "invalid_request_error", message: "AccountDock's router serves this endpoint over HTTP"))
             return
         }
-        let route = brain.currentState().passthroughRoutes[key]
-        let path = rest.split(separator: "?").first.map(String.init) ?? rest
-        let responses = route != nil && request.method == "POST" && path == "/responses"
+        // A route's backend is paid for by the user's accounts, so it serves
+        // only clients holding one of their credentials, as the pool does.
+        let trusted = brain.isAllowed(RouterLogic.bearerToken(request.headers).map(RouterLogic.fingerprint))
+        let route = trusted ? brain.currentState().passthroughRoutes[key] : nil
+        let isResponses = request.method == "POST" && ProviderPassthrough.isResponsesPath(rest)
+        let responses = route != nil && isResponses
             ? (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any] : nil
         let session = ProviderPassthrough.sessionID(request.body, field: entry.sessionField)
             ?? ProviderPassthrough.sessionID(request.headers)
         let streaming = ProviderPassthrough.isStreaming(request.body)
         var heldStream = false
-        if ProviderPassthrough.isHeld(key: key, session: session), !ProviderPassthrough.takeAllowance(key: key, session: session) {
+        if entry.holdsRequests, ProviderPassthrough.isHeld(key: key, session: session),
+           !ProviderPassthrough.takeAllowance(key: key, session: session) {
             let marker = ProviderPassthrough.markWaiting(key: key, session: session)
             defer { if let marker { try? FileManager.default.removeItem(at: marker) } }
             log.write("\(key) session \(session ?? "unknown") held while its provider is paused")
@@ -806,7 +810,7 @@ enum Router {
                                         detail: ISO8601DateFormatter().string(from: Date().addingTimeInterval(10 * 60)), client: key))
                 if await serveResponses(request, json: responses, route: route, key: key, session: session, writer: writer) { return }
                 if heldStream {
-                    await writer.chunk(ProviderPassthrough.streamError(status: http.statusCode, body: refusal))
+                    await writer.chunk(ProviderPassthrough.streamError(status: http.statusCode, body: refusal, responses: isResponses))
                 } else {
                     await writer.head(http.statusCode, headerList(http))
                     await writer.chunk(refusal)
@@ -820,7 +824,7 @@ enum Router {
                 } else {
                     var body = Data()
                     for try await byte in bytes { body.append(byte) }
-                    await writer.chunk(ProviderPassthrough.streamError(status: http.statusCode, body: body))
+                    await writer.chunk(ProviderPassthrough.streamError(status: http.statusCode, body: body, responses: isResponses))
                 }
             } else {
                 await writer.head(http.statusCode, headerList(http))
@@ -832,7 +836,9 @@ enum Router {
         } catch {
             log.write("\(key) \(request.method) \(rest.split(separator: "?").first ?? "") failed\(writer.headWritten ? " mid-response" : ""): \(error.localizedDescription)")
             if writer.headWritten {
-                if heldStream { await writer.chunk(ProviderPassthrough.streamError(status: 502, body: Data(error.localizedDescription.utf8))) }
+                if heldStream {
+                    await writer.chunk(ProviderPassthrough.streamError(status: 502, body: Data(error.localizedDescription.utf8), responses: isResponses))
+                }
                 await writer.finish()
             } else {
                 await writer.complete(502, json: RouterLogic.errorBody(type: "api_error", message: "AccountDock router could not reach \(key): \(error.localizedDescription)"))
@@ -929,10 +935,18 @@ enum Router {
                 throw ClientClosed()
             } catch {
                 log.write("\(backend.id) \(key) reply failed mid-response: \(error.localizedDescription)")
-                await writer.chunk(ResponsesBridge.failedEvent(id: "resp_router", code: "server_error",
-                                                               message: "\(backend.displayName) stopped replying: \(error.localizedDescription)"))
+                await writer.chunk(translator.fail(code: "server_error",
+                                                   message: "\(backend.displayName) stopped replying: \(error.localizedDescription)"))
             }
             await writer.finish()
+            if case .failed(let code, let message) = translator.outcome {
+                // The client has the failure as its reply; the app learns
+                // of it here, and a backend at its limit is skipped.
+                if code == "rate_limit_exceeded" { brain.refuseBackend(backend.id, until: RouterLogic.refusedUntil([:], now: Date())) }
+                brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id,
+                                        detail: message, client: key))
+                log.write("\(backend.id) failed a \(key) reply mid-stream (\(code)): \(message.prefix(300))")
+            }
             let counts = translator.counts
             if counts.context > 0 {
                 brain.noteContext(routerSession, tokens: counts.context)

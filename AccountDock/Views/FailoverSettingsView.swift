@@ -111,6 +111,8 @@ struct FailoverSettingsView: View {
 
             if provider.capabilities.requestRouter != nil {
                 routingControls(provider, policy: policy)
+            } else if provider.capabilities.requestHold?.bridgedProtocol != nil, !RouteTarget.available(for: provider).isEmpty {
+                bridgeControls(provider, policy: policy)
             } else if provider.capabilities.pauseGate != nil {
                 unroutedNote(provider)
             }
@@ -301,6 +303,74 @@ struct FailoverSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             .help("Serving \(provider.rawValue)'s requests from \(destinations.map(\.displayName).joined(separator: " or ")) needs AccountDock's router, which speaks only \(AIProviderType.routedProvider?.rawValue ?? "another CLI")'s request format.")
+        }
+    }
+
+    /// Controls for a provider whose CLI reaches the router through a
+    /// bridged request hold (`RequestHoldSupport.bridgedProtocol`): whether
+    /// its requests go through the router at all, and the route target that
+    /// serves them while every account is exhausted. Each change is applied
+    /// by `AppState.applyBridgeSettings`, which installs or retires the
+    /// router's agent and points the CLI's base URL there or back.
+    @ViewBuilder
+    private func bridgeControls(_ provider: AIProviderType, policy: ProviderFailoverPolicy) -> some View {
+        let name = provider.capabilities.displayName
+        let cli = provider.rawValue
+        let targets = RouteTarget.available(for: provider)
+        let hold = provider.capabilities.requestHold
+        Toggle("Send \(cli) requests through AccountDock's router", isOn: Binding(
+            get: { store.policy(for: provider).routeThroughBridge },
+            set: { on in
+                store.update(provider) {
+                    $0.routeThroughBridge = on
+                    if !on { $0.routeTarget = nil }
+                }
+                if !on { appState.routedStatus[provider] = nil }
+                Task { await appState.applyBridgeSettings() }
+            }
+        ))
+        .help("Lets another service serve \(cli)'s requests while every included \(name) account is exhausted. Once a service is chosen below, AccountDock sets \(hold?.key ?? "the base URL") in ~/\(hold?.settingsFile ?? "its config") to its local router, which forwards every request to \(name) unchanged until then. Turning this off restores the setting. Off by default.")
+        if policy.routeThroughBridge {
+            Picker("When every account is exhausted", selection: Binding(
+                get: { store.policy(for: provider).routeTarget },
+                set: { target in
+                    store.update(provider) { $0.routeTarget = target }
+                    if target == nil { appState.routedStatus[provider] = nil }
+                    Task { await appState.applyBridgeSettings() }
+                }
+            )) {
+                Text(policy.suspendAgentsWhenExhausted ? "Pause sessions" : "Do nothing").tag(String?.none)
+                ForEach(targets) { target in
+                    Text("Serve requests from \(target.displayName)").tag(Optional(target.id))
+                }
+            }
+            .padding(.leading, 20)
+            .help("While every included \(name) account is exhausted, the router rewrites \(cli)'s requests for the chosen service and its replies for \(cli), so sessions keep running; requests return to \(name) at each session's next turn once an account has capacity. A request \(name) refuses at the plan limit is served by the service instead of failing. \(name)'s own reasoning records and hosted tools, such as web search, are not carried over.")
+            if let target = RouteTarget.named(policy.routeTarget) {
+                Picker("\(target.displayName) model", selection: Binding(
+                    get: { target.model(store.policy(for: provider).routeModel)?.id ?? target.defaultModel },
+                    set: { model in
+                        store.update(provider) { $0.routeModel = model }
+                        appState.applyRouterState()
+                    }
+                )) {
+                    ForEach(target.routableModels) { model in Text(model.label).tag(model.id) }
+                }
+                .padding(.leading, 20)
+                Text(target.note)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 20)
+                routeLimits(provider, target: target)
+                Text("\(cli) sessions started before this was turned on reach \(name) directly until they are restarted.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        if let routerError = appState.routerProblem {
+            Text(routerError)
+                .font(.caption)
+                .foregroundStyle(.orange)
         }
     }
 

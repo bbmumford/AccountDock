@@ -50,7 +50,8 @@ enum TOMLHookConfig {
 
     // MARK: - One value in a table
 
-    /// The string value of `key` in the table whose header is `[table]`.
+    /// The string value of `key` in the table whose header is `[table]`; an
+    /// empty `table` names the keys before any header.
     static func value(at url: URL, table: String, key: String) -> String? {
         guard let text = try? existingText(url) else { return nil }
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
@@ -78,8 +79,23 @@ enum TOMLHookConfig {
         try write(lines.joined(separator: "\n"), original: original, to: url)
     }
 
-    /// Lines after the header `[table]` up to the next table header.
+    /// Removes `key` from the table `[table]`; the rest of the file is kept
+    /// as is. Does nothing when the key is not there.
+    static func removeValue(at url: URL, table: String, key: String) throws {
+        let original = try existingText(url)
+        var lines = original.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let range = tableRange(lines, table: table),
+              let index = range.first(where: { keyOf(lines[$0]) == key }) else { return }
+        lines.remove(at: index)
+        try write(lines.joined(separator: "\n"), original: original, to: url)
+    }
+
+    /// Lines after the header `[table]` up to the next table header; for an
+    /// empty `table`, the lines before the first header.
     private static func tableRange(_ lines: [String], table: String) -> Range<Int>? {
+        if table.isEmpty {
+            return 0..<(lines.firstIndex { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[") } ?? lines.count)
+        }
         guard let header = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[\(table)]") }) else { return nil }
         let start = header + 1
         let end = lines[start...].firstIndex { $0.trimmingCharacters(in: .whitespaces).hasPrefix("[") } ?? lines.count

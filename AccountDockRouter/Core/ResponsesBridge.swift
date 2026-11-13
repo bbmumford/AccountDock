@@ -67,6 +67,7 @@ enum ResponsesBridge {
         var system: [String] = []
         if let instructions = request["instructions"] as? String, !instructions.isEmpty { system.append(instructions) }
         var messages: [[String: Any]] = []
+        var toolList = request["tools"] as? [[String: Any]] ?? []
 
         func append(_ role: String, _ blocks: [[String: Any]]) {
             guard !blocks.isEmpty else { return }
@@ -111,6 +112,10 @@ enum ResponsesBridge {
                 let name = names.wireName(namespace: item["namespace"] as? String, name: item["name"] as? String ?? "", custom: true)
                 append("assistant", [["type": "tool_use", "id": item["call_id"] as? String ?? "", "name": name,
                                       "input": ["input": item["input"] as? String ?? ""]]])
+            case "additional_tools":
+                // Codex can list its tools in an input item instead of in
+                // `tools`; both are offered to the backend.
+                toolList += item["tools"] as? [[String: Any]] ?? []
             case "function_call_output", "custom_tool_call_output":
                 append("user", [["type": "tool_result", "tool_use_id": item["call_id"] as? String ?? "",
                                  "content": toolResultContent(item["output"])]])
@@ -141,7 +146,7 @@ enum ResponsesBridge {
         if let temperature = request["temperature"] as? NSNumber { body["temperature"] = temperature }
         if let topP = request["top_p"] as? NSNumber { body["top_p"] = topP }
 
-        let tools = toolDefinitions(request["tools"] as? [[String: Any]] ?? [], names: &names)
+        let tools = toolDefinitions(toolList, names: &names)
         if !tools.isEmpty {
             body["tools"] = tools
             var choice: [String: Any]
@@ -289,6 +294,11 @@ enum ResponsesBridge {
         event("response.failed", ["response": ["id": id, "status": "failed", "error": ["code": code, "message": message]]])
     }
 
+    /// An ID for a response the router originates.
+    static func newResponseID() -> String {
+        "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+
     static func event(_ type: String, _ fields: [String: Any]) -> Data {
         var object = fields
         object["type"] = type
@@ -299,13 +309,25 @@ enum ResponsesBridge {
 
 /// Rewrites a streamed Messages reply as the Responses events Codex reads:
 /// `response.created`, each output item's `added` and `done`, text deltas,
-/// and `response.completed` with the token use.
+/// and one closing event: `response.completed` with the token use,
+/// `response.incomplete` when the backend stopped at its output cap, or
+/// `response.failed` when it reported an error or its stream ended early.
 final class ResponsesStreamTranslator {
+    /// How the reply ended.
+    enum Outcome: Equatable {
+        case completed
+        /// The backend stopped before the reply was whole, for `reason`.
+        case incomplete(reason: String)
+        case failed(code: String, message: String)
+    }
+
     private let tools: ResponsesBridge.ToolNames
     private let responseID: String
     private var buffer = Data()
     private var started = false
-    private var finished = false
+    /// Set by the closing event; nothing is written after it.
+    private(set) var outcome: Outcome?
+    private var stopReason: String?
     private var outputIndex = 0
     private struct Block {
         var kind: String
@@ -317,12 +339,18 @@ final class ResponsesStreamTranslator {
         var arguments = ""
     }
     private var blocks: [Int: Block] = [:]
-    private var usage: [String: Any] = [:]
-    private(set) var counts = RouterLogic.TokenCounts()
-    /// The backend reported an error inside its stream.
-    private(set) var failed = false
+    private var usage = RouterLogic.StreamUsage()
+    /// Token use the backend has reported so far, counted as `SSEScanner`
+    /// counts a Messages stream.
+    var counts: RouterLogic.TokenCounts { usage.counts }
+    /// The reply ended in `response.failed`; `serveResponses` records the
+    /// backend's failure from it.
+    var failed: Bool {
+        if case .failed = outcome { return true }
+        return false
+    }
 
-    init(tools: ResponsesBridge.ToolNames, responseID: String = "resp_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()) {
+    init(tools: ResponsesBridge.ToolNames, responseID: String = ResponsesBridge.newResponseID()) {
         self.tools = tools
         self.responseID = responseID
     }
@@ -341,15 +369,25 @@ final class ResponsesStreamTranslator {
         return output
     }
 
-    /// Events closing a stream the backend ended without `message_stop`.
+    /// The closing event for a stream the backend ended without
+    /// `message_stop` or an error: the reply is not whole, so it fails.
     func finish() -> Data {
-        guard !finished else { return Data() }
-        if !started { return ResponsesBridge.failedEvent(id: responseID, code: "server_error", message: "The routed backend ended its reply without content.") }
-        return completed()
+        fail(code: "server_error", message: started
+            ? "The routed backend's reply ended before it was complete."
+            : "The routed backend ended its reply without content.")
+    }
+
+    /// `response.failed` for this response, unless it already closed. Items
+    /// still open are not reported done: a tool call cut short must not run.
+    func fail(code: String, message: String) -> Data {
+        guard outcome == nil else { return Data() }
+        outcome = .failed(code: code, message: message)
+        blocks.removeAll()
+        return ResponsesBridge.failedEvent(id: responseID, code: code, message: message)
     }
 
     private func handle(_ event: [String: Any]) -> Data {
-        guard !finished else { return Data() }
+        guard outcome == nil else { return Data() }
         var output = Data()
         if !started, event["type"] as? String != "error" {
             started = true
@@ -358,8 +396,8 @@ final class ResponsesStreamTranslator {
         let index = event["index"] as? Int ?? 0
         switch event["type"] as? String {
         case "message_start":
-            if let message = event["message"] as? [String: Any], let usage = message["usage"] as? [String: Any] {
-                self.usage = usage
+            if let message = event["message"] as? [String: Any], let start = message["usage"] as? [String: Any] {
+                usage.start(start)
             }
         case "content_block_start":
             guard let block = event["content_block"] as? [String: Any] else { break }
@@ -401,20 +439,14 @@ final class ResponsesStreamTranslator {
         case "content_block_stop":
             if let block = blocks.removeValue(forKey: index) { output.append(itemDone(block)) }
         case "message_delta":
-            if let late = event["usage"] as? [String: Any] {
-                for (key, value) in late where !(value is NSNull) {
-                    if key == "output_tokens" || ((value as? NSNumber)?.intValue ?? 0) > 0 { usage[key] = value }
-                }
-            }
+            if let late = event["usage"] as? [String: Any] { usage.update(late) }
+            if let reason = (event["delta"] as? [String: Any])?["stop_reason"] as? String { stopReason = reason }
         case "message_stop":
             output.append(completed())
         case "error":
             let error = event["error"] as? [String: Any]
-            failed = true
-            finished = true
             let type = error?["type"] as? String ?? "server_error"
-            output.append(ResponsesBridge.failedEvent(
-                id: responseID,
+            output.append(fail(
                 code: type == "rate_limit_error" ? "rate_limit_exceeded" : type == "overloaded_error" ? "server_is_overloaded" : "server_error",
                 message: error?["message"] as? String ?? "The routed backend reported an error."))
         default:
@@ -459,16 +491,17 @@ final class ResponsesStreamTranslator {
         return ResponsesBridge.event("response.output_item.done", ["output_index": block.outputIndex, "item": toolItem(block, done: true)])
     }
 
+    /// The closing event after `message_stop`: `response.incomplete` when
+    /// the backend stopped at its output cap, else `response.completed`.
     private func completed() -> Data {
-        guard !finished else { return Data() }
-        finished = true
+        guard outcome == nil else { return Data() }
         var output = Data()
         // Blocks the backend left open are closed first.
         for index in blocks.keys.sorted() { output.append(itemDone(blocks[index]!)) }
         blocks.removeAll()
-        counts = RouterLogic.tokenCounts(usage)
-        output.append(ResponsesBridge.event("response.completed", ["response": [
-            "id": responseID, "status": "completed", "output": [],
+        let counts = usage.counts
+        var response: [String: Any] = [
+            "id": responseID, "output": [],
             "usage": [
                 "input_tokens": counts.context,
                 "input_tokens_details": ["cached_tokens": counts.cacheRead, "cache_write_tokens": counts.cacheWrite],
@@ -476,7 +509,17 @@ final class ResponsesStreamTranslator {
                 "output_tokens_details": ["reasoning_tokens": 0],
                 "total_tokens": counts.context + counts.output,
             ],
-        ]]))
+        ]
+        if stopReason == "max_tokens" {
+            outcome = .incomplete(reason: "max_output_tokens")
+            response["status"] = "incomplete"
+            response["incomplete_details"] = ["reason": "max_output_tokens"]
+            output.append(ResponsesBridge.event("response.incomplete", ["response": response]))
+        } else {
+            outcome = .completed
+            response["status"] = "completed"
+            output.append(ResponsesBridge.event("response.completed", ["response": response]))
+        }
         return output
     }
 
