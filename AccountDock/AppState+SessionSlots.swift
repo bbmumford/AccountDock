@@ -304,7 +304,7 @@ extension AppState {
         func credential(_ id: UUID) async -> String? {
             if let known = credentials[id] { return known }
             guard let account = accounts.first(where: { $0.id == id }),
-                  let json = await claudeCredential(account, minimumLifetime: account.isActive ? 60 : 2 * 60 * 60),
+                  let json = await claudeCredential(account, minimumLifetime: readsLiveCredential(account) ? 60 : 2 * 60 * 60),
                   let accessOnly = SessionSlots.accessOnly(json) else { return nil }
             credentials[id] = accessOnly
             return accessOnly
@@ -442,7 +442,7 @@ extension AppState {
               let slots = SessionSlots(account.provider),
               let cli = slots.realExecutable(preferred: ClaudeService.shared.claudePath) else { return nil }
         let start = "cd \(Self.shellQuoted(directory.path)) && "
-        let lifetime: TimeInterval = account.isActive ? 60 : 2 * 60 * 60
+        let lifetime: TimeInterval = readsLiveCredential(account) ? 60 : 2 * 60 * 60
         let id = account.id
         let accessOnly = await claudeCredential(account, minimumLifetime: lifetime).flatMap(SessionSlots.accessOnly)
         var slot: URL?
@@ -451,9 +451,9 @@ extension AppState {
                 slots.makeRequestedSlot(for: id, credential: accessOnly)
             }).value
         }
-        // The active account's sessions can still read the CLI's own
-        // credential when no slot could be filled.
-        guard let slot else { return account.isActive ? start + Self.shellQuoted(cli) : nil }
+        // The sessions of the account the CLI's own credential belongs to
+        // can still read it when no slot could be filled.
+        guard let slot else { return readsLiveCredential(account) ? start + Self.shellQuoted(cli) : nil }
         slotDirectoryServing[slot.path] = id
         slotCredentialAccounts.insert(id)
         slotsLog.info("Slot claimed for a session started on \(messageName(account))")
@@ -511,7 +511,7 @@ extension AppState {
             let servingID = pooled.contains(slot) ? slot : fallback
             guard let servingID, let account = accounts.first(where: { $0.id == servingID }) else { continue }
             if credentials[servingID] == nil {
-                let lifetime: TimeInterval = account.isActive ? 60 : 2 * 60 * 60
+                let lifetime: TimeInterval = readsLiveCredential(account) ? 60 : 2 * 60 * 60
                 guard let json = await claudeCredential(account, minimumLifetime: lifetime),
                       let accessOnly = SessionSlots.accessOnly(json) else {
                     slotsLog.warning("No current credential for \(messageName(account)); its slot is not updated")

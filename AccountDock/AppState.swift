@@ -116,10 +116,6 @@ final class AppState: ObservableObject {
     /// Destinations whose automatic switch just failed, and until when they
     /// are not tried again.
     var switchFailureCooldown: [UUID: Date] = [:]
-    /// Claude `accountUuid` to AccountDock account, used to attribute the
-    /// usage Claude Code caches in `~/.claude.json`.
-    var claudeAccountUUIDs: [String: UUID] = [:]
-    var claudeAccountUUIDsBuiltAt: Date?
     private var loginAttemptID: UUID?
     var exhaustedFailoverAccounts: [AIProviderType: Set<UUID>] = [:]
     var lastAutomaticFailover: [AIProviderType: Date] = [:]
@@ -1491,7 +1487,7 @@ final class AppState: ObservableObject {
     private func readKimiUsage(_ account: Account, includeMetadata: Bool) async -> UsageReadOutcome {
         guard let location = account.credentialLocation else { return .skipped }
         do {
-            let usage = try await kimiService.getUsageLimits(location: location, isActive: account.isActive)
+            let usage = try await kimiService.getUsageLimits(location: location, isActive: readsLiveCredential(account))
             if includeMetadata, let identity = try? await kimiService.identity(location: location),
                let index = accounts.firstIndex(where: { $0.id == account.id }),
                accounts[index].email != identity.identifier
@@ -1521,7 +1517,7 @@ final class AppState: ObservableObject {
     private func readClaudeUsage(_ account: Account, forced: Bool, includeMetadata: Bool) async -> UsageReadOutcome {
         var tokenJSON: String?
         var usesSavedCopy = false
-        if account.isActive, liveCredentialOwner(.claudeCode).map({ $0 == account.id }) ?? true {
+        if readsLiveCredential(account) {
             tokenJSON = keychain.readClaudeToken()
         } else {
             usesSavedCopy = true
@@ -1549,7 +1545,7 @@ final class AppState: ObservableObject {
             return .reading(try await claudeService.getUsageLimits(accessToken: accessToken))
         } catch ClaudeService.UsageError.expired {
             log.warning("[fetchUsage] Token expired for \(account.email)")
-            return await readClaudeUsageAfterRenewal(account)
+            return await readClaudeUsageAfterRenewal(account, readsLive: !usesSavedCopy)
         } catch ClaudeService.UsageError.subscriptionUnavailable {
             markClaudeCodeUnavailable(accountID: account.id)
             return .workloadUnavailable(unavailableMessage(for: account.provider))
@@ -1561,11 +1557,12 @@ final class AppState: ObservableObject {
     }
 
     /// The read retried once the rejected token is renewed: by Claude Code
-    /// itself for the active account (`claude auth status`), and here for
-    /// the stored copy of any other account.
-    private func readClaudeUsageAfterRenewal(_ account: Account) async -> UsageReadOutcome {
+    /// itself for the live credential (`claude auth status`), and here for
+    /// a stored copy. `readsLive` is `readClaudeUsage`'s
+    /// `readsLiveCredential` answer.
+    private func readClaudeUsageAfterRenewal(_ account: Account, readsLive: Bool) async -> UsageReadOutcome {
         let accessToken: String
-        if account.isActive {
+        if readsLive {
             do {
                 let status = try await claudeService.getAuthStatus()
                 if !status.loggedIn {
@@ -1607,7 +1604,7 @@ final class AppState: ObservableObject {
             // token, so a second refusal on the active account shows only
             // that no session has renewed it yet; the next one that sends a
             // request does.
-            if account.isActive {
+            if readsLive {
                 return .credentialUnrenewed(String(localized: "Token expired. Switch to refresh.", bundle: L10n.bundle))
             }
             return .credentialRejected("Stored credentials expired. Reauthenticate this account.")
@@ -1877,7 +1874,8 @@ final class AppState: ObservableObject {
     private func performWindowWarmup(accountID: UUID, windows: PendingWindowWarmup) async {
         guard let account = accounts.first(where: { $0.id == accountID }) else { return }
         let policy = failoverConfig.policy(for: account.provider)
-        guard policy.keepWindowsWarm, let probe = quotaWindowProbe(for: account) else { return }
+        guard policy.keepWindowsWarm,
+              let probe = quotaWindowProbe(for: account, readsLive: readsLiveCredential(account)) else { return }
 
         guard accountWarmupsInFlight.insert(accountID).inserted else {
             log.info("[warmup] Skipped duplicate in-flight probe for \(accountID.uuidString)")

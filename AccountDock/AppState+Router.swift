@@ -106,23 +106,26 @@ extension AppState {
             return await currentClaudeToken(account, minimumLifetime: minimumLifetime)
         case .kimi:
             guard let location = account.credentialLocation else { return nil }
-            return try? await kimiService.freshAccessToken(location: location, isActive: account.isActive, minimumLifetime: minimumLifetime)
+            return try? await kimiService.freshAccessToken(location: location, isActive: readsLiveCredential(account),
+                                                          minimumLifetime: minimumLifetime)
         case .codex, .gemini:
             return nil
         }
     }
 
     /// The access token `account` holds now, without renewing it, for
-    /// recognising which account a session's credential belongs to.
+    /// recognising which account a session's credential belongs to: the
+    /// live one only when `readsLiveCredential`.
     func currentAccessToken(_ account: Account) -> String? {
+        let readsLive = readsLiveCredential(account)
         switch account.provider {
         case .claudeCode:
-            let json = account.isActive
+            let json = readsLive
                 ? keychain.readClaudeToken()
                 : keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
             return json.flatMap(ClaudeService.extractAccessToken(from:))
         case .codex:
-            let homes = [account.isActive ? (account.provider.configDirectory as NSString).expandingTildeInPath : nil,
+            let homes = [readsLive ? (account.provider.configDirectory as NSString).expandingTildeInPath : nil,
                          account.credentialLocation]
             return homes.compactMap { $0 }.lazy.compactMap(CodexService.accessToken(codexHome:)).first
         case .kimi, .gemini:
@@ -639,14 +642,14 @@ extension AppState {
     }
 
     /// The account's Claude Code credential JSON, valid for at least
-    /// `minimumLifetime`: the live Keychain copy for the active account,
+    /// `minimumLifetime`: the live Keychain copy when `readsLiveCredential`,
     /// which needs only a minute, and the stored copy, renewed here when
-    /// needed, for the others. Claude Code renews the live copy itself, but
+    /// needed, otherwise. Claude Code renews the live copy itself, but
     /// only from a session that reads it; while session slots hold its
     /// access token it is renewed here once it has less than
     /// `liveCredentialSlotLifetime` left, since a slot's session cannot.
     func claudeCredential(_ account: Account, minimumLifetime: TimeInterval) async -> String? {
-        if account.isActive, liveCredentialOwner(.claudeCode).map({ $0 == account.id }) ?? true {
+        if readsLiveCredential(account) {
             guard let json = keychain.readClaudeToken(), let token = Self.claudeAccessToken(json) else { return nil }
             if Self.liveRenewalIsDue(expiry: token.1, slotsHoldIt: slotCredentialAccounts.contains(account.id), now: Date()),
                let renewed = await renewLiveClaudeCredential(account, current: json) {
