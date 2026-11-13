@@ -4,7 +4,6 @@
 "Accounts" = "Accounts";
 
 /* Main Menu */
-"Double Usage Active" = "Double Usage Active";
 "No account connected" = "No account connected";
 "Refresh" = "Refresh";
 "Settings" = "Settings";
@@ -122,10 +121,6 @@
 "API Rate Limited. Try again later." = "API Rate Limited. Try again later.";
 "Could not fetch usage: %@" = "Could not fetch usage: %@";
 
-/* Promo */
-"%@ - %@ (Weekdays) & Weekends" = "%@ - %@ (Weekdays) & Weekends";
-"Double limits: 2 PM - 8 AM ET & Weekends" = "Double limits: 2 PM - 8 AM ET & Weekends";
-
 /* About */
 "More apps at xueshi.dev" = "More apps at xueshi.dev";
 
@@ -134,15 +129,8 @@
 "Menu bar modules" = "Menu bar modules";
 "Drag to reorder, toggle to enable. Disabled modules sit at the bottom." = "Drag to reorder, toggle to enable. Disabled modules sit at the bottom.";
 "Preview" = "Preview";
-"Account name" = "Account name";
-"Session usage (5h)" = "Session usage (5h)";
-"Weekly usage (7d)" = "Weekly usage (7d)";
 "Daily cost" = "Daily cost";
-"Session reset countdown" = "Session reset countdown";
-"Weekly reset countdown" = "Weekly reset countdown";
 "Menu Bar" = "Menu Bar";
 "Account display" = "Account display";
-"Session — usage vs time (5h)" = "Session — usage vs time (5h)";
-"Weekly — usage vs time (7d)" = "Weekly — usage vs time (7d)";
 "The vertical line marks time elapsed in the window; fill past it means you're using faster than the clock." = "The vertical line marks time elapsed in the window; fill past it means you're using faster than the clock.";
 "Claude Fable 5 — most powerful model, the new flagship tier" = "Claude Fable 5 — most powerful model, the new flagship tier";
