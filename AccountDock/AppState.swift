@@ -384,6 +384,23 @@ final class AppState: ObservableObject {
         providerCosts[provider]?.todayModelTokens ?? [:]
     }
 
+    /// Today's totals across the providers not in `hidden`: the figures the
+    /// usage dashboard, the cost tab, the menu bar and the widget show.
+    func todaySummary(hidden: Set<AIProviderType> = ProviderVisibility.storedHidden()) -> TodaySummary {
+        var days: [AIProviderType: TodaySummary.ProviderDay] = [:]
+        for (provider, history) in providerCosts {
+            days[provider] = TodaySummary.ProviderDay(
+                cost: todayCost(for: provider),
+                tokens: history.todayTokens,
+                turns: history.todayTurns,
+                linesChanged: history.todayLinesChanged,
+                activeMinutes: history.todayActiveMinutes ?? 0,
+                modelActivity: history.todayModelActivity
+            )
+        }
+        return TodaySummary.make(days: days, hidden: hidden)
+    }
+
     /// Sessions with activity today: the usage records' count, or the
     /// sessions the provider's lifecycle hooks recorded today.
     func todaySessions(for provider: AIProviderType) -> Int {

@@ -6,6 +6,7 @@ struct CostDetailView: View {
     @AppStorage("showCostLast7Days") private var showLast7Days = true
     @AppStorage("showCostLast30Days") private var showLast30Days = true
     @AppStorage("showCostAllTime") private var showAllTime = true
+    @AppStorage(ProviderVisibility.storageKey) private var hiddenProviders = ""
     @State private var visibleDailyCount = 7
     @State private var showingCalculationInfo = false
 
@@ -34,6 +35,8 @@ struct CostDetailView: View {
     // MARK: - Summary Cards
 
     private var todayCard: some View {
+        let summary = appState.todaySummary(hidden: hidden)
+        let todayProviders = summary.byProvider.map(\.provider)
         return VStack(spacing: 8) {
             HStack {
                 Text("Today")
@@ -45,12 +48,12 @@ struct CostDetailView: View {
                     .foregroundStyle(.textSecondary)
             }
 
-            Text(formatCost(appState.combinedTodayCost))
+            Text(UsageFormat.cost(summary.cost))
                 .font(.system(size: 36, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.brand)
 
-            Text("\(formatTokenCount(todayProviders.reduce(0) { $0 + appState.todayTokens(for: $1) })) tokens")
+            Text("\(UsageFormat.tokens(summary.tokens)) tokens")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.textSecondary)
 
@@ -59,8 +62,8 @@ struct CostDetailView: View {
                     providerTodayCost(
                         name: provider.capabilities.displayName,
                         icon: provider.iconName,
-                        cost: appState.todayCost(for: provider),
-                        tokens: appState.todayTokens(for: provider)
+                        cost: summary.day(for: provider).cost,
+                        tokens: summary.day(for: provider).tokens
                     )
                 }
             }
@@ -79,10 +82,10 @@ struct CostDetailView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.textSecondary)
                             Spacer()
-                            Text(formatTokenCount(item.tokens))
+                            Text(UsageFormat.tokens(item.tokens))
                                 .font(.caption2.monospacedDigit())
                                 .foregroundStyle(.textSecondary)
-                            Text(formatCost(item.cost))
+                            Text(UsageFormat.cost(item.cost))
                                 .font(.caption2.weight(.medium).monospacedDigit())
                                 .foregroundStyle(.textSecondary)
                         }
@@ -96,7 +99,7 @@ struct CostDetailView: View {
                             .font(.caption2)
                             .foregroundStyle(.textSecondary)
                         Spacer()
-                        Text("\(formatTokenCount(appState.todayTokens(for: provider))) tokens")
+                        Text("\(UsageFormat.tokens(summary.day(for: provider).tokens)) tokens")
                             .font(.caption2)
                             .foregroundStyle(.textSecondary)
                     }
@@ -108,17 +111,11 @@ struct CostDetailView: View {
         .sectionPadding()
     }
 
-    /// Providers with sessions, tokens or cost today, in registry order.
-    private var todayProviders: [AIProviderType] {
-        costProviders.filter { provider in
-            appState.todayCost(for: provider) > 0 || appState.todayTokens(for: provider) > 0
-                || appState.todaySessions(for: provider) > 0
-        }
-    }
+    private var hidden: Set<AIProviderType> { ProviderVisibility.hidden(in: hiddenProviders) }
 
-    /// Providers with any recorded cost history, in registry order.
+    /// Shown providers with any recorded cost history, in registry order.
     private var costProviders: [AIProviderType] {
-        AIProviderType.implementedProviders.filter { !appState.dailyCosts(for: $0).isEmpty }
+        AIProviderType.implementedProviders.filter { !hidden.contains($0) && !appState.dailyCosts(for: $0).isEmpty }
     }
 
     private func combinedTodayModelCosts() -> [ProviderModelCost] {
@@ -147,10 +144,10 @@ struct CostDetailView: View {
                 Text(name)
             }
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(formatCost(cost))
+                Text(UsageFormat.cost(cost))
                     .foregroundStyle(.primary)
                 Spacer(minLength: 2)
-                Text("\(formatTokenCount(tokens)) tok")
+                Text("\(UsageFormat.tokens(tokens)) tok")
                     .font(.system(size: 8))
             }
             .monospacedDigit()
@@ -220,10 +217,10 @@ struct CostDetailView: View {
             Text(title)
                 .font(.caption2)
                 .foregroundStyle(.textSecondary)
-            Text(formatCost(days.reduce(0) { $0 + $1.total }))
+            Text(UsageFormat.cost(days.reduce(0) { $0 + $1.total }))
                 .font(.title3.weight(.semibold).monospacedDigit())
                 .foregroundStyle(.primary)
-            Text("\(formatTokenCount(days.reduce(0) { $0 + $1.totalTokens })) tokens")
+            Text("\(UsageFormat.tokens(days.reduce(0) { $0 + $1.totalTokens })) tokens")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.textSecondary)
         }
@@ -256,7 +253,7 @@ struct CostDetailView: View {
                         legendDot(color: segmentColor(index, isToday: true), label: provider.capabilities.displayName)
                     }
                 }
-                Text("Total: \(formatCost(visibleCosts.reduce(0) { $0 + $1.total })) · \(formatTokenCount(visibleCosts.reduce(0) { $0 + $1.totalTokens }))")
+                Text("Total: \(UsageFormat.cost(visibleCosts.reduce(0) { $0 + $1.total })) · \(UsageFormat.tokens(visibleCosts.reduce(0) { $0 + $1.totalTokens }))")
                     .font(.caption2.weight(.medium).monospacedDigit())
                     .foregroundStyle(.textSecondary)
             }
@@ -341,12 +338,12 @@ struct CostDetailView: View {
                 .foregroundStyle(isToday ? .brand : .secondary)
                 .frame(width: 40, alignment: .leading)
 
-            Text(formatWholeCost(day.total))
+            Text(UsageFormat.cost(day.total, wholeDollars: true))
                 .font(.caption2.weight(.medium).monospacedDigit())
                 .foregroundStyle(isToday ? .brand : .primary)
                 .frame(width: 56, alignment: .trailing)
 
-            Text(formatTokenCount(day.totalTokens))
+            Text(UsageFormat.tokens(day.totalTokens))
                 .font(.system(size: 9).monospacedDigit())
                 .foregroundStyle(.textSecondary)
                 .frame(width: 40, alignment: .trailing)
@@ -368,7 +365,7 @@ struct CostDetailView: View {
             HStack(spacing: 4) {
                 ForEach(costProviders) { provider in
                     if let cost = day.costs[provider], cost > 0 {
-                        Text("\(provider.capabilities.shortBadge) \(formatWholeCost(cost))")
+                        Text("\(provider.capabilities.shortBadge) \(UsageFormat.cost(cost, wholeDollars: true))")
                     }
                 }
             }
@@ -425,29 +422,6 @@ struct CostDetailView: View {
     }
 
     // MARK: - Helpers
-
-    private func formatCost(_ cost: Double) -> String {
-        if cost >= 1 {
-            return String(format: "$%.2f", cost)
-        } else {
-            return String(format: "$%.4f", cost)
-        }
-    }
-
-    private func formatWholeCost(_ cost: Double) -> String {
-        String(format: "$%.0f", cost)
-    }
-
-    private func formatTokenCount(_ count: Int) -> String {
-        if count >= 1_000_000_000 {
-            return String(format: "%.1fB", Double(count) / 1_000_000_000)
-        } else if count >= 1_000_000 {
-            return String(format: "%.1fM", Double(count) / 1_000_000)
-        } else if count >= 1_000 {
-            return String(format: "%.1fK", Double(count) / 1_000)
-        }
-        return "\(count)"
-    }
 
     private func todayString() -> String {
         let f = DayKey.makeFormatter()
