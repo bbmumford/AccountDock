@@ -538,6 +538,10 @@ struct UsageDashboardView: View {
     /// A model's own weekly limit, drawn inside the bar of the whole weekly
     /// limit: `fractionOfBar` is the part of the whole allowance the model
     /// has used, and `percent` how much of its own limit that is.
+    /// The colour of a model's part of the weekly bar: the orange the
+    /// Extra usage row uses.
+    static let modelShareColor = Color.orange
+
     struct ModelShare {
         let name: String
         let percent: Double
@@ -556,12 +560,12 @@ struct UsageDashboardView: View {
                 ForEach(inner, id: \.name) { share in
                     let shareLevel = UsageLevel(utilization: share.percent)
                     HStack(spacing: 3) {
-                        Circle().fill(Color.purple).frame(width: 6, height: 6)
+                        Circle().fill(Self.modelShareColor).frame(width: 6, height: 6)
                         Text("\(share.name) \(shareLevel.percentText)")
                             .font(.caption)
                             .foregroundStyle(shareLevel.color(normal: .textSecondary))
                     }
-                    .help("\(share.name) has used \(shareLevel.percentText) of its own weekly limit; the purple part of the bar is its share of the whole weekly allowance.")
+                    .help("\(share.name) has used \(shareLevel.percentText) of its own weekly limit; the orange part of the bar is its share of the whole weekly allowance.")
                 }
                 Spacer()
                 if let resetText {
@@ -585,8 +589,12 @@ struct UsageDashboardView: View {
                         // Each model's part of what is used, from the leading edge.
                         ForEach(inner, id: \.name) { share in
                             RoundedRectangle(cornerRadius: 3)
-                                .fill(Color.purple)
+                                .fill(Self.modelShareColor)
                                 .frame(width: max(0, geo.size.width * min(level.fraction, max(0, share.fractionOfBar))), height: 7)
+                                // Darkened inside a bar that has itself
+                                // turned orange or red, so the part still
+                                // reads apart from it.
+                                .brightness(level.severity == .normal ? 0 : -0.25)
                         }
                     }
                 }
