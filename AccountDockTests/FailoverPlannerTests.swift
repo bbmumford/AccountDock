@@ -894,6 +894,41 @@ final class FailoverPlannerTests: XCTestCase {
         let plan = planner(policy(balancing: true)).plan(current: current, ladder: [current, unconfirmed], lastSwitch: nil, now: now)
         XCTAssertEqual(plan, .stay(.healthy))
     }
+
+    // MARK: - Serving verdict
+
+    func testServingVerdictTable() {
+        let lead: TimeInterval = 10 * 60
+        var refused = account(session: 10, weekly: 10)
+        refused.refusedAtLimit = true
+        let cases: [(String, QuotaAccountState, ServingVerdict)] = [
+            ("healthy", account(session: 10, weekly: 10), .canServe),
+            ("at the limit", account(session: 100, weekly: 40), .atLimit),
+            ("refused at the limit", refused, .atLimit),
+            ("quarantined", account(session: 10, weekly: 10, credentialsUsable: false), .ineligible),
+            ("reset unverified", account(session: 10, weekly: 10, resetUnverified: true), .ineligible),
+            ("reaching the limit within the lead", account(session: 50, weekly: 20, active: true, burn: 600), .nearLimit),
+        ]
+        let planner = planner(policy())
+        for (name, state, expected) in cases {
+            XCTAssertEqual(planner.servingVerdict(state, now: now, lead: lead), expected, name)
+        }
+        XCTAssertEqual(planner.servingVerdict(account(session: 50, weekly: 20, active: true, burn: 600), now: now, lead: 0),
+                       .canServe, "no lead asks only whether it can serve")
+    }
+
+    func testServingViewIgnoresTheCredentialResetAndRefusal() {
+        let planner = planner(policy())
+        var refused = account(session: 10, weekly: 10, credentialsUsable: false, resetUnverified: true)
+        refused.refusedAtLimit = true
+        let view = planner.servingView(refused)
+        XCTAssertTrue(view.credentialsUsable)
+        XCTAssertFalse(view.resetUnverified)
+        XCTAssertFalse(view.refusedAtLimit)
+        XCTAssertEqual(planner.servingVerdict(view, now: now, lead: 0), .canServe)
+        XCTAssertEqual(planner.servingVerdict(planner.servingView(account(session: 100, weekly: 40, credentialsUsable: false)),
+                                              now: now, lead: 0), .atLimit)
+    }
 }
 
 

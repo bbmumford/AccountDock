@@ -146,6 +146,24 @@ extension AppState {
         return known.account
     }
 
+    /// Whether `account` is read, served and warmed with its provider's live
+    /// credential rather than its saved copy: `readClaudeUsage`,
+    /// `claudeCredential`, `currentAccessToken` and `quotaWindowProbe` all
+    /// ask it, so another account's live token is never filed, spent or
+    /// counted under this one.
+    func readsLiveCredential(_ account: Account) -> Bool {
+        guard account.isActive else { return false }
+        return Self.readsLiveCredential(account, liveOwner: liveCredentialOwner(account.provider))
+    }
+
+    /// The account must be active, and the live credential its own; an
+    /// owner not known since the credential last changed counts as its own,
+    /// since the active account's credential is the one AccountDock
+    /// installs.
+    nonisolated static func readsLiveCredential(_ account: Account, liveOwner: UUID?) -> Bool {
+        account.isActive && (liveOwner.map { $0 == account.id } ?? true)
+    }
+
     /// Records that the live credential now in place belongs to `account`,
     /// after AccountDock installed or captured it.
     func noteLiveCredentialOwner(_ provider: AIProviderType, account: UUID) {
@@ -162,6 +180,7 @@ extension AppState {
     func moveRunningSessions(_ provider: AIProviderType, from previous: UUID? = nil) {
         guard let live = credentialModule(for: provider)?.liveCredential else { return }
         live.signalRunningSessions()
+        sessionsSignalledAt[provider] = Date()
         if let previous { lastSwitchedAway[previous] = nil }
         sessionsLeftOn[provider] = nil
         credentialLog.info("\(provider.rawValue): running sessions signalled to use the live credential")
@@ -192,12 +211,9 @@ extension AppState {
                     sessionsLeftOn[provider]?.remove(id)
                     continue
                 }
-                var state = quotaState(for: account, now: now)
-                let refused = state.refusedAtLimit
-                state.credentialsUsable = true
-                state.resetUnverified = false
-                state.refusedAtLimit = false
-                if refused || planner.tier(state, now: now) == .exhausted {
+                let state = quotaState(for: account, now: now)
+                if state.refusedAtLimit
+                    || planner.servingVerdict(planner.servingView(state), now: now, lead: 0) == .atLimit {
                     failoverEvents.record(provider, "\(messageName(account)) reached its limit; the sessions still on it move to the active account at their next request.")
                     moveRunningSessions(provider, from: id)
                     break
@@ -224,13 +240,15 @@ extension AppState {
     /// reads each live credential at most every two minutes and asks the
     /// provider only when it changed.
     func adoptRenewedCredentials(now: Date = Date()) async {
-        guard !isLoading, !isLoggingIn else { return }
-        for provider in AIProviderType.implementedProviders {
-            guard let live = credentialModule(for: provider)?.liveCredential,
-                  let active = activeAccount(for: provider) else { continue }
-            if let checked = liveCredentialCheckedAt[provider], now.timeIntervalSince(checked) < 2 * 60 { continue }
-            liveCredentialCheckedAt[provider] = now
-            await adoptLiveCredential(live, provider: provider, active: active)
+        guard !credentialGate.isBusy, !isLoggingIn else { return }
+        await credentialGate.run {
+            for provider in AIProviderType.implementedProviders {
+                guard let live = self.credentialModule(for: provider)?.liveCredential,
+                      let active = self.activeAccount(for: provider) else { continue }
+                if let checked = self.liveCredentialCheckedAt[provider], now.timeIntervalSince(checked) < 2 * 60 { continue }
+                self.liveCredentialCheckedAt[provider] = now
+                await self.adoptLiveCredential(live, provider: provider, active: active)
+            }
         }
     }
 
@@ -278,10 +296,7 @@ extension AppState {
             _ = live.save(credential, asCopyOf: active)
         case .makeOwnerActive:
             if live.savedCopy(account) != credential { _ = live.save(credential, asCopyOf: account) }
-            for index in accounts.indices where accounts[index].provider == provider {
-                accounts[index].isActive = accounts[index].id == account.id
-            }
-            if activeAccount?.provider == provider { activeAccount = accounts.first { $0.id == account.id } }
+            accounts.makeActive(account.id)
             saveAccounts(refreshWidget: true)
             let restored = live.restoreSignedInIdentity(of: account)
             failoverEvents.record(provider, "\(messageName(account))'s sign-in is the one in use, so it is the active account; a session on \(messageName(active)) had rewritten the signed-in identity\(restored ? ", which is restored" : "").")
@@ -298,6 +313,7 @@ extension AppState {
             liveCredentialDigests[provider] = Self.credentialDigest(installed)
             liveCredentialOwners[provider] = (Self.credentialDigest(installed), active.id)
             live.signalRunningSessions()
+            sessionsSignalledAt[provider] = Date()
             failoverEvents.record(provider, "Restored \(messageName(active))'s sign-in for new sessions.")
         }
     }

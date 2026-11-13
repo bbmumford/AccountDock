@@ -55,6 +55,24 @@ enum QuotaTier: Int, Comparable {
     static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
 }
 
+/// Whether an account can take work now, from `FailoverPlanner.servingVerdict`:
+/// the one answer to "can it serve" and "is it near its limit" for pausing,
+/// resuming, holding and pooling sessions.
+enum ServingVerdict: Equatable {
+    /// Below its limits, and not expected to reach one within the lead.
+    case canServe
+    /// Below its limits, but expected to reach one within the lead.
+    case nearLimit
+    /// At a limit, or just refused at it by the provider.
+    case atLimit
+    /// No trustworthy reading, unusable credentials, an unconfirmed reset or
+    /// no workload entitlement.
+    case ineligible
+
+    /// At its limit or within the lead of it.
+    var atOrNearLimit: Bool { self == .nearLimit || self == .atLimit }
+}
+
 enum FailoverPlan: Equatable {
     enum StayReason: Equatable {
         case healthy
@@ -259,6 +277,34 @@ struct FailoverPlanner {
         return .usable
     }
 
+    /// Whether the account can take work now. A refusal at the limit counts
+    /// as at the limit, though `tier` places such an account among the
+    /// ineligible, so a session resumed onto it is not taken to have room.
+    /// `lead` is how long before a projected limit the account counts as
+    /// near it; 0 asks only whether it can serve at all.
+    func servingVerdict(_ state: QuotaAccountState, now: Date, lead: TimeInterval) -> ServingVerdict {
+        if state.refusedAtLimit { return .atLimit }
+        switch tier(state, now: now) {
+        case .exhausted: return .atLimit
+        case .ineligible: return .ineligible
+        case .belowTrigger, .usable:
+            return (secondsUntilExhaustion(state, now: now) ?? .infinity) < lead ? .nearLimit : .canServe
+        }
+    }
+
+    /// The account as it serves the work already running on it: its own
+    /// stored credential, an unconfirmed reset and a refusal already
+    /// answered by moving do not stop that work. `plan` judges the active
+    /// account by it, and `AppState.moveSessionsOffLimitedAccounts` the
+    /// accounts sessions were left on.
+    func servingView(_ state: QuotaAccountState) -> QuotaAccountState {
+        var serving = state
+        serving.credentialsUsable = true
+        serving.resetUnverified = false
+        serving.refusedAtLimit = false
+        return serving
+    }
+
     /// Whether the active account has crossed, or will cross before the next
     /// decision, a trigger or the hard limit.
     func isTriggered(_ state: QuotaAccountState, now: Date) -> Bool {
@@ -397,13 +443,7 @@ struct FailoverPlanner {
         if current.workloadAvailable, projection(current, now: now) == nil {
             return .stay(.healthy)
         }
-        // The active account's own stored credential, reset confirmation and
-        // a refusal already answered by moving do not stop it serving the
-        // work already running on it.
-        var serving = current
-        serving.credentialsUsable = true
-        serving.resetUnverified = false
-        serving.refusedAtLimit = false
+        let serving = servingView(current)
         let currentTier = current.workloadAvailable ? tier(serving, now: now) : .exhausted
         let atLimit = currentTier == .exhausted || current.refusedAtLimit
             || (upperHeadroom(serving, now: now).map { $0 < settings.inFlightReservePercent + Self.minimumUsableHeadroom } ?? false)
