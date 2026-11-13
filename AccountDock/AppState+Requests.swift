@@ -97,6 +97,15 @@ extension AppState {
                 !accountCannotServe(account.id, provider: provider, planner: planner, now: now, model: model)
             }
             let wanted = named(request.account)
+            // A session on the shared sign-in keeps the token it holds until
+            // it is told to read the sign-in again, so it can still be on an
+            // account that was active earlier. When the active account has
+            // room for its model, reading the sign-in again is the whole move.
+            if slot == nil, let active = activeAccount(for: provider), wanted == nil || wanted?.id == active.id,
+               credentialModule(for: provider)?.liveCredential != nil, hasRoom(active) {
+                moveRunningSessions(provider)
+                return outcome(true, "Sessions on the shared sign-in were told to read it again; \(messageName(active)) is the active account and has allowance left.", active)
+            }
             let target = wanted ?? accounts
                 .filter { $0.provider == provider && $0.id != current && !needsSignIn($0) && !policy.excludedAccountIDs.contains($0.id) && hasRoom($0) }
                 .min { (plannedUsage($0, now: now, model: model)?.sevenDay?.utilization ?? 100) < (plannedUsage($1, now: now, model: model)?.sevenDay?.utilization ?? 100) }
@@ -112,12 +121,15 @@ extension AppState {
             }
             // The session reads a credential it shares with others, which
             // only moves by making the destination the active account.
-            guard provider.capabilities.switchReachesRunningSessions else {
+            guard provider.capabilities.switchReachesRunningSessions
+                    || credentialModule(for: provider)?.liveCredential != nil else {
                 return outcome(false, "The session's sign-in cannot be changed while it runs.")
             }
             if policy.activeAccountLocked { return outcome(false, "The active account is locked, and the session shares its sign-in.") }
+            let previous = activeAccount(for: provider)?.id
             await switchTo(target, refreshAfter: false)
             let switched = activeAccount(for: provider)?.id == target.id
+            if switched { moveRunningSessions(provider, from: previous) }
             return outcome(switched, switched ? "Switched the active account to \(messageName(target)); every session on the shared sign-in moves with it."
                                               : "The switch to \(messageName(target)) did not complete.", target)
         default:

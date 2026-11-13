@@ -273,6 +273,9 @@ final class AppState: ObservableObject {
     var routerSessionMoves: [String: UUID] = [:]
     /// Accounts currently giving sessions up to stay within their windows.
     var pacingShedding: Set<UUID> = []
+    /// The same for one model's allowance, as "account|model", so
+    /// `AppState.paced` reports each once.
+    var pacingScopedShedding: Set<String> = []
     /// Paused sessions AccountDock let continue during the current pause,
     /// by provider and session.
     var sessionAdmissions: [AIProviderType: [String: SessionAdmission]] = [:]
@@ -1217,6 +1220,9 @@ final class AppState: ObservableObject {
         guard let loginID = beginLoginAttempt() else { return }
         defer { finishLoginAttempt(loginID) }
 
+        // The account to put back once `account` has signed in, when its
+        // live sign-in could be saved first.
+        var displaced: Account?
         do {
             // 1. Back up current active account before login overwrites it
             if let current = activeAccount, current.id != account.id {
@@ -1225,6 +1231,7 @@ final class AppState: ObservableObject {
                     forAccountId: current.id.uuidString,
                     expectedEmail: current.email
                 )
+                if preserved { displaced = current }
                 if !preserved {
                     log.warning("[reauth] Skipped pre-login backup because the live identity does not match the selected account")
                 }
@@ -1241,7 +1248,7 @@ final class AppState: ObservableObject {
                 return
             }
 
-            guard email == account.email else {
+            guard account.matches(email: email) else {
                 errorMessage = String(localized: "Logged in as \(email), but expected \(account.email). Credentials not updated.", bundle: L10n.bundle)
                 log.error("[reauth] Email mismatch: got \(email), expected \(account.email)")
                 return
@@ -1268,6 +1275,21 @@ final class AppState: ObservableObject {
                 }
                 activeAccount = accounts[index]
                 saveAccounts()
+            }
+
+            // The login left the CLI signed in as `account`, and every
+            // session on the CLI's own credential follows that sign-in. The
+            // account that was active is put back, so renewing one account's
+            // sign-in moves no session; sessions that read the credential
+            // meanwhile are told to read it again.
+            if let displaced {
+                await performSwitch(to: displaced, refreshAfter: false)
+                if activeAccount(for: .claudeCode)?.id == displaced.id {
+                    moveRunningSessions(.claudeCode, from: account.id)
+                    log.info("[reauth] Put the account that was active back")
+                } else {
+                    failoverEvents.record(.claudeCode, "\(messageName(account)) signed in again and is now the active account, because \(messageName(displaced)) could not be put back; sessions on the shared sign-in follow it.")
+                }
             }
 
             finishLoginAttempt(loginID)

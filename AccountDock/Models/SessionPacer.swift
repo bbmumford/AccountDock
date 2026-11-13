@@ -125,7 +125,20 @@ struct SessionRates: Codable, Equatable {
 /// their cache; the router holds one refused there when the reset is close
 /// (`RouterLogic.holdUntil`). New sessions go to the accounts with the most
 /// unused rate. Consumed by `AppState.buildPool`.
+///
+/// An allowance only one model's sessions draw on (`Account.scoped`) is
+/// paced the same way for those sessions alone: an account whose sessions
+/// on that model would run its allowance out gives up sessions on that
+/// model, a session only moves to an account with room for its model, and
+/// `Plan.modelWeights` says where a new session on the model starts.
 struct SessionPacer {
+    /// What is left of an allowance only one model's sessions draw on, in
+    /// 5-hour window percent like `Account.weeklyRemaining`.
+    struct ScopedAllowance: Equatable {
+        var remaining: Double
+        var resetsAt: Date
+    }
+
     struct Account: Equatable {
         let id: UUID
         /// 5-hour window percent used now; 0 when no window is running.
@@ -149,6 +162,9 @@ struct SessionPacer {
         /// rates are still in 5-hour window percent, the unit of
         /// `weeklyRemaining`.
         var hasSessionWindow = true
+        /// Allowances only one model's sessions draw on, by the lowercased
+        /// name a session's model must contain (`scopedKeys`).
+        var scoped: [String: ScopedAllowance] = [:]
     }
 
     struct Session: Equatable {
@@ -161,6 +177,8 @@ struct SessionPacer {
         var cacheLifetime: TimeInterval?
         /// When the session's current turn began (`SessionRates.Entry`).
         var lastTurnStart: Date? = nil
+        /// The model the session uses; nil when it has not said.
+        var model: String? = nil
     }
 
     /// How an account's windows go at its sessions' current rate.
@@ -186,6 +204,13 @@ struct SessionPacer {
         var moves: [String: UUID] = [:]
         /// Accounts giving sessions up, with how they would have gone.
         var shedding: [UUID: Outlook] = [:]
+        /// Pool weight for a new session on a model with an allowance of
+        /// its own, by that allowance's key and then by account. All zero
+        /// when no account has any of the allowance left.
+        var modelWeights: [String: [UUID: Double]] = [:]
+        /// Accounts giving up sessions on one model, by that model's
+        /// allowance, with how the allowance would have gone.
+        var scopedShedding: [UUID: [String: Outlook]] = [:]
     }
 
     /// The window percent treated as the limit, which leaves the in-flight
@@ -214,10 +239,7 @@ struct SessionPacer {
     /// it runs out before the 5-hour window's does.
     func outlook(_ account: Account, spent: Double = 0, burn: Double, now: Date) -> Outlook {
         func projected(_ remaining: Double, until end: Date) -> Outlook {
-            let hours = max(end.timeIntervalSince(now), 60) / 3600
-            let limitAt = burn > 0 ? now.addingTimeInterval(max(0, remaining) / burn * 3600) : nil
-            return Outlook(allowedPerHour: max(0, remaining) / hours, burnPerHour: burn,
-                           limitAt: limitAt.flatMap { $0 < end ? $0 : nil }, windowEndsAt: end)
+            self.projected(remaining, burn: burn, until: end, now: now)
         }
         if !account.hasSessionWindow, let weeklyLeft = account.weeklyRemaining,
            let weeklyEnd = account.weeklyResetsAt, weeklyEnd > now {
@@ -230,6 +252,20 @@ struct SessionPacer {
         let first = [session, weekly].compactMap { outlook in outlook.limitAt.map { ($0, outlook) } }.min { $0.0 < $1.0 }?.1
         return Outlook(allowedPerHour: min(session.allowedPerHour, weekly.allowedPerHour), burnPerHour: burn,
                        limitAt: first?.limitAt, windowEndsAt: first?.windowEndsAt ?? session.windowEndsAt)
+    }
+
+    /// How `remaining` percent goes at `burn` percent per hour until `end`.
+    func projected(_ remaining: Double, burn: Double, until end: Date, now: Date) -> Outlook {
+        let hours = max(end.timeIntervalSince(now), 60) / 3600
+        let limitAt = burn > 0 ? now.addingTimeInterval(max(0, remaining) / burn * 3600) : nil
+        return Outlook(allowedPerHour: max(0, remaining) / hours, burnPerHour: burn,
+                       limitAt: limitAt.flatMap { $0 < end ? $0 : nil }, windowEndsAt: end)
+    }
+
+    /// The allowances of `account` that only `session`'s model draws on.
+    func scopedKeys(_ session: Session, on account: Account) -> [String] {
+        guard let model = session.model?.lowercased(), !account.scoped.isEmpty else { return [] }
+        return account.scoped.keys.filter { model.contains($0) }.sorted()
     }
 
     func remaining(_ account: Account, now: Date) -> Double {
@@ -259,9 +295,18 @@ struct SessionPacer {
         let active = sessions.filter { ids.contains($0.account) && now.timeIntervalSince($0.lastSeen) <= Self.activeWithin }
         var spent: [UUID: Double] = [:]
         var burn: [UUID: Double] = [:]
+        // The same two for each allowance only one model's sessions draw on.
+        var scopedSpent: [UUID: [String: Double]] = [:]
+        var scopedBurn: [UUID: [String: Double]] = [:]
         for account in accounts {
-            let sessionsBurn = active.filter { $0.account == account.id }.reduce(0) { $0 + percent($1.tokensPerHour, on: account) }
+            let own = active.filter { $0.account == account.id }
+            let sessionsBurn = own.reduce(0) { $0 + percent($1.tokensPerHour, on: account) }
             burn[account.id] = max(account.burnPerHour, sessionsBurn)
+            for session in own {
+                for key in scopedKeys(session, on: account) {
+                    scopedBurn[account.id, default: [:]][key, default: 0] += percent(session.tokensPerHour, on: account)
+                }
+            }
         }
         func cacheLifetime(_ id: UUID) -> TimeInterval {
             active.filter { $0.account == id }.compactMap(\.cacheLifetime).max() ?? Self.defaultCacheLifetime
@@ -269,40 +314,85 @@ struct SessionPacer {
         func current(_ account: Account) -> Outlook {
             outlook(account, spent: spent[account.id] ?? 0, burn: burn[account.id] ?? 0, now: now)
         }
+        // Nil once the allowance's reset has passed: it no longer limits
+        // anything, and the account's next reading carries the new one.
+        func currentScoped(_ account: Account, _ key: String, spending: Double = 0, burning: Double = 0) -> Outlook? {
+            guard let allowance = account.scoped[key], allowance.resetsAt > now else { return nil }
+            return projected(allowance.remaining - (scopedSpent[account.id]?[key] ?? 0) - spending,
+                             burn: (scopedBurn[account.id]?[key] ?? 0) + burning, until: allowance.resetsAt, now: now)
+        }
+        func waitsTooLong(_ outlook: Outlook, on account: Account) -> Bool {
+            outlook.limitAt != nil && outlook.waitAtLimit > cacheLifetime(account.id)
+        }
         func sheds(_ account: Account) -> Bool {
-            let outlook = current(account)
-            return outlook.limitAt != nil && outlook.waitAtLimit > cacheLifetime(account.id)
+            waitsTooLong(current(account), on: account)
+        }
+        func shedsScoped(_ account: Account, _ key: String) -> Bool {
+            currentScoped(account, key).map { waitsTooLong($0, on: account) } ?? false
         }
         var plan = Plan()
-        for account in accounts where sheds(account) { plan.shedding[account.id] = current(account) }
-        // The account that reaches its limit soonest gives sessions up first,
+        for account in accounts {
+            if sheds(account) { plan.shedding[account.id] = current(account) }
+            for key in account.scoped.keys.sorted() where shedsScoped(account, key) {
+                plan.scopedShedding[account.id, default: [:]][key] = currentScoped(account, key)
+            }
+        }
+        // The allowance that reaches its limit soonest gives sessions up
+        // first, an account's whole allowance and each model's own alike:
         // those relieving the most rate per cache rewrite first, until it no
         // longer would wait at its limit longer than its sessions' cache.
         // Sessions whose next turn comes soon go before those deep in a long
-        // turn, whose relief would arrive only when that turn ends.
-        let sources = accounts.filter { plan.shedding[$0.id] != nil }
-            .sorted { (plan.shedding[$0.id]?.limitAt ?? .distantFuture) < (plan.shedding[$1.id]?.limitAt ?? .distantFuture) }
-        for source in sources {
-            let candidates = active.filter { $0.account == source.id }.sorted {
+        // turn, whose relief would arrive only when that turn ends. A
+        // model's allowance gives up only sessions on that model.
+        var sources: [(account: Account, key: String?, limitAt: Date)] = []
+        for account in accounts {
+            if let outlook = plan.shedding[account.id] { sources.append((account, nil, outlook.limitAt ?? .distantFuture)) }
+            for key in (plan.scopedShedding[account.id] ?? [:]).keys.sorted() {
+                sources.append((account, key, plan.scopedShedding[account.id]?[key]?.limitAt ?? .distantFuture))
+            }
+        }
+        for source in sources.sorted(by: { $0.limitAt < $1.limitAt }) {
+            let candidates = active.filter { session in
+                session.account == source.account.id && plan.moves[session.id] == nil
+                    && (source.key.map { scopedKeys(session, on: source.account).contains($0) } ?? true)
+            }.sorted {
                 let (first, second) = (movable($0, now: now), movable($1, now: now))
                 return first == second ? relief($0) > relief($1) : first
             }
             for session in candidates where session.tokensPerHour > 0 {
-                guard sheds(source) else { break }
+                guard source.key.map({ shedsScoped(source.account, $0) }) ?? sheds(source.account) else { break }
                 var best: (id: UUID, spare: Double)?
-                for destination in accounts where destination.id != source.id
+                for destination in accounts where destination.id != source.account.id
                     && plan.shedding[destination.id] == nil && destination.baseWeight > 0 {
-                    let after = outlook(destination, spent: (spent[destination.id] ?? 0) + moveCost(session.contextTokens, to: destination),
-                                        burn: (burn[destination.id] ?? 0) + percent(session.tokensPerHour, on: destination), now: now)
+                    let keys = scopedKeys(session, on: destination)
+                    guard !keys.contains(where: { plan.scopedShedding[destination.id]?[$0] != nil }) else { continue }
+                    let cost = moveCost(session.contextTokens, to: destination)
+                    let rate = percent(session.tokensPerHour, on: destination)
+                    let after = outlook(destination, spent: (spent[destination.id] ?? 0) + cost,
+                                        burn: (burn[destination.id] ?? 0) + rate, now: now)
                     guard after.limitAt == nil else { continue }
-                    let spare = after.allowedPerHour - after.burnPerHour
+                    // The destination must carry the session within its
+                    // model's own allowance too.
+                    let scoped = keys.compactMap { currentScoped(destination, $0, spending: cost, burning: rate) }
+                    guard !scoped.contains(where: { $0.limitAt != nil }) else { continue }
+                    let spare = ([after] + scoped).map { $0.allowedPerHour - $0.burnPerHour }.min() ?? 0
                     if best.map({ spare > $0.spare }) ?? true { best = (destination.id, spare) }
                 }
                 guard let best, let target = accounts.first(where: { $0.id == best.id }) else { continue }
                 plan.moves[session.id] = best.id
-                burn[source.id, default: 0] -= percent(session.tokensPerHour, on: source)
-                burn[best.id, default: 0] += percent(session.tokensPerHour, on: target)
-                spent[best.id, default: 0] += moveCost(session.contextTokens, to: target)
+                let leaving = percent(session.tokensPerHour, on: source.account)
+                burn[source.account.id, default: 0] -= leaving
+                for key in scopedKeys(session, on: source.account) {
+                    scopedBurn[source.account.id, default: [:]][key, default: 0] -= leaving
+                }
+                let arriving = percent(session.tokensPerHour, on: target)
+                let cost = moveCost(session.contextTokens, to: target)
+                burn[best.id, default: 0] += arriving
+                spent[best.id, default: 0] += cost
+                for key in scopedKeys(session, on: target) {
+                    scopedBurn[best.id, default: [:]][key, default: 0] += arriving
+                    scopedSpent[best.id, default: [:]][key, default: 0] += cost
+                }
             }
         }
         // New sessions go by unused rate to accounts that stay within their
@@ -320,6 +410,28 @@ struct SessionPacer {
             for account in candidates.isEmpty ? accounts : candidates {
                 plan.weights[account.id] = max(account.baseWeight, 0.01) * Self.sustainedShare(current(account))
             }
+        }
+        // A new session on a model with an allowance of its own goes the
+        // same way by the smaller of the two unused rates, so none starts
+        // where that model's allowance is spent while another account has
+        // some left.
+        for key in Set(accounts.flatMap { $0.scoped.keys }).sorted() {
+            var weights: [UUID: Double] = [:]
+            for account in accounts {
+                let outlooks = [current(account)] + [currentScoped(account, key)].compactMap { $0 }
+                let open = account.baseWeight > 0 && plan.shedding[account.id] == nil
+                    && plan.scopedShedding[account.id]?[key] == nil && !outlooks.contains { $0.limitAt != nil }
+                let unused = outlooks.map { $0.allowedPerHour - $0.burnPerHour }.min() ?? 0
+                weights[account.id] = open ? account.baseWeight * max(0, unused) : 0
+            }
+            if !weights.values.contains(where: { $0 > 0 }) {
+                let candidates = accounts.filter { $0.baseWeight > 0 }
+                for account in candidates.isEmpty ? accounts : candidates {
+                    let shares = [current(account)] + [currentScoped(account, key)].compactMap { $0 }
+                    weights[account.id] = max(account.baseWeight, 0.01) * (shares.map(Self.sustainedShare).min() ?? 0)
+                }
+            }
+            plan.modelWeights[key] = weights
         }
         return plan
     }

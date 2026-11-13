@@ -115,6 +115,16 @@ struct SessionSlots: Sendable {
         return UUID(uuidString: url.lastPathComponent)
     }
 
+    /// The account a slot directory serves as far as the slot itself
+    /// records: an account's own slot by its name, a one-session slot by
+    /// its account file.
+    func recordedAccount(forSlotAt path: String) -> UUID? {
+        if let id = account(forDirectory: path) { return id }
+        let file = URL(fileURLWithPath: path).appendingPathComponent(Self.accountFile)
+        guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+        return UUID(uuidString: text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     // MARK: - Session slots
 
     /// Every one-session slot on disk.

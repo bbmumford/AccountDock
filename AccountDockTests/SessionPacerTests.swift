@@ -228,4 +228,63 @@ final class SessionPacerTests: XCTestCase {
         resting.lastSeen = now.addingTimeInterval(-5 * 60)
         XCTAssertTrue(pacer.movable(resting, now: now), "a quiet session is between turns")
     }
+
+    /// An account limited by its weekly allowance alone, with `fable` left
+    /// of the allowance only Fable sessions draw on.
+    func weekly(_ id: UUID, left: Double, fable: Double) -> SessionPacer.Account {
+        var account = account(id, used: 0, resetIn: nil)
+        account.hasSessionWindow = false
+        account.weeklyRemaining = left
+        account.weeklyResetsAt = now.addingTimeInterval(100 * 3600)
+        account.scoped = ["fable": .init(remaining: fable, resetsAt: now.addingTimeInterval(100 * 3600))]
+        return account
+    }
+
+    func testAModelsOwnAllowanceGivesUpOnlyThatModelsSessions() {
+        var fable = session("fable", on: a, burn: 5)
+        fable.model = "claude-fable-5-2[1m]"
+        var opus = session("opus", on: a, burn: 1)
+        opus.model = "claude-opus-5-5"
+        // a has room for both sessions overall, but only two hours of Fable.
+        let plan = SessionPacer().plan(accounts: [weekly(a, left: 2000, fable: 10), weekly(b, left: 2000, fable: 800)],
+                                       sessions: [fable, opus], now: now)
+        XCTAssertNil(plan.shedding[a], "the whole allowance carries its sessions")
+        XCTAssertNotNil(plan.scopedShedding[a]?["fable"])
+        XCTAssertEqual(plan.moves["fable"], b)
+        XCTAssertNil(plan.moves["opus"], "a session on another model stays")
+    }
+
+    func testANewSessionOnAModelStartsWhereThatModelHasAllowanceLeft() {
+        let plan = SessionPacer().plan(accounts: [weekly(a, left: 2000, fable: 0), weekly(b, left: 500, fable: 800)],
+                                       sessions: [], now: now)
+        XCTAssertGreaterThan(plan.weights[a] ?? 0, plan.weights[b] ?? 0, "by the whole allowance a has more unused")
+        XCTAssertEqual(plan.modelWeights["fable"]?[a] ?? -1, 0, accuracy: 0.001)
+        XCTAssertGreaterThan(plan.modelWeights["fable"]?[b] ?? 0, 0)
+    }
+
+    func testASessionOnlyMovesToAnAccountWithRoomForItsModel() {
+        var busy = session("busy", on: a, burn: 5)
+        busy.model = "Fable 5.2"
+        // a runs out overall; b has the most room overall but no Fable left.
+        let plan = SessionPacer().plan(accounts: [weekly(a, left: 10, fable: 800), weekly(b, left: 2000, fable: 0),
+                                                  weekly(c, left: 1000, fable: 800)],
+                                       sessions: [busy], now: now)
+        XCTAssertNotNil(plan.shedding[a])
+        XCTAssertEqual(plan.moves["busy"], c)
+        var other = busy
+        other.model = "claude-opus-5-5"
+        let unscoped = SessionPacer().plan(accounts: [weekly(a, left: 10, fable: 800), weekly(b, left: 2000, fable: 0),
+                                                      weekly(c, left: 1000, fable: 800)],
+                                           sessions: [other], now: now)
+        XCTAssertEqual(unscoped.moves["busy"], b, "a session on another model goes where the most is unused")
+    }
+
+    func testNewSessionsAreWeightedForTheModelMostSessionsUse() {
+        let keys = ["fable"]
+        XCTAssertEqual(AppState.prevailingAllowance(models: ["claude-fable-5-2[1m]", "Fable 5.2", "claude-opus-5-5"], keys: keys), "fable")
+        XCTAssertNil(AppState.prevailingAllowance(models: ["claude-opus-5-5", "Sonnet 5.5", "Fable 5.2"], keys: keys))
+        XCTAssertEqual(AppState.prevailingAllowance(models: ["Fable 5.2", "claude-opus-5-5"], keys: keys), "fable",
+                       "a tie goes to the model with an allowance of its own")
+        XCTAssertNil(AppState.prevailingAllowance(models: [], keys: keys))
+    }
 }
