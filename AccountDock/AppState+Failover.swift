@@ -62,7 +62,8 @@ extension AppState {
         // The paused-session display follows the pause files on every tick,
         // skipped cycles included, so sessions are never held unseen.
         for provider in AgentPauseGate.providers { refreshPauseStatus(provider) }
-        guard !isMonitoringFailover, !isLoading, !isLoggingIn else { return }
+        guard Self.quotaCycleMayStart(monitoring: isMonitoringFailover, credentialWorkBusy: credentialGate.isBusy,
+                                      loggingIn: isLoggingIn) else { return }
         isMonitoringFailover = true
         defer { isMonitoringFailover = false }
 
@@ -92,6 +93,12 @@ extension AppState {
         await evaluateFailover()
         saveLearningIfDue()
         for provider in AgentPauseGate.providers { prunePausedSessions(provider) }
+    }
+
+    /// Whether a quota cycle may start: none is running, no credential work
+    /// is under way (`credentialGate`) and no sign-in is.
+    nonisolated static func quotaCycleMayStart(monitoring: Bool, credentialWorkBusy: Bool, loggingIn: Bool) -> Bool {
+        !monitoring && !credentialWorkBusy && !loggingIn
     }
 
     /// Keeps the pause hook installed exactly for the providers that pause
