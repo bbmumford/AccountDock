@@ -187,8 +187,67 @@ extension AppState {
     }
 
     /// Spare one-session slots kept filled for each account taking new
-    /// sessions.
-    static let sparesPerAccount = 3
+    /// sessions: `minimumSpares`, or two more than the most sessions seen
+    /// running at once in the last day when that is more, up to
+    /// `maximumSpares`. A terminal that restores every session at once
+    /// after a restart then finds a slot for each, at a moment AccountDock
+    /// is itself still starting and cannot fill more.
+    nonisolated static func spareTarget(peakSessions: Int) -> Int {
+        min(max(minimumSpares, peakSessions + 2), maximumSpares)
+    }
+    nonisolated static let minimumSpares = 3
+    nonisolated static let maximumSpares = 16
+    /// How long a count of running sessions stays the peak `spareTarget`
+    /// is taken from.
+    nonisolated static let sessionPeakLifetime: TimeInterval = 24 * 60 * 60
+
+    /// The peak after `running` sessions are seen at `now`: a higher count
+    /// replaces it, an expired one is replaced by the current count, and a
+    /// peak still being matched has its date moved on hourly, not on every
+    /// cycle, so it is rarely written.
+    nonisolated static func sessionPeak(stored: (count: Int, at: Date)?, running: Int, now: Date) -> (count: Int, at: Date) {
+        guard let stored, now.timeIntervalSince(stored.at) < sessionPeakLifetime else { return (running, now) }
+        if running > stored.count { return (running, now) }
+        if running == stored.count, now.timeIntervalSince(stored.at) > 60 * 60 { return (running, now) }
+        return stored
+    }
+
+    /// The most sessions of the provider seen running at once in the last
+    /// day, kept across launches: after a restart no session runs yet, at
+    /// the very moment the spare count has to cover all of them.
+    func recentSessionPeak(_ provider: AIProviderType, now: Date) -> Int {
+        let key = "slotSessionPeak." + provider.capabilities.storageKey
+        let saved = UserDefaults.standard.dictionary(forKey: key)
+        var stored: (count: Int, at: Date)?
+        if let count = saved?["count"] as? Int, let at = saved?["at"] as? Double {
+            stored = (count, Date(timeIntervalSince1970: at))
+        }
+        let peak = Self.sessionPeak(stored: stored, running: liveSessions[provider]?.count ?? 0, now: now)
+        if stored?.count != peak.count || stored?.at != peak.at {
+            UserDefaults.standard.set(["count": peak.count, "at": peak.at.timeIntervalSince1970], forKey: key)
+        }
+        return peak.count
+    }
+
+    /// How long a slot `serveSlot` wrote is trusted to still hold what was
+    /// written: a spare, which nothing else touches, and a slot a session
+    /// reads, whose CLI can replace its item.
+    nonisolated static let spareRecheckInterval: TimeInterval = 10 * 60
+    nonisolated static let claimedRecheckInterval: TimeInterval = 60
+
+    /// Writes `credential` to a slot through `SessionSlots.serve`, unless
+    /// the same credential was written or found there within `recheck`.
+    /// Every slot is served on every quota cycle and each `serve` starts a
+    /// `security` process to read the slot's item, so most cycles skip it.
+    func serveSlot(_ slots: SessionSlots, _ directory: URL, credential: String, recheck: TimeInterval,
+                   now: Date = Date()) async -> Bool {
+        let digest = Self.credentialDigest(credential)
+        if let written = slotCredentialWritten[directory.path], written.digest == digest,
+           now.timeIntervalSince(written.at) < recheck { return true }
+        let served = await Task.detached(priority: .utility) { slots.serve(directory, credential: credential) }.value
+        slotCredentialWritten[directory.path] = served ? (digest, now) : nil
+        return served
+    }
     /// A claimed one-session slot that no process reads this long after its
     /// claim has lost its session.
     static let slotClaimGrace: TimeInterval = 2 * 60
@@ -234,18 +293,20 @@ extension AppState {
             credentials[id] = accessOnly
             return accessOnly
         }
-        func serve(_ directory: URL, _ id: UUID) async -> Bool {
+        func serve(_ directory: URL, _ id: UUID, spare: Bool = false) async -> Bool {
             guard let value = await credential(id) else { return false }
-            return await Task.detached(priority: .utility) { slots.serve(directory, credential: value) }.value
+            return await serveSlot(slots, directory, credential: value,
+                                   recheck: spare ? Self.spareRecheckInterval : Self.claimedRecheckInterval, now: now)
         }
+        let spareTarget = Self.spareTarget(peakSessions: recentSessionPeak(provider, now: now))
         var sparesOf: [UUID: Int] = [:]
         var remove: [URL] = []
         var removeSpares: [URL] = []
         for slot in await Task.detached(priority: .utility, operation: { slots.sessionSlots() }).value {
             let path = slot.directory.path
             guard let claimedAt = slot.claimedAt else {
-                guard let id = slot.account, open.contains(id), sparesOf[id, default: 0] < Self.sparesPerAccount,
-                      await serve(slot.directory, id) else {
+                guard let id = slot.account, open.contains(id), sparesOf[id, default: 0] < spareTarget,
+                      await serve(slot.directory, id, spare: true) else {
                     removeSpares.append(slot.directory)
                     continue
                 }
@@ -313,9 +374,9 @@ extension AppState {
                 ? "Moved the session\(place) from \(from) to \(to) to balance load; it rebuilds its prompt cache there at its next request."
                 : "Moved the session\(place) from \(from) to \(to): \(why).")
         }
-        for id in open where sparesOf[id, default: 0] < Self.sparesPerAccount {
+        for id in open where sparesOf[id, default: 0] < spareTarget {
             guard let value = await credential(id) else { continue }
-            let missing = Self.sparesPerAccount - sparesOf[id, default: 0]
+            let missing = spareTarget - sparesOf[id, default: 0]
             let made = await Task.detached(priority: .utility) {
                 (0..<missing).filter { _ in slots.makeSpare(for: id, credential: value) }.count
             }.value
@@ -326,6 +387,7 @@ extension AppState {
                 slotDirectoryServing[directory.path] = nil
                 slotDirectoryMovedAt[directory.path] = nil
             }
+            for directory in remove + removeSpares { slotCredentialWritten[directory.path] = nil }
             await Task.detached(priority: .utility) {
                 remove.forEach(slots.remove)
                 removeSpares.forEach { slots.removeSpare($0) }
@@ -393,10 +455,14 @@ extension AppState {
               let accessOnly = SessionSlots.accessOnly(json) else { return }
         let id = account.id
         let serving = slotDirectoryServing
-        let written = await Task.detached(priority: .utility) {
-            slots.directories(holding: id, serving: serving)
-                .filter { slots.serve(URL(fileURLWithPath: $0), credential: accessOnly) }.count
-        }.value
+        let holding = await Task.detached(priority: .utility) { slots.directories(holding: id, serving: serving) }.value
+        // The renewal revoked what these slots held, so each is written now
+        // whatever `serveSlot` last found there.
+        for path in holding { slotCredentialWritten[path] = nil }
+        var written = 0
+        for path in holding where await serveSlot(slots, URL(fileURLWithPath: path), credential: accessOnly, recheck: 0) {
+            written += 1
+        }
         slotsLog.info("Renewed credential of \(messageName(account)) written to \(written) slot(s)")
     }
 
@@ -439,7 +505,8 @@ extension AppState {
             }
             guard let credential = credentials[servingID] else { continue }
             let directory = slots.directory(for: slot)
-            if await Task.detached(priority: .utility, operation: { slots.serve(directory, credential: credential) }).value {
+            let recheck = running.contains(slot) ? Self.claimedRecheckInterval : Self.spareRecheckInterval
+            if await serveSlot(slots, directory, credential: credential, recheck: recheck) {
                 ready.insert(slot)
             } else {
                 slotsLog.error("Slot for \(slot.uuidString) not written")
@@ -456,6 +523,7 @@ extension AppState {
             UUID(uuidString: directory.lastPathComponent).map { !keep.contains($0) } ?? false
         }
         if !stale.isEmpty {
+            for directory in stale { slotCredentialWritten[directory.path] = nil }
             await Task.detached(priority: .utility) { stale.forEach(slots.remove) }.value
         }
         return ready.intersection(newSessions)
