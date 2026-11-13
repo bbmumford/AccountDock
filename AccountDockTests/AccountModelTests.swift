@@ -145,8 +145,7 @@ final class AccountModelTests: XCTestCase {
             "claudeSessionReset", "claudeWeeklyReset", "codexSession", "codexWeekly", "codexSessionPercent",
             "codexWeeklyPercent", "codexPercentages", "codexSessionReset", "codexWeeklyReset", "kimiSession",
             "kimiMonthly", "kimiSessionPercent", "kimiMonthlyPercent", "kimiPercentages", "kimiSessionReset",
-            "kimiMonthlyReset", "claudeUsage", "codexUsage", "account", "sessionBar", "sessionBarPlain",
-            "weeklyBar", "weeklyBarPlain", "dailyCost", "sessionReset", "weeklyReset",
+            "kimiMonthlyReset", "dailyCost",
         ]
         for name in stored {
             XCTAssertEqual(MenuBarModule(rawValue: name)?.rawValue, name, name)
@@ -155,6 +154,41 @@ final class AccountModelTests: XCTestCase {
         XCTAssertNil(MenuBarModule(rawValue: "kimiWeekly"))
         let data = MenuBarModuleStore.encode([.claudeSession, .kimiMonthlyPercent, .dailyCost])
         XCTAssertEqual(MenuBarModuleStore.decode(data), [.claudeSession, .kimiMonthlyPercent, .dailyCost])
+    }
+
+    func testStoredModuleNamesWithoutAProviderAreDroppedOrReplaced() {
+        let stored = ["claudeUsage", "account", "sessionBar", "codexWeekly", "sessionReset", "weeklyReset"]
+        XCTAssertNil(MenuBarModule(rawValue: "sessionReset"))
+        XCTAssertEqual(
+            MenuBarModuleStore.normalizedModules(stored: stored, replacingUnscopedResets: true, splittingCombinedPercentages: false),
+            [.codexWeekly, .claudeSessionReset, .claudeWeeklyReset, .codexWeeklyReset]
+        )
+        XCTAssertEqual(
+            MenuBarModuleStore.normalizedModules(stored: stored, replacingUnscopedResets: false, splittingCombinedPercentages: false),
+            [.codexWeekly]
+        )
+        XCTAssertEqual(
+            MenuBarModuleStore.normalizedModules(stored: ["account"], replacingUnscopedResets: true, splittingCombinedPercentages: false),
+            MenuBarModuleStore.defaultModules
+        )
+        XCTAssertEqual(
+            MenuBarModuleStore.normalizedModules(stored: ["sessionReset"], replacingUnscopedResets: true, splittingCombinedPercentages: false),
+            [.claudeSessionReset]
+        )
+        XCTAssertEqual(
+            MenuBarModuleStore.normalizedModules(stored: ["kimiPercentages", "dailyCost", "kimiSessionPercent"],
+                                                 replacingUnscopedResets: false, splittingCombinedPercentages: true),
+            [.kimiSessionPercent, .kimiMonthlyPercent, .dailyCost]
+        )
+    }
+
+    func testElapsedMarkerNeedsTheWindowsOwnLength() {
+        let now = Date()
+        let reset = ISO8601DateFormatter().string(from: now.addingTimeInterval(3600))
+        let elapsed = UsageWindow(utilization: 10, resetsAt: reset, windowSeconds: 4 * 3600).elapsedPercent(at: now)
+        XCTAssertEqual(elapsed ?? -1, 75, accuracy: 0.5)
+        XCTAssertNil(UsageWindow(utilization: 10, resetsAt: reset).elapsedPercent(at: now))
+        XCTAssertNil(UsageWindow(utilization: 10, resetsAt: nil, windowSeconds: 3600).elapsedPercent(at: now))
     }
 
     func testCachedUsageClearsAfterKnownResetPasses() {

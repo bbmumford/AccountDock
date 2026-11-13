@@ -4,7 +4,6 @@
 "Accounts" = "账户";
 
 /* Main Menu */
-"Double Usage Active" = "双倍用量生效中";
 "No account connected" = "未连接账户";
 "Refresh" = "刷新";
 "Settings" = "设置";
@@ -122,24 +121,13 @@
 "API Rate Limited. Try again later." = "API 请求频率受限。请稍后重试。";
 "Could not fetch usage: %@" = "无法获取用量：%@";
 
-/* Promo */
-"%@ - %@ (Weekdays) & Weekends" = "%1$@ - %2$@（工作日）及周末";
-"Double limits: 2 PM - 8 AM ET & Weekends" = "双倍额度：美东时间下午 2 点 - 上午 8 点及周末";
-
 /* Menu Bar */
 "Menu bar" = "菜单栏";
 "Menu bar modules" = "菜单栏模块";
 "Drag to reorder, toggle to enable. Disabled modules sit at the bottom." = "拖动排序，勾选启用。未启用的模块排在下方。";
 "Preview" = "预览";
-"Account name" = "账户名称";
-"Session usage (5h)" = "会话用量（5小时）";
-"Weekly usage (7d)" = "每周用量（7天）";
 "Daily cost" = "今日花费";
-"Session reset countdown" = "会话重置倒计时";
-"Weekly reset countdown" = "每周重置倒计时";
 "Menu Bar" = "菜单栏";
 "Account display" = "账户显示";
-"Session — usage vs time (5h)" = "会话 — 用量 vs 时间（5小时）";
-"Weekly — usage vs time (7d)" = "每周 — 用量 vs 时间（7天）";
 "The vertical line marks time elapsed in the window; fill past it means you're using faster than the clock." = "竖线 = 时间进度（该时段已过去多少）；填充超过它 = 你用得比时间快。";
 "Claude Fable 5 — most powerful model, the new flagship tier" = "Claude Fable 5 — 最强大的模型，全新旗舰层级";
