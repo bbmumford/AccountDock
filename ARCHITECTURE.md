@@ -208,9 +208,13 @@ token and identity first and restores them if any later step fails.
 2. **Read the target backup.** An incomplete stored token falls back to the
    backup's previous token; with neither, the switch stops.
 3. **Write.** The target token goes into `Claude Code-credentials` and the
-   target identity into `~/.claude.json`.
-4. **Verify.** `claude auth status` must report the target's email and be
-   logged in. Anything else rolls back to the snapshot.
+   target identity into `~/.claude.json`. Every Claude Code session rewrites
+   that file, so `ClaudeIdentityFile` replaces the text of `oauthAccount` only,
+   keeps every other byte and the file's permissions, and replaces the file
+   only if it is unchanged since it was read, reading it again otherwise.
+4. **Verify.** `claude auth status` must report the target's email, in any
+   case, and be logged in, within `ClaudeService.cliTimeout`. Anything else,
+   a CLI that does not answer included, rolls back to the snapshot.
 
 Running Claude Code processes keep the token they started with until they
 refresh it, so a switch moves new requests, not requests already in flight.

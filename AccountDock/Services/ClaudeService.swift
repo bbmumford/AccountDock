@@ -980,49 +980,51 @@ final class ClaudeService: @unchecked Sendable {
 
     // MARK: - CLI Runner
 
+    /// How long one `claude` command may run. `switchAccount` waits for
+    /// `claude auth status` with the target credential already written, and
+    /// rolls back when it does not answer within this.
+    static let cliTimeout: TimeInterval = 30
+
     private func runClaude(args: [String]) async throws -> String {
         let claudePath = self.claudePath
         log.debug("[runClaude] Running: \(claudePath) \(args.joined(separator: " "))")
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async { [claudePath] in
-                let process = Process()
-                let pipe = Pipe()
+        return try await Self.runClaude(
+            executable: claudePath, args: args, environment: environment(for: claudePath), timeout: Self.cliTimeout
+        )
+    }
 
-                process.executableURL = URL(fileURLWithPath: claudePath)
-                process.arguments = args
-                process.standardOutput = pipe
-                process.standardError = pipe
-
-                process.environment = self.environment(for: claudePath)
-
-                do {
-                    try process.run()
-                    process.waitUntilExit()
-
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let output = String(data: data, encoding: .utf8) ?? ""
-
-                    if process.terminationStatus == 0 {
-                        log.debug("[runClaude] Success (exit 0), output length: \(output.count)")
-                        continuation.resume(returning: output)
-                    } else if args == ["auth", "status"],
-                              let data = output.data(using: .utf8),
-                              (try? JSONDecoder().decode(AuthStatus.self, from: data)) != nil {
-                        // Claude uses exit 1 for the valid logged-out status
-                        // document. Let getAuthStatus decode it so callers can
-                        // distinguish rejected credentials from a CLI failure.
-                        log.info("[runClaude] auth status returned logged-out state (exit \(process.terminationStatus))")
-                        continuation.resume(returning: output)
-                    } else {
-                        log.error("[runClaude] Failed (exit \(process.terminationStatus))")
-                        continuation.resume(throwing: ClaudeServiceError.cliError("exit \(process.terminationStatus)"))
-                    }
-                } catch {
-                    log.error("[runClaude] Process launch failed: \(error.localizedDescription)")
-                    continuation.resume(throwing: ClaudeServiceError.processLaunchFailed(error))
-                }
-            }
+    /// Runs `claude` and returns its standard output. Throws `cliTimedOut`
+    /// when it runs past `timeout`; it is stopped then.
+    static func runClaude(
+        executable: String, args: [String], environment: [String: String]?, timeout: TimeInterval
+    ) async throws -> String {
+        let result: BoundedProcess.Result
+        do {
+            result = try await BoundedProcess.run(
+                executable: URL(fileURLWithPath: executable), arguments: args,
+                environment: environment, timeout: timeout
+            )
+        } catch BoundedProcess.Failure.timedOut(let seconds) {
+            log.error("[runClaude] `\(args.joined(separator: " "))` did not finish within \(Int(seconds)) s; stopped")
+            throw ClaudeServiceError.cliTimedOut(seconds: seconds)
+        } catch {
+            log.error("[runClaude] Process launch failed: \(error.localizedDescription)")
+            throw ClaudeServiceError.processLaunchFailed(error)
         }
+        let output = String(data: result.output, encoding: .utf8) ?? ""
+        if result.status == 0 {
+            log.debug("[runClaude] Success (exit 0), output length: \(output.count)")
+            return output
+        }
+        if args == ["auth", "status"], (try? JSONDecoder().decode(AuthStatus.self, from: result.output)) != nil {
+            // Claude uses exit 1 for the valid logged-out status
+            // document. Let getAuthStatus decode it so callers can
+            // distinguish rejected credentials from a CLI failure.
+            log.info("[runClaude] auth status returned logged-out state (exit \(result.status))")
+            return output
+        }
+        log.error("[runClaude] Failed (exit \(result.status))")
+        throw ClaudeServiceError.cliError("exit \(result.status)")
     }
 
     private func environment(for executable: String) -> [String: String] {
@@ -1055,9 +1057,12 @@ enum ClaudeServiceError: LocalizedError {
     case oauthAccountWriteFailed
     case switchVerificationFailed
     case switchWrongAccount(expected: String, actual: String)
+    case cliTimedOut(seconds: TimeInterval)
 
     var errorDescription: String? {
         switch self {
+        case .cliTimedOut(let seconds):
+            return "Claude CLI did not answer within \(Int(seconds)) seconds"
         case .invalidOutput:
             return "Invalid output from Claude CLI"
         case .cliError(let msg):
