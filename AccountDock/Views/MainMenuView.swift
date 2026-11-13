@@ -360,7 +360,10 @@ struct MainMenuView: View {
             Spacer()
 
             Button {
-                Task { await appState.refresh(forceUnavailablePlanCheck: true) }
+                Task {
+                    await appState.readActiveUsageNow()
+                    await appState.refresh(forceUnavailablePlanCheck: true)
+                }
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.caption)

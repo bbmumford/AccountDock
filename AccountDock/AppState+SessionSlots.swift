@@ -284,6 +284,12 @@ extension AppState {
                 target = destination
                 balanced = true
             }
+            if modelSpent, target == nil, let session, let model, sessionsWithoutModelRoom.insert(session.sessionID).inserted {
+                let place = session.workingDirectory.map { " in " + ($0 as NSString).abbreviatingWithTildeInPath } ?? ""
+                failoverEvents.record(provider, "No account has \(CostParser.shortModelName(model)) allowance left for the session\(place); it stays where it is and will be refused until one resets or it changes model.")
+            } else if !modelSpent, let session {
+                sessionsWithoutModelRoom.remove(session.sessionID)
+            }
             guard let target, await serve(slot.directory, target) else {
                 if let id = slot.account { slotDirectoryServing[path] = id }
                 continue
@@ -358,9 +364,8 @@ extension AppState {
         let accessOnly = await claudeCredential(account, minimumLifetime: lifetime).flatMap(SessionSlots.accessOnly)
         var slot: URL?
         if let accessOnly {
-            slot = await Task.detached(priority: .userInitiated, operation: { () -> URL? in
-                guard let slot = slots.makeSlot(for: id, credential: accessOnly), slots.claimRequested(slot) else { return nil }
-                return slot
+            slot = await Task.detached(priority: .userInitiated, operation: {
+                slots.makeRequestedSlot(for: id, credential: accessOnly)
             }).value
         }
         // The active account's sessions can still read the CLI's own

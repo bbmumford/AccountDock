@@ -187,6 +187,7 @@ extension AppState {
             guard let accountID = slotAccount(forSession: observation.processKey, provider: observation.source.provider)
                     ?? attribute(observation) else { continue }
             if let updatedAt = accountUsageUpdatedAt[accountID], observation.observedAt <= updatedAt { continue }
+            if Self.describesSupersededWindow(observation.usage, stored: accountUsage[accountID]) { continue }
             let merged = accountUsage[accountID].map {
                 $0.merged(withNewer: observation.usage, clearingSession: noSessionWindow)
             } ?? observation.usage
@@ -336,6 +337,36 @@ extension AppState {
         guard spendUsageRequest(account.provider, priority) else { return false }
         return applyUsageRead(await readUsage(account, forced: false, includeMetadata: false,
                                               resetDetails: resetDetails), for: account)
+    }
+
+    /// Reads one account's usage from the provider at once, for an action
+    /// the user just took on it: neither a throttle the provider answered
+    /// an earlier reading with nor the request allowance holds it back, and
+    /// what it returns replaces the stored reading whole.
+    @discardableResult
+    func readUsageNow(_ account: Account) async -> Bool {
+        usageRetryAfter[account.id] = nil
+        let outcome = await readUsage(account, forced: true, includeMetadata: false, resetDetails: true)
+        if case .reading = outcome { accountUsage[account.id] = nil }
+        return applyUsageRead(outcome, for: account)
+    }
+
+    /// `readUsageNow` for each provider's active account; the menu's Refresh
+    /// button calls it before the ordinary refresh.
+    func readActiveUsageNow() async {
+        for provider in AIProviderType.implementedProviders {
+            if let active = activeAccount(for: provider), !needsSignIn(active) { await readUsageNow(active) }
+        }
+    }
+
+    /// Whether a passive reading describes a long window the stored reading
+    /// has already left behind: its reset comes over an hour before the
+    /// stored one. A session's status line repeats the limits of its last
+    /// reply, so after the provider resets an account early its idle
+    /// sessions keep reporting the window before the reset.
+    nonisolated static func describesSupersededWindow(_ passive: UsageAPIResponse, stored: UsageAPIResponse?) -> Bool {
+        guard let known = stored?.sevenDay?.resetsAtDate, let reported = passive.sevenDay?.resetsAtDate else { return false }
+        return reported < known.addingTimeInterval(-60 * 60)
     }
 
     /// Checks the destinations the plan switches to until one's sign-in is
