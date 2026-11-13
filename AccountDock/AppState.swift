@@ -1496,7 +1496,7 @@ final class AppState: ObservableObject {
             log.warning("[fetchUsage] No token for \(account.email), skipping")
             return .skipped
         }
-        if usesSavedCopy, !(await savedCopyIsOwn(account, tokenJSON: tokenJSON, accessToken: accessToken)) {
+        if usesSavedCopy, !(await savedCopyIsOwn(account, tokenJSON: tokenJSON, accessToken: accessToken, forced: forced)) {
             return .credentialRejected("This account's saved sign-in was another account's. Sign it in again.")
         }
         setRateLimitTier(ClaudeService.rateLimitTier(from: tokenJSON), for: account.id)

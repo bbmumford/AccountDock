@@ -31,11 +31,14 @@ extension AppState {
     /// account when it is newer than the one held there, removed from
     /// `account`, and `account` is marked as needing sign-in with its
     /// reading cleared. A check that cannot be made counts as its own, so a
-    /// network failure never costs an account its sign-in.
-    func savedCopyIsOwn(_ account: Account, tokenJSON: String, accessToken: String) async -> Bool {
+    /// network failure never costs an account its sign-in. The check spends
+    /// background request allowance, and waits for a later reading when
+    /// there is none; `forced`, a reading the user asked for, makes it
+    /// regardless.
+    func savedCopyIsOwn(_ account: Account, tokenJSON: String, accessToken: String, forced: Bool = false) async -> Bool {
         let digest = Self.credentialDigest(tokenJSON)
         if savedCopyVerified[account.id] == digest { return true }
-        guard spendUsageRequest(account.provider, .background),
+        guard forced || spendUsageRequest(account.provider, .background),
               let email = try? await claudeService.getProfileIdentity(accessToken: accessToken).email else { return true }
         let owner = Self.savedCopyOwner(profileEmail: email, account: account, accounts: accounts)
         guard owner != .own else {
