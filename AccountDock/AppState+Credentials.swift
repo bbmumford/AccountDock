@@ -146,6 +146,24 @@ extension AppState {
         return known.account
     }
 
+    /// Whether `account` is read, served and warmed with its provider's live
+    /// credential rather than its saved copy: `readClaudeUsage`,
+    /// `claudeCredential`, `currentAccessToken` and `quotaWindowProbe` all
+    /// ask it, so another account's live token is never filed, spent or
+    /// counted under this one.
+    func readsLiveCredential(_ account: Account) -> Bool {
+        guard account.isActive else { return false }
+        return Self.readsLiveCredential(account, liveOwner: liveCredentialOwner(account.provider))
+    }
+
+    /// The account must be active, and the live credential its own; an
+    /// owner not known since the credential last changed counts as its own,
+    /// since the active account's credential is the one AccountDock
+    /// installs.
+    nonisolated static func readsLiveCredential(_ account: Account, liveOwner: UUID?) -> Bool {
+        account.isActive && (liveOwner.map { $0 == account.id } ?? true)
+    }
+
     /// Records that the live credential now in place belongs to `account`,
     /// after AccountDock installed or captured it.
     func noteLiveCredentialOwner(_ provider: AIProviderType, account: UUID) {

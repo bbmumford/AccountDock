@@ -247,12 +247,11 @@ extension AppState {
         }
     }
 
-    /// The account the provider identifies by `id`.
+    /// The account the provider identifies by `id`: the one whose saved
+    /// copy the provider's credential module names so.
     private func accountID(forProviderAccountID id: String, provider: AIProviderType) -> UUID? {
-        switch provider {
-        case .claudeCode: claudeAccountID(forUUID: id)
-        case .codex, .kimi, .gemini: nil
-        }
+        guard let live = credentialModule(for: provider)?.liveCredential else { return nil }
+        return accounts.first { $0.provider == provider && live.providerAccountID(ofSavedCopy: $0) == id }?.id
     }
 
     /// Every account's quota window resets at its own moment, so a reading
@@ -289,26 +288,6 @@ extension AppState {
             return (active.id, false)
         }
         return nil
-    }
-
-    private func claudeAccountID(forUUID uuid: String) -> UUID? {
-        if let id = claudeAccountUUIDs[uuid] { return id }
-        if let builtAt = claudeAccountUUIDsBuiltAt, Date().timeIntervalSince(builtAt) < 10 * 60 { return nil }
-        var map: [String: UUID] = [:]
-        for account in accounts where account.provider == .claudeCode {
-            if let value = keychain.getAccountBackup(forAccountId: account.id.uuidString)?
-                .oauthAccount["accountUuid"]?.value as? String {
-                map[value] = account.id
-            }
-        }
-        if let active = activeAccount(for: .claudeCode),
-           let value = keychain.readOAuthAccount()?["accountUuid"]?.value as? String {
-            map[value] = active.id
-        }
-        claudeAccountUUIDs = map
-        // An incomplete map is rebuilt as soon as the saved accounts are read.
-        claudeAccountUUIDsBuiltAt = keychain.backupStoreAvailable ? Date() : nil
-        return map[uuid]
     }
 
     // MARK: - Request budget
