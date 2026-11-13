@@ -116,6 +116,62 @@ enum AgentSessions {
 
     private static let recordCache = RecordCache()
 
+    // MARK: - Archiving
+
+    /// A record not written for this long is moved out of `directory`. It is
+    /// six times `liveLifetime`, past which no reader of `records` uses one.
+    static let archiveAfter: TimeInterval = 3 * 24 * 60 * 60
+
+    static func archiveDirectory(of directory: URL = directory) -> URL {
+        directory.appendingPathComponent("Archive", isDirectory: true)
+    }
+
+    /// Moves records last written over `archiveAfter` ago into the
+    /// directory's `Archive` folder, which `records` does not list.
+    /// `records` lists and stats every file in `directory` on each quota
+    /// cycle, and every session ever run leaves one, so the listing would
+    /// otherwise grow without bound. Nothing is deleted: a record whose name
+    /// is already archived is kept beside it under its modification time.
+    /// Returns how many were moved.
+    @discardableResult
+    static func archiveStaleRecords(directory: URL = directory, now: Date = Date()) -> Int {
+        let fm = FileManager.default
+        guard let urls = try? fm.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]
+        ) else { return 0 }
+        let archive = archiveDirectory(of: directory)
+        var moved = 0
+        for url in urls where url.pathExtension == "json" {
+            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                  values.isRegularFile == true, let modified = values.contentModificationDate,
+                  now.timeIntervalSince(modified) > archiveAfter else { continue }
+            if moved == 0 { try? fm.createDirectory(at: archive, withIntermediateDirectories: true) }
+            var destination = archive.appendingPathComponent(url.lastPathComponent)
+            if fm.fileExists(atPath: destination.path) {
+                let stem = url.deletingPathExtension().lastPathComponent
+                destination = archive.appendingPathComponent("\(stem).\(Int(modified.timeIntervalSince1970)).json")
+            }
+            if (try? fm.moveItem(at: url, to: destination)) != nil { moved += 1 }
+        }
+        return moved
+    }
+
+    /// Runs `archiveStaleRecords` now and then hourly, off the main thread.
+    /// Started once, by `AccountDockApp` at launch.
+    static func startArchiving() {
+        archiveQueue.async {
+            guard archiveTimer == nil else { return }
+            let timer = DispatchSource.makeTimerSource(queue: archiveQueue)
+            timer.schedule(deadline: .now() + 30, repeating: 60 * 60)
+            timer.setEventHandler { archiveStaleRecords() }
+            timer.resume()
+            archiveTimer = timer
+        }
+    }
+
+    private static let archiveQueue = DispatchQueue(label: "app.accountdock.session-records", qos: .utility)
+    nonisolated(unsafe) private static var archiveTimer: DispatchSourceTimer?
+
     /// Sessions running now: the process is alive, the session has not
     /// ended, and it was heard from within `liveLifetime`.
     static func live(

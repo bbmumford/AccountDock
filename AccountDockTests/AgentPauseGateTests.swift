@@ -33,6 +33,28 @@ final class AgentPauseGateTests: XCTestCase {
         XCTAssertNil(AgentSessions.records(.claudeCode, directory: directory)["s"])
     }
 
+    func testRecordsNotWrittenForDaysAreArchivedAndNoLongerListed() throws {
+        try record("old", event: "SessionEnd", pid: 10, at: "2026-10-01T09:00:00Z")
+        try record("recent", event: "Stop", pid: 11, at: "2026-10-17T09:00:00Z")
+        let now = Date()
+        let old = directory.appendingPathComponent("claude-old.json")
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-AgentSessions.archiveAfter - 60)],
+                                              ofItemAtPath: old.path)
+        XCTAssertEqual(AgentSessions.archiveStaleRecords(directory: directory, now: now), 1)
+        XCTAssertEqual(Set(AgentSessions.records(.claudeCode, directory: directory).keys), ["recent"])
+        let archive = AgentSessions.archiveDirectory(of: directory)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: archive.appendingPathComponent("claude-old.json").path))
+
+        // A session resumed after its record was archived writes a new one;
+        // archived in turn, it is kept beside the first.
+        try record("old", event: "SessionEnd", pid: 12, at: "2026-10-18T09:00:00Z")
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-AgentSessions.archiveAfter - 30)],
+                                              ofItemAtPath: old.path)
+        XCTAssertEqual(AgentSessions.archiveStaleRecords(directory: directory, now: now), 1)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: archive.path).count, 2)
+        XCTAssertEqual(AgentSessions.archiveStaleRecords(directory: directory, now: now), 0)
+    }
+
     func testOnlySessionsMidTurnWithALiveProcessArePaused() throws {
         try record("turning", event: "UserPromptSubmit", pid: 10, at: "2026-10-17T09:00:00.120Z")
         try record("finished", event: "Stop", pid: 11, at: "2026-10-17T09:01:00Z")
