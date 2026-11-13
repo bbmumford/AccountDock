@@ -178,6 +178,7 @@ extension AppState {
             let observation = observation.with(usage: usage)
             if let model = observation.model {
                 workloadModels[observation.source.provider] = (model, observation.observedAt)
+                if let session = observation.processKey { noteSessionModel(session, model: model, at: observation.observedAt) }
             }
             // A session in a slot reports its slot's account; others are
             // matched by their reset times.
@@ -379,7 +380,7 @@ extension AppState {
         return settings
     }
 
-    func quotaState(for account: Account, now: Date = Date()) -> QuotaAccountState {
+    func quotaState(for account: Account, now: Date = Date(), model: String? = nil) -> QuotaAccountState {
         let trend = quotaTrends[account.id] ?? QuotaTrend()
         let rates = trend.currentRates(now: now)
         let uncertainty = trend.currentUncertainty(now: now)
@@ -392,7 +393,7 @@ extension AppState {
         let expired = !account.isActive && rejectedCredentialAccounts.contains(account.id)
         return QuotaAccountState(
             id: account.id,
-            usage: plannedUsage(account, now: now),
+            usage: plannedUsage(account, now: now, model: model),
             observedAt: accountUsageUpdatedAt[account.id],
             sessionBurnPerHour: rates.session,
             weeklyBurnPerHour: rates.weekly,
@@ -410,13 +411,50 @@ extension AppState {
     }
 
     /// The account's usage with its weekly window narrowed to what work on
-    /// the provider's current model may still use, when a model-scoped
-    /// weekly limit leaves less room than the whole weekly allowance.
-    func plannedUsage(_ account: Account, now: Date = Date()) -> UsageAPIResponse? {
+    /// a model may still use, when that model's own weekly limit leaves less
+    /// room than the whole weekly allowance.
+    ///
+    /// With `model`, the account is judged for one session using it, as
+    /// `serveSessionSlots` judges each session that has a slot of its own.
+    /// Without, it is judged for the sessions that share one credential and
+    /// so move together: the window is narrowed by the tightest limit among
+    /// the models those sessions use, and left whole when none uses a
+    /// limited model, so one session on a spent model moves alone.
+    func plannedUsage(_ account: Account, now: Date = Date(), model: String? = nil) -> UsageAPIResponse? {
         guard let usage = accountUsage[account.id] else { return nil }
-        guard let seen = workloadModels[account.provider], now.timeIntervalSince(seen.seenAt) < 2 * 60 * 60,
-              !usage.modelWeeklyLimits.isEmpty else { return usage }
-        return usage.replacingSevenDay(usage.weeklyWindow(forModel: seen.model))
+        guard !usage.modelWeeklyLimits.isEmpty else { return usage }
+        let models = model.map { [$0] } ?? sharedSessionModels(account.provider, now: now)
+        return usage.replacingSevenDay(usage.weeklyWindow(forModels: models))
+    }
+
+    /// How long a session's last reported model is taken as the one it uses.
+    static let sessionModelLifetime: TimeInterval = 24 * 60 * 60
+
+    func noteSessionModel(_ session: String, model: String, at: Date) {
+        if let known = sessionModels[session], known.seenAt > at { return }
+        sessionModels[session] = (model, at)
+        if sessionModels.count > 512 {
+            sessionModels = sessionModels.filter { at.timeIntervalSince($0.value.seenAt) < Self.sessionModelLifetime }
+        }
+    }
+
+    /// The model `session` uses, when it reported one within
+    /// `sessionModelLifetime`.
+    func sessionModel(_ session: String?, now: Date) -> String? {
+        guard let session, let known = sessionModels[session],
+              now.timeIntervalSince(known.seenAt) < Self.sessionModelLifetime else { return nil }
+        return known.model
+    }
+
+    /// The models used by the provider's running sessions that read no slot
+    /// of their own: they share the CLI's credential or the router, and are
+    /// served by whichever account that is.
+    func sharedSessionModels(_ provider: AIProviderType, now: Date) -> [String] {
+        let models = (liveSessions[provider] ?? []).compactMap { session -> String? in
+            if let pid = session.processID, slotDirectoryByProcess[pid] != nil { return nil }
+            return sessionModel(session.sessionID, now: now)
+        }
+        return Array(Set(models))
     }
 
     /// Session percentage per weekly percent, shared by every account of the

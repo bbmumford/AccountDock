@@ -14,9 +14,11 @@ private let log = FileLog("SessionSlots")
 /// `AppState.maintainSessionSlots` writes each slot and the pool file the
 /// launcher reads. A slot holds the access token only: AccountDock renews
 /// every account it stores, and a CLI holding the refresh token would
-/// replace it under AccountDock. The active account is served by the CLI's
-/// default credential, which the CLI renews itself, so the pool names it
-/// `activeEntry`.
+/// replace it under AccountDock. Every session the launcher starts gets a
+/// one-session slot of its own, the active account's included, so each can
+/// be moved alone; the pool names the active account `activeEntry` only
+/// while it has no spare slot, and its session then reads the CLI's default
+/// credential.
 ///
 /// Launches from IDEs and apps do not read the shell profile and keep the
 /// default credential.
@@ -76,6 +78,14 @@ struct SessionSlots: Sendable {
     var sessionRoot: URL { root.appendingPathComponent("session", isDirectory: true) }
     static let accountFile = "account"
     static let claimedMarker = "claimed"
+    /// Names the file a launcher leaves in `sessionRoot` when it finds no
+    /// spare, for `takeSpareRequests`.
+    static let requestPrefix = ".wanted."
+    /// How long a launcher waits for a spare before it starts its session
+    /// on a credential shared with other sessions; `spareWaitVariable` in
+    /// the launch's environment gives another number of seconds.
+    static let spareWaitSeconds = 4
+    static let spareWaitVariable = "ACCOUNTDOCK_SPARE_WAIT"
     /// Marks a slot claimed for a session the user asked AccountDock to
     /// start on one account (`claimRequested`), which may begin later than
     /// a session the launcher claims for.
@@ -225,6 +235,32 @@ struct SessionSlots: Sendable {
             return false
         }
         return store.apply(writes: [(NSUserName(), credential)])
+    }
+
+    /// Deletes a spare slot, claiming it first: the launcher claims a spare
+    /// with the same `mkdir`, so a spare it took in the meantime is left to
+    /// its session. Returns whether the slot was removed.
+    @discardableResult
+    func removeSpare(_ directory: URL) -> Bool {
+        do {
+            try FileManager.default.createDirectory(at: directory.appendingPathComponent(Self.claimedMarker),
+                                                    withIntermediateDirectories: false)
+        } catch {
+            return false
+        }
+        remove(directory)
+        return true
+    }
+
+    /// Whether a launcher found no spare slot for its account since the last
+    /// call: it leaves a `requestPrefix` file in `sessionRoot` and waits
+    /// `spareWaitSeconds` for `AppState.maintainSessionSlots` to fill one.
+    /// The files are removed.
+    func takeSpareRequests() -> Bool {
+        let fm = FileManager.default
+        let names = ((try? fm.contentsOfDirectory(atPath: sessionRoot.path)) ?? []).filter { $0.hasPrefix(Self.requestPrefix) }
+        for name in names { try? fm.removeItem(at: sessionRoot.appendingPathComponent(name)) }
+        return !names.isEmpty
     }
 
     /// Deletes the slot's Keychain item and directory.
@@ -450,17 +486,32 @@ struct SessionSlots: Sendable {
             for (i = 1; i <= n; i++) { r -= weight[i]; if (r < 0) { print path[i]; exit } }
             print path[n]
           }' "$pool" 2>/dev/null)
+        # Each session gets a slot of its own, so AccountDock can move it
+        # alone. With no spare left, AccountDock is asked for one and given
+        # \#(Self.spareWaitSeconds) seconds to fill it.
         if [ -n "$slot" ] && [ "$slot" != "\#(Self.activeEntry)" ]; then
           account=${slot##*/}
-          for spare in "$sessions"/*; do
-            [ -f "$spare/\#(Self.accountFile)" ] || continue
-            [ "$(cat "$spare/\#(Self.accountFile)" 2>/dev/null)" = "$account" ] || continue
-            if mkdir "$spare/\#(Self.claimedMarker)" 2>/dev/null; then
-              \#(support.directoryVariable)=$spare
-              export \#(support.directoryVariable)
-              exec "$real" "$@"
-            fi
+          request="$sessions/\#(Self.requestPrefix)$$"
+          wait=${\#(Self.spareWaitVariable):-\#(Self.spareWaitSeconds)}
+          case "$wait" in ''|*[!0-9]*) wait=\#(Self.spareWaitSeconds) ;; esac
+          tries=0
+          while :; do
+            for spare in "$sessions"/*; do
+              [ -f "$spare/\#(Self.accountFile)" ] || continue
+              [ "$(cat "$spare/\#(Self.accountFile)" 2>/dev/null)" = "$account" ] || continue
+              if mkdir "$spare/\#(Self.claimedMarker)" 2>/dev/null; then
+                [ "$tries" -eq 0 ] || rm -f "$request"
+                \#(support.directoryVariable)=$spare
+                export \#(support.directoryVariable)
+                exec "$real" "$@"
+              fi
+            done
+            [ "$tries" -lt $((wait * 5)) ] || break
+            : > "$request" 2>/dev/null || break
+            tries=$((tries + 1))
+            sleep 0.2
           done
+          [ "$tries" -eq 0 ] || rm -f "$request"
         fi
         if [ -z "$slot" ] || [ "$slot" = "\#(Self.activeEntry)" ] || [ ! -d "$slot" ]; then
           exec "$real" "$@"

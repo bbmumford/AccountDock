@@ -151,7 +151,8 @@ final class SessionSlotsTests: XCTestCase {
             let pipe = Pipe()
             process.executableURL = URL(fileURLWithPath: "/bin/sh")
             process.arguments = ["-c", "exec claude \"$@\"", "sh"] + arguments
-            process.environment = ["PATH": slots.binDirectory.path + ":" + realBin.path + ":/usr/bin:/bin"]
+            process.environment = ["PATH": slots.binDirectory.path + ":" + realBin.path + ":/usr/bin:/bin",
+                                   SessionSlots.spareWaitVariable: "0"]
                 .merging(environment) { $1 }
             process.standardOutput = pipe
             try process.run()
@@ -185,6 +186,34 @@ final class SessionSlotsTests: XCTestCase {
         XCTAssertNotNil(slots.sessionSlots().first { $0.directory.lastPathComponent == spare.lastPathComponent }?.claimedAt)
         XCTAssertNil(slots.sessionSlots().first { $0.directory.lastPathComponent == other.lastPathComponent }?.claimedAt)
         XCTAssertEqual(try launch(["-p"]), slot.path + "|-p", "a claimed spare is never handed out twice")
+
+        // With no spare left the launcher asks for one and takes the one
+        // filled while it waits, so the session still gets a slot of its own.
+        let late = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let asked = expectation(description: "the launcher asked for a spare")
+        DispatchQueue.global().async {
+            for _ in 0..<100 {
+                if slots.takeSpareRequests() {
+                    try? FileManager.default.createDirectory(at: late, withIntermediateDirectories: true)
+                    _ = slots.assign(late, to: account)
+                    asked.fulfill()
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        XCTAssertEqual(try launch(["-p"], environment: [SessionSlots.spareWaitVariable: "5"]), late.path + "|-p")
+        wait(for: [asked], timeout: 6)
+        XCTAssertFalse(slots.takeSpareRequests(), "the launcher removes its request once served")
+
+        // A spare is removed only while unclaimed.
+        let unclaimed = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: unclaimed, withIntermediateDirectories: true)
+        XCTAssertTrue(slots.assign(unclaimed, to: account))
+        XCTAssertFalse(slots.removeSpare(late), "a spare a session has claimed is left to it")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: late.path))
+        XCTAssertTrue(slots.removeSpare(unclaimed))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: unclaimed.path))
 
         // A session resumed by ID goes back to the account its history ran
         // on, whatever the weights say; an unknown ID is placed by weight.
@@ -254,5 +283,13 @@ final class SessionSlotsTests: XCTestCase {
         try process.run()
         process.waitUntilExit()
         XCTAssertEqual(String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self), text)
+    }
+
+    func testTheLiveCredentialIsRenewedEarlyOnlyWhileSlotsHoldItsToken() {
+        let now = Date()
+        XCTAssertTrue(AppState.liveRenewalIsDue(expiry: now.addingTimeInterval(20 * 60), slotsHoldIt: true, now: now))
+        XCTAssertFalse(AppState.liveRenewalIsDue(expiry: now.addingTimeInterval(20 * 60), slotsHoldIt: false, now: now),
+                       "sessions on the default credential renew it themselves")
+        XCTAssertFalse(AppState.liveRenewalIsDue(expiry: now.addingTimeInterval(3 * 60 * 60), slotsHoldIt: true, now: now))
     }
 }

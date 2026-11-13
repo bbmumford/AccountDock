@@ -608,6 +608,17 @@ final class FailoverPlannerTests: XCTestCase {
      "weekly_scoped_shares":[{"limit_index":2,"used_percent_of_weekly":45,"allowance_percent_of_weekly":50}]}
     """
 
+    func testOnlyWorkOnAModelWithItsOwnLimitIsJudgedByThatLimit() throws {
+        let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(scopedResponse.utf8))
+        let whole = try XCTUnwrap(usage.sevenDay?.utilization)
+        let limited = try XCTUnwrap(usage.modelWeeklyLimits.first?.model)
+        let scoped = try XCTUnwrap(usage.weeklyWindow(forModel: limited)?.utilization)
+        XCTAssertEqual(usage.weeklyWindow(forModels: [])?.utilization, whole, "sessions on no limited model see the whole allowance")
+        XCTAssertEqual(usage.weeklyWindow(forModels: ["claude-other-1"])?.utilization, whole)
+        XCTAssertEqual(usage.weeklyWindow(forModels: ["claude-other-1", limited])?.utilization, max(whole, scoped),
+                       "sessions that move together are held to the tightest of their models")
+    }
+
     func testAModelScopedWeeklyLimitNarrowsTheRoomForWorkOnThatModel() throws {
         let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(scopedResponse.utf8))
         XCTAssertEqual(usage.limits?.count, 4, "unknown limit shapes keep their positions")
