@@ -58,8 +58,7 @@ struct UsageChartView: View {
     }
 
     private func todayString() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = DayKey.makeFormatter()
         return formatter.string(from: Date())
     }
 }

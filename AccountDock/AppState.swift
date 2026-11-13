@@ -4,8 +4,7 @@ import WidgetKit
 
 private extension DateFormatter {
     static let accountDockDay: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = DayKey.makeFormatter()
         return formatter
     }()
 }

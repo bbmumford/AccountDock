@@ -449,8 +449,7 @@ struct DailyActivity: Codable, Identifiable {
     var id: String { date }
 
     var parsedDate: Date? {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = DayKey.makeFormatter()
         return formatter.date(from: date)
     }
 }

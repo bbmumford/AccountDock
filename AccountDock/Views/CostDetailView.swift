@@ -165,8 +165,7 @@ struct CostDetailView: View {
 
     private var periodSummaryCards: some View {
         let todayStr = todayString()
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = DayKey.makeFormatter()
 
         let last7 = combinedDaysInLast(7, today: todayStr, formatter: formatter)
         let last30 = combinedDaysInLast(30, today: todayStr, formatter: formatter)
@@ -451,8 +450,7 @@ struct CostDetailView: View {
     }
 
     private func todayString() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
+        let f = DayKey.makeFormatter()
         return f.string(from: Date())
     }
 

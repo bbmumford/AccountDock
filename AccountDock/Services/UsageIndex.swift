@@ -566,9 +566,7 @@ actor UsageIndex {
     }
 
     private static func localDateString(_ d: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.locale = Locale(identifier: "en_US_POSIX")
+        let f = DayKey.makeFormatter()
         return f.string(from: d)
     }
 }
@@ -592,9 +590,7 @@ private func parseFile(
     let isoAlt = ISO8601DateFormatter()
     isoAlt.formatOptions = [.withInternetDateTime]
 
-    let dateFmt = DateFormatter()
-    dateFmt.dateFormat = "yyyy-MM-dd"
-    dateFmt.locale = Locale(identifier: "en_US_POSIX")
+    let dateFmt = DayKey.makeFormatter()
     let hourFmt = DateFormatter()
     hourFmt.dateFormat = "H"
     hourFmt.locale = Locale(identifier: "en_US_POSIX")

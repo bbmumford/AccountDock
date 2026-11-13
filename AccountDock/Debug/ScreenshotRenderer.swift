@@ -192,8 +192,7 @@ extension AppState {
         errorMessage = nil
         lastUsageRefresh = now.addingTimeInterval(-40)
 
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = DayKey.makeFormatter()
         // Thirty days of a weekday-heavy pattern, ending with today.
         let pattern: [Double] = [38.4, 52.1, 29.7, 61.3, 44.8, 12.6, 9.1]
         let claudeDays: [Double] = (0..<30).map { day -> Double in
