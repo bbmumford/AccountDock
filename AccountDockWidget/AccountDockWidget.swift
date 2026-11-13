@@ -176,16 +176,16 @@ private struct SmallWidgetView: View {
     }
 
     private func compactUsageBar(label: String, utilization: Double?, hasError: Bool) -> some View {
-        let pct = utilization ?? 0
+        let level = UsageLevel(utilization: utilization)
         return VStack(spacing: 3) {
             HStack {
                 Text(label)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(hasError ? "—" : "\(Int(pct))%")
+                Text(hasError ? "—" : level.percentText)
                     .font(.caption2.weight(.medium).monospacedDigit())
-                    .foregroundStyle(hasError ? Color.secondary : colorForUtilization(pct))
+                    .foregroundStyle(hasError ? Color.secondary : level.color(normal: .green))
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
@@ -193,8 +193,8 @@ private struct SmallWidgetView: View {
                         .fill(.quaternary)
                         .frame(height: 5)
                     RoundedRectangle(cornerRadius: 2.5)
-                        .fill(colorForUtilization(pct))
-                        .frame(width: max(0, geo.size.width * min(pct / 100.0, 1.0)), height: 5)
+                        .fill(level.color(normal: .green))
+                        .frame(width: max(0, geo.size.width * level.fraction), height: 5)
                 }
             }
             .frame(height: 5)
@@ -278,7 +278,7 @@ private struct MediumWidgetView: View {
     }
 
     private func usageBar(label: LocalizedStringKey, utilization: Double?, resetTime: String?) -> some View {
-        let pct = utilization ?? 0
+        let level = UsageLevel(utilization: utilization)
         return VStack(spacing: 3) {
             HStack {
                 Text(label)
@@ -290,9 +290,9 @@ private struct MediumWidgetView: View {
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
-                Text("\(Int(pct))%")
+                Text(level.percentText)
                     .font(.caption2.weight(.medium).monospacedDigit())
-                    .foregroundStyle(colorForUtilization(pct))
+                    .foregroundStyle(level.color(normal: .green))
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
@@ -300,8 +300,8 @@ private struct MediumWidgetView: View {
                         .fill(.quaternary)
                         .frame(height: 5)
                     RoundedRectangle(cornerRadius: 2.5)
-                        .fill(colorForUtilization(pct))
-                        .frame(width: max(0, geo.size.width * min(pct / 100.0, 1.0)), height: 5)
+                        .fill(level.color(normal: .green))
+                        .frame(width: max(0, geo.size.width * level.fraction), height: 5)
                 }
             }
             .frame(height: 5)
@@ -495,7 +495,7 @@ private struct LargeWidgetView: View {
     }
 
     private func accountUsageBar(label: LocalizedStringKey, utilization: Double?, resetTime: String?) -> some View {
-        let pct = utilization ?? 0
+        let level = UsageLevel(utilization: utilization)
         return HStack(spacing: 6) {
             Text(label)
                 .font(.caption2)
@@ -507,14 +507,14 @@ private struct LargeWidgetView: View {
                         .fill(.quaternary)
                         .frame(height: 5)
                     RoundedRectangle(cornerRadius: 2.5)
-                        .fill(colorForUtilization(pct))
-                        .frame(width: max(0, geo.size.width * min(pct / 100.0, 1.0)), height: 5)
+                        .fill(level.color(normal: .green))
+                        .frame(width: max(0, geo.size.width * level.fraction), height: 5)
                 }
             }
             .frame(height: 5)
-            Text("\(Int(pct))%")
+            Text(level.percentText)
                 .font(.caption2.weight(.medium).monospacedDigit())
-                .foregroundStyle(colorForUtilization(pct))
+                .foregroundStyle(level.color(normal: .green))
                 .frame(width: 32, alignment: .trailing)
         }
     }
@@ -558,7 +558,7 @@ private struct CircleWidgetView: View {
                             utilization: account.weeklyUtilization,
                             accent: account.hasError
                                 ? .secondary
-                                : colorForUtilization(account.weeklyUtilization ?? 0)
+                                : UsageLevel(utilization: account.weeklyUtilization).color(normal: .green)
                         )
                     }
                 }
@@ -574,16 +574,16 @@ private struct CircleWidgetView: View {
     }
 
     private func ringStat(label: LocalizedStringKey, resetTime: String?, utilization: Double?, accent: Color) -> some View {
-        let pct = utilization ?? 0
+        let level = UsageLevel(utilization: utilization)
         return VStack(spacing: 4) {
             ZStack {
                 Circle()
                     .stroke(.quaternary, lineWidth: 6)
                 Circle()
-                    .trim(from: 0, to: min(pct / 100.0, 1.0))
+                    .trim(from: 0, to: level.fraction)
                     .stroke(accent, style: StrokeStyle(lineWidth: 6, lineCap: .round))
                     .rotationEffect(.degrees(-90))
-                Text("\(Int(pct))%")
+                Text(level.percentText)
                     .font(.caption.weight(.semibold).monospacedDigit())
             }
             .aspectRatio(1, contentMode: .fit)
@@ -625,12 +625,6 @@ private struct CircleWidgetEntryView: View {
 }
 
 // MARK: - Helpers
-
-private func colorForUtilization(_ pct: Double) -> Color {
-    if pct >= 90 { return .red }
-    if pct >= 60 { return .orange }
-    return .green
-}
 
 private func formatCost(_ cost: Double) -> String {
     cost >= 1 ? String(format: "$%.2f", cost) : String(format: "$%.4f", cost)
