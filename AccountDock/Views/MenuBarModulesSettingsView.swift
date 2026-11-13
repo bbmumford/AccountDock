@@ -4,7 +4,6 @@ import SwiftUI
 /// available modules with a toggle per row, plus a live preview showing
 /// exactly what will appear in the menu bar.
 struct MenuBarModulesSettingsView: View {
-    @AppStorage("showFullEmail") private var showFullEmail = false
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var config: MenuBarConfig
 
@@ -36,7 +35,6 @@ struct MenuBarModulesSettingsView: View {
                         MenuBarModuleView(
                             module: row.module,
                             appState: appState,
-                            showFullEmail: showFullEmail,
                             tick: tick
                         )
                         .opacity(row.isEnabled ? 1.0 : 0.35)
@@ -88,7 +86,6 @@ struct MenuBarModulesSettingsView: View {
                         MenuBarModuleView(
                             module: row.module,
                             appState: appState,
-                            showFullEmail: showFullEmail,
                             tick: tick
                         )
                     }
@@ -98,7 +95,6 @@ struct MenuBarModulesSettingsView: View {
                 MenuBarModuleView(
                     module: row.module,
                     appState: appState,
-                    showFullEmail: showFullEmail,
                     tick: tick
                 )
             }

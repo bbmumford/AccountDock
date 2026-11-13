@@ -6,10 +6,9 @@ import SwiftUI
 struct MenuBarModuleView: View {
     let module: MenuBarModule
     let appState: AppState
-    let showFullEmail: Bool
-    /// Tick value that recomputes reset countdowns once a minute.
-    /// Passed in (and ignored by non-countdown modules) so the parent timer
-    /// can drive view updates without each module owning a timer.
+    /// Tick value that recomputes reset countdowns and elapsed-time markers.
+    /// Passed in (and ignored by other modules) so the parent timer can
+    /// drive view updates without each module owning a timer.
     let tick: Date
 
     // Fixed row geometry so every module shares the same baseline grid: the
@@ -22,6 +21,8 @@ struct MenuBarModuleView: View {
         switch module.kind {
         case .provider(let provider, .percentages):
             combinedPercentageView(provider: provider)
+        case .provider(let provider, .modelLimit):
+            modelLimitView(provider: provider)
         case .provider(let provider, let metric):
             if let window = metric.window {
                 switch metric {
@@ -33,16 +34,7 @@ struct MenuBarModuleView: View {
                     providerUsageView(provider: provider, window: window, presentation: .bar)
                 }
             }
-        case .legacy(.account):
-            // Account is shown as a single line (no label) — the name is
-            // self-identifying and the `@` label added noise. No height frame:
-            // wrapping the Text in a fixed-height frame truncated it.
-            Text(accountText)
-                .font(.system(size: 11, weight: .medium))
-                .lineLimit(1)
-                .foregroundStyle(.primary)
-                .fixedSize()
-        case .dailyCost, .legacy:
+        case .dailyCost:
             VStack(alignment: .center, spacing: 0) {
                 Text(module.compactLabel)
                     .font(.system(size: 8, weight: .semibold))
@@ -51,62 +43,53 @@ struct MenuBarModuleView: View {
                     .fixedSize()
                     .frame(height: labelRowHeight)
 
-                valueRow
+                Text(dailyCostText)
+                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.primary)
+                    .fixedSize()
                     .frame(height: valueRowHeight)
             }
             .fixedSize()
         }
     }
 
-    @ViewBuilder
-    private var valueRow: some View {
-        switch module.kind {
-        case .provider, .legacy(.claudeUsage), .legacy(.codexUsage):
-            EmptyView()
+    // MARK: - Data accessors
 
-        case .legacy(.account):
-            Text(accountText)
-                .font(.system(size: 10, weight: .medium))
-                .lineLimit(1)
-                .foregroundStyle(.primary)
-                .fixedSize()
+    private enum UsagePresentation { case bar, percentage }
 
-        case .legacy(.sessionBar):
-            UtilizationBar(utilization: sessionUtilization, markerPercent: sessionTimeElapsed)
-
-        case .legacy(.weeklyBar):
-            UtilizationBar(utilization: weeklyUtilization, markerPercent: weeklyTimeElapsed)
-
-        case .legacy(.sessionBarPlain):
-            UtilizationBar(utilization: sessionUtilization)
-
-        case .legacy(.weeklyBarPlain):
-            UtilizationBar(utilization: weeklyUtilization)
-
-        case .dailyCost:
-            Text(dailyCostText)
-                .font(.system(size: 10, weight: .medium).monospacedDigit())
-                .foregroundStyle(.primary)
-                .fixedSize()
-
-        case .legacy(.sessionReset):
-            Text(sessionResetText)
-                .font(.system(size: 10, weight: .medium).monospacedDigit())
-                .foregroundStyle(.primary)
-                .fixedSize()
-
-        case .legacy(.weeklyReset):
-            Text(weeklyResetText)
-                .font(.system(size: 10, weight: .medium).monospacedDigit())
-                .foregroundStyle(.primary)
-                .fixedSize()
+    /// The active account's reading of one of `provider`'s windows.
+    private func activeWindow(provider: AIProviderType, window: MenuBarModule.Window) -> UsageWindow? {
+        guard let account = appState.activeAccount(for: provider),
+              let usage = appState.accountUsage[account.id] else { return nil }
+        switch window {
+        case .session: return usage.fiveHour
+        case .long: return usage.sevenDay
         }
     }
 
-    // MARK: - Data accessors
-
-    private typealias UsageWindow = MenuBarModule.Window
-    private enum UsagePresentation { case bar, percentage }
+    /// The active account's tightest model-scoped weekly limit: the model's
+    /// name beside its percentage, or a dash when the account has none.
+    private func modelLimitView(provider: AIProviderType) -> some View {
+        _ = tick // a limit whose reset passes drops out
+        let limit = appState.activeAccount(for: provider)
+            .flatMap { appState.accountUsage[$0.id] }?
+            .tightestModelWeeklyLimit()
+        let level = UsageLevel(utilization: limit?.percent)
+        return HStack(spacing: 3) {
+            if let limit {
+                Text(limit.model)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            Text(level.percentText)
+                .font(.system(size: 13.2, weight: .regular).monospacedDigit())
+                .foregroundStyle(level.color(normal: .primary))
+        }
+        .frame(height: 22)
+        .fixedSize()
+        .help(limit.map { "\($0.model) weekly limit: \(level.percentText)" }
+              ?? "The active account has no weekly limit scoped to one model.")
+    }
 
     @ViewBuilder
     private func combinedPercentageView(provider: AIProviderType) -> some View {
@@ -144,11 +127,12 @@ struct MenuBarModuleView: View {
                 Circle()
                     .stroke(Color.primary.opacity(0.2), lineWidth: lineWidth)
             }
-            if let utilization, !unavailable {
+            let level = UsageLevel(utilization: utilization)
+            if level.isKnown, !unavailable {
                 Circle()
-                    .trim(from: 0, to: min(max(utilization / 100, 0), 1))
+                    .trim(from: 0, to: level.fraction)
                     .stroke(
-                        quotaColor(utilization),
+                        level.color(normal: .green),
                         style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                     )
                     .rotationEffect(.degrees(-90))
@@ -157,39 +141,29 @@ struct MenuBarModuleView: View {
         .frame(width: diameter, height: diameter)
     }
 
-    private func quotaColor(_ utilization: Double) -> Color {
-        if utilization >= 90 { return .red }
-        if utilization >= 70 { return .orange }
-        return .green
-    }
-
     private func combinedPercentageHelp(
         provider: AIProviderType,
         session: Double?,
         longWindow: Double?
     ) -> String {
-        let sessionText = session.map { "\(Int($0.rounded()))%" } ?? "unavailable"
-        let longText = longWindow.map { "\(Int($0.rounded()))%" } ?? "unavailable"
+        let sessionText = UsageLevel(utilization: session).percentText
+        let longText = UsageLevel(utilization: longWindow).percentText
         return "\(provider.capabilities.sessionQuotaLabel): \(sessionText) · \(provider.capabilities.weeklyQuotaLabel): \(longText)"
     }
 
     private func providerUsageView(
         provider: AIProviderType,
-        window: UsageWindow,
+        window: MenuBarModule.Window,
         presentation: UsagePresentation
     ) -> some View {
-        let account = appState.activeAccount(for: provider)
-        let utilization: Double? = account.flatMap {
-            switch window {
-            case .session: return appState.accountUsage[$0.id]?.fiveHour?.utilization
-            case .long: return appState.accountUsage[$0.id]?.sevenDay?.utilization
-            }
-        }
+        let reading = activeWindow(provider: provider, window: window)
+        let utilization = reading?.utilization
+        _ = tick // the elapsed marker moves with the clock
 
         return Group {
             switch presentation {
             case .bar:
-                UtilizationBar(utilization: utilization)
+                UtilizationBar(utilization: utilization, markerPercent: reading?.elapsedPercent())
                     .frame(height: 22)
                     .padding(.horizontal, 2)
             case .percentage:
@@ -197,7 +171,7 @@ struct MenuBarModuleView: View {
                     Image(systemName: window == .session ? "clock" : "calendar")
                         .font(.system(size: 12, weight: .regular))
                         .foregroundStyle(.secondary)
-                    Text(utilization.map { "\(Int($0.rounded()))%" } ?? "—")
+                    Text(UsageLevel(utilization: utilization).percentText)
                         .font(.system(size: 13.2, weight: .regular).monospacedDigit())
                 }
                 .frame(height: 22)
@@ -206,21 +180,16 @@ struct MenuBarModuleView: View {
         .fixedSize()
     }
 
-    private func resetText(provider: AIProviderType, window: UsageWindow) -> some View {
-        let account = appState.activeAccount(for: provider)
-        let value: String? = account.flatMap {
-            switch window {
-            case .session: return appState.accountUsage[$0.id]?.fiveHour?.compactResetString
-            case .long: return appState.accountUsage[$0.id]?.sevenDay?.compactResetString
-            }
-        }
+    private func resetText(provider: AIProviderType, window: MenuBarModule.Window) -> some View {
+        _ = tick // the countdown moves with the clock
+        let value = activeWindow(provider: provider, window: window)?.compactResetString
         return Text(value ?? "—")
             .font(.system(size: 13.2, weight: .regular).monospacedDigit())
             .foregroundStyle(.primary)
             .fixedSize()
     }
 
-    private func resetCell(provider: AIProviderType, window: UsageWindow) -> some View {
+    private func resetCell(provider: AIProviderType, window: MenuBarModule.Window) -> some View {
         HStack(spacing: 3) {
             Image(systemName: "arrow.clockwise")
                 .font(.system(size: 12, weight: .regular))
@@ -232,59 +201,11 @@ struct MenuBarModuleView: View {
         .fixedSize()
     }
 
-    private var accountText: String {
-        guard let account = appState.activeAccount else { return "—" }
-        let name = account.effectiveDisplayName(obfuscated: !showFullEmail)
-        return name.isEmpty ? "—" : name
-    }
-
-    private var sessionUtilization: Double? {
-        guard let id = appState.activeAccount?.id else { return nil }
-        return appState.accountUsage[id]?.fiveHour?.utilization
-    }
-
-    private var weeklyUtilization: Double? {
-        guard let id = appState.activeAccount?.id else { return nil }
-        return appState.accountUsage[id]?.sevenDay?.utilization
-    }
-
-    private var sessionTimeElapsed: Double? {
-        _ = tick // recompute as the window progresses
-        guard let id = appState.activeAccount?.id else { return nil }
-        return appState.accountUsage[id]?.fiveHour?
-            .elapsedPercent(windowSeconds: RateLimitWindow.fiveHourSeconds)
-    }
-
-    private var weeklyTimeElapsed: Double? {
-        _ = tick
-        guard let id = appState.activeAccount?.id else { return nil }
-        return appState.accountUsage[id]?.sevenDay?
-            .elapsedPercent(windowSeconds: RateLimitWindow.sevenDaySeconds)
-    }
-
+    /// Today's cost of the shown providers, read from the stored hidden list
+    /// on each tick of the status item's timer.
     private var dailyCostText: String {
-        let cost = appState.combinedTodayCost
-        guard cost > 0 else { return "—" }
-        return String(format: "$%.2f", cost)
-    }
-
-    private var sessionResetText: String {
-        // `tick` is read so SwiftUI recomputes on each timer fire.
         _ = tick
-        guard let id = appState.activeAccount?.id,
-              let s = appState.accountUsage[id]?.fiveHour?.compactResetString else {
-            return "—"
-        }
-        return s
-    }
-
-    private var weeklyResetText: String {
-        _ = tick
-        guard let id = appState.activeAccount?.id,
-              let s = appState.accountUsage[id]?.sevenDay?.compactResetString else {
-            return "—"
-        }
-        return s
+        return UsageFormat.cost(appState.todaySummary().cost)
     }
 }
 
@@ -313,8 +234,9 @@ private struct EvenDashedCircle: View {
 
 /// Hollow rounded capsule with an inner filled pill whose width reflects
 /// `utilization` (a 0–100 percentage, normalized to 0–1). Fill is monochrome
-/// (adapts to the light/dark menu bar), turning red above 90% (and staying red
-/// on overage, clamped at 100%).
+/// (adapts to the light/dark menu bar) until `UsageLevel` rates the window
+/// high or critical, which colour it orange or red (clamped at 100% on
+/// overage).
 ///
 /// `markerPercent` (0–100, optional) draws a thin vertical "pace" tick at the
 /// fraction of the rate-limit window already elapsed. Compare the fill to the
@@ -330,12 +252,11 @@ private struct UtilizationBar: View {
     private let strokeWidth: CGFloat = 1
     private let innerInset: CGFloat = 1.5
 
-    private var clamped: Double { min(max((utilization ?? 0) / 100.0, 0), 1) }
+    private var level: UsageLevel { UsageLevel(utilization: utilization) }
 
-    private var fillColor: Color {
-        guard let u = utilization, u > 90 else { return .primary }
-        return .red
-    }
+    private var clamped: Double { level.fraction }
+
+    private var fillColor: Color { level.color(normal: .primary) }
 
     /// X offset (within the inset interior) of the pace tick, if shown.
     /// Suppressed when there's no usage data so a dashed "no data" bar can't
@@ -346,9 +267,8 @@ private struct UtilizationBar: View {
         return innerInset + (trackWidth - innerInset * 2) * frac
     }
 
-    // Restored verbatim from the original (commit b012f0d): a left-anchored
-    // inset Capsule fill. Plus one optional vertical pace tick. No clip /
-    // compositingGroup / blend — those are what broke it.
+    // A left-anchored inset Capsule fill and one optional vertical pace
+    // tick, stacked without clip, compositingGroup or blend modifiers.
     var body: some View {
         ZStack(alignment: .leading) {
             // Track — hollow capsule outline.

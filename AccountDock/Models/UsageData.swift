@@ -173,6 +173,18 @@ extension UsageAPIResponse {
         }
     }
 
+    /// The model-scoped weekly limit with the most of its own allowance
+    /// used, among those whose reset has not passed at `date`; nil when the
+    /// reading has none. Shown by the menu bar's model-limit module.
+    func tightestModelWeeklyLimit(at date: Date = Date()) -> ModelWeeklyLimit? {
+        modelWeeklyLimits
+            .filter { limit in
+                guard let reset = limit.resetsAt.flatMap(UsageWindow.parseProviderDate) else { return true }
+                return reset > date
+            }
+            .max { $0.percent < $1.percent }
+    }
+
     /// The weekly window as it applies to sessions using `models` together:
     /// the tightest of their windows, and the whole weekly limit when none
     /// of them has a limit of its own.
@@ -399,22 +411,16 @@ struct UsageWindow: Codable {
         return "\(max(minutes, 1))m"
     }
 
-    /// How much of the rate-limit window has already elapsed, as a 0–100
-    /// percentage: `1 − remaining / windowSeconds`, clamped to [0, 100].
-    /// `windowSeconds` is the fixed window length (5h = 18000, 7d = 604800).
-    /// Returns nil if there's no reset timestamp. Compared against the usage
-    /// bar this shows whether you're burning faster or slower than the clock.
-    func elapsedPercent(windowSeconds: Double) -> Double? {
-        guard windowSeconds > 0, let date = resetsAtDate else { return nil }
-        let elapsed = 1.0 - (date.timeIntervalSinceNow / windowSeconds)
+    /// How much of the window has already elapsed, as a 0–100 percentage:
+    /// `1 − remaining / windowSeconds`, clamped to [0, 100]. Nil unless the
+    /// reading carries both the window's length and its reset. The menu-bar
+    /// usage bar draws it as a marker, so a fill past it shows usage running
+    /// ahead of the clock.
+    func elapsedPercent(at date: Date = Date()) -> Double? {
+        guard let windowSeconds, windowSeconds > 0, let reset = resetsAtDate else { return nil }
+        let elapsed = 1.0 - (reset.timeIntervalSince(date) / Double(windowSeconds))
         return min(max(elapsed, 0), 1) * 100
     }
-}
-
-/// Fixed rate-limit window lengths, in seconds.
-enum RateLimitWindow {
-    static let fiveHourSeconds: Double = 5 * 60 * 60       // 18,000
-    static let sevenDaySeconds: Double = 7 * 24 * 60 * 60  // 604,800
 }
 
 struct ExtraUsage: Codable {

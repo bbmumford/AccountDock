@@ -4,7 +4,6 @@
 "Accounts" = "Comptes";
 
 /* Main Menu */
-"Double Usage Active" = "Double utilisation active";
 "No account connected" = "Aucun compte connecté";
 "Refresh" = "Actualiser";
 "Settings" = "Réglages";
@@ -122,24 +121,13 @@
 "API Rate Limited. Try again later." = "Limite de l'API atteinte. Réessayez plus tard.";
 "Could not fetch usage: %@" = "Impossible de récupérer l'utilisation : %@";
 
-/* Promo */
-"%@ - %@ (Weekdays) & Weekends" = "%1$@ - %2$@ (Jours ouvrables) & Week-ends";
-"Double limits: 2 PM - 8 AM ET & Weekends" = "Limites doublées : 14h - 8h ET & week-ends";
-
 /* Menu Bar */
 "Menu bar" = "Barre de menus";
 "Menu bar modules" = "Modules de la barre de menus";
 "Drag to reorder, toggle to enable. Disabled modules sit at the bottom." = "Glissez pour réorganiser, basculez pour activer. Les modules désactivés sont en bas.";
 "Preview" = "Aperçu";
-"Account name" = "Nom du compte";
-"Session usage (5h)" = "Utilisation de la session (5h)";
-"Weekly usage (7d)" = "Utilisation hebdomadaire (7j)";
 "Daily cost" = "Coût quotidien";
-"Session reset countdown" = "Compte à rebours réinitialisation session";
-"Weekly reset countdown" = "Compte à rebours réinitialisation semaine";
 "Menu Bar" = "Barre de menus";
 "Account display" = "Affichage du compte";
-"Session — usage vs time (5h)" = "Session — usage vs temps (5 h)";
-"Weekly — usage vs time (7d)" = "Hebdomadaire — usage vs temps (7 j)";
 "The vertical line marks time elapsed in the window; fill past it means you're using faster than the clock." = "La ligne verticale indique le temps écoulé ; remplissage au-delà = consommation plus rapide que l'horloge.";
 "Claude Fable 5 — most powerful model, the new flagship tier" = "Claude Fable 5 — le modèle le plus puissant, le nouveau niveau phare";

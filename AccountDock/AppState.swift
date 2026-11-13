@@ -387,6 +387,23 @@ final class AppState: ObservableObject {
         providerCosts[provider]?.todayModelTokens ?? [:]
     }
 
+    /// Today's totals across the providers not in `hidden`: the figures the
+    /// usage dashboard, the cost tab, the menu bar and the widget show.
+    func todaySummary(hidden: Set<AIProviderType> = ProviderVisibility.storedHidden()) -> TodaySummary {
+        var days: [AIProviderType: TodaySummary.ProviderDay] = [:]
+        for (provider, history) in providerCosts {
+            days[provider] = TodaySummary.ProviderDay(
+                cost: todayCost(for: provider),
+                tokens: history.todayTokens,
+                turns: history.todayTurns,
+                linesChanged: history.todayLinesChanged,
+                activeMinutes: history.todayActiveMinutes ?? 0,
+                modelActivity: history.todayModelActivity
+            )
+        }
+        return TodaySummary.make(days: days, hidden: hidden)
+    }
+
     /// Sessions with activity today: the usage records' count, or the
     /// sessions the provider's lifecycle hooks recorded today.
     func todaySessions(for provider: AIProviderType) -> Int {
@@ -1620,40 +1637,13 @@ final class AppState: ObservableObject {
     // MARK: - Widget
 
     private func updateWidgetData() {
-        let widgetAccounts = accounts.map { account in
-            let usage = accountUsage[account.id]
-            let error = accountUsageErrors[account.id]
-            return WidgetAccountData(
-                provider: account.provider.rawValue,
-                email: account.displayEmail(obfuscated: !UserDefaults.standard.bool(forKey: "showFullEmail")),
-                displayName: account.effectiveDisplayName(obfuscated: !UserDefaults.standard.bool(forKey: "showFullEmail")),
-                subscriptionType: account.displaySubscriptionType,
-                isActive: account.isActive,
-                sessionUtilization: usage?.fiveHour?.utilization,
-                sessionResetTime: usage?.fiveHour?.resetTimeString,
-                weeklyUtilization: usage?.sevenDay?.utilization,
-                weeklyResetTime: usage?.sevenDay?.resetTimeString,
-                extraUsageEnabled: usage?.extraUsage?.isEnabled,
-                hasError: error != nil && usage == nil,
-                errorMessage: error?.message
-            )
-        }
-
-        var combinedModelUsage: [String: Int] = [:]
-        for (_, history) in providerCosts {
-            for (model, count) in history.todayModelActivity where count > 0 {
-                combinedModelUsage[model, default: 0] += count
-            }
-        }
-        let data = WidgetData(
-            selectedProvider: nil,
-            accounts: widgetAccounts,
-            todayCost: combinedTodayCost,
-            conversationTurns: activityStats.conversationTurns,
-            activeCodingTime: activityStats.activeCodingTimeString,
-            linesWritten: activityStats.linesWritten,
-            modelUsage: combinedModelUsage.filter { $0.value > 0 },
-            lastUpdated: Date()
+        let data = WidgetProjection.make(
+            accounts: accounts,
+            usage: accountUsage,
+            errorMessages: accountUsageErrors.mapValues(\.message),
+            summary: todaySummary(),
+            obfuscated: !UserDefaults.standard.bool(forKey: "showFullEmail"),
+            now: Date()
         )
         data.save()
         WidgetCenter.shared.reloadAllTimelines()

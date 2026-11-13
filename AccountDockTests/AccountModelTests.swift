@@ -133,6 +133,7 @@ final class AccountModelTests: XCTestCase {
             .claudeSessionPercent, .claudeWeeklyPercent, .claudePercentages,
             .codexSessionPercent, .codexWeeklyPercent, .codexPercentages,
             .kimiSessionPercent, .kimiMonthlyPercent, .kimiPercentages,
+            .claudeModelWeekly,
             .claudeWeeklyReset, .codexWeeklyReset, .kimiMonthlyReset,
             .claudeSessionReset, .codexSessionReset, .kimiSessionReset,
             .dailyCost
@@ -145,8 +146,7 @@ final class AccountModelTests: XCTestCase {
             "claudeSessionReset", "claudeWeeklyReset", "codexSession", "codexWeekly", "codexSessionPercent",
             "codexWeeklyPercent", "codexPercentages", "codexSessionReset", "codexWeeklyReset", "kimiSession",
             "kimiMonthly", "kimiSessionPercent", "kimiMonthlyPercent", "kimiPercentages", "kimiSessionReset",
-            "kimiMonthlyReset", "claudeUsage", "codexUsage", "account", "sessionBar", "sessionBarPlain",
-            "weeklyBar", "weeklyBarPlain", "dailyCost", "sessionReset", "weeklyReset",
+            "kimiMonthlyReset", "dailyCost", "claudeModelWeekly",
         ]
         for name in stored {
             XCTAssertEqual(MenuBarModule(rawValue: name)?.rawValue, name, name)
@@ -155,6 +155,67 @@ final class AccountModelTests: XCTestCase {
         XCTAssertNil(MenuBarModule(rawValue: "kimiWeekly"))
         let data = MenuBarModuleStore.encode([.claudeSession, .kimiMonthlyPercent, .dailyCost])
         XCTAssertEqual(MenuBarModuleStore.decode(data), [.claudeSession, .kimiMonthlyPercent, .dailyCost])
+    }
+
+    func testStoredModuleNamesWithoutAProviderAreDroppedOrReplaced() {
+        let stored = ["claudeUsage", "account", "sessionBar", "codexWeekly", "sessionReset", "weeklyReset"]
+        XCTAssertNil(MenuBarModule(rawValue: "sessionReset"))
+        XCTAssertEqual(
+            MenuBarModuleStore.normalizedModules(stored: stored, replacingUnscopedResets: true, splittingCombinedPercentages: false),
+            [.codexWeekly, .claudeSessionReset, .claudeWeeklyReset, .codexWeeklyReset]
+        )
+        XCTAssertEqual(
+            MenuBarModuleStore.normalizedModules(stored: stored, replacingUnscopedResets: false, splittingCombinedPercentages: false),
+            [.codexWeekly]
+        )
+        XCTAssertEqual(
+            MenuBarModuleStore.normalizedModules(stored: ["account"], replacingUnscopedResets: true, splittingCombinedPercentages: false),
+            MenuBarModuleStore.defaultModules
+        )
+        XCTAssertEqual(
+            MenuBarModuleStore.normalizedModules(stored: ["sessionReset"], replacingUnscopedResets: true, splittingCombinedPercentages: false),
+            [.claudeSessionReset]
+        )
+        XCTAssertEqual(
+            MenuBarModuleStore.normalizedModules(stored: ["kimiPercentages", "dailyCost", "kimiSessionPercent"],
+                                                 replacingUnscopedResets: false, splittingCombinedPercentages: true),
+            [.kimiSessionPercent, .kimiMonthlyPercent, .dailyCost]
+        )
+    }
+
+    func testModelLimitModuleIsOfferedOnlyWhereReadingsCarryModelLimitsAndIsOffByDefault() {
+        let offered = MenuBarModule.allCases.filter { $0.metric == .modelLimit }
+        XCTAssertEqual(offered.compactMap(\.provider),
+                       AIProviderType.implementedProviders.filter { $0.capabilities.reportsModelWeeklyLimits })
+        XCTAssertFalse(MenuBarModuleStore.defaultModules.contains { $0.metric == .modelLimit })
+        XCTAssertEqual(MenuBarModule.claudeModelWeekly.rawValue, "claudeModelWeekly")
+    }
+
+    func testTheModelLimitModuleShowsTheTightestUnexpiredModelLimit() throws {
+        let json = """
+        {"seven_day": {"utilization": 30, "resets_at": null},
+         "limits": [
+           {"kind": "weekly_scoped", "percent": 91, "resets_at": "2001-01-01T00:00:00+00:00",
+            "scope": {"model": {"display_name": "Old"}}},
+           {"kind": "weekly_scoped", "percent": 64, "resets_at": "2099-10-22T13:00:00+00:00",
+            "scope": {"model": {"display_name": "Fable"}}},
+           {"kind": "weekly_scoped", "percent": 20, "resets_at": null,
+            "scope": {"model": {"display_name": "Sonnet"}}}
+         ]}
+        """
+        let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(json.utf8))
+        XCTAssertEqual(usage.tightestModelWeeklyLimit()?.model, "Fable")
+        let none = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(#"{"seven_day": {"utilization": 1}}"#.utf8))
+        XCTAssertNil(none.tightestModelWeeklyLimit())
+    }
+
+    func testElapsedMarkerNeedsTheWindowsOwnLength() {
+        let now = Date()
+        let reset = ISO8601DateFormatter().string(from: now.addingTimeInterval(3600))
+        let elapsed = UsageWindow(utilization: 10, resetsAt: reset, windowSeconds: 4 * 3600).elapsedPercent(at: now)
+        XCTAssertEqual(elapsed ?? -1, 75, accuracy: 0.5)
+        XCTAssertNil(UsageWindow(utilization: 10, resetsAt: reset).elapsedPercent(at: now))
+        XCTAssertNil(UsageWindow(utilization: 10, resetsAt: nil, windowSeconds: 3600).elapsedPercent(at: now))
     }
 
     func testCachedUsageClearsAfterKnownResetPasses() {
