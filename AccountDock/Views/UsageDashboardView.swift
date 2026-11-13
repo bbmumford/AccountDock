@@ -478,7 +478,7 @@ struct UsageDashboardView: View {
             usageRow(
                 label: LocalizedStringKey(provider.capabilities.sessionQuotaLabel),
                 resetText: session.resetLabelString,
-                utilization: session.utilization ?? 0
+                utilization: session.utilization
             )
         } else if usage.reportsNoSessionWindow, provider.capabilities.supportsSessionQuota {
             Label("No \(provider.capabilities.sessionQuotaLabel.lowercased()) limit on this account", systemImage: "infinity")
@@ -489,7 +489,7 @@ struct UsageDashboardView: View {
             usageRow(
                 label: longQuotaLabel(for: provider, window: weekly),
                 resetText: weekly.resetLabelString,
-                utilization: weekly.utilization ?? 0
+                utilization: weekly.utilization
             )
         }
         // A model with a weekly limit of its own, which `AppState.plannedUsage`
@@ -561,8 +561,10 @@ struct UsageDashboardView: View {
 
     // MARK: - Usage Row
 
-    private func usageRow(label: LocalizedStringKey, resetText: String?, utilization: Double) -> some View {
-        VStack(spacing: 5) {
+    private func usageRow(label: LocalizedStringKey, resetText: String?, utilization: Double?) -> some View {
+        let level = UsageLevel(utilization: utilization)
+        let color = level.color(normal: .brand)
+        return VStack(spacing: 5) {
             HStack {
                 Text(label)
                     .font(.caption)
@@ -583,24 +585,18 @@ struct UsageDashboardView: View {
                             .frame(height: 7)
 
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(colorForUtilization(utilization))
-                            .frame(width: max(0, geo.size.width * min(utilization / 100.0, 1.0)), height: 7)
+                            .fill(color)
+                            .frame(width: max(0, geo.size.width * level.fraction), height: 7)
                     }
                 }
                 .frame(height: 7)
 
-                Text("\(Int(utilization))%")
+                Text(level.percentText)
                     .font(.caption.weight(.medium).monospacedDigit())
-                    .foregroundStyle(colorForUtilization(utilization))
+                    .foregroundStyle(color)
                     .frame(width: 34, alignment: .trailing)
             }
         }
-    }
-
-    private func colorForUtilization(_ pct: Double) -> Color {
-        if pct >= 90 { return .red }
-        if pct >= 60 { return .orange }
-        return .brand
     }
 }
 

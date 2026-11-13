@@ -101,11 +101,12 @@ struct MenuBarModuleView: View {
                 Circle()
                     .stroke(Color.primary.opacity(0.2), lineWidth: lineWidth)
             }
-            if let utilization, !unavailable {
+            let level = UsageLevel(utilization: utilization)
+            if level.isKnown, !unavailable {
                 Circle()
-                    .trim(from: 0, to: min(max(utilization / 100, 0), 1))
+                    .trim(from: 0, to: level.fraction)
                     .stroke(
-                        quotaColor(utilization),
+                        level.color(normal: .green),
                         style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                     )
                     .rotationEffect(.degrees(-90))
@@ -114,19 +115,13 @@ struct MenuBarModuleView: View {
         .frame(width: diameter, height: diameter)
     }
 
-    private func quotaColor(_ utilization: Double) -> Color {
-        if utilization >= 90 { return .red }
-        if utilization >= 70 { return .orange }
-        return .green
-    }
-
     private func combinedPercentageHelp(
         provider: AIProviderType,
         session: Double?,
         longWindow: Double?
     ) -> String {
-        let sessionText = session.map { "\(Int($0.rounded()))%" } ?? "unavailable"
-        let longText = longWindow.map { "\(Int($0.rounded()))%" } ?? "unavailable"
+        let sessionText = UsageLevel(utilization: session).percentText
+        let longText = UsageLevel(utilization: longWindow).percentText
         return "\(provider.capabilities.sessionQuotaLabel): \(sessionText) · \(provider.capabilities.weeklyQuotaLabel): \(longText)"
     }
 
@@ -150,7 +145,7 @@ struct MenuBarModuleView: View {
                     Image(systemName: window == .session ? "clock" : "calendar")
                         .font(.system(size: 12, weight: .regular))
                         .foregroundStyle(.secondary)
-                    Text(utilization.map { "\(Int($0.rounded()))%" } ?? "—")
+                    Text(UsageLevel(utilization: utilization).percentText)
                         .font(.system(size: 13.2, weight: .regular).monospacedDigit())
                 }
                 .frame(height: 22)
@@ -212,8 +207,9 @@ private struct EvenDashedCircle: View {
 
 /// Hollow rounded capsule with an inner filled pill whose width reflects
 /// `utilization` (a 0–100 percentage, normalized to 0–1). Fill is monochrome
-/// (adapts to the light/dark menu bar), turning red above 90% (and staying red
-/// on overage, clamped at 100%).
+/// (adapts to the light/dark menu bar) until `UsageLevel` rates the window
+/// high or critical, which colour it orange or red (clamped at 100% on
+/// overage).
 ///
 /// `markerPercent` (0–100, optional) draws a thin vertical "pace" tick at the
 /// fraction of the rate-limit window already elapsed. Compare the fill to the
@@ -229,12 +225,11 @@ private struct UtilizationBar: View {
     private let strokeWidth: CGFloat = 1
     private let innerInset: CGFloat = 1.5
 
-    private var clamped: Double { min(max((utilization ?? 0) / 100.0, 0), 1) }
+    private var level: UsageLevel { UsageLevel(utilization: utilization) }
 
-    private var fillColor: Color {
-        guard let u = utilization, u > 90 else { return .primary }
-        return .red
-    }
+    private var clamped: Double { level.fraction }
+
+    private var fillColor: Color { level.color(normal: .primary) }
 
     /// X offset (within the inset interior) of the pace tick, if shown.
     /// Suppressed when there's no usage data so a dashed "no data" bar can't
