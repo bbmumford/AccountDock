@@ -50,6 +50,7 @@ struct AccountDockApp: App {
                     }
                     #endif
                     updateChecker.startPeriodicChecks()
+                    AgentSessions.startArchiving()
                     statusItemController.install(
                         appState: appState,
                         config: menuBarConfig,
