@@ -754,6 +754,25 @@ final class ClaudeService: @unchecked Sendable {
             .replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
 
+    /// Whether the live credential is saved as `source`'s backup before a
+    /// switch to `target` replaces it: only when `liveEmail`, the address
+    /// `~/.claude.json` names, is the source's, and never when the switch
+    /// restores the same account, whose backup is the copy being restored.
+    static func backsUpLiveCredential(liveEmail: String?, from source: Account, to target: Account) -> Bool {
+        source.id != target.id && source.matches(email: liveEmail)
+    }
+
+    /// Why `claude auth status` after writing `target`'s credential does not
+    /// confirm the switch, or nil when it does; `switchAccount` rolls back on
+    /// any failure.
+    static func verificationFailure(of status: AuthStatus, switchingTo target: Account) -> ClaudeServiceError? {
+        guard status.loggedIn else { return .switchVerificationFailed }
+        guard target.matches(email: status.email) else {
+            return .switchWrongAccount(expected: target.email, actual: status.email ?? "unknown")
+        }
+        return nil
+    }
+
     func switchAccount(from currentAccount: Account, to targetAccount: Account) async throws -> AuthStatus {
         let keychain = KeychainService.shared
         // Keep an exact snapshot of the live state. A target credential can
@@ -783,7 +802,7 @@ final class ClaudeService: @unchecked Sendable {
         } else if let currentToken = keychain.readClaudeToken(),
            let currentOAuth = keychain.readOAuthAccount() {
             let email = (currentOAuth["emailAddress"]?.value as? String) ?? "?"
-            if email == currentAccount.email {
+            if Self.backsUpLiveCredential(liveEmail: email, from: currentAccount, to: targetAccount) {
                 let saved = keychain.saveAccountBackup(token: currentToken, oauthAccount: currentOAuth, forAccountId: currentAccount.id.uuidString)
                 log.info("[switchAccount] Step 1: Backup saved: \(saved)")
             } else {
@@ -827,13 +846,9 @@ final class ClaudeService: @unchecked Sendable {
         log.info("[switchAccount] Step 4: Verifying with `claude auth status`...")
         do {
             let status = try await getAuthStatus()
-            guard status.loggedIn else {
-                log.error("[switchAccount] Step 4: Target credentials are not logged in")
-                throw ClaudeServiceError.switchVerificationFailed
-            }
-            if status.email != targetAccount.email {
-                log.error("[switchAccount] Step 4: Logged in as \(status.email ?? "nil") instead of \(targetAccount.email)")
-                throw ClaudeServiceError.switchWrongAccount(expected: targetAccount.email, actual: status.email ?? "unknown")
+            if let failure = Self.verificationFailure(of: status, switchingTo: targetAccount) {
+                log.error("[switchAccount] Step 4: Not confirmed (loggedIn=\(status.loggedIn), email=\(status.email ?? "nil"), expected \(targetAccount.email))")
+                throw failure
             }
             log.info("[switchAccount] Step 4: Switch verified — logged in as \(status.email ?? "")")
             return status
