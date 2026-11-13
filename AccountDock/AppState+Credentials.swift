@@ -222,13 +222,15 @@ extension AppState {
     /// reads each live credential at most every two minutes and asks the
     /// provider only when it changed.
     func adoptRenewedCredentials(now: Date = Date()) async {
-        guard !isLoading, !isLoggingIn else { return }
-        for provider in AIProviderType.implementedProviders {
-            guard let live = credentialModule(for: provider)?.liveCredential,
-                  let active = activeAccount(for: provider) else { continue }
-            if let checked = liveCredentialCheckedAt[provider], now.timeIntervalSince(checked) < 2 * 60 { continue }
-            liveCredentialCheckedAt[provider] = now
-            await adoptLiveCredential(live, provider: provider, active: active)
+        guard !credentialGate.isBusy, !isLoggingIn else { return }
+        await credentialGate.run {
+            for provider in AIProviderType.implementedProviders {
+                guard let live = self.credentialModule(for: provider)?.liveCredential,
+                      let active = self.activeAccount(for: provider) else { continue }
+                if let checked = self.liveCredentialCheckedAt[provider], now.timeIntervalSince(checked) < 2 * 60 { continue }
+                self.liveCredentialCheckedAt[provider] = now
+                await self.adoptLiveCredential(live, provider: provider, active: active)
+            }
         }
     }
 

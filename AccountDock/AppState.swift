@@ -28,6 +28,7 @@ final class AppState: ObservableObject {
     @Published var usageSummary: UsageSummary = .empty
     @Published var recentActivity: [DailyActivity] = []
     @Published var activeSessions: [SessionInfo] = []
+    /// Shows credential work under way (`credentialGate`); for the UI only.
     @Published var isLoading = false
     @Published var isLoggingIn = false
     @Published private(set) var loginDeadline: Date?
@@ -84,6 +85,10 @@ final class AppState: ObservableObject {
     var failoverMonitorTimer: Timer?
     private var usageResetTimer: Timer?
     var isMonitoringFailover = false
+    /// Busy while a refresh, a switch, a sign-in or the adoption of a
+    /// renewed live credential runs; `runQuotaCycle` and
+    /// `adoptRenewedCredentials` do not start meanwhile.
+    let credentialGate = CredentialOperationGate()
     /// Learned consumption rates per account, used to time readings and to
     /// project usage while a provider throttles its usage endpoint.
     var quotaTrends: [UUID: QuotaTrend] = [:]
@@ -351,6 +356,7 @@ final class AppState: ObservableObject {
         UserDefaults.standard.removeObject(forKey: "app.accountdock.warmup.bootstrap")
         reconcilePassedUsageResets()
         loadFailoverRuntime()
+        credentialGate.onBusyChange = { [weak self] busy in self?.isLoading = busy }
         log.info("[init] Loaded \(self.accounts.count) accounts, active: \(self.activeAccount?.id.uuidString ?? "none")")
     }
 
@@ -438,11 +444,11 @@ final class AppState: ObservableObject {
             return
         }
         isRefreshing = true
-        defer {
-            isRefreshing = false
-            isLoading = false
-        }
-        isLoading = true
+        defer { isRefreshing = false }
+        await credentialGate.run { await self.performRefresh(forceUnavailablePlanCheck: forceUnavailablePlanCheck) }
+    }
+
+    private func performRefresh(forceUnavailablePlanCheck: Bool) async {
         errorMessage = nil
 
         // Index local usage concurrently with provider refreshes. SQLite writes
@@ -1107,9 +1113,14 @@ final class AppState: ObservableObject {
     }
 
     /// Makes `account` its provider's active account with the provider's
-    /// switch method. A Claude switch stops no session; a switch the user
-    /// made moves the running ones with `moveRunningSessions`.
+    /// switch method, inside `credentialGate`. A Claude switch stops no
+    /// session; a switch the user made moves the running ones with
+    /// `moveRunningSessions`.
     private func performSwitch(to account: Account, refreshAfter: Bool) async {
+        await credentialGate.run { await self.performSwitchNow(to: account, refreshAfter: refreshAfter) }
+    }
+
+    private func performSwitchNow(to account: Account, refreshAfter: Bool) async {
         guard account.supportsProviderWorkloads else {
             errorMessage = account.providerUnavailableLabel ?? "This account is unavailable."
             return
@@ -1139,7 +1150,6 @@ final class AppState: ObservableObject {
             return
         }
 
-        isLoading = true
         do {
             let status = try await claudeService.switchAccount(from: currentActive, to: account)
             rejectedCredentialAccounts.remove(account.id)
@@ -1189,15 +1199,10 @@ final class AppState: ObservableObject {
             if refreshAfter {
                 await refresh()
                 await warmSelectedAccountIfNeeded(account.id)
-            } else {
-                // Automatic failover deliberately skips the expensive full
-                // refresh, but it must still release the UI loading state.
-                isLoading = false
             }
             log.info("[switchTo] ===== Switch completed =====")
         } catch {
             errorMessage = error.localizedDescription
-            isLoading = false
             switch error {
             case ClaudeServiceError.switchVerificationFailed, ClaudeServiceError.switchWrongAccount,
                  ClaudeServiceError.noTokenForAccount:
@@ -1211,6 +1216,10 @@ final class AppState: ObservableObject {
 
     /// Re-authenticate an account by running `claude auth login` and capturing fresh credentials.
     func reauthenticateAccount(_ account: Account) async {
+        await credentialGate.run { await self.reauthenticateAccountNow(account) }
+    }
+
+    private func reauthenticateAccountNow(_ account: Account) async {
         switch account.provider {
         case .codex: return await reauthenticateCodexAccount(account)
         case .kimi: return await reauthenticateKimiAccount(account)
@@ -2161,8 +2170,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Signs in a new account through the provider's CLI and adds it.
+    /// Signs in a new account through the provider's CLI and adds it,
+    /// inside `credentialGate`.
     func loginNewAccount(_ provider: AIProviderType) async {
+        await credentialGate.run { await self.loginNewAccountNow(provider) }
+    }
+
+    private func loginNewAccountNow(_ provider: AIProviderType) async {
         switch provider {
         case .claudeCode: await loginNewAccount()
         case .codex, .kimi: await loginNewManagedAccount(provider: provider)
@@ -2196,13 +2210,24 @@ final class AppState: ObservableObject {
         closeTerminalTabs: Bool = false,
         liveReloading liveProcesses: [RunningCodexProcess] = []
     ) async {
+        await credentialGate.run {
+            await self.switchToCodexNow(account, refreshAfter: refreshAfter, safelyRestarting: processes,
+                                        closeTerminalTabs: closeTerminalTabs, liveReloading: liveProcesses)
+        }
+    }
+
+    private func switchToCodexNow(
+        _ account: Account,
+        refreshAfter: Bool,
+        safelyRestarting processes: [RunningCodexProcess],
+        closeTerminalTabs: Bool,
+        liveReloading liveProcesses: [RunningCodexProcess]
+    ) async {
         guard account.supportsProviderWorkloads else {
             errorMessage = account.providerUnavailableLabel ?? "This Codex account is unavailable."
             return
         }
         guard !account.isActive, let location = account.credentialLocation else { return }
-        isLoading = true
-        defer { isLoading = false }
         // Sessions stopped for the switch are reopened however it ends: once
         // the credential is promoted, or when a step fails.
         var stopped: CodexService.StoppedSessions?
@@ -2314,9 +2339,11 @@ final class AppState: ObservableObject {
     }
 
     private func switchToKimi(_ account: Account, refreshAfter: Bool) async {
+        await credentialGate.run { await self.switchToKimiNow(account, refreshAfter: refreshAfter) }
+    }
+
+    private func switchToKimiNow(_ account: Account, refreshAfter: Bool) async {
         guard !account.isActive, let location = account.credentialLocation else { return }
-        isLoading = true
-        defer { isLoading = false }
         do {
             if let current = activeAccount(for: .kimi), let currentLocation = current.credentialLocation {
                 try kimiService.syncSystemCredentials(toManagedLocation: currentLocation)
