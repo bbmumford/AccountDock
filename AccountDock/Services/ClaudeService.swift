@@ -427,14 +427,7 @@ final class ClaudeService: @unchecked Sendable {
     }
 
     static func retryAfterDate(_ value: String, now: Date = Date()) -> Date? {
-        if let seconds = TimeInterval(value), seconds >= 0 {
-            return now.addingTimeInterval(seconds)
-        }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
-        return formatter.date(from: value)
+        RetryAfter.date(value, now: now)
     }
 
     /// Extract access token string from a token JSON (keychain format)

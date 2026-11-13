@@ -1411,8 +1411,10 @@ final class AppState: ObservableObject {
         } catch CodexServiceError.subscriptionUnavailable {
             setSubscriptionType("inactive", for: account.id)
             return .workloadUnavailable(unavailableMessage(for: account.provider))
-        } catch CodexServiceError.rateLimited {
-            return .throttled(retryAt: nil)
+        } catch CodexServiceError.rateLimited(let retryAt) {
+            return .throttled(retryAt: retryAt)
+        } catch CodexServiceError.liveCredentialExpired {
+            return .credentialUnrenewed(String(localized: "Token expired. Switch to refresh.", bundle: L10n.bundle))
         } catch CodexServiceError.credentialRejected {
             return .credentialRejected(CodexServiceError.credentialRejected.localizedDescription)
         } catch {
@@ -1439,6 +1441,8 @@ final class AppState: ObservableObject {
             return .reading(usage)
         } catch KimiServiceError.rateLimited {
             return .throttled(retryAt: nil)
+        } catch KimiServiceError.liveCredentialExpired {
+            return .credentialUnrenewed(String(localized: "Token expired. Switch to refresh.", bundle: L10n.bundle))
         } catch KimiServiceError.credentialRejected {
             return .credentialRejected(KimiServiceError.credentialRejected.localizedDescription)
         } catch {

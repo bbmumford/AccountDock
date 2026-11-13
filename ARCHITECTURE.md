@@ -195,6 +195,15 @@ isolated copy of Kimi Code's credential file. Kimi rotates its refresh token on
 every renewal, so a renewed token is written back to the managed copy before it
 is used.
 
+The credential a CLI's sessions share (`~/.codex/auth.json`, Kimi Code's slot)
+is renewed by AccountDock only while no process of that CLI runs
+(`CLIProcessScan`). Both CLIs read the file again before they renew, but
+neither can see a renewal AccountDock is making at that moment: Codex takes no
+lock on the file, and Kimi Code, finding its refresh token already used,
+replaces the slot with a revoked credential. While the CLI runs, a reading
+whose token has expired reports it as expired and the CLI renews it with its
+next request.
+
 ## Claude account switching
 
 `ClaudeService.switchAccount(from:to:)` is transactional: it snapshots the live
