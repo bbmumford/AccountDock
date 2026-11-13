@@ -308,6 +308,9 @@ final class AppState: ObservableObject {
     /// The destination of the switch last withheld for a locked active
     /// account, so `performAutomaticSwitch` reports each once.
     var lockedSwitchNoted: [AIProviderType: UUID] = [:]
+    /// The digest of each account's saved sign-in the provider confirmed as
+    /// that account's (`savedCopyIsOwn`).
+    var savedCopyVerified: [UUID: String] = [:]
     /// Providers with a switch in progress; `switchTo` runs one at a time
     /// for each, since two at once write the CLI's credential over each
     /// other.
@@ -1476,9 +1479,11 @@ final class AppState: ObservableObject {
     /// sessions keep consuming their own subscription.
     private func readClaudeUsage(_ account: Account, forced: Bool, includeMetadata: Bool) async -> UsageReadOutcome {
         var tokenJSON: String?
+        var usesSavedCopy = false
         if account.isActive, liveCredentialOwner(.claudeCode).map({ $0 == account.id }) ?? true {
             tokenJSON = keychain.readClaudeToken()
         } else {
+            usesSavedCopy = true
             tokenJSON = keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
             // An idle account's token is renewed before it expires, which
             // saves the rejected request a stale token would cost.
@@ -1490,6 +1495,9 @@ final class AppState: ObservableObject {
         guard let tokenJSON, let accessToken = ClaudeService.extractAccessToken(from: tokenJSON) else {
             log.warning("[fetchUsage] No token for \(account.email), skipping")
             return .skipped
+        }
+        if usesSavedCopy, !(await savedCopyIsOwn(account, tokenJSON: tokenJSON, accessToken: accessToken)) {
+            return .credentialRejected("This account's saved sign-in was another account's. Sign it in again.")
         }
         setRateLimitTier(ClaudeService.rateLimitTier(from: tokenJSON), for: account.id)
         if includeMetadata, shouldCheckClaudeProfile(account, forced: forced),
@@ -1623,6 +1631,14 @@ final class AppState: ObservableObject {
             log.warning("[fetchUsage] Claude live plan refresh failed: \(error.localizedDescription)")
             return false
         }
+    }
+
+    /// Drops an account's stored reading, as when it turns out not to
+    /// describe the account.
+    func forgetUsage(of accountID: UUID) {
+        accountUsage[accountID] = nil
+        accountUsageUpdatedAt[accountID] = nil
+        saveUsageSnapshots()
     }
 
     private func markClaudeCodeUnavailable(accountID: UUID) {
