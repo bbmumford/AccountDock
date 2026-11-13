@@ -302,6 +302,20 @@ final class AppState: ObservableObject {
     /// Sessions already reported as having no account left with allowance
     /// for their model, so `serveSessionSlots` says it once per session.
     var sessionsWithoutModelRoom: Set<String> = []
+    /// The destination of the switch last withheld for a locked active
+    /// account, so `performAutomaticSwitch` reports each once.
+    var lockedSwitchNoted: [AIProviderType: UUID] = [:]
+    /// Providers with a switch in progress; `switchTo` runs one at a time
+    /// for each, since two at once write the CLI's credential over each
+    /// other.
+    var switchesInFlight: Set<AIProviderType> = []
+    /// When the user last switched each provider's account themselves;
+    /// `performAutomaticSwitch` leaves that choice alone for
+    /// `userSwitchHold`.
+    var userSwitchedAt: [AIProviderType: Date] = [:]
+    /// When failover switched away from each account, for
+    /// `FailoverPlanner.isSwitchLoop`.
+    var automaticSwitchesAway: [UUID: [Date]] = [:]
 
     // MARK: - Initialization
 
@@ -945,6 +959,12 @@ final class AppState: ObservableObject {
     }
 
     func switchTo(_ account: Account, refreshAfter: Bool = true) async {
+        guard switchesInFlight.insert(account.provider).inserted else {
+            log.info("[switchTo] A \(account.provider.rawValue) switch is in progress; this one is not started")
+            return
+        }
+        defer { switchesInFlight.remove(account.provider) }
+        if refreshAfter { userSwitchedAt[account.provider] = Date() }
         await switchTo(account, refreshAfter: refreshAfter, safelyRestarting: [])
         // A switch the user made shows the account as the provider reports
         // it now, whatever was last known of it.

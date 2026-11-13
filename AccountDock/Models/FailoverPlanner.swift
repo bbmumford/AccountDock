@@ -645,3 +645,15 @@ struct FailoverPlanner {
         return min(available.addingTimeInterval(5), now.addingTimeInterval(15 * 60))
     }
 }
+
+extension FailoverPlanner {
+    /// The period `isSwitchLoop` counts switches over.
+    static let switchLoopWindow: TimeInterval = 15 * 60
+
+    /// Whether failover leaving one account at `times` is a loop: three
+    /// switches away within `switchLoopWindow` mean the account keeps being
+    /// made active again, so another switch would only repeat it.
+    static func isSwitchLoop(_ times: [Date], now: Date) -> Bool {
+        times.filter { now.timeIntervalSince($0) < switchLoopWindow }.count >= 3
+    }
+}

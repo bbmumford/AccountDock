@@ -492,11 +492,13 @@ final class FailoverPlannerTests: XCTestCase {
     func testBudgetBacksOffExponentiallyAfterThrottling() {
         let budget = UsageRequestBudget(capacity: 3, refillInterval: 30, now: now)
         budget.recordThrottle(retryAfter: nil, now: now)
-        XCTAssertEqual(budget.blockedUntil, now.addingTimeInterval(60))
+        XCTAssertEqual(budget.blockedUntil, now.addingTimeInterval(30))
         budget.recordThrottle(retryAfter: nil, now: now)
-        XCTAssertEqual(budget.blockedUntil, now.addingTimeInterval(120))
-        XCTAssertFalse(budget.canSpend(.critical, now: now.addingTimeInterval(100)))
+        XCTAssertEqual(budget.blockedUntil, now.addingTimeInterval(60))
+        XCTAssertFalse(budget.canSpend(.critical, now: now.addingTimeInterval(50)))
         XCTAssertTrue(budget.canSpend(.critical, now: now.addingTimeInterval(160)))
+        for _ in 0..<10 { budget.recordThrottle(retryAfter: nil, now: now) }
+        XCTAssertEqual(budget.blockedUntil, now.addingTimeInterval(UsageRequestBudget.longestCooldown))
     }
 
     func testReadsClaudeCodeUsageCache() throws {
@@ -762,12 +764,30 @@ final class FailoverPlannerTests: XCTestCase {
     }
 
     @MainActor
-    func testAThrottledBudgetWaitsForTheProvidersRetryAfter() {
+    func testAThrottledBudgetWaitsForTheProvidersRetryAfterUpToTheLongestCooldown() {
         let budget = UsageRequestBudget(capacity: 3, refillInterval: 30, now: now)
-        budget.recordThrottle(retryAfter: now.addingTimeInterval(20 * 60), now: now)
-        XCTAssertEqual(budget.blockedUntil, now.addingTimeInterval(20 * 60))
-        XCTAssertFalse(budget.canSpend(.critical, now: now.addingTimeInterval(19 * 60)))
-        XCTAssertTrue(budget.canSpend(.critical, now: now.addingTimeInterval(21 * 60)))
+        budget.recordThrottle(retryAfter: now.addingTimeInterval(3 * 60), now: now)
+        XCTAssertEqual(budget.blockedUntil, now.addingTimeInterval(3 * 60))
+        XCTAssertFalse(budget.canSpend(.critical, now: now.addingTimeInterval(2 * 60)))
+        let hour = UsageRequestBudget(capacity: 3, refillInterval: 30, now: now)
+        hour.recordThrottle(retryAfter: now.addingTimeInterval(60 * 60), now: now)
+        XCTAssertEqual(hour.blockedUntil, now.addingTimeInterval(UsageRequestBudget.longestCooldown))
+        XCTAssertTrue(hour.canSpend(.critical, now: now.addingTimeInterval(6 * 60)))
+    }
+
+    func testThreeSwitchesAwayInTheWindowAreALoop() {
+        let at = { (minutes: Double) in self.now.addingTimeInterval(-minutes * 60) }
+        XCTAssertFalse(FailoverPlanner.isSwitchLoop([at(1), at(3)], now: now))
+        XCTAssertTrue(FailoverPlanner.isSwitchLoop([at(1), at(3), at(5)], now: now))
+        XCTAssertFalse(FailoverPlanner.isSwitchLoop([at(1), at(3), at(40)], now: now), "old switches do not count")
+    }
+
+    func testALockedActiveAccountIsKeptInThePolicy() throws {
+        var policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
+        XCTAssertFalse(policy.activeAccountLocked)
+        policy.activeAccountLocked = true
+        let decoded = try JSONDecoder().decode(ProviderFailoverPolicy.self, from: JSONEncoder().encode(policy))
+        XCTAssertTrue(decoded.activeAccountLocked)
     }
 
     // MARK: - Triggers, limits and headroom
