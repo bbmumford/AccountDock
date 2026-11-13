@@ -541,6 +541,9 @@ enum Router {
         // A held request already has its 200 event-stream head; whatever
         // follows, errors included, is written as events.
         let headSent = writer.headWritten
+        // Whether the reply is an event stream, where a failure is written
+        // as an error event: a truncated stream otherwise reads as complete.
+        var eventStream = headSent
         func fail(_ status: Int, _ body: Data) async {
             if headSent {
                 await writer.chunk(RouterLogic.streamedError(body, status: status))
@@ -605,13 +608,11 @@ enum Router {
                                       state: state, isLast: isLast, retried: true, cacheLifetime: cacheLifetime,
                                       extendCache: extendCache)
                 }
-                if backend.id != state.primary {
+                if RouterLogic.handsBackToPool(isRouteTarget: backend.id != state.primary, status: http.statusCode, wroteReply: false) {
                     brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id, detail: "HTTP \(http.statusCode)"))
-                    if http.statusCode == 400 {
-                        let reply = String(decoding: collected.prefix(300), as: UTF8.self)
-                        log.write("\(backend.id) rejected a request (\(RouterLogic.requestShape(body))): \(reply); sending it to \(state.primary)")
-                        return .rejected
-                    }
+                    let reply = String(decoding: collected.prefix(300), as: UTF8.self)
+                    log.write("\(backend.id) answered \(http.statusCode) (\(RouterLogic.requestShape(body))): \(reply); sending the request to \(state.primary)")
+                    return .rejected
                 }
                 if headSent {
                     await fail(http.statusCode, collected)
@@ -622,6 +623,12 @@ enum Router {
                 }
                 return .served
             }
+            if RouterLogic.handsBackToPool(isRouteTarget: backend.id != state.primary, status: http.statusCode, wroteReply: false) {
+                bytes.task.cancel()
+                brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id, detail: "HTTP \(http.statusCode)"))
+                log.write("\(backend.id) answered \(http.statusCode); sending the request to \(state.primary)")
+                return .rejected
+            }
             if headSent, http.statusCode >= 400 {
                 var collected = Data()
                 for try await byte in bytes { collected.append(byte); if collected.count > 65_536 { break } }
@@ -629,19 +636,21 @@ enum Router {
                 await fail(http.statusCode, collected)
                 return .served
             }
-            if http.statusCode >= 400, backend.id != state.primary {
-                brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id, detail: "HTTP \(http.statusCode)"))
-            }
-            let before = brain.session(session)?.account
-            brain.setSession(session, backend: backend.id, account: attempt.account, cacheLifetime: cacheLifetime)
-            if let account = attempt.account, before != account {
-                brain.event(RouterEvent(kind: .assigned, at: Date(), session: session, backend: backend.id, accountID: account))
-            }
-            if startsTurn, backend.id != state.primary {
-                brain.event(RouterEvent(kind: .servedByRoute, at: Date(), session: session, backend: backend.id))
+            // Only a reply that serves the request places the session on its
+            // backend and account; a failed one leaves it where it was.
+            if http.statusCode < 400 {
+                let before = brain.session(session)?.account
+                brain.setSession(session, backend: backend.id, account: attempt.account, cacheLifetime: cacheLifetime)
+                if let account = attempt.account, before != account {
+                    brain.event(RouterEvent(kind: .assigned, at: Date(), session: session, backend: backend.id, accountID: account))
+                }
+                if startsTurn, backend.id != state.primary {
+                    brain.event(RouterEvent(kind: .servedByRoute, at: Date(), session: session, backend: backend.id))
+                }
             }
             if !headSent { await writer.head(http.statusCode, headerList(http)) }
             let streaming = (http.value(forHTTPHeaderField: "Content-Type") ?? "").contains("event-stream")
+            eventStream = eventStream || streaming
             let scanner = SSEScanner()
             let whole = try await stream(bytes, to: writer, scanner: streaming ? scanner : nil, issuer: issuer, keepBody: !streaming)
             await writer.finish()
@@ -671,10 +680,15 @@ enum Router {
             if backend.id != state.primary {
                 brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id, detail: error.localizedDescription))
             }
+            // This attempt wrote to the client only if the head was written
+            // during it; a held head came before.
+            if RouterLogic.handsBackToPool(isRouteTarget: backend.id != state.primary, status: nil,
+                                           wroteReply: writer.headWritten && !headSent) {
+                return .rejected
+            }
             let reply = RouterLogic.errorBody(type: "overloaded_error", message: "\(backend.displayName) could not be reached through AccountDock: \(error.localizedDescription)")
-            if headSent, !writer.clientGone {
-                await fail(529, reply)
-            } else if writer.headWritten {
+            if writer.headWritten {
+                if eventStream, !writer.clientGone { await writer.chunk(RouterLogic.streamedError(reply, status: 529)) }
                 await writer.finish()
             } else {
                 await writer.complete(529, json: reply)
