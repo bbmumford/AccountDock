@@ -580,6 +580,16 @@ enum RouterLogic {
         return reset
     }
 
+    /// Whether a failed attempt goes back to the pool instead of to the
+    /// client. A route target never gives the final answer: any error reply
+    /// from one, or a failure to reach it (`status` nil), is retried on the
+    /// provider's own accounts, as long as this attempt has written none of
+    /// its reply to the client. The pool's own failures are the answer.
+    static func handsBackToPool(isRouteTarget: Bool, status: Int?, wroteReply: Bool) -> Bool {
+        guard isRouteTarget, !wroteReply else { return false }
+        return status.map { $0 >= 400 } ?? true
+    }
+
     /// An error written into an event stream whose 200 head was already
     /// sent, in the Messages API's own error event shape.
     static func streamedError(_ body: Data, status: Int) -> Data {
