@@ -144,7 +144,7 @@ final class AppState: ObservableObject {
     var slotCredentialAccounts: Set<UUID> = []
     /// The slot directory each running process reads, and the account
     /// serving each slot that has running sessions; read by
-    /// `slotAccount(forSession:)`.
+    /// `sessionAttribution` and `slotAccount(forSession:)`.
     var slotDirectoryByProcess: [Int32: String] = [:]
     var slotDirectoryServing: [String: UUID] = [:]
     /// Sessions `SessionPacer` moves to another account to balance load,
@@ -241,6 +241,12 @@ final class AppState: ObservableObject {
     /// The running sessions each account serves, shown on the account cards.
     @Published var accountSessions: [UUID: Set<String>] = [:]
     var routedSessionSeen: [String: (account: UUID, at: Date)] = [:]
+    /// The account each session's own status line last named by its reset
+    /// times, kept by `ingestPassiveTelemetry` for `sessionAttribution`.
+    var sessionServedBy: [String: SessionAttribution.Observation] = [:]
+    /// When each provider's running sessions were last told to read the
+    /// live credential again, for `sessionAttribution`.
+    var sessionsSignalledAt: [AIProviderType: Date] = [:]
     /// Credential fingerprint to account, for usage the router observed.
     var credentialFingerprints: [String: UUID] = [:]
     /// When each credential fingerprint was last seen as an account's token.
