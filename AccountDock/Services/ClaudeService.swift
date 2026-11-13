@@ -427,14 +427,7 @@ final class ClaudeService: @unchecked Sendable {
     }
 
     static func retryAfterDate(_ value: String, now: Date = Date()) -> Date? {
-        if let seconds = TimeInterval(value), seconds >= 0 {
-            return now.addingTimeInterval(seconds)
-        }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
-        return formatter.date(from: value)
+        RetryAfter.date(value, now: now)
     }
 
     /// Extract access token string from a token JSON (keychain format)
@@ -696,62 +689,23 @@ final class ClaudeService: @unchecked Sendable {
         return String(command[idRange])
     }
 
-
-    /// Gracefully stops the exact processes captured before a credential switch.
-    /// It intentionally never escalates to SIGKILL; unsaved interactive sessions
-    /// remain under the user's control if they do not respond to termination.
-    func terminateForSafeRestart(_ processes: [RunningClaudeProcess]) async -> [RunningClaudeProcess] {
-        guard !processes.isEmpty else { return [] }
-        for process in processes {
-            if Darwin.kill(process.id, SIGTERM) != 0, errno != ESRCH {
-                log.warning("[safeRestart] Could not terminate pid \(process.id): errno \(errno)")
-            }
-        }
-
-        let deadline = Date().addingTimeInterval(4)
-        while Date() < deadline {
-            let remaining = processes.filter { Darwin.kill($0.id, 0) == 0 || errno == EPERM }
-            if remaining.isEmpty { return [] }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-        return processes.filter { Darwin.kill($0.id, 0) == 0 || errno == EPERM }
+    /// Whether the live credential is saved as `source`'s backup before a
+    /// switch to `target` replaces it: only when `liveEmail`, the address
+    /// `~/.claude.json` names, is the source's, and never when the switch
+    /// restores the same account, whose backup is the copy being restored.
+    static func backsUpLiveCredential(liveEmail: String?, from source: Account, to target: Account) -> Bool {
+        source.id != target.id && source.matches(email: liveEmail)
     }
 
-    /// Resumes workloads using a method appropriate to their host. IDE-managed
-    /// sessions are left to their host's respawn mechanism. Standalone CLI
-    /// sessions open in Terminal at their original working directory.
-    func resumeAfterSafeRestart(_ processes: [RunningClaudeProcess]) {
-        let activeSessionIDs = Set(runningProcesses().compactMap(\.sessionID))
-        for process in processes {
-            guard process.recoveryMethod == .terminal,
-                  let sessionID = process.sessionID,
-                  !activeSessionIDs.contains(sessionID) else { continue }
-            let directory = process.workingDirectory
-                ?? FileManager.default.homeDirectoryForCurrentUser.path
-            let shellCommand = "cd \(Self.shellQuote(directory)) && \(Self.shellQuote(claudePath)) --resume \(Self.shellQuote(sessionID))"
-            let script = "tell application \"Terminal\" to do script \(Self.appleScriptQuote(shellCommand))"
-            let launcher = Process()
-            launcher.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            launcher.arguments = ["-e", script]
-            launcher.standardOutput = FileHandle.nullDevice
-            launcher.standardError = FileHandle.nullDevice
-            do {
-                try launcher.run()
-                log.info("[safeRestart] Requested CLI resume for session \(sessionID.prefix(8))…")
-            } catch {
-                log.warning("[safeRestart] Could not resume CLI session: \(error.localizedDescription)")
-            }
+    /// Why `claude auth status` after writing `target`'s credential does not
+    /// confirm the switch, or nil when it does; `switchAccount` rolls back on
+    /// any failure.
+    static func verificationFailure(of status: AuthStatus, switchingTo target: Account) -> ClaudeServiceError? {
+        guard status.loggedIn else { return .switchVerificationFailed }
+        guard target.matches(email: status.email) else {
+            return .switchWrongAccount(expected: target.email, actual: status.email ?? "unknown")
         }
-    }
-
-    private static func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
-    }
-
-    private static func appleScriptQuote(_ value: String) -> String {
-        "\"" + value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        return nil
     }
 
     func switchAccount(from currentAccount: Account, to targetAccount: Account) async throws -> AuthStatus {
@@ -783,7 +737,7 @@ final class ClaudeService: @unchecked Sendable {
         } else if let currentToken = keychain.readClaudeToken(),
            let currentOAuth = keychain.readOAuthAccount() {
             let email = (currentOAuth["emailAddress"]?.value as? String) ?? "?"
-            if email == currentAccount.email {
+            if Self.backsUpLiveCredential(liveEmail: email, from: currentAccount, to: targetAccount) {
                 let saved = keychain.saveAccountBackup(token: currentToken, oauthAccount: currentOAuth, forAccountId: currentAccount.id.uuidString)
                 log.info("[switchAccount] Step 1: Backup saved: \(saved)")
             } else {
@@ -827,13 +781,9 @@ final class ClaudeService: @unchecked Sendable {
         log.info("[switchAccount] Step 4: Verifying with `claude auth status`...")
         do {
             let status = try await getAuthStatus()
-            guard status.loggedIn else {
-                log.error("[switchAccount] Step 4: Target credentials are not logged in")
-                throw ClaudeServiceError.switchVerificationFailed
-            }
-            if status.email != targetAccount.email {
-                log.error("[switchAccount] Step 4: Logged in as \(status.email ?? "nil") instead of \(targetAccount.email)")
-                throw ClaudeServiceError.switchWrongAccount(expected: targetAccount.email, actual: status.email ?? "unknown")
+            if let failure = Self.verificationFailure(of: status, switchingTo: targetAccount) {
+                log.error("[switchAccount] Step 4: Not confirmed (loggedIn=\(status.loggedIn), email=\(status.email ?? "nil"), expected \(targetAccount.email))")
+                throw failure
             }
             log.info("[switchAccount] Step 4: Switch verified — logged in as \(status.email ?? "")")
             return status
@@ -1023,49 +973,51 @@ final class ClaudeService: @unchecked Sendable {
 
     // MARK: - CLI Runner
 
+    /// How long one `claude` command may run. `switchAccount` waits for
+    /// `claude auth status` with the target credential already written, and
+    /// rolls back when it does not answer within this.
+    static let cliTimeout: TimeInterval = 30
+
     private func runClaude(args: [String]) async throws -> String {
         let claudePath = self.claudePath
         log.debug("[runClaude] Running: \(claudePath) \(args.joined(separator: " "))")
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async { [claudePath] in
-                let process = Process()
-                let pipe = Pipe()
+        return try await Self.runClaude(
+            executable: claudePath, args: args, environment: environment(for: claudePath), timeout: Self.cliTimeout
+        )
+    }
 
-                process.executableURL = URL(fileURLWithPath: claudePath)
-                process.arguments = args
-                process.standardOutput = pipe
-                process.standardError = pipe
-
-                process.environment = self.environment(for: claudePath)
-
-                do {
-                    try process.run()
-                    process.waitUntilExit()
-
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let output = String(data: data, encoding: .utf8) ?? ""
-
-                    if process.terminationStatus == 0 {
-                        log.debug("[runClaude] Success (exit 0), output length: \(output.count)")
-                        continuation.resume(returning: output)
-                    } else if args == ["auth", "status"],
-                              let data = output.data(using: .utf8),
-                              (try? JSONDecoder().decode(AuthStatus.self, from: data)) != nil {
-                        // Claude uses exit 1 for the valid logged-out status
-                        // document. Let getAuthStatus decode it so callers can
-                        // distinguish rejected credentials from a CLI failure.
-                        log.info("[runClaude] auth status returned logged-out state (exit \(process.terminationStatus))")
-                        continuation.resume(returning: output)
-                    } else {
-                        log.error("[runClaude] Failed (exit \(process.terminationStatus))")
-                        continuation.resume(throwing: ClaudeServiceError.cliError("exit \(process.terminationStatus)"))
-                    }
-                } catch {
-                    log.error("[runClaude] Process launch failed: \(error.localizedDescription)")
-                    continuation.resume(throwing: ClaudeServiceError.processLaunchFailed(error))
-                }
-            }
+    /// Runs `claude` and returns its standard output. Throws `cliTimedOut`
+    /// when it runs past `timeout`; it is stopped then.
+    static func runClaude(
+        executable: String, args: [String], environment: [String: String]?, timeout: TimeInterval
+    ) async throws -> String {
+        let result: BoundedProcess.Result
+        do {
+            result = try await BoundedProcess.run(
+                executable: URL(fileURLWithPath: executable), arguments: args,
+                environment: environment, timeout: timeout
+            )
+        } catch BoundedProcess.Failure.timedOut(let seconds) {
+            log.error("[runClaude] `\(args.joined(separator: " "))` did not finish within \(Int(seconds)) s; stopped")
+            throw ClaudeServiceError.cliTimedOut(seconds: seconds)
+        } catch {
+            log.error("[runClaude] Process launch failed: \(error.localizedDescription)")
+            throw ClaudeServiceError.processLaunchFailed(error)
         }
+        let output = String(data: result.output, encoding: .utf8) ?? ""
+        if result.status == 0 {
+            log.debug("[runClaude] Success (exit 0), output length: \(output.count)")
+            return output
+        }
+        if args == ["auth", "status"], (try? JSONDecoder().decode(AuthStatus.self, from: result.output)) != nil {
+            // Claude uses exit 1 for the valid logged-out status
+            // document. Let getAuthStatus decode it so callers can
+            // distinguish rejected credentials from a CLI failure.
+            log.info("[runClaude] auth status returned logged-out state (exit \(result.status))")
+            return output
+        }
+        log.error("[runClaude] Failed (exit \(result.status))")
+        throw ClaudeServiceError.cliError("exit \(result.status)")
     }
 
     private func environment(for executable: String) -> [String: String] {
@@ -1098,9 +1050,12 @@ enum ClaudeServiceError: LocalizedError {
     case oauthAccountWriteFailed
     case switchVerificationFailed
     case switchWrongAccount(expected: String, actual: String)
+    case cliTimedOut(seconds: TimeInterval)
 
     var errorDescription: String? {
         switch self {
+        case .cliTimedOut(let seconds):
+            return "Claude CLI did not answer within \(Int(seconds)) seconds"
         case .invalidOutput:
             return "Invalid output from Claude CLI"
         case .cliError(let msg):

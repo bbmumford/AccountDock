@@ -42,15 +42,26 @@ enum CodexServiceError: LocalizedError {
     case notLoggedIn
     case invalidCredentials
     case subscriptionUnavailable
-    case rateLimited
+    /// The provider throttled the request, until `retryAt` when it said.
+    case rateLimited(retryAt: Date?)
     case loginFailed(String)
     case unsafeCredentialLocation
     /// The token endpoint refused the refresh token: the account must sign
     /// in again.
     case credentialRejected
+    /// A session restart could not prepare the resume of every session it
+    /// would stop, so it stopped none.
+    case restartUnavailable(String)
+    /// The live credential in `~/.codex` needs renewing while Codex runs,
+    /// which renews it itself.
+    case liveCredentialExpired
 
     var errorDescription: String? {
         switch self {
+        case .liveCredentialExpired:
+            return "The Codex sign-in expired; Codex renews it with its next request."
+        case let .restartUnavailable(reason):
+            return "Codex sessions were not restarted: \(reason)"
         case .binaryNotFound:
             return "Codex CLI not found. Install Codex or choose its path in Settings."
         case .notLoggedIn:
@@ -158,34 +169,79 @@ final class CodexService: @unchecked Sendable {
         }
     }
 
-    func resumeAfterSafeRestart(_ processes: [RunningCodexProcess], codexHome: String? = nil) {
-        guard let binaryPath else { return }
-        for process in processes {
-            guard !process.isHostManaged,
-                  let sessionID = process.sessionID else {
-                if process.isHostManaged {
-                    codexLog.info("[safeRestart] \(process.label) left to its host to reconnect")
+    /// The shell command that reopens session `sessionID` in `directory`,
+    /// against the credential in `codexHome` when one is given.
+    static func resumeCommand(binary: String, sessionID: String, directory: String, codexHome: String?) -> String {
+        let scope = codexHome.map { "CODEX_HOME=\(shellQuote($0)) " } ?? ""
+        return "\(scope)\(shellQuote(binary)) resume \(shellQuote(sessionID)) -C \(shellQuote(directory))"
+    }
+
+    /// Sessions `stopForRestart` stopped, each terminal session with the
+    /// Terminal launch that reopens it. Host-managed sessions and sessions
+    /// without an ID have none: their host reconnects them, or they cannot
+    /// be resumed.
+    struct StoppedSessions: Sendable {
+        /// Processes still running after the grace period.
+        let survivors: [RunningCodexProcess]
+        let resumes: [(process: RunningCodexProcess, launch: SessionTerminal.PreparedLaunch)]
+
+        /// Reopens every stopped session that has a launch, and discards the
+        /// launches of sessions that did not stop. Returns how many reopened.
+        @discardableResult
+        func resume() -> Int {
+            let surviving = Set(survivors.map(\.id))
+            var reopened = 0
+            for (process, launch) in resumes {
+                if surviving.contains(process.id) {
+                    launch.discard()
                 } else {
-                    codexLog.warning("[safeRestart] No session ID available for pid \(process.id)")
+                    launch.open()
+                    reopened += 1
+                    codexLog.info("[safeRestart] Reopened session \(process.sessionID?.prefix(8) ?? "")… in Terminal")
                 }
-                continue
             }
-            let directory = process.workingDirectory ?? NSHomeDirectory()
-            let scope = codexHome.map { "CODEX_HOME=\(Self.shellQuote($0)) " } ?? ""
-            let command = "\(scope)\(Self.shellQuote(binaryPath)) resume \(Self.shellQuote(sessionID)) -C \(Self.shellQuote(directory))"
-            let script = "tell application \"Terminal\" to do script \(Self.appleScriptQuote(command))"
-            let launcher = Process()
-            launcher.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            launcher.arguments = ["-e", script]
-            launcher.standardOutput = FileHandle.nullDevice
-            launcher.standardError = FileHandle.nullDevice
-            do {
-                try launcher.run()
-                codexLog.info("[safeRestart] Requested CLI resume for session \(sessionID.prefix(8))…")
-            } catch {
-                codexLog.warning("[safeRestart] Could not resume CLI session: \(error.localizedDescription)")
-            }
+            return reopened
         }
+    }
+
+    /// Stops `processes` to restart them, after preparing the Terminal
+    /// launch that resumes each terminal session (`resumeCommand`, scoped to
+    /// `codexHome`). When any launch cannot be prepared, nothing is stopped
+    /// and the error is thrown. The caller resumes the result with
+    /// `StoppedSessions.resume()` whether or not what it does while they are
+    /// stopped succeeds. `prepare` and `binary` are replaced in tests.
+    func stopForRestart(
+        _ processes: [RunningCodexProcess],
+        codexHome: String?,
+        shouldCloseTerminalTabs: Bool = false,
+        binary: String? = nil,
+        prepare: @Sendable (String) throws -> SessionTerminal.PreparedLaunch = { try SessionTerminal.prepareTerminalLaunch($0) }
+    ) async throws -> StoppedSessions {
+        var resumes: [(process: RunningCodexProcess, launch: SessionTerminal.PreparedLaunch)] = []
+        do {
+            for process in processes {
+                guard !process.isHostManaged, let sessionID = process.sessionID else {
+                    if process.isHostManaged {
+                        codexLog.info("[safeRestart] \(process.label) left to its host to reconnect")
+                    } else {
+                        codexLog.warning("[safeRestart] No session ID available for pid \(process.id)")
+                    }
+                    continue
+                }
+                guard let executable = binary ?? binaryPath else { throw CodexServiceError.binaryNotFound }
+                let command = Self.resumeCommand(
+                    binary: executable, sessionID: sessionID,
+                    directory: process.workingDirectory ?? NSHomeDirectory(), codexHome: codexHome
+                )
+                resumes.append((process, try prepare(command)))
+            }
+        } catch {
+            resumes.forEach { $0.launch.discard() }
+            codexLog.warning("[safeRestart] Resume not prepared; no session stopped: \(error.localizedDescription)")
+            throw CodexServiceError.restartUnavailable(error.localizedDescription)
+        }
+        let survivors = await terminateForSafeRestart(processes, shouldCloseTerminalTabs: shouldCloseTerminalTabs)
+        return StoppedSessions(survivors: survivors, resumes: resumes)
     }
 
     private struct CodexProcess {
@@ -389,8 +445,33 @@ final class CodexService: @unchecked Sendable {
         return base.appendingPathComponent("AccountDock/managed-codex-homes", isDirectory: true)
     }
 
-    var systemHome: URL {
-        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex", isDirectory: true)
+    /// The Codex home running sessions use, `~/.codex`, whose `auth.json`
+    /// holds the active account's live credential.
+    let systemHome: URL
+    /// Whether a Codex process is running, which renews the live credential
+    /// itself (`getUsageSnapshot`).
+    private let cliIsRunning: @Sendable () async -> Bool
+
+    /// `systemHome` and `cliIsRunning` default to the user's `~/.codex` and
+    /// a process scan; tests pass their own.
+    init(
+        systemHome: URL? = nil,
+        cliIsRunning: @escaping @Sendable () async -> Bool = { await CLIProcessScan.isRunning(.codex) }
+    ) {
+        self.systemHome = systemHome
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex", isDirectory: true)
+        self.cliIsRunning = cliIsRunning
+    }
+
+    /// Whether this reader may renew the credential in `home`. The live one
+    /// in `systemHome` is left to Codex while any Codex process runs: Codex
+    /// reloads `auth.json` before it renews, but takes no lock on it, so a
+    /// renewal here racing its own leaves one of them with a refresh token
+    /// the server has already used, and Codex then asks the user to sign in
+    /// again.
+    private func mayRenewCredential(in home: URL) async -> Bool {
+        guard home.standardizedFileURL.path == systemHome.standardizedFileURL.path else { return true }
+        return !(await cliIsRunning())
     }
 
     func isAvailable() async -> Bool {
@@ -453,6 +534,7 @@ final class CodexService: @unchecked Sendable {
         if Self.credentialsNeedRefresh(auth),
            let refreshToken = tokens["refresh_token"] as? String,
            !refreshToken.isEmpty {
+            guard await mayRenewCredential(in: home) else { throw CodexServiceError.liveCredentialExpired }
             tokens = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
             auth["tokens"] = tokens
             auth["last_refresh"] = ISO8601DateFormatter().string(from: Date())
@@ -465,6 +547,7 @@ final class CodexService: @unchecked Sendable {
             // Subscription changes can revoke a server-side access token well
             // before its signed JWT expiry. Refresh and retry once so an
             // upgrade/downgrade immediately publishes its new tier and windows.
+            guard await mayRenewCredential(in: home) else { throw CodexServiceError.liveCredentialExpired }
             codexLog.info("[usage] Access token rejected before expiry; refreshing and retrying")
             tokens = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
             auth["tokens"] = tokens
@@ -476,7 +559,7 @@ final class CodexService: @unchecked Sendable {
             throw CodexServiceError.subscriptionUnavailable
         }
         if result.statusCode == 429 {
-            throw CodexServiceError.rateLimited
+            throw CodexServiceError.rateLimited(retryAt: result.retryAt)
         }
         guard (200...299).contains(result.statusCode),
               let accessToken = tokens["access_token"] as? String else {
@@ -511,14 +594,15 @@ final class CodexService: @unchecked Sendable {
 
     private func fetchUsageResponse(
         tokens: [String: Any]
-    ) async throws -> (data: Data, statusCode: Int) {
+    ) async throws -> (data: Data, statusCode: Int, retryAt: Date?) {
         try await fetchResponse(Self.usageURL, tokens: tokens)
     }
 
-    /// A GET of one of the account's endpoints with its access token.
+    /// A GET of one of the account's endpoints with its access token, with
+    /// the time a `Retry-After` header names.
     private func fetchResponse(
         _ url: URL, tokens: [String: Any]
-    ) async throws -> (data: Data, statusCode: Int) {
+    ) async throws -> (data: Data, statusCode: Int, retryAt: Date?) {
         guard let accessToken = tokens["access_token"] as? String,
               !accessToken.isEmpty else {
             throw CodexServiceError.invalidCredentials
@@ -535,7 +619,7 @@ final class CodexService: @unchecked Sendable {
         guard let http = response as? HTTPURLResponse else {
             throw CodexServiceError.invalidCredentials
         }
-        return (data, http.statusCode)
+        return (data, http.statusCode, RetryAfter.date(in: http))
     }
 
     static func resolvedLivePlan(
@@ -568,7 +652,7 @@ final class CodexService: @unchecked Sendable {
         // A refused grant is answered with 400 or 401; anything else says
         // nothing about the refresh token.
         if status == 400 || status == 401 { throw CodexServiceError.credentialRejected }
-        if status == 429 { throw CodexServiceError.rateLimited }
+        if status == 429 { throw CodexServiceError.rateLimited(retryAt: RetryAfter.date(in: response)) }
         guard (200...299).contains(status),
               let refreshed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw CodexServiceError.invalidCredentials
@@ -653,10 +737,9 @@ final class CodexService: @unchecked Sendable {
         return formatter.date(from: value)
     }
 
-    private static func writePrivateAuth(_ auth: [String: Any], to url: URL) throws {
+    static func writePrivateAuth(_ auth: [String: Any], to url: URL) throws {
         let data = try JSONSerialization.data(withJSONObject: auth, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try PrivateFile.writeAtomically(data, to: url, mode: 0o600)
     }
 
     static func decodeUsage(_ data: Data) throws -> UsageAPIResponse {

@@ -104,6 +104,17 @@ struct Account: Identifiable, Codable, Hashable {
         obfuscated ? obfuscatedEmail : email
     }
 
+    /// Whether `other`, an address a provider or its CLI reported, names this
+    /// account. Providers return an address in the case it was entered in,
+    /// so case and surrounding whitespace are ignored; nil matches nothing.
+    func matches(email other: String?) -> Bool {
+        guard let other else { return false }
+        let trimmed = other.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed.caseInsensitiveCompare(
+            email.trimmingCharacters(in: .whitespacesAndNewlines)
+        ) == .orderedSame
+    }
+
     /// Returns the effective display name, optionally obfuscating the fallback.
     func effectiveDisplayName(obfuscated: Bool) -> String {
         if let label = customLabel, !label.isEmpty {
