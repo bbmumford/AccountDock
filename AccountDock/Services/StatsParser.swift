@@ -96,8 +96,7 @@ final class StatsParser: Sendable {
     }
 
     private func formatDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = DayKey.makeFormatter()
         return formatter.string(from: date)
     }
 }

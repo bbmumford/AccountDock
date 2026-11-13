@@ -94,8 +94,7 @@ struct DailyCost: Identifiable {
     }
 
     var parsedDate: Date? {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = DayKey.makeFormatter()
         return formatter.date(from: date)
     }
 }

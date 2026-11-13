@@ -159,8 +159,7 @@ final class CostParser: Sendable {
     /// Codex aggregate convention of input including cached tokens.
     static func scanKimiFile(_ url: URL) -> [CodexAggregateKey: CodexTokenAggregate] {
         var aggregates: [CodexAggregateKey: CodexTokenAggregate] = [:]
-        let dayFormatter = DateFormatter()
-        dayFormatter.dateFormat = "yyyy-MM-dd"
+        let dayFormatter = DayKey.makeFormatter()
         JSONLStreamReader.read(path: url.path) { data in
             guard let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   row["type"] as? String == "usage.record",
@@ -210,8 +209,7 @@ final class CostParser: Sendable {
         var aggregates: [CodexAggregateKey: CodexTokenAggregate] = [:]
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let dayFormatter = DateFormatter()
-        dayFormatter.dateFormat = "yyyy-MM-dd"
+        let dayFormatter = DayKey.makeFormatter()
 
         var model: String?
         var reasoningEffort: String?
@@ -389,8 +387,7 @@ private actor CodexCostIndex {
 
 private extension DateFormatter {
     static let codexDay: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = DayKey.makeFormatter()
         return formatter
     }()
 }
