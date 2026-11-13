@@ -150,6 +150,17 @@ final class AppState: ObservableObject {
     /// Sessions `SessionPacer` moves to another account to balance load,
     /// applied to one-session slots by `maintainSessionSlots`.
     var slotSessionMoves: [String: UUID] = [:]
+    /// Guards `maintainSessionSlots` against running twice at once, and
+    /// records a call that arrived meanwhile, which is then run after.
+    var slotMaintenanceRunning = false
+    var slotMaintenanceRequested = false
+    /// Watches the one-session slot directory for a launcher's request for a
+    /// spare; installed by `watchSpareRequests`.
+    var spareRequestWatcher: DispatchSourceFileSystemObject?
+    /// The renewal of the active account's live credential in progress, so
+    /// concurrent callers of `claudeCredential` share one: a second renewal
+    /// would present the refresh token the first has just replaced.
+    var liveCredentialRenewal: Task<String?, Never>?
     /// When each one-session slot last moved to another account.
     var slotDirectoryMovedAt: [String: Date] = [:]
     /// Accounts a threshold or balancing switch left, whose running sessions
@@ -284,6 +295,10 @@ final class AppState: ObservableObject {
     /// Model the provider's sessions were last seen using, from the Claude
     /// Code status line; selects which model-scoped weekly limit applies.
     var workloadModels: [AIProviderType: (model: String, seenAt: Date)] = [:]
+    /// The model each session last asked, from its status line and its
+    /// transcript; kept by `noteSessionModel` and read by `sessionModel`, so
+    /// a session is judged against the limits of the model it uses.
+    var sessionModels: [String: (model: String, seenAt: Date)] = [:]
 
     // MARK: - Initialization
 

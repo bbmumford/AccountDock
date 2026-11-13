@@ -17,6 +17,9 @@ struct TranscriptRequest: Equatable, Sendable {
     let cacheLifetime: TimeInterval?
     /// Whether the request answered a prompt rather than a tool result.
     let startsTurn: Bool
+    /// The model the session itself asked; nil for a subagent's request,
+    /// which may use another model than its session.
+    var model: String? = nil
 }
 
 /// Reads each request's token use from the session transcripts a CLI writes
@@ -250,7 +253,8 @@ actor TranscriptRequestFeed {
         return TranscriptRequest(
             session: subagent ? session : (row["sessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? session,
             at: at, contextTokens: input + write + read, cacheWriteTokens: write, cacheWriteLongTokens: long,
-            outputTokens: int(usage["output_tokens"]), cacheLifetime: lifetime, startsTurn: startsTurn
+            outputTokens: int(usage["output_tokens"]), cacheLifetime: lifetime, startsTurn: startsTurn,
+            model: subagent ? nil : message["model"] as? String
         )
     }
 

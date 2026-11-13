@@ -17,6 +17,7 @@ extension AppState {
             guard !requests.isEmpty else { continue }
             let shared = liveCredentialOwner(provider) ?? activeAccount(for: provider)?.id
             for request in requests {
+                if let model = request.model { noteSessionModel(request.session, model: model, at: request.at) }
                 if routerInUse, let seen = routedSessionSeen[request.session],
                    now.timeIntervalSince(seen.at) < 10 * 60 { continue }
                 if sessionSlotIsSettling(request.session, provider: provider, reportedAt: request.at) { continue }

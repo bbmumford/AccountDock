@@ -173,6 +173,14 @@ extension UsageAPIResponse {
         }
     }
 
+    /// The weekly window as it applies to sessions using `models` together:
+    /// the tightest of their windows, and the whole weekly limit when none
+    /// of them has a limit of its own.
+    func weeklyWindow(forModels models: [String]) -> UsageWindow? {
+        models.compactMap { weeklyWindow(forModel: $0) }
+            .max { ($0.utilization ?? 0) < ($1.utilization ?? 0) } ?? sevenDay
+    }
+
     /// The weekly window as it applies to work on `model`: the whole weekly
     /// limit, or a model's own weekly limit when that leaves less room.
     /// Room is measured in percent of the whole weekly allowance, the unit

@@ -504,13 +504,19 @@ extension AppState {
 
     /// The account's Claude Code credential JSON, valid for at least
     /// `minimumLifetime`: the live Keychain copy for the active account,
-    /// which Claude Code renews itself and which needs only a minute, and
-    /// the stored copy, renewed here when needed, for the others.
+    /// which needs only a minute, and the stored copy, renewed here when
+    /// needed, for the others. Claude Code renews the live copy itself, but
+    /// only from a session that reads it; while session slots hold its
+    /// access token it is renewed here once it has less than
+    /// `liveCredentialSlotLifetime` left, since a slot's session cannot.
     func claudeCredential(_ account: Account, minimumLifetime: TimeInterval) async -> String? {
         if account.isActive, liveCredentialOwner(.claudeCode).map({ $0 == account.id }) ?? true {
-            guard let json = keychain.readClaudeToken(),
-                  let token = Self.claudeAccessToken(json), token.1 > Date().addingTimeInterval(60) else { return nil }
-            return json
+            guard let json = keychain.readClaudeToken(), let token = Self.claudeAccessToken(json) else { return nil }
+            if Self.liveRenewalIsDue(expiry: token.1, slotsHoldIt: slotCredentialAccounts.contains(account.id), now: Date()),
+               let renewed = await renewLiveClaudeCredential(account, current: json) {
+                return renewed
+            }
+            return token.1 > Date().addingTimeInterval(60) ? json : nil
         }
         let stored = keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
         if let stored, let token = Self.claudeAccessToken(stored), token.1 > Date().addingTimeInterval(minimumLifetime) {
@@ -520,6 +526,56 @@ extension AppState {
               let renewed = keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token,
               Self.claudeAccessToken(renewed) != nil else { return nil }
         return renewed
+    }
+
+    /// Life the active account's live credential must have left while
+    /// session slots hold its access token. Claude Code renews it only in
+    /// its last five minutes, so this is reached first.
+    nonisolated static let liveCredentialSlotLifetime: TimeInterval = 30 * 60
+
+    nonisolated static func liveRenewalIsDue(expiry: Date, slotsHoldIt: Bool, now: Date) -> Bool {
+        slotsHoldIt && expiry.timeIntervalSince(now) < liveCredentialSlotLifetime
+    }
+
+    /// Renews the active account's live credential and returns it. The live
+    /// copy is first saved as the account's stored copy, so the renewal
+    /// presents the refresh token now in use; the renewed credential then
+    /// replaces the live one in place, where sessions on the CLI's default
+    /// credential read it at their next request, and is written to every
+    /// slot holding the account's token. A refusal counts against the
+    /// account only while the live copy is the one that was presented:
+    /// otherwise Claude Code renewed it first, and the next reading has it.
+    private func renewLiveClaudeCredential(_ account: Account, current: String) async -> String? {
+        if let running = liveCredentialRenewal { return await running.value }
+        let task = Task<String?, Never> { @MainActor [weak self] in
+            guard let self, !self.isLoggingIn, let module = self.credentialModule(for: .claudeCode),
+                  self.claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString, expectedEmail: account.email)
+            else { return nil }
+            let outcome = await module.renewSavedCopy(account)
+            let unchanged = self.keychain.readClaudeToken() == current
+            switch outcome {
+            case .renewed:
+                guard let renewed = self.keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token else { return nil }
+                guard (0..<3).contains(where: { _ in self.keychain.writeClaudeToken(renewed) }) else {
+                    self.failoverEvents.record(.claudeCode, "\(self.messageName(account))'s renewed sign-in could not be written for Claude Code; re-authenticate it if its sessions ask to sign in.")
+                    return nil
+                }
+                self.liveCredentialDigests[.claudeCode] = Self.credentialDigest(renewed)
+                self.noteLiveCredentialOwner(.claudeCode, account: account.id)
+                self.clearNeedsSignIn(account)
+                await self.reissueSlotCredential(for: account)
+                return renewed
+            case .rejected:
+                if unchanged { self.noteCredentialRejected(account) }
+                return nil
+            case .unavailable:
+                return nil
+            }
+        }
+        liveCredentialRenewal = task
+        let result = await task.value
+        liveCredentialRenewal = nil
+        return result
     }
 
     /// The access token and expiry in a Claude Code credential JSON.
