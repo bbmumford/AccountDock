@@ -696,64 +696,6 @@ final class ClaudeService: @unchecked Sendable {
         return String(command[idRange])
     }
 
-
-    /// Gracefully stops the exact processes captured before a credential switch.
-    /// It intentionally never escalates to SIGKILL; unsaved interactive sessions
-    /// remain under the user's control if they do not respond to termination.
-    func terminateForSafeRestart(_ processes: [RunningClaudeProcess]) async -> [RunningClaudeProcess] {
-        guard !processes.isEmpty else { return [] }
-        for process in processes {
-            if Darwin.kill(process.id, SIGTERM) != 0, errno != ESRCH {
-                log.warning("[safeRestart] Could not terminate pid \(process.id): errno \(errno)")
-            }
-        }
-
-        let deadline = Date().addingTimeInterval(4)
-        while Date() < deadline {
-            let remaining = processes.filter { Darwin.kill($0.id, 0) == 0 || errno == EPERM }
-            if remaining.isEmpty { return [] }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-        return processes.filter { Darwin.kill($0.id, 0) == 0 || errno == EPERM }
-    }
-
-    /// Resumes workloads using a method appropriate to their host. IDE-managed
-    /// sessions are left to their host's respawn mechanism. Standalone CLI
-    /// sessions open in Terminal at their original working directory.
-    func resumeAfterSafeRestart(_ processes: [RunningClaudeProcess]) {
-        let activeSessionIDs = Set(runningProcesses().compactMap(\.sessionID))
-        for process in processes {
-            guard process.recoveryMethod == .terminal,
-                  let sessionID = process.sessionID,
-                  !activeSessionIDs.contains(sessionID) else { continue }
-            let directory = process.workingDirectory
-                ?? FileManager.default.homeDirectoryForCurrentUser.path
-            let shellCommand = "cd \(Self.shellQuote(directory)) && \(Self.shellQuote(claudePath)) --resume \(Self.shellQuote(sessionID))"
-            let script = "tell application \"Terminal\" to do script \(Self.appleScriptQuote(shellCommand))"
-            let launcher = Process()
-            launcher.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            launcher.arguments = ["-e", script]
-            launcher.standardOutput = FileHandle.nullDevice
-            launcher.standardError = FileHandle.nullDevice
-            do {
-                try launcher.run()
-                log.info("[safeRestart] Requested CLI resume for session \(sessionID.prefix(8))…")
-            } catch {
-                log.warning("[safeRestart] Could not resume CLI session: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    private static func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
-    }
-
-    private static func appleScriptQuote(_ value: String) -> String {
-        "\"" + value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"") + "\""
-    }
-
     /// Whether the live credential is saved as `source`'s backup before a
     /// switch to `target` replaces it: only when `liveEmail`, the address
     /// `~/.claude.json` names, is the source's, and never when the switch

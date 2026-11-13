@@ -965,16 +965,12 @@ final class AppState: ObservableObject {
         }
         defer { switchesInFlight.remove(account.provider) }
         if refreshAfter { userSwitchedAt[account.provider] = Date() }
-        await switchTo(account, refreshAfter: refreshAfter, safelyRestarting: [])
+        await performSwitch(to: account, refreshAfter: refreshAfter)
         // A switch the user made shows the account as the provider reports
         // it now, whatever was last known of it.
         if refreshAfter, let active = activeAccount(for: account.provider), active.id == account.id {
             await readUsageNow(active)
         }
-    }
-
-    func runningClaudeProcesses() -> [RunningClaudeProcess] {
-        claudeService.recoverableRunningProcesses()
     }
 
     func runningCodexProcesses() -> [RunningCodexProcess] {
@@ -987,27 +983,34 @@ final class AppState: ObservableObject {
             errorMessage = "No running Codex terminal sessions were detected."
             return
         }
-        let resumable = processes.filter { !$0.isHostManaged && $0.sessionID != nil }
-        let survivors = await codexService.terminateForSafeRestart(
-            processes,
-            shouldCloseTerminalTabs: true
-        )
-        guard survivors.isEmpty else {
-            errorMessage = "\(survivors.count) Codex process(es) did not close. They were not reopened."
-            failoverEvents.record(.codex, "Force restart stopped: \(survivors.count) Codex process(es) remained active.")
+        let stopped: CodexService.StoppedSessions
+        do {
+            stopped = try await codexService.stopForRestart(
+                processes,
+                codexHome: activeAccount(for: .codex)?.credentialLocation,
+                shouldCloseTerminalTabs: true
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            failoverEvents.record(.codex, "Force restart not started: \(error.localizedDescription)")
             return
         }
-        codexService.resumeAfterSafeRestart(
-            resumable,
-            codexHome: activeAccount(for: .codex)?.credentialLocation
-        )
-        let skipped = processes.count - resumable.count
+        let reopened = stopped.resume()
+        guard stopped.survivors.isEmpty else {
+            errorMessage = "\(stopped.survivors.count) Codex process(es) did not close and were left running."
+            failoverEvents.record(
+                .codex,
+                "Force restart reopened \(reopened) session(s); \(stopped.survivors.count) Codex process(es) remained active."
+            )
+            return
+        }
+        let skipped = processes.count - reopened
         failoverEvents.record(
             .codex,
-            "Force restart reopened \(resumable.count) terminal session(s)"
+            "Force restart reopened \(reopened) terminal session(s)"
                 + (skipped == 0 ? "." : "; \(skipped) session(s) had no recoverable ID or are host-managed.")
         )
-        if resumable.isEmpty {
+        if reopened == 0 {
             errorMessage = "Codex processes were closed, but no active terminal session IDs were available to resume."
         }
     }
@@ -1067,14 +1070,10 @@ final class AppState: ObservableObject {
         )
     }
 
-    /// Switch credentials and then stop only the Claude processes that were
-    /// captured before the switch. IDE integrations can respawn against the new
-    /// credential; terminal sessions can be reopened by the user.
-    func switchTo(
-        _ account: Account,
-        refreshAfter: Bool = true,
-        safelyRestarting processes: [RunningClaudeProcess]
-    ) async {
+    /// Makes `account` its provider's active account with the provider's
+    /// switch method. A Claude switch stops no session; a switch the user
+    /// made moves the running ones with `moveRunningSessions`.
+    private func performSwitch(to account: Account, refreshAfter: Bool) async {
         guard account.supportsProviderWorkloads else {
             errorMessage = account.providerUnavailableLabel ?? "This account is unavailable."
             return
@@ -1150,17 +1149,6 @@ final class AppState: ObservableObject {
             )
             saveAccounts()
             await routerFollowActiveAccount()
-
-            if !processes.isEmpty {
-                let survivors = await claudeService.terminateForSafeRestart(processes)
-                if survivors.isEmpty {
-                    log.info("[switchTo] Safely stopped \(processes.count) pre-switch Claude process(es)")
-                    claudeService.resumeAfterSafeRestart(processes)
-                } else {
-                    errorMessage = "\(survivors.count) Claude session(s) did not close. Quit them manually before continuing work."
-                    log.warning("[switchTo] \(survivors.count) pre-switch Claude process(es) survived graceful termination")
-                }
-            }
 
             if refreshAfter {
                 await refresh()
@@ -2170,18 +2158,29 @@ final class AppState: ObservableObject {
         guard !account.isActive, let location = account.credentialLocation else { return }
         isLoading = true
         defer { isLoading = false }
+        // Sessions stopped for the switch are reopened however it ends: once
+        // the credential is promoted, or when a step fails.
+        var stopped: CodexService.StoppedSessions?
+        func resumeStopped() {
+            guard let sessions = stopped else { return }
+            stopped = nil
+            let reopened = sessions.resume()
+            failoverEvents.record(.codex, "Restarted \(reopened) of \(processes.count) Codex process(es) against the selected account.")
+        }
         do {
             // Stop captured clients before touching ~/.codex/auth.json. A live
             // Codex process can refresh and rewrite that file, racing the
             // credential promotion and effectively undoing a safe switch.
             if !processes.isEmpty {
-                let survivors = await codexService.terminateForSafeRestart(
+                let stoppedNow = try await codexService.stopForRestart(
                     processes,
+                    codexHome: location,
                     shouldCloseTerminalTabs: closeTerminalTabs
                 )
-                guard survivors.isEmpty else {
+                stopped = stoppedNow
+                guard stoppedNow.survivors.isEmpty else {
                     throw CodexServiceError.loginFailed(
-                        "\(survivors.count) Codex session(s) did not close; credentials were not switched."
+                        "\(stoppedNow.survivors.count) Codex session(s) did not close; credentials were not switched."
                     )
                 }
                 log.info("[switchToCodex] Safely stopped \(processes.count) pre-switch Codex process(es)")
@@ -2207,6 +2206,7 @@ final class AppState: ObservableObject {
                 }
             }
             saveAccounts(refreshWidget: true)
+            resumeStopped()
 
             if !liveProcesses.isEmpty {
                 let failures = codexService.requestCredentialReload(liveProcesses)
@@ -2221,15 +2221,11 @@ final class AppState: ObservableObject {
                 )
             }
 
-            if !processes.isEmpty {
-                codexService.resumeAfterSafeRestart(processes, codexHome: location)
-                failoverEvents.record(.codex, "Restarted \(processes.count) Codex process(es) against the selected account.")
-            }
-
             if refreshAfter {
                 await refresh()
             }
         } catch {
+            resumeStopped()
             errorMessage = error.localizedDescription
         }
     }

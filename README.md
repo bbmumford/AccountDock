@@ -275,8 +275,11 @@ Running sessions are never terminated or restarted.
 - **Switch Without Restart** signals compatible Codex processes to reload the
   credential in place.
 
-Standalone sessions reopen in their original directory; IDE sessions reconnect
-through their host. Codex lifecycle hooks need a Codex build that supports them
+Standalone sessions reopen in their original directory, in a new Terminal
+window opened from a `.command` file, which needs no Automation permission;
+IDE sessions reconnect through their host. Every resume is prepared before any
+session is closed, so when one cannot be, none is closed and the switch reports
+why. Codex lifecycle hooks need a Codex build that supports them
 (the `bbmumford/codex` fork); on other builds they are inert.
 
 **Kimi Code.** The Accounts tab can capture the current Kimi Code login or run
