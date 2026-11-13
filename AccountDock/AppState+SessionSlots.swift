@@ -176,8 +176,10 @@ extension AppState {
     func accountCannotServe(_ id: UUID, provider: AIProviderType, planner: FailoverPlanner, now: Date,
                             model: String? = nil) -> Bool {
         guard let account = accounts.first(where: { $0.id == id && $0.provider == provider }) else { return true }
-        let tier = planner.tier(quotaState(for: account, now: now, model: model), now: now)
-        return tier == .exhausted || tier == .ineligible
+        switch planner.servingVerdict(quotaState(for: account, now: now, model: model), now: now, lead: 0) {
+        case .atLimit, .ineligible: return true
+        case .canServe, .nearLimit: return false
+        }
     }
 
     /// The account each recent session that is not running last ran on,

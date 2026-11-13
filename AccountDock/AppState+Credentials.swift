@@ -193,12 +193,9 @@ extension AppState {
                     sessionsLeftOn[provider]?.remove(id)
                     continue
                 }
-                var state = quotaState(for: account, now: now)
-                let refused = state.refusedAtLimit
-                state.credentialsUsable = true
-                state.resetUnverified = false
-                state.refusedAtLimit = false
-                if refused || planner.tier(state, now: now) == .exhausted {
+                let state = quotaState(for: account, now: now)
+                if state.refusedAtLimit
+                    || planner.servingVerdict(planner.servingView(state), now: now, lead: 0) == .atLimit {
                     failoverEvents.record(provider, "\(messageName(account)) reached its limit; the sessions still on it move to the active account at their next request.")
                     moveRunningSessions(provider, from: id)
                     break

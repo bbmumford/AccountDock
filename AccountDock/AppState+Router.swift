@@ -62,7 +62,7 @@ extension AppState {
         if let until = routeTargetRefusedUntil[target.id], until > now { return nil }
         guard let account = accounts.first(where: { $0.provider == target.provider && $0.isActive }) else { return nil }
         let planner = FailoverPlanner(settings: plannerSettings(target.provider))
-        guard planner.tier(quotaState(for: account, now: now), now: now) <= .usable else { return nil }
+        guard planner.servingVerdict(quotaState(for: account, now: now), now: now, lead: 0) == .canServe else { return nil }
         let verdict = routeCapacity(target, account: account, for: provider, now: now)
         if routeTargetVerdicts[target.id] != verdict { routeTargetVerdicts[target.id] = verdict }
         return verdict.serves ? account : nil
@@ -373,7 +373,7 @@ extension AppState {
             let planner = FailoverPlanner(settings: plannerSettings(provider))
             let anotherAccountServes = accounts.contains { account in
                 account.provider == provider && !account.isActive && !policy.excludedAccountIDs.contains(account.id)
-                    && planner.tier(quotaState(for: account), now: Date()) <= .usable
+                    && planner.servingVerdict(quotaState(for: account), now: Date(), lead: 0) == .canServe
             }
             state.passthroughRoutes[key] = PassthroughRoute(
                 backend: target.backend(model: policy.routeModel, maxContextTokens: policy.routeMaxContextTokens),
@@ -418,7 +418,8 @@ extension AppState {
         for account in [active] + others {
             if account.id != active.id {
                 let state = quotaState(for: account, now: now)
-                guard planner.tier(state, now: now) <= .usable, planner.canSwitchWithoutReading(state, now: now) else { continue }
+                guard planner.servingVerdict(state, now: now, lead: 0) == .canServe,
+                      planner.canSwitchWithoutReading(state, now: now) else { continue }
             }
             let name = Self.poolTokenFile(account)
             if forRouter {
