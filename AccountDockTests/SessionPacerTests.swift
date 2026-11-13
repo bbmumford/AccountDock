@@ -287,4 +287,31 @@ final class SessionPacerTests: XCTestCase {
                        "a tie goes to the model with an allowance of its own")
         XCTAssertNil(AppState.prevailingAllowance(models: [], keys: keys))
     }
+
+    func testAnAccountThatCannotCarryOneMoreSessionForAnHourTakesNoNewOnes() {
+        // b is idle with almost nothing left; a is busy with plenty. By
+        // unused rate alone b would take a share of the new sessions, and a
+        // session started there would use it up in minutes.
+        let busy = session("busy", on: a, burn: 20)
+        let plan = SessionPacer().plan(accounts: [weekly(a, left: 4000, fable: 4000), weekly(b, left: 8, fable: 4000)],
+                                       sessions: [busy], now: now)
+        XCTAssertGreaterThan(plan.weights[a] ?? 0, 0)
+        XCTAssertEqual(plan.weights[b] ?? -1, 0, accuracy: 0.001)
+
+        // The same for a model's own allowance: b has plenty overall and
+        // twenty minutes of Fable.
+        var fable = busy
+        fable.model = "claude-fable-5-2"
+        let scoped = SessionPacer().plan(accounts: [weekly(a, left: 4000, fable: 4000), weekly(b, left: 4000, fable: 7)],
+                                         sessions: [fable], now: now)
+        XCTAssertEqual(scoped.modelWeights["fable"]?[b] ?? -1, 0, accuracy: 0.001)
+        XCTAssertGreaterThan(scoped.weights[b] ?? 0, 0, "a session on another model can still start there")
+    }
+
+    func testWhenNoAccountCarriesAnotherSessionNewOnesStillHaveSomewhereToGo() {
+        let busy = session("busy", on: a, burn: 20)
+        let plan = SessionPacer().plan(accounts: [weekly(a, left: 12, fable: 4000), weekly(b, left: 8, fable: 4000)],
+                                       sessions: [busy], now: now)
+        XCTAssertTrue(plan.weights.values.contains { $0 > 0 })
+    }
 }

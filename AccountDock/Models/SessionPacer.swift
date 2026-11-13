@@ -395,20 +395,47 @@ struct SessionPacer {
                 }
             }
         }
+        // A session started now is expected to use what the running ones
+        // use on average. An account that could not carry one more such
+        // session for `newSessionRunway` takes none while another account
+        // can: the session would be refused there, or moved and made to
+        // write its cache again, within the hour. `key` adds the allowance
+        // of the model the session uses.
+        let rates = active.map(\.tokensPerHour).filter { $0 > 0 }
+        let typical = rates.isEmpty ? nil : rates.reduce(0, +) / Double(rates.count)
+        func carriesAnother(_ account: Account, _ key: String? = nil) -> Bool {
+            guard let typical else { return true }
+            let rate = percent(typical, on: account)
+            let whole = outlook(account, spent: spent[account.id] ?? 0, burn: (burn[account.id] ?? 0) + rate, now: now)
+            let scoped = key.flatMap { currentScoped(account, $0, burning: rate) }
+            return !([whole] + [scoped].compactMap { $0 }).contains { outlook in
+                outlook.limitAt.map { $0.timeIntervalSince(now) < Self.newSessionRunway } ?? false
+            }
+        }
+        // Weights for the accounts that carry another session, or for all of
+        // them when none does, so a new session always has somewhere to go.
+        func weighted(_ key: String? = nil, _ weight: (Account) -> Double) -> [UUID: Double] {
+            let all = accounts.reduce(into: [UUID: Double]()) { $0[$1.id] = weight($1) }
+            let carrying = all.filter { id, value in
+                value > 0 && accounts.first { $0.id == id }.map { carriesAnother($0, key) } == true
+            }
+            return carrying.isEmpty ? all : all.mapValues { _ in 0 }.merging(carrying) { $1 }
+        }
         // New sessions go by unused rate to accounts that stay within their
         // windows. When every account would reach a limit before its reset,
         // they go by how much of its present rate each account's allowance
         // sustains until then, so the accounts run out as late as they can:
         // one running short soonest for its reset takes the fewest.
-        for account in accounts {
+        plan.weights = weighted { account in
             let outlook = current(account)
             let open = account.baseWeight > 0 && plan.shedding[account.id] == nil && outlook.limitAt == nil
-            plan.weights[account.id] = open ? account.baseWeight * max(0, outlook.allowedPerHour - outlook.burnPerHour) : 0
+            return open ? account.baseWeight * max(0, outlook.allowedPerHour - outlook.burnPerHour) : 0
         }
         if !plan.weights.values.contains(where: { $0 > 0 }) {
             let candidates = accounts.filter { $0.baseWeight > 0 }
-            for account in candidates.isEmpty ? accounts : candidates {
-                plan.weights[account.id] = max(account.baseWeight, 0.01) * Self.sustainedShare(current(account))
+            let among = Set((candidates.isEmpty ? accounts : candidates).map(\.id))
+            plan.weights = weighted { account in
+                among.contains(account.id) ? max(account.baseWeight, 0.01) * Self.sustainedShare(current(account)) : 0
             }
         }
         // A new session on a model with an allowance of its own goes the
@@ -416,25 +443,31 @@ struct SessionPacer {
         // where that model's allowance is spent while another account has
         // some left.
         for key in Set(accounts.flatMap { $0.scoped.keys }).sorted() {
-            var weights: [UUID: Double] = [:]
-            for account in accounts {
+            var weights = weighted(key) { account in
                 let outlooks = [current(account)] + [currentScoped(account, key)].compactMap { $0 }
                 let open = account.baseWeight > 0 && plan.shedding[account.id] == nil
                     && plan.scopedShedding[account.id]?[key] == nil && !outlooks.contains { $0.limitAt != nil }
                 let unused = outlooks.map { $0.allowedPerHour - $0.burnPerHour }.min() ?? 0
-                weights[account.id] = open ? account.baseWeight * max(0, unused) : 0
+                return open ? account.baseWeight * max(0, unused) : 0
             }
             if !weights.values.contains(where: { $0 > 0 }) {
                 let candidates = accounts.filter { $0.baseWeight > 0 }
-                for account in candidates.isEmpty ? accounts : candidates {
+                let among = Set((candidates.isEmpty ? accounts : candidates).map(\.id))
+                weights = weighted(key) { account in
+                    guard among.contains(account.id) else { return 0 }
                     let shares = [current(account)] + [currentScoped(account, key)].compactMap { $0 }
-                    weights[account.id] = max(account.baseWeight, 0.01) * (shares.map(Self.sustainedShare).min() ?? 0)
+                    return max(account.baseWeight, 0.01) * (shares.map(Self.sustainedShare).min() ?? 0)
                 }
             }
             plan.modelWeights[key] = weights
         }
         return plan
     }
+
+    /// How long an account must be able to carry one more session of the
+    /// running sessions' average rate to take a new one: the default
+    /// lifetime of the cache the session would write there.
+    static let newSessionRunway: TimeInterval = defaultCacheLifetime
 
     /// The share of its present rate an account's allowance sustains until
     /// its window resets, at most `maximumSustainedShare`: an account barely
