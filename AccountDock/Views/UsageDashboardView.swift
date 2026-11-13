@@ -492,6 +492,15 @@ struct UsageDashboardView: View {
                 utilization: weekly.utilization ?? 0
             )
         }
+        // A model with a weekly limit of its own, which `AppState.plannedUsage`
+        // judges that model's sessions by.
+        ForEach(usage.modelWeeklyLimits, id: \.model) { limit in
+            usageRow(
+                label: LocalizedStringKey("\(limit.model) weekly limit"),
+                resetText: UsageWindow(utilization: limit.percent, resetsAt: limit.resetsAt).resetLabelString,
+                utilization: limit.percent
+            )
+        }
     }
 
     @ViewBuilder
