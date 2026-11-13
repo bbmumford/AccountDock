@@ -192,15 +192,6 @@ struct UsageDashboardView: View {
         .sectionPadding()
     }
 
-    private func longQuotaLabel(for provider: AIProviderType, window: UsageWindow) -> LocalizedStringKey {
-        if !provider.capabilities.longWindowReportsLength {
-            return LocalizedStringKey(provider.capabilities.weeklyQuotaLabel)
-        }
-        guard let seconds = window.windowSeconds else { return "Weekly" }
-        let days = seconds / 86_400
-        return days == 7 ? "Weekly" : LocalizedStringKey("\(days)-day quota")
-    }
-
     // MARK: - Today Activity Card
 
     private var todayActivityCard: some View {
@@ -475,7 +466,7 @@ struct UsageDashboardView: View {
         }
         if let weekly = usage.sevenDay {
             usageRow(
-                label: longQuotaLabel(for: provider, window: weekly),
+                label: LocalizedStringKey(provider.capabilities.longWindowLabel(for: weekly)),
                 resetText: weekly.resetLabelString,
                 utilization: weekly.utilization
             )

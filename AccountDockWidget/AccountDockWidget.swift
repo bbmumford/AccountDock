@@ -11,48 +11,51 @@ struct AccountDockEntry: TimelineEntry {
     let date: Date
     let data: WidgetData?
 
-    static let placeholder = AccountDockEntry(
-        date: .now,
-        data: WidgetData(
-            selectedProvider: nil,
-            accounts: [
-                WidgetAccountData(
-                    provider: "Claude Code",
-                    email: "us***@ex***.com",
-                    displayName: "My Org",
-                    subscriptionType: "Pro",
-                    isActive: true,
-                    sessionUtilization: 42,
-                    sessionResetTime: "2 hr 15 min",
-                    weeklyUtilization: 28,
-                    weeklyResetTime: "in 3 days",
-                    extraUsageEnabled: true,
-                    hasError: false,
-                    errorMessage: nil
-                ),
-                WidgetAccountData(
-                    provider: "Codex",
-                    email: "co***@ex***.com",
-                    displayName: "Codex Plus",
-                    subscriptionType: "Plus",
-                    isActive: true,
-                    sessionUtilization: nil,
-                    sessionResetTime: nil,
-                    weeklyUtilization: 14,
-                    weeklyResetTime: "in 6 days",
-                    extraUsageEnabled: nil,
-                    hasError: false,
-                    errorMessage: nil
-                )
-            ],
-            todayCost: 3.45,
-            conversationTurns: 18,
-            activeCodingTime: "1h 30m",
-            linesWritten: 326,
-            modelUsage: ["Opus": 12, "Sonnet": 5, "gpt-5.3-codex": 18],
-            lastUpdated: .now
+    static var placeholder: AccountDockEntry {
+        AccountDockEntry(
+            date: .now,
+            data: WidgetData(
+                providerOrder: ["Claude Code", "Codex"],
+                accounts: [
+                    WidgetAccountData(
+                        provider: "Claude Code",
+                        providerName: "Claude",
+                        iconName: "brain.head.profile",
+                        email: "us***@ex***.com",
+                        displayName: "My Org",
+                        subscriptionType: "Pro",
+                        isActive: true,
+                        windows: [
+                            WidgetWindow(label: "Session", utilization: 42, resetsAt: .now.addingTimeInterval(8_100)),
+                            WidgetWindow(label: "Weekly limit", utilization: 28, resetsAt: .now.addingTimeInterval(259_200)),
+                        ],
+                        hasError: false,
+                        errorMessage: nil
+                    ),
+                    WidgetAccountData(
+                        provider: "Codex",
+                        providerName: "Codex",
+                        iconName: "chevron.left.forwardslash.chevron.right",
+                        email: "co***@ex***.com",
+                        displayName: "Plus",
+                        subscriptionType: "Plus",
+                        isActive: true,
+                        windows: [
+                            WidgetWindow(label: "Weekly", utilization: 14, resetsAt: .now.addingTimeInterval(518_400)),
+                        ],
+                        hasError: false,
+                        errorMessage: nil
+                    ),
+                ],
+                todayCost: 3.45,
+                conversationTurns: 18,
+                activeCodingTime: "1h 30m",
+                linesWritten: 326,
+                modelUsage: ["Opus": 12, "Sonnet": 5, "GPT 5.3 Codex": 18],
+                lastUpdated: .now
+            )
         )
-    )
+    }
 }
 
 // MARK: - Timeline Provider
@@ -120,40 +123,82 @@ struct AccountDockWidgetEntryView: View {
     }
 }
 
+// MARK: - Shared Pieces
+
+/// The header row: one icon per provider shown, then the app's name.
+private struct ProviderIconsHeader: View {
+    let accounts: [WidgetAccountData]
+    var font: Font = .caption.weight(.semibold)
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(Array(accounts.enumerated()), id: \.offset) { _, account in
+                Image(systemName: account.displayIconName)
+                    .font(.caption)
+                    .foregroundStyle(brandColor)
+                    .widgetAccentable()
+            }
+            Text("AccountDock")
+                .font(font)
+                .lineLimit(1)
+        }
+    }
+}
+
+/// A thin horizontal bar filled to `level`; empty when the level is unknown.
+private struct LevelBar: View {
+    let level: UsageLevel
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2.5)
+                    .fill(.quaternary)
+                    .frame(height: 5)
+                RoundedRectangle(cornerRadius: 2.5)
+                    .fill(level.color(normal: .green))
+                    .frame(width: max(0, geo.size.width * level.fraction), height: 5)
+            }
+        }
+        .frame(height: 5)
+    }
+}
+
+/// Time left until `date`, counting down live between timeline reloads;
+/// nothing once it has passed or when the reset is unknown.
+private struct ResetCountdown: View {
+    let date: Date?
+    var font: Font = .caption2
+
+    var body: some View {
+        if let date, date > .now {
+            Text(date, style: .relative)
+                .font(font)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+}
+
 // MARK: - Small Widget
 
 private struct SmallWidgetView: View {
     let data: WidgetData
 
-    private var providerAccounts: [WidgetAccountData] {
-        ["Claude Code", "Codex"].compactMap { provider in
-            data.accounts.first { $0.provider == provider && $0.isActive }
-                ?? data.accounts.first { $0.provider == provider }
-        }
-    }
+    private var providerAccounts: [WidgetAccountData] { data.providerAccounts }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 5) {
-                ForEach(providerAccounts, id: \.provider) { account in
-                    Image(systemName: providerIcon(account))
-                        .font(.caption)
-                        .foregroundStyle(brandColor)
-                        .widgetAccentable()
-                }
-                Text("AccountDock")
-                    .font(.caption.weight(.semibold))
+            HStack {
+                ProviderIconsHeader(accounts: providerAccounts)
                 Spacer()
             }
 
             if !providerAccounts.isEmpty {
                 Spacer(minLength: 2)
-                ForEach(providerAccounts, id: \.provider) { account in
-                    compactUsageBar(
-                        label: account.provider == "Codex" ? "Codex" : "Claude",
-                        utilization: account.weeklyUtilization,
-                        hasError: account.hasError
-                    )
+                ForEach(Array(providerAccounts.enumerated()), id: \.offset) { _, account in
+                    compactUsageBar(account)
                 }
                 Spacer(minLength: 2)
                 HStack {
@@ -175,29 +220,20 @@ private struct SmallWidgetView: View {
         }
     }
 
-    private func compactUsageBar(label: String, utilization: Double?, hasError: Bool) -> some View {
-        let level = UsageLevel(utilization: utilization)
+    /// The provider's tightest window, labelled with the provider's name.
+    private func compactUsageBar(_ account: WidgetAccountData) -> some View {
+        let level = UsageLevel(utilization: account.hasError ? nil : account.tightestWindow?.utilization)
         return VStack(spacing: 3) {
             HStack {
-                Text(label)
+                Text(verbatim: account.displayProviderName)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(hasError ? "—" : level.percentText)
+                Text(level.percentText)
                     .font(.caption2.weight(.medium).monospacedDigit())
-                    .foregroundStyle(hasError ? Color.secondary : level.color(normal: .green))
+                    .foregroundStyle(level.color(normal: .green))
             }
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 2.5)
-                        .fill(.quaternary)
-                        .frame(height: 5)
-                    RoundedRectangle(cornerRadius: 2.5)
-                        .fill(level.color(normal: .green))
-                        .frame(width: max(0, geo.size.width * level.fraction), height: 5)
-                }
-            }
-            .frame(height: 5)
+            LevelBar(level: level)
         }
     }
 }
@@ -207,25 +243,13 @@ private struct SmallWidgetView: View {
 private struct MediumWidgetView: View {
     let data: WidgetData
 
-    private var providerAccounts: [WidgetAccountData] {
-        ["Claude Code", "Codex"].compactMap { provider in
-            data.accounts.first { $0.provider == provider && $0.isActive }
-                ?? data.accounts.first { $0.provider == provider }
-        }
-    }
+    private var providerAccounts: [WidgetAccountData] { data.providerAccounts }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header row
-            HStack(spacing: 5) {
-                ForEach(providerAccounts, id: \.provider) { account in
-                    Image(systemName: providerIcon(account))
-                        .font(.caption)
-                        .foregroundStyle(brandColor)
-                        .widgetAccentable()
-                }
-                Text("AccountDock")
-                    .font(.caption.weight(.medium))
+            HStack {
+                ProviderIconsHeader(accounts: providerAccounts, font: .caption.weight(.medium))
                 Spacer()
                 Text(data.lastUpdated, style: .relative)
                     .font(.caption2)
@@ -236,21 +260,16 @@ private struct MediumWidgetView: View {
 
             // Main content: usage bars on left, activity on right
             HStack(spacing: 12) {
-                // Left: Usage bars
+                // Left: each provider's tightest window
                 VStack(alignment: .leading, spacing: 5) {
-                    ForEach(providerAccounts, id: \.provider) { account in
-                        if account.provider == "Claude Code", account.sessionUtilization != nil {
+                    ForEach(Array(providerAccounts.enumerated()), id: \.offset) { _, account in
+                        if let window = account.tightestWindow {
                             usageBar(
-                                label: "Claude session",
-                                utilization: account.sessionUtilization,
-                                resetTime: account.sessionResetTime
+                                label: "\(account.displayProviderName) · \(window.label)",
+                                utilization: account.hasError ? nil : window.utilization,
+                                resetsAt: window.resetsAt
                             )
                         }
-                        usageBar(
-                            label: account.provider == "Codex" ? "Codex weekly" : "Claude weekly",
-                            utilization: account.weeklyUtilization,
-                            resetTime: account.weeklyResetTime
-                        )
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -277,34 +296,21 @@ private struct MediumWidgetView: View {
         }
     }
 
-    private func usageBar(label: LocalizedStringKey, utilization: Double?, resetTime: String?) -> some View {
+    private func usageBar(label: String, utilization: Double?, resetsAt: Date?) -> some View {
         let level = UsageLevel(utilization: utilization)
         return VStack(spacing: 3) {
-            HStack {
-                Text(label)
+            HStack(spacing: 4) {
+                Text(verbatim: label)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Spacer()
-                if let reset = resetTime {
-                    Text(reset)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
+                    .lineLimit(1)
+                Spacer(minLength: 2)
+                ResetCountdown(date: resetsAt)
                 Text(level.percentText)
                     .font(.caption2.weight(.medium).monospacedDigit())
                     .foregroundStyle(level.color(normal: .green))
             }
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 2.5)
-                        .fill(.quaternary)
-                        .frame(height: 5)
-                    RoundedRectangle(cornerRadius: 2.5)
-                        .fill(level.color(normal: .green))
-                        .frame(width: max(0, geo.size.width * level.fraction), height: 5)
-                }
-            }
-            .frame(height: 5)
+            LevelBar(level: level)
         }
     }
 
@@ -340,6 +346,16 @@ private struct LargeWidgetView: View {
             }
             .prefix(4)
             .map { (name: $0.key, count: $0.value) }
+    }
+
+    /// Accounts grouped by provider, in the providers' display order.
+    private var orderedAccounts: [WidgetAccountData] {
+        let order = data.orderedProviders
+        return data.accounts.enumerated().sorted { lhs, rhs in
+            let left = lhs.element.provider.flatMap(order.firstIndex(of:)) ?? order.count
+            let right = rhs.element.provider.flatMap(order.firstIndex(of:)) ?? order.count
+            return left == right ? lhs.offset < rhs.offset : left < right
+        }.map(\.element)
     }
 
     var body: some View {
@@ -388,7 +404,7 @@ private struct LargeWidgetView: View {
             .background(brandColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
 
             // Per-account cards — expand to fill remaining space
-            ForEach(Array(data.accounts.enumerated()), id: \.offset) { _, account in
+            ForEach(Array(orderedAccounts.enumerated()), id: \.offset) { _, account in
                 accountCard(account)
                     .frame(maxHeight: .infinity)
             }
@@ -438,7 +454,7 @@ private struct LargeWidgetView: View {
         VStack(alignment: .leading, spacing: 10) {
             // Account header
             HStack(spacing: 6) {
-                Image(systemName: providerIcon(account))
+                Image(systemName: account.displayIconName)
                     .font(.caption2)
                     .foregroundStyle(account.isActive ? brandColor : .secondary)
                 Text(account.displayName)
@@ -481,8 +497,9 @@ private struct LargeWidgetView: View {
                     }
                 }
             } else {
-                accountUsageBar(label: "Session", utilization: account.sessionUtilization, resetTime: account.sessionResetTime)
-                accountUsageBar(label: "Weekly", utilization: account.weeklyUtilization, resetTime: account.weeklyResetTime)
+                ForEach(Array(account.displayWindows.enumerated()), id: \.offset) { _, window in
+                    accountUsageBar(window)
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -494,24 +511,18 @@ private struct LargeWidgetView: View {
         )
     }
 
-    private func accountUsageBar(label: LocalizedStringKey, utilization: Double?, resetTime: String?) -> some View {
-        let level = UsageLevel(utilization: utilization)
+    private func accountUsageBar(_ window: WidgetWindow) -> some View {
+        let level = UsageLevel(utilization: window.utilization)
         return HStack(spacing: 6) {
-            Text(label)
+            Text(LocalizedStringKey(window.label))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-                .frame(width: 48, alignment: .leading)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 2.5)
-                        .fill(.quaternary)
-                        .frame(height: 5)
-                    RoundedRectangle(cornerRadius: 2.5)
-                        .fill(level.color(normal: .green))
-                        .frame(width: max(0, geo.size.width * level.fraction), height: 5)
-                }
-            }
-            .frame(height: 5)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 76, alignment: .leading)
+            LevelBar(level: level)
+            ResetCountdown(date: window.resetsAt, font: .system(size: 9))
+                .frame(width: 58, alignment: .trailing)
             Text(level.percentText)
                 .font(.caption2.weight(.medium).monospacedDigit())
                 .foregroundStyle(level.color(normal: .green))
@@ -525,25 +536,12 @@ private struct LargeWidgetView: View {
 private struct CircleWidgetView: View {
     let data: WidgetData
 
-    private var providerAccounts: [WidgetAccountData] {
-        ["Claude Code", "Codex"].compactMap { provider in
-            data.accounts.first { $0.provider == provider && $0.isActive }
-                ?? data.accounts.first { $0.provider == provider }
-        }
-    }
+    private var providerAccounts: [WidgetAccountData] { data.providerAccounts }
 
     var body: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 5) {
-                ForEach(providerAccounts, id: \.provider) { account in
-                    Image(systemName: providerIcon(account))
-                        .font(.caption)
-                        .foregroundStyle(brandColor)
-                        .widgetAccentable()
-                }
-                Text("AccountDock")
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
+            HStack {
+                ProviderIconsHeader(accounts: providerAccounts)
                 Spacer()
             }
 
@@ -551,14 +549,12 @@ private struct CircleWidgetView: View {
 
             if !providerAccounts.isEmpty {
                 HStack(spacing: 12) {
-                    ForEach(providerAccounts, id: \.provider) { account in
+                    ForEach(Array(providerAccounts.enumerated()), id: \.offset) { _, account in
+                        let window = account.tightestWindow
                         ringStat(
-                            label: account.provider == "Codex" ? "Codex" : "Claude",
-                            resetTime: account.weeklyResetTime,
-                            utilization: account.weeklyUtilization,
-                            accent: account.hasError
-                                ? .secondary
-                                : UsageLevel(utilization: account.weeklyUtilization).color(normal: .green)
+                            label: account.displayProviderName,
+                            resetsAt: window?.resetsAt,
+                            level: UsageLevel(utilization: account.hasError ? nil : window?.utilization)
                         )
                     }
                 }
@@ -573,30 +569,25 @@ private struct CircleWidgetView: View {
         }
     }
 
-    private func ringStat(label: LocalizedStringKey, resetTime: String?, utilization: Double?, accent: Color) -> some View {
-        let level = UsageLevel(utilization: utilization)
-        return VStack(spacing: 4) {
+    private func ringStat(label: String, resetsAt: Date?, level: UsageLevel) -> some View {
+        VStack(spacing: 4) {
             ZStack {
                 Circle()
                     .stroke(.quaternary, lineWidth: 6)
                 Circle()
                     .trim(from: 0, to: level.fraction)
-                    .stroke(accent, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                    .stroke(level.color(normal: .green), style: StrokeStyle(lineWidth: 6, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                 Text(level.percentText)
                     .font(.caption.weight(.semibold).monospacedDigit())
             }
             .aspectRatio(1, contentMode: .fit)
 
-            Text(label)
+            Text(verbatim: label)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            if let reset = resetTime {
-                Text(reset)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
+                .lineLimit(1)
+            ResetCountdown(date: resetsAt, font: .system(size: 9))
         }
         .frame(maxWidth: .infinity)
     }
@@ -630,12 +621,6 @@ private func formatCost(_ cost: Double) -> String {
     UsageFormat.cost(cost)
 }
 
-private func providerIcon(_ account: WidgetAccountData) -> String {
-    account.provider == "Codex"
-        ? "chevron.left.forwardslash.chevron.right"
-        : "brain.head.profile"
-}
-
 // MARK: - Widget Definition
 
 struct AccountDockWidget: Widget {
@@ -647,7 +632,7 @@ struct AccountDockWidget: Widget {
                 .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("AccountDock")
-        .description("Monitor Claude Code and Codex accounts from one place.")
+        .description("Monitor your coding-agent accounts from one place.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }
@@ -661,7 +646,7 @@ struct AccountDockCircleWidget: Widget {
                 .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("AccountDock Rings")
-        .description("Claude and Codex weekly usage shown together as progress rings.")
+        .description("Each provider's tightest limit, shown together as progress rings.")
         .supportedFamilies([.systemSmall])
     }
 }

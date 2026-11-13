@@ -41,7 +41,7 @@ releasing are in [BUILD_GUIDE.md](BUILD_GUIDE.md).
 | App | `AccountDock/` | Menu-bar UI, account management, usage and cost readers, failover, hooks, router control |
 | Router | `AccountDockRouter/` | Local HTTP proxy for Claude Code; serves requests from a pool of Claude accounts or a route target |
 | Router core | `AccountDockRouter/Core/` | Pure routing logic and shared types, compiled into both the router and the app |
-| Widget | `AccountDockWidget/` | WidgetKit extension fed by the projection in `Shared/` |
+| Widget | `AccountDockWidget/` | WidgetKit extension that renders `Shared/WidgetData.swift`: labels, icons and windows the app's `WidgetProjection` writes from the providers' capabilities |
 | Hook scripts | `AccountDock/Resources/`, generated at install | Session lifecycle records, the pause gate and Claude Code status-line telemetry |
 | Tests | `AccountDockTests/` | Unit tests for planning, routing, parsing, credentials and hooks |
 
@@ -58,7 +58,7 @@ feature its capabilities declare, and its settings appear with it:
 
 | Capability | Drives |
 | --- | --- |
-| Quota windows, labels, `longWindowReportsLength` | Usage cards, menu-bar modules (one set of metrics per provider), failover thresholds |
+| Quota windows, labels, `longWindowReportsLength` | Usage cards, menu-bar modules (one set of metrics per provider), the widget, failover thresholds |
 | `requiresPaidPlanForWorkloads`, `unavailableLabel` | Whether a plan can carry work |
 | `usageRequestBudget` | The provider's `UsageRequestBudget` |
 | `supportsWindowWarming` | Window warming and its setting |

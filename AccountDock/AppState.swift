@@ -1642,40 +1642,13 @@ final class AppState: ObservableObject {
     // MARK: - Widget
 
     private func updateWidgetData() {
-        let widgetAccounts = accounts.map { account in
-            let usage = accountUsage[account.id]
-            let error = accountUsageErrors[account.id]
-            return WidgetAccountData(
-                provider: account.provider.rawValue,
-                email: account.displayEmail(obfuscated: !UserDefaults.standard.bool(forKey: "showFullEmail")),
-                displayName: account.effectiveDisplayName(obfuscated: !UserDefaults.standard.bool(forKey: "showFullEmail")),
-                subscriptionType: account.displaySubscriptionType,
-                isActive: account.isActive,
-                sessionUtilization: usage?.fiveHour?.utilization,
-                sessionResetTime: usage?.fiveHour?.resetTimeString,
-                weeklyUtilization: usage?.sevenDay?.utilization,
-                weeklyResetTime: usage?.sevenDay?.resetTimeString,
-                extraUsageEnabled: usage?.extraUsage?.isEnabled,
-                hasError: error != nil && usage == nil,
-                errorMessage: error?.message
-            )
-        }
-
-        var combinedModelUsage: [String: Int] = [:]
-        for (_, history) in providerCosts {
-            for (model, count) in history.todayModelActivity where count > 0 {
-                combinedModelUsage[model, default: 0] += count
-            }
-        }
-        let data = WidgetData(
-            selectedProvider: nil,
-            accounts: widgetAccounts,
-            todayCost: combinedTodayCost,
-            conversationTurns: activityStats.conversationTurns,
-            activeCodingTime: activityStats.activeCodingTimeString,
-            linesWritten: activityStats.linesWritten,
-            modelUsage: combinedModelUsage.filter { $0.value > 0 },
-            lastUpdated: Date()
+        let data = WidgetProjection.make(
+            accounts: accounts,
+            usage: accountUsage,
+            errorMessages: accountUsageErrors.mapValues(\.message),
+            summary: todaySummary(),
+            obfuscated: !UserDefaults.standard.bool(forKey: "showFullEmail"),
+            now: Date()
         )
         data.save()
         WidgetCenter.shared.reloadAllTimelines()
