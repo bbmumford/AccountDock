@@ -17,7 +17,6 @@ final class AppState: ObservableObject {
     // MARK: - Published State
 
     @Published var accounts: [Account] = []
-    @Published var activeAccount: Account?
     @Published var accountUsage: [UUID: UsageAPIResponse] = [:]
     @Published private(set) var accountUsageUpdatedAt: [UUID: Date] = [:]
     /// When each account's limit resets were last asked for, by
@@ -353,7 +352,7 @@ final class AppState: ObservableObject {
         reconcilePassedUsageResets()
         loadFailoverRuntime()
         credentialGate.onBusyChange = { [weak self] busy in self?.isLoading = busy }
-        log.info("[init] Loaded \(self.accounts.count) accounts, active: \(self.activeAccount?.id.uuidString ?? "none")")
+        log.info("[init] Loaded \(self.accounts.count) accounts, active: \(self.accounts.filter(\.isActive).count)")
     }
 
     // MARK: - Refresh
@@ -762,8 +761,9 @@ final class AppState: ObservableObject {
         log.info("[login] User cancelled browser login")
     }
 
+    /// The provider's active account, read from the accounts' own flags.
     func activeAccount(for provider: AIProviderType) -> Account? {
-        accounts.first { $0.provider == provider && $0.isActive }
+        accounts.active(for: provider)
     }
 
     func addAccount() async {
@@ -783,7 +783,7 @@ final class AppState: ObservableObject {
             }
             log.info("[addAccount] Current auth: logged in, sub=\(status.subscriptionType ?? "nil")")
 
-            if accounts.contains(where: { $0.email == email }) {
+            if accounts.contains(where: { $0.matches(email: email) }) {
                 errorMessage = String(localized: "Account already exists", bundle: L10n.bundle)
                 log.warning("[addAccount] Aborted: duplicate account")
                 return
@@ -813,7 +813,6 @@ final class AppState: ObservableObject {
 
             if !accounts.contains(where: { $0.provider == .claudeCode }) {
                 account.isActive = true
-                activeAccount = account
                 log.info("[addAccount] First account, setting as active")
             }
 
@@ -839,7 +838,7 @@ final class AppState: ObservableObject {
 
         do {
             // 1. Back up current account (token + oauthAccount) before login overwrites them
-            if let current = activeAccount {
+            if let current = activeAccount(for: .claudeCode) {
                 log.info("[loginNewAccount] Step 1: Backing up current account (\(current.email))...")
                 let backed = claudeService.captureCurrentCredentials(
                     forAccountId: current.id.uuidString,
@@ -866,7 +865,7 @@ final class AppState: ObservableObject {
             log.info("[loginNewAccount] Step 3: Logged in as \(email)")
 
             // 4. Check for duplicate — if exists, just refresh its backup
-            if let existing = accounts.firstIndex(where: { $0.email == email }) {
+            if let existing = accounts.firstIndex(where: { $0.matches(email: email) }) {
                 log.info("[loginNewAccount] Step 4: Account already exists, refreshing backup")
                 _ = claudeService.captureCurrentCredentials(
                     forAccountId: accounts[existing].id.uuidString,
@@ -898,11 +897,8 @@ final class AppState: ObservableObject {
             }
 
             // 6. Mark new account as active
-            for i in accounts.indices where accounts[i].provider == .claudeCode {
-                accounts[i].isActive = false
-            }
             accounts.append(account)
-            activeAccount = account
+            accounts.makeActive(account.id)
             saveAccounts()
             log.info("[loginNewAccount] Step 6: New account active. Total: \(self.accounts.count)")
 
@@ -920,11 +916,6 @@ final class AppState: ObservableObject {
         guard let index = accounts.firstIndex(where: { $0.id == account.id }) else { return }
         let trimmed = label?.trimmingCharacters(in: .whitespaces)
         accounts[index].customLabel = (trimmed?.isEmpty == true) ? nil : trimmed
-        // `activeAccount` is the active Claude Code account only; every
-        // provider has an active account of its own.
-        if accounts[index].id == activeAccount?.id {
-            activeAccount = accounts[index]
-        }
         saveAccounts()
         updateWidgetData()
         log.info("[updateAccountLabel] Set label for \(account.email): \(trimmed ?? "nil")")
@@ -975,25 +966,75 @@ final class AppState: ObservableObject {
             keychain.removeAccountBackup(forAccountId: account.id.uuidString)
         }
         accounts.removeAll { $0.id == account.id }
-        accountUsage[account.id] = nil
-        accountUsageUpdatedAt[account.id] = nil
-        accountUsageErrors[account.id] = nil
-        usageRetryAfter[account.id] = nil
-        rejectedCredentialAccounts.remove(account.id)
-        exhaustedFailoverAccounts[account.provider]?.remove(account.id)
+        forgetAccount(account.id)
         saveUsageSnapshots()
         saveFailoverRuntime()
         if account.isActive,
            let firstIndex = accounts.firstIndex(where: { $0.provider == account.provider }) {
-            accounts[firstIndex].isActive = true
-            if account.provider == .claudeCode {
-                activeAccount = accounts[firstIndex]
-            }
+            accounts.makeActive(accounts[firstIndex].id)
             log.info("[removeAccount] Removed active account, switching to first remaining")
             Task { await switchTo(accounts[firstIndex]) }
         }
         saveAccounts()
         log.info("[removeAccount] Done. Remaining accounts: \(self.accounts.count)")
+    }
+
+    /// Drops everything AccountDock keeps per account for `id`, for
+    /// `removeAccount`: readings, learning, credential state, failover and
+    /// pause state, slots, router and session maps. Entries keyed by
+    /// session or slot that name the account go too.
+    func forgetAccount(_ id: UUID) {
+        accountUsage[id] = nil
+        accountUsageUpdatedAt[id] = nil
+        accountUsageErrors[id] = nil
+        limitResetsCheckedAt[id] = nil
+        unavailablePlanCheckedAt[id] = nil
+        quotaTrends[id] = nil
+        credentialQuarantine[id] = nil
+        lastSwitchedAway[id] = nil
+        usageRetryAfter[id] = nil
+        lastProfileCheck[id] = nil
+        switchFailureCooldown[id] = nil
+        credentialVerifiedAt[id] = nil
+        routerRefusedUntil[id] = nil
+        savedCopyVerified[id] = nil
+        automaticSwitchesAway[id] = nil
+        pendingWindowWarmups[id] = nil
+        warmupRetryAttempts[id] = nil
+        routedSessions[id] = nil
+        accountSessions[id] = nil
+        rejectedCredentialAccounts.remove(id)
+        slotServedAccounts.remove(id)
+        slotCredentialAccounts.remove(id)
+        accountsAwaitingPostResetVerification.remove(id)
+        accountWarmupsInFlight.remove(id)
+        pacingShedding.remove(id)
+        pacingScopedShedding = pacingScopedShedding.filter { !$0.hasPrefix(id.uuidString + "|") }
+        for provider in exhaustedFailoverAccounts.keys { exhaustedFailoverAccounts[provider]?.remove(id) }
+        for provider in sessionsLeftOn.keys { sessionsLeftOn[provider]?.remove(id) }
+        liveCredentialOwners = liveCredentialOwners.filter { $0.value.account != id }
+        lockedSwitchNoted = lockedSwitchNoted.filter { $0.value != id }
+        pendingResetRecovery = pendingResetRecovery.filter { $0.value.accountID != id }
+        suspensionContexts = suspensionContexts.filter { $0.value.accountID != id }
+        userResumes = userResumes.mapValues { $0.filter { $0.value != id } }
+        sessionAdmissions = sessionAdmissions.mapValues { $0.filter { $0.value.account != id } }
+        slotDirectoryServing = slotDirectoryServing.filter { $0.value != id }
+        slotSessionMoves = slotSessionMoves.filter { $0.value != id }
+        requestedSlotMoves = requestedSlotMoves.filter { $0.value != id }
+        routerSessionMoves = routerSessionMoves.filter { $0.value != id }
+        routedSessionSeen = routedSessionSeen.filter { $0.value.account != id }
+        sessionServedBy = sessionServedBy.filter { $0.value.account != id }
+        routerPoolMembers.removeAll { $0.accountID == id.uuidString }
+        sessionRates.entries = sessionRates.entries.filter { $0.value.account != id }
+        let fingerprints = credentialFingerprints.filter { $0.value == id }.keys
+        for fingerprint in fingerprints {
+            credentialFingerprints[fingerprint] = nil
+            credentialFingerprintSeen[fingerprint] = nil
+        }
+        turnCostModel.accountPercentPerMillion?[id] = nil
+        turnCostModel.pending[id] = nil
+        turnCostModel.lastSession[id] = nil
+        turnCostModel.sessionAccount = turnCostModel.sessionAccount.filter { $0.value != id }
     }
 
     func switchTo(_ account: Account, refreshAfter: Bool = true) async {
@@ -1182,7 +1223,6 @@ final class AppState: ObservableObject {
                     accounts[i].subscriptionType = verifiedSubscription
                 }
             }
-            activeAccount = accounts.first(where: { $0.id == account.id })
             // Preserve any token rotation performed while validating the newly
             // active profile so the managed copy is current on the next switch.
             _ = claudeService.captureCurrentCredentials(
@@ -1236,7 +1276,7 @@ final class AppState: ObservableObject {
         var displaced: Account?
         do {
             // 1. Back up current active account before login overwrites it
-            if let current = activeAccount, current.id != account.id {
+            if let current = activeAccount(for: .claudeCode), current.id != account.id {
                 log.info("[reauth] Backing up current account before login...")
                 let preserved = claudeService.captureCurrentCredentials(
                     forAccountId: current.id.uuidString,
@@ -1281,10 +1321,7 @@ final class AppState: ObservableObject {
                 accounts[index].subscriptionType = status.subscriptionType
 
                 // Mark this account as active (it's what the CLI is now using)
-                for i in accounts.indices where accounts[i].provider == .claudeCode {
-                    accounts[i].isActive = (i == index)
-                }
-                activeAccount = accounts[index]
+                accounts.makeActive(account.id)
                 saveAccounts()
             }
 
@@ -2088,7 +2125,6 @@ final class AppState: ObservableObject {
             return
         }
         accounts = decoded
-        activeAccount = accounts.first { $0.provider == .claudeCode && $0.isActive }
         log.info("[loadAccounts] Loaded \(decoded.count) accounts")
     }
 
@@ -2114,23 +2150,17 @@ final class AppState: ObservableObject {
             let restored = credentialModule(for: .claudeCode)?.liveCredential?
                 .restoreSignedInIdentity(of: accounts[ownerIndex]) ?? false
             if !accounts[ownerIndex].isActive {
-                for i in accounts.indices where accounts[i].provider == .claudeCode {
-                    accounts[i].isActive = (i == ownerIndex)
-                }
-                activeAccount = accounts[ownerIndex]
+                accounts.makeActive(owner)
                 saveAccounts()
             }
             log.warning("[updateActiveAccount] Signed-in identity names another account than the live credential's owner; kept the owner active, identity restored: \(restored)")
             return
         }
 
-        if let index = accounts.firstIndex(where: { $0.provider == .claudeCode && $0.email == email }) {
-            for i in accounts.indices where accounts[i].provider == .claudeCode {
-                accounts[i].isActive = (i == index)
-            }
+        if let index = accounts.firstIndex(where: { $0.provider == .claudeCode && $0.matches(email: email) }) {
+            accounts.makeActive(accounts[index].id)
             accounts[index].orgName = status.orgName
             accounts[index].subscriptionType = status.subscriptionType
-            activeAccount = accounts[index]
             saveAccounts()
             log.info("[updateActiveAccount] Matched existing account at index \(index)")
         } else if !accounts.contains(where: { $0.provider == .claudeCode }) {
@@ -2143,7 +2173,6 @@ final class AppState: ObservableObject {
                 isActive: true
             )
             accounts.append(account)
-            activeAccount = account
             _ = claudeService.captureCurrentCredentials(
                 forAccountId: account.id.uuidString,
                 expectedEmail: account.email

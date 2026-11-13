@@ -169,7 +169,6 @@ extension AppState {
             })
         }
         accounts = [claudePersonal, claudeWork, claudeLab, codex, codexTeam, kimi]
-        activeAccount = claudePersonal
         var personalUsage = usage(64, 2.2 * hour, 41, 3.5 * day)
         personalUsage.limitResets = resets([([.weekly, .model("Fable")], 1, 29), ([.model("Fable")], 1, 118)])
         var workUsage = usage(8, 4.6 * hour, 72, 1.2 * day)
