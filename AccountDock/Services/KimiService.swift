@@ -16,9 +16,11 @@ enum KimiServiceError: LocalizedError {
     /// The token endpoint refused the refresh token: the account must sign
     /// in again.
     case credentialRejected
+    case unsafeCredentialLocation
 
     var errorDescription: String? {
         switch self {
+        case .unsafeCredentialLocation: "The managed Kimi account location is outside AccountDock's storage."
         case .binaryNotFound: "Kimi Code CLI was not found."
         case .credentialsNotFound: "Kimi Code credentials were not found. Run `kimi login` first."
         case .invalidCredentials: "The Kimi credential is incomplete or unreadable."
@@ -95,9 +97,18 @@ final class KimiService: @unchecked Sendable {
     private let apiRoot = URL(string: "https://api.kimi.ai/coding/v1")!
     private let clientID = "17e5f671-d194-4dfb-9706-5516cb48c098"
 
-    private var home: URL { fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".kimi-code", isDirectory: true) }
-    private var managedRoot: URL {
-        fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    /// Kimi Code's own directory, holding `config.toml` and the credential
+    /// slot its sessions use.
+    private let home: URL
+    /// Where each account's credential copy lives, one directory per account.
+    private let managedRoot: URL
+
+    /// `home` and `managedRoot` default to the user's; tests pass temporary
+    /// directories.
+    init(home: URL? = nil, managedRoot: URL? = nil) {
+        self.home = home ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".kimi-code", isDirectory: true)
+        self.managedRoot = managedRoot ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("AccountDock/KimiAccounts", isDirectory: true)
     }
 
@@ -173,8 +184,18 @@ final class KimiService: @unchecked Sendable {
         try atomicCopy(try activeCredentialURL(in: home), to: URL(fileURLWithPath: location))
     }
 
+    /// Deletes the account directory holding `location`, which must be one
+    /// `makeManagedDirectory` created: a directory inside `managedRoot`, not
+    /// the root itself or anything outside it.
     func removeManagedAccount(location: String) throws {
-        try fileManager.removeItem(at: URL(fileURLWithPath: location).deletingLastPathComponent())
+        let directory = URL(fileURLWithPath: location).standardizedFileURL.deletingLastPathComponent()
+        let root = managedRoot.standardizedFileURL.path
+        guard directory.path.hasPrefix(root + "/"), directory.path != root else {
+            throw KimiServiceError.unsafeCredentialLocation
+        }
+        if fileManager.fileExists(atPath: directory.path) {
+            try fileManager.removeItem(at: directory)
+        }
     }
 
     /// An access token valid for at least `minimumLifetime`, for the request
@@ -301,17 +322,19 @@ final class KimiService: @unchecked Sendable {
         return directory
     }
 
-    private func activeCredentialURL(in kimiHome: URL) throws -> URL {
+    /// The table of `config.toml` naming the OAuth credential Kimi Code's
+    /// managed provider signs in with. Other tables carry a `key` too: other
+    /// providers' and services' OAuth references.
+    static let credentialTable = #"providers."managed:kimi-code".oauth"#
+
+    /// The credential file Kimi Code's sessions use: the `key` of
+    /// `credentialTable` in `kimiHome`'s `config.toml`, as a file under
+    /// `credentials/`.
+    func activeCredentialURL(in kimiHome: URL) throws -> URL {
         let config = kimiHome.appendingPathComponent("config.toml")
-        guard let text = try? String(contentsOf: config, encoding: .utf8),
-              let match = text.range(of: #"(?m)^key\s*=\s*\"([^\"]+)\""#, options: .regularExpression) else {
+        guard let key = TOMLHookConfig.value(at: config, table: Self.credentialTable, key: "key"), !key.isEmpty else {
             throw KimiServiceError.credentialsNotFound
         }
-        let line = String(text[match])
-        guard let first = line.firstIndex(of: "\""), let last = line.lastIndex(of: "\""), first < last else {
-            throw KimiServiceError.credentialsNotFound
-        }
-        let key = String(line[line.index(after: first)..<last])
         guard let storageName = Self.credentialStorageName(for: key) else {
             throw KimiServiceError.invalidCredentials
         }
@@ -365,12 +388,8 @@ final class KimiService: @unchecked Sendable {
 
     private func writeCredential(_ credential: Credential, to url: URL) throws {
         let data = try JSONEncoder().encode(credential)
-        let temporary = url.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).tmp")
         try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: temporary, options: .atomic)
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
-        if fileManager.fileExists(atPath: url.path) { _ = try fileManager.replaceItemAt(url, withItemAt: temporary) }
-        else { try fileManager.moveItem(at: temporary, to: url) }
+        try PrivateFile.writeAtomically(data, to: url, mode: 0o600)
     }
 
     private func atomicCopy(_ source: URL, to destination: URL) throws {

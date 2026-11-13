@@ -653,10 +653,9 @@ final class CodexService: @unchecked Sendable {
         return formatter.date(from: value)
     }
 
-    private static func writePrivateAuth(_ auth: [String: Any], to url: URL) throws {
+    static func writePrivateAuth(_ auth: [String: Any], to url: URL) throws {
         let data = try JSONSerialization.data(withJSONObject: auth, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try PrivateFile.writeAtomically(data, to: url, mode: 0o600)
     }
 
     static func decodeUsage(_ data: Data) throws -> UsageAPIResponse {
