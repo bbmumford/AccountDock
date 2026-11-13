@@ -677,9 +677,7 @@ extension AppState {
         let pooled = provider == AIProviderType.routedProvider && policy.distributeSessions && routerInUse
         let poolHasRoom = pooled && ladder.contains { account in
             guard account.id != current.id else { return false }
-            let state = quotaState(for: account, now: now)
-            return planner.tier(state, now: now) <= .usable
-                && (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) >= Self.suspensionLead
+            return servingVerdict(account, planner: planner, now: now) == .canServe
         }
         if pooled {
             await holdSessionsForImminentReset(provider, policy: policy, ladder: ladder, planner: planner)
@@ -690,8 +688,10 @@ extension AppState {
                 ladder: ladder.map { quotaState(for: $0, now: now) },
                 now: now
             )
-        let exhaustionSoon = (planner.secondsUntilExhaustion(currentState, now: now) ?? .infinity) < Self.suspensionLead
-            || planner.tier(currentState, now: now) == .exhausted
+        // The active account is judged as it serves the work already on it,
+        // as `FailoverPlanner.plan` judges it.
+        let exhaustionSoon = currentState.refusedAtLimit
+            || planner.servingVerdict(planner.servingView(currentState), now: now, lead: Self.suspensionLead).atOrNearLimit
 
         switch plan {
         case .waitForReset, .noCapacity, .verify: break
@@ -1078,8 +1078,8 @@ extension AppState {
     private func admissionAccounts(_ provider: AIProviderType, planner: FailoverPlanner, now: Date) -> [SessionPacer.Account] {
         let policy = failoverConfig.policy(for: provider)
         func usable(_ state: QuotaAccountState) -> Bool {
-            planner.canSwitchWithoutReading(state, now: now) && planner.tier(state, now: now) <= .usable
-                && (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) >= Self.suspensionLead
+            planner.canSwitchWithoutReading(state, now: now)
+                && planner.servingVerdict(state, now: now, lead: Self.suspensionLead) == .canServe
         }
         if provider == AIProviderType.routedProvider, policy.distributeSessions, routerInUse {
             return routerPoolMembers.compactMap { member in
@@ -1117,8 +1117,7 @@ extension AppState {
             } ?? admission.account
             guard let account = accounts.first(where: { $0.id == accountID }) else { continue }
             let state = quotaState(for: account, now: now)
-            let nearLimit = planner.tier(state, now: now) == .exhausted
-                || (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) < Self.suspensionLead
+            let nearLimit = planner.servingVerdict(state, now: now, lead: Self.suspensionLead).atOrNearLimit
             let surplusSpent = admission.surplus && !SessionPacer().covers(
                 pacerAccount(account.id, state: state, weight: 1, planner: planner, now: now), sessions: others, now: now)
             guard nearLimit || surplusSpent else { continue }
@@ -1160,8 +1159,8 @@ extension AppState {
             } else if let account = accounts.first(where: { $0.id == id }) {
                 let state = quotaState(for: account, now: now)
                 let reset = (pause.resumeAt ?? now) <= now
-                let usable = planner.isFresh(state, now: now) && planner.tier(state, now: now) <= .usable
-                    && (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) >= Self.suspensionLead
+                let usable = planner.isFresh(state, now: now)
+                    && planner.servingVerdict(state, now: now, lead: Self.suspensionLead) == .canServe
                 if reset && usable || (pause.resumeAt ?? now).addingTimeInterval(Self.accountHoldGrace) <= now {
                     let resumed = await releasePausedAgents(provider)
                     failoverEvents.record(provider, "\(messageName(account)) reset; \(resumed) held session(s) continue on it.")
@@ -1174,9 +1173,7 @@ extension AppState {
         let working = Set(AgentPauseGate.turningSessions(provider))
         for account in ladder {
             let state = quotaState(for: account, now: now)
-            let nearLimit = planner.tier(state, now: now) == .exhausted
-                || (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) < Self.suspensionLead
-            guard nearLimit else { continue }
+            guard planner.servingVerdict(state, now: now, lead: Self.suspensionLead).atOrNearLimit else { continue }
             let paced = pacerAccount(account.id, state: state, weight: 1, planner: planner, now: now)
             let pacer = SessionPacer()
             let reset = pacer.outlook(paced, burn: max(paced.burnPerHour, 1), now: now).windowEndsAt
@@ -1203,11 +1200,17 @@ extension AppState {
         }
     }
 
-    /// Whether `account` is at its limit or within `suspensionLead` of it.
+    /// Whether `account` can take work now, with `suspensionLead` as the
+    /// lead (`FailoverPlanner.servingVerdict`).
+    func servingVerdict(_ account: Account, planner: FailoverPlanner, now: Date = Date(),
+                        model: String? = nil) -> ServingVerdict {
+        planner.servingVerdict(quotaState(for: account, now: now, model: model), now: now, lead: Self.suspensionLead)
+    }
+
+    /// Whether `account` is at its limit, refused at it, or within
+    /// `suspensionLead` of it.
     func isNearLimit(_ account: Account, planner: FailoverPlanner, now: Date = Date()) -> Bool {
-        let state = quotaState(for: account, now: now)
-        return planner.tier(state, now: now) == .exhausted
-            || (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) < Self.suspensionLead
+        servingVerdict(account, planner: planner, now: now).atOrNearLimit
     }
 
     /// The account serving a session now (`SessionAttribution`).
@@ -1265,8 +1268,7 @@ extension AppState {
             state.weeklyBurnPerHour = max(state.weeklyBurnPerHour, context.weeklyBurnPerHour)
         }
         guard planner.isFresh(state, now: now),
-              planner.tier(state, now: now) <= .usable,
-              (planner.secondsUntilExhaustion(state, now: now) ?? .infinity) >= Self.suspensionLead else { return }
+              planner.servingVerdict(state, now: now, lead: Self.suspensionLead) == .canServe else { return }
         let resumed = await releasePausedAgents(provider)
         if resumed > 0 {
             pendingResetRecovery[provider] = nil
