@@ -96,9 +96,15 @@ Some data is the same for every provider by construction:
   (`Sessions/<pause gate key>-<session>.json`). `AgentSessions` reads them
   for all providers: live sessions (process alive, not ended), the sessions
   mid-turn that a pause lists, and process-to-session matching for restarts.
-  `AppState.refreshSessions` assigns each live session to the account the
-  router last served it from, or else its provider's active account; the
-  account cards show these counts.
+  `SessionAttribution` decides the account serving each session, for the
+  account cards' counts, transcript learning, pacing, holds and moves alike:
+  the slot it reads, else the router's account within ten minutes, else the
+  account its own status line matched by reset times, else the account its
+  last recorded request was on (both only when seen after its sessions were
+  last signalled to read the sign-in again, and within a session window),
+  else the live credential's owner, else the active account. A session on
+  the shared sign-in keeps the token it read until it is signalled, so it
+  stays on the earlier account after a switch.
 - **Cost and activity.** `CostParser.ProviderCostHistory` holds each
   provider's daily cost and today's turns, models, lines, tokens, sessions and
   active time. Claude Code's is built from its per-request cost summary; the

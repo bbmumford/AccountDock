@@ -4,20 +4,18 @@ import AppKit
 /// every provider's hooks write, and the account serving each one.
 extension AppState {
     /// Reads every provider's live sessions and assigns each to the account
-    /// serving it: the one serving its slot, the one the router last served
-    /// it from, or else its provider's active account. Sessions the router
-    /// served in the last ten minutes are counted even without a lifecycle
-    /// record.
+    /// serving it (`SessionAttribution`). Sessions the router served within
+    /// `SessionAttribution.routerWindow` are counted even without a
+    /// lifecycle record.
     func refreshSessions(now: Date = Date()) {
         var live: [AIProviderType: [AgentSession]] = [:]
         var byAccount: [UUID: Set<String>] = [:]
         for provider in AIProviderType.implementedProviders {
             let sessions = AgentSessions.live(provider, now: now)
             live[provider] = sessions
-            let active = activeAccount(for: provider)?.id
+            let attribution = sessionAttribution(provider, now: now)
             for session in sessions {
-                if let account = session.processID.flatMap(slotAccount(forProcess:))
-                    ?? routedSessionSeen[session.sessionID]?.account ?? active {
+                if let account = attribution.decide(session: session.sessionID, process: session.processID)?.account {
                     byAccount[account, default: []].insert(session.sessionID)
                 }
             }
@@ -27,6 +25,41 @@ extension AppState {
         }
         if live != liveSessions { liveSessions = live }
         if byAccount != accountSessions { accountSessions = byAccount }
+    }
+
+    /// The provider's `SessionAttribution` from what AccountDock knows now:
+    /// the slot each process reads, the router's recent sessions, what each
+    /// session's status line named, the requests recorded per session, the
+    /// last signal, the live credential's owner and the active account.
+    func sessionAttribution(_ provider: AIProviderType, now: Date = Date()) -> SessionAttribution {
+        var owner: UUID??
+        return SessionAttribution(
+            slotAccounts: slotDirectoryByProcess.compactMapValues { slotDirectoryServing[$0] },
+            routerSeen: routedSessionSeen.mapValues { SessionAttribution.Observation(account: $0.account, at: $0.at) },
+            lastServed: sessionServedBy,
+            recordedRequests: sessionRates.entries.mapValues { SessionAttribution.Observation(account: $0.account, at: $0.lastSeen) },
+            signalledAt: sessionsSignalledAt[provider],
+            liveCredentialOwner: { [weak self] in
+                if owner == nil { owner = .some(self?.liveCredentialOwner(provider)) }
+                return owner ?? nil
+            },
+            activeAccount: activeAccount(for: provider)?.id,
+            now: now
+        )
+    }
+
+    /// The account serving one session of `provider`, and what decided it.
+    func servingDecision(_ provider: AIProviderType, session: String, now: Date = Date()) -> SessionAttribution.Decision? {
+        let process = liveSessions[provider]?.first { $0.sessionID == session }?.processID
+        return sessionAttribution(provider, now: now).decide(session: session, process: process)
+    }
+
+    /// The process of each live session of `provider`, for
+    /// `SessionAttribution.decide`.
+    func sessionProcesses(_ provider: AIProviderType) -> [String: Int32] {
+        (liveSessions[provider] ?? []).reduce(into: [:]) { result, session in
+            if let process = session.processID { result[session.sessionID] = process }
+        }
     }
 
     /// Live sessions of a provider AccountDock pauses whose CLI started

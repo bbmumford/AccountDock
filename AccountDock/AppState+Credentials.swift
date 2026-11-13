@@ -162,6 +162,7 @@ extension AppState {
     func moveRunningSessions(_ provider: AIProviderType, from previous: UUID? = nil) {
         guard let live = credentialModule(for: provider)?.liveCredential else { return }
         live.signalRunningSessions()
+        sessionsSignalledAt[provider] = Date()
         if let previous { lastSwitchedAway[previous] = nil }
         sessionsLeftOn[provider] = nil
         credentialLog.info("\(provider.rawValue): running sessions signalled to use the live credential")
@@ -298,6 +299,7 @@ extension AppState {
             liveCredentialDigests[provider] = Self.credentialDigest(installed)
             liveCredentialOwners[provider] = (Self.credentialDigest(installed), active.id)
             live.signalRunningSessions()
+            sessionsSignalledAt[provider] = Date()
             failoverEvents.record(provider, "Restored \(messageName(active))'s sign-in for new sessions.")
         }
     }

@@ -593,14 +593,23 @@ extension AppState {
     }
 
     /// The provider's running sessions for `SessionPacer`: paused ones are
-    /// left out, as they use nothing, and resumed ones count on the account
-    /// they were placed on.
+    /// left out, as they use nothing, resumed ones count on the account
+    /// they were placed on, and the others on the account serving them
+    /// (`SessionAttribution`).
     func pacerSessions(_ provider: AIProviderType, now: Date) -> [SessionPacer.Session] {
         let held = heldSessions(provider)
         let placed = pendingPlacements(provider)
+        let attribution = sessionAttribution(provider, now: now)
+        let processes = sessionProcesses(provider)
+        // `sessionRates` holds every provider's sessions; only this
+        // provider's are attributed among its accounts.
+        let own = Set(accounts.filter { $0.provider == provider }.map(\.id))
         return sessionRates.entries.compactMap { id, entry in
             guard !held.contains(id) else { return nil }
-            return SessionPacer.Session(id: id, account: placed[id] ?? entry.account,
+            let serving = own.contains(entry.account)
+                ? attribution.decide(session: id, process: processes[id])?.account ?? entry.account
+                : entry.account
+            return SessionPacer.Session(id: id, account: placed[id] ?? serving,
                                         tokensPerHour: sessionRates.tokensPerHour(id, now: now),
                                         contextTokens: entry.contextTokens, lastSeen: entry.lastSeen, cacheLifetime: entry.cacheLifetime,
                                         lastTurnStart: entry.lastTurnStart, model: sessionModel(id, now: now))
@@ -858,7 +867,7 @@ extension AppState {
                 }
             }
         }
-        let cutoff = now.addingTimeInterval(-10 * 60)
+        let cutoff = now.addingTimeInterval(-SessionAttribution.routerWindow)
         routedSessionSeen = routedSessionSeen.filter { $0.value.at > cutoff }
         let demandCutoff = now.addingTimeInterval(-RouteCapacity.demandLookback)
         recentRouterRequests.removeAll { $0.at < demandCutoff }

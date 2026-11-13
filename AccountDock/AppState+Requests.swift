@@ -90,7 +90,7 @@ extension AppState {
             let policy = failoverConfig.policy(for: provider)
             let planner = FailoverPlanner(settings: plannerSettings(provider))
             let slot = session.processID.flatMap { slotDirectoryByProcess[$0] }
-            let current = slot.flatMap { slotDirectoryServing[$0] } ?? activeAccount(for: provider)?.id
+            let current = sessionAttribution(provider, now: now).decide(session: sessionID, process: session.processID)?.account
             // The limit the session met is learned before anything is chosen.
             if let current, let account = accounts.first(where: { $0.id == current }) { await readUsageNow(account) }
             func hasRoom(_ account: Account) -> Bool {
