@@ -296,10 +296,7 @@ extension AppState {
             _ = live.save(credential, asCopyOf: active)
         case .makeOwnerActive:
             if live.savedCopy(account) != credential { _ = live.save(credential, asCopyOf: account) }
-            for index in accounts.indices where accounts[index].provider == provider {
-                accounts[index].isActive = accounts[index].id == account.id
-            }
-            if activeAccount?.provider == provider { activeAccount = accounts.first { $0.id == account.id } }
+            accounts.makeActive(account.id)
             saveAccounts(refreshWidget: true)
             let restored = live.restoreSignedInIdentity(of: account)
             failoverEvents.record(provider, "\(messageName(account))'s sign-in is the one in use, so it is the active account; a session on \(messageName(active)) had rewritten the signed-in identity\(restored ? ", which is restored" : "").")

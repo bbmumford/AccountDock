@@ -174,3 +174,20 @@ struct AuthStatus: Codable {
     let orgName: String?
     let subscriptionType: String?
 }
+
+extension Array where Element == Account {
+    /// The provider's active account; `AppState.activeAccount(for:)` reads
+    /// it, so no copy of it can disagree with the accounts' flags.
+    func active(for provider: AIProviderType) -> Account? {
+        first { $0.provider == provider && $0.isActive }
+    }
+
+    /// Makes `id` its provider's active account and that provider's other
+    /// accounts inactive; other providers' accounts keep theirs.
+    mutating func makeActive(_ id: UUID) {
+        guard let provider = first(where: { $0.id == id })?.provider else { return }
+        for index in indices where self[index].provider == provider {
+            self[index].isActive = self[index].id == id
+        }
+    }
+}
