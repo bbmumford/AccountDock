@@ -292,4 +292,21 @@ final class SessionSlotsTests: XCTestCase {
                        "sessions on the default credential renew it themselves")
         XCTAssertFalse(AppState.liveRenewalIsDue(expiry: now.addingTimeInterval(3 * 60 * 60), slotsHoldIt: true, now: now))
     }
+
+    func testASlotMadeOnRequestIsClaimedBeforeAnythingElseCanTakeIt() throws {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let slots = try XCTUnwrap(SessionSlots(.claudeCode, home: temp))
+        let directory = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // Claimed while still empty: no account file yet, so neither the
+        // launcher nor spare upkeep treats it as a spare.
+        XCTAssertTrue(slots.claimRequested(directory))
+        let slot = try XCTUnwrap(slots.sessionSlots().first)
+        XCTAssertNil(slot.account)
+        XCTAssertNotNil(slot.claimedAt)
+        XCTAssertTrue(slot.requested)
+        XCTAssertFalse(slots.removeSpare(directory), "a claimed slot is not removed as a spare")
+        XCTAssertTrue(slots.assign(directory, to: UUID()))
+    }
 }

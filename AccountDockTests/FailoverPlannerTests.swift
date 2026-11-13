@@ -608,6 +608,25 @@ final class FailoverPlannerTests: XCTestCase {
      "weekly_scoped_shares":[{"limit_index":2,"used_percent_of_weekly":45,"allowance_percent_of_weekly":50}]}
     """
 
+    func testAStatusLineStillOnTheWindowBeforeAnEarlyResetIsIgnored() {
+        let now = Date()
+        func reading(_ used: Double, resetIn hours: Double) -> UsageAPIResponse {
+            UsageAPIResponse(
+                fiveHour: nil,
+                sevenDay: UsageWindow(utilization: used, resetsAt: ISO8601DateFormatter().string(from: now.addingTimeInterval(hours * 3600)), windowSeconds: nil),
+                sevenDayOauthApps: nil, sevenDayOpus: nil, sevenDaySonnet: nil, sevenDayCowork: nil,
+                iguanaNecktie: nil, extraUsage: nil
+            )
+        }
+        let afterReset = reading(13, resetIn: 150)
+        XCTAssertTrue(AppState.describesSupersededWindow(reading(99, resetIn: 96), stored: afterReset),
+                      "the window that ended at the early reset")
+        XCTAssertFalse(AppState.describesSupersededWindow(reading(14, resetIn: 150), stored: afterReset))
+        XCTAssertFalse(AppState.describesSupersededWindow(reading(2, resetIn: 168), stored: reading(99, resetIn: 0.1)),
+                       "a later window replaces the stored one")
+        XCTAssertFalse(AppState.describesSupersededWindow(reading(50, resetIn: 96), stored: nil))
+    }
+
     func testOnlyWorkOnAModelWithItsOwnLimitIsJudgedByThatLimit() throws {
         let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(scopedResponse.utf8))
         let whole = try XCTUnwrap(usage.sevenDay?.utilization)

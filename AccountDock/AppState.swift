@@ -299,6 +299,9 @@ final class AppState: ObservableObject {
     /// transcript; kept by `noteSessionModel` and read by `sessionModel`, so
     /// a session is judged against the limits of the model it uses.
     var sessionModels: [String: (model: String, seenAt: Date)] = [:]
+    /// Sessions already reported as having no account left with allowance
+    /// for their model, so `serveSessionSlots` says it once per session.
+    var sessionsWithoutModelRoom: Set<String> = []
 
     // MARK: - Initialization
 
@@ -943,6 +946,11 @@ final class AppState: ObservableObject {
 
     func switchTo(_ account: Account, refreshAfter: Bool = true) async {
         await switchTo(account, refreshAfter: refreshAfter, safelyRestarting: [])
+        // A switch the user made shows the account as the provider reports
+        // it now, whatever was last known of it.
+        if refreshAfter, let active = activeAccount(for: account.provider), active.id == account.id {
+            await readUsageNow(active)
+        }
     }
 
     func runningClaudeProcesses() -> [RunningClaudeProcess] {

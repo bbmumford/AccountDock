@@ -165,9 +165,29 @@ struct SessionSlots: Sendable {
         return directory
     }
 
-    /// Claims a filled slot for one session started on request, so the
-    /// launcher never hands it to another session; the session names the
-    /// slot itself through the CLI's slot variable.
+    /// A new slot for one session started on request, claimed before it is
+    /// filled: an unclaimed slot is a spare, which a launcher may take and
+    /// `AppState.maintainSessionSlots` may remove at any moment. Nil when it
+    /// could not be written.
+    func makeRequestedSlot(for account: UUID, credential: String) -> URL? {
+        let directory = sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+        } catch {
+            log.error("[makeRequestedSlot] Slot not created: \(error.localizedDescription)")
+            return nil
+        }
+        guard claimRequested(directory), serve(directory, credential: credential), assign(directory, to: account) else {
+            remove(directory)
+            return nil
+        }
+        return directory
+    }
+
+    /// Claims a slot for one session started on request, so the launcher
+    /// never hands it to another session; the session names the slot itself
+    /// through the CLI's slot variable.
     func claimRequested(_ directory: URL) -> Bool {
         let fm = FileManager.default
         do {
