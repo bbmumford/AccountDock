@@ -90,6 +90,9 @@ final class CodexService: @unchecked Sendable {
     private let fileManager = FileManager.default
     private let binaryPreferenceKey = "codexBinaryPathPreference"
     private let loginRunner = LoginProcessRunner()
+    /// Sends Codex's token renewals (`refreshOAuthTokens`).
+    var renewalClient = CredentialRenewalClient()
+
 
     var binaryPath: String? {
         if let preferred = UserDefaults.standard.string(forKey: binaryPreferenceKey),
@@ -633,28 +636,34 @@ final class CodexService: @unchecked Sendable {
         return hasLiveQuota ? credentialPlan : "inactive"
     }
 
+    /// Codex's token endpoint, for `CredentialRenewalClient`: a refused
+    /// grant is answered with 400 or 401, throttling with 429.
+    static let tokenEndpoint = TokenEndpoint(
+        url: URL(string: "https://auth.openai.com/oauth/token")!,
+        encoding: .json,
+        fields: ["client_id": "app_EMoamEEZ73f0CkXaXp7hrann", "scope": "openid profile email"],
+        timeout: 30,
+        refusesGrant: TokenEndpoint.badRequestOrUnauthorizedRefuses,
+        throttledStatuses: [429]
+    )
+
     private func refreshOAuthTokens(
         _ existing: [String: Any],
         refreshToken: String
     ) async throws -> [String: Any] {
-        var request = URLRequest(url: URL(string: "https://auth.openai.com/oauth/token")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
-            "grant_type": "refresh_token",
-            "refresh_token": refreshToken,
-            "scope": "openid profile email"
-        ])
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        // A refused grant is answered with 400 or 401; anything else says
-        // nothing about the refresh token.
-        if status == 400 || status == 401 { throw CodexServiceError.credentialRejected }
-        if status == 429 { throw CodexServiceError.rateLimited(retryAt: RetryAfter.date(in: response)) }
-        guard (200...299).contains(status),
-              let refreshed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        let data: Data
+        do {
+            data = try await renewalClient.exchange(Self.tokenEndpoint, refreshToken: refreshToken)
+        } catch CredentialRenewalFailure.refused {
+            throw CodexServiceError.credentialRejected
+        } catch CredentialRenewalFailure.throttled(let retryAt) {
+            throw CodexServiceError.rateLimited(retryAt: retryAt)
+        } catch CredentialRenewalFailure.status {
+            throw CodexServiceError.invalidCredentials
+        } catch CredentialRenewalFailure.transport(let error) {
+            throw error
+        }
+        guard let refreshed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw CodexServiceError.invalidCredentials
         }
         var merged = existing
@@ -668,18 +677,13 @@ final class CodexService: @unchecked Sendable {
     /// `home` by `reason`, whatever its outcome.
     private func renewTokens(_ tokens: [String: Any], refreshToken: String, home: URL,
                              reason: String) async throws -> [String: Any] {
-        let live = isSystemHome(home)
-        let presented = tokens["access_token"] as? String
-        do {
-            let renewed = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
-            audit.record(.renewal, .codex, location: home.path, live: live, accessToken: renewed["access_token"] as? String,
-                         previousAccessToken: presented, outcome: "renewed", reason: reason)
-            return renewed
-        } catch {
-            let outcome = if case CodexServiceError.credentialRejected = error { "rejected" } else { "unavailable" }
-            audit.record(.renewal, .codex, location: home.path, live: live, accessToken: presented,
-                         outcome: outcome, reason: reason)
-            throw error
+        let subject = CredentialRenewalClient.AuditSubject(provider: .codex, location: home.path, live: isSystemHome(home))
+        return try await audit.recordingRenewal(
+            subject, presented: (tokens["access_token"] as? String).map { .accessToken($0) }, reason: reason,
+            refused: { if case CodexServiceError.credentialRejected = $0 { true } else { false } },
+            received: { ($0["access_token"] as? String).map { .accessToken($0) } }
+        ) {
+            try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
         }
     }
 

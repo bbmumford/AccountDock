@@ -114,7 +114,9 @@ final class KimiService: @unchecked Sendable {
     /// presented the same token would be refused and mark the account as
     /// needing sign-in. `renewCredential`, `renewed` and
     /// `renewLiveCredentialForSlots` all go through it.
-    private let renewals = KimiRenewalQueue()
+    private let renewals = CredentialRenewalClient.Queue()
+    /// Sends Kimi's token renewals (`refresh`).
+    var renewalClient = CredentialRenewalClient()
     /// Where every write, removal, renewal, read for use and ownership
     /// answer of a Kimi credential here is recorded.
     private let audit: CredentialAudit
@@ -269,16 +271,7 @@ final class KimiService: @unchecked Sendable {
         return try await renewals.run(Self.renewalKey(managedURL)) { [self] in
             let current = (try? newestCredential(at: managedURL, isActive: isActive, reason: reason)) ?? credential
             if current.refreshToken != credential.refreshToken { return current }
-            let fresh: Credential
-            do {
-                fresh = try await refresh(current)
-            } catch {
-                audit.record(.renewal, .kimi, location: managedURL.path, accessToken: current.accessToken,
-                             outcome: Self.renewalOutcome(error), reason: reason)
-                throw error
-            }
-            audit.record(.renewal, .kimi, location: managedURL.path, accessToken: fresh.accessToken,
-                         previousAccessToken: current.accessToken, outcome: "renewed", reason: reason)
+            let fresh = try await recordedRefresh(current, location: managedURL.path, live: false, reason: reason)
             try writeCredential(fresh, to: managedURL, reason: reason + ".renewal")
             if isActive {
                 try writeCredential(fresh, to: activeCredentialURL(in: home), attributedTo: managedURL.path,
@@ -288,11 +281,28 @@ final class KimiService: @unchecked Sendable {
         }
     }
 
-    /// How a failed renewal is recorded.
+    /// How a failed renewal is recorded (`CredentialRenewalClient.auditOutcome`).
     private static func renewalOutcome(_ error: Error) -> String {
+        CredentialRenewalClient.auditOutcome(error, refused: refusesGrant)
+    }
+
+    /// Whether a renewal failed for a refused grant or a credential that
+    /// cannot be presented.
+    private static func refusesGrant(_ error: Error) -> Bool {
         switch error {
-        case KimiServiceError.credentialRejected, KimiServiceError.invalidCredentials: "rejected"
-        default: "unavailable"
+        case KimiServiceError.credentialRejected, KimiServiceError.invalidCredentials: true
+        default: false
+        }
+    }
+
+    /// `refresh` recorded as a renewal of the credential at `location`.
+    private func recordedRefresh(_ current: Credential, location: String, live: Bool, reason: String) async throws -> Credential {
+        try await audit.recordingRenewal(
+            CredentialRenewalClient.AuditSubject(provider: .kimi, location: location, live: live),
+            presented: .accessToken(current.accessToken), reason: reason, refused: Self.refusesGrant,
+            received: { .accessToken($0.accessToken) }
+        ) {
+            try await refresh(current)
         }
     }
 
@@ -335,7 +345,8 @@ final class KimiService: @unchecked Sendable {
         do {
             presented = try readCredential(at: managedURL)
         } catch {
-            audit.record(.renewal, .kimi, location: location, outcome: "rejected", reason: reason)
+            audit.recordRenewal(CredentialRenewalClient.AuditSubject(provider: .kimi, location: location), token: nil,
+                                previous: nil, outcome: "rejected", reason: reason)
             return .rejected
         }
         do {
@@ -343,16 +354,17 @@ final class KimiService: @unchecked Sendable {
                 let current = try readCredential(at: managedURL)
                 guard current.refreshToken == presented.refreshToken else { return }
                 let renewed = try await refresh(current)
-                audit.record(.renewal, .kimi, location: location, accessToken: renewed.accessToken,
-                             previousAccessToken: current.accessToken, outcome: "renewed", reason: reason)
+                audit.recordRenewal(CredentialRenewalClient.AuditSubject(provider: .kimi, location: location),
+                                    token: .accessToken(renewed.accessToken), previous: .accessToken(current.accessToken),
+                                    outcome: "renewed", reason: reason)
                 try writeCredential(renewed, to: managedURL, reason: reason + ".renewal")
             }
             return .renewed
         } catch {
-            let outcome: CredentialRenewal = Self.renewalOutcome(error) == "rejected" ? .rejected : .unavailable
-            audit.record(.renewal, .kimi, location: location, accessToken: presented.accessToken,
-                         outcome: outcome == .rejected ? "rejected" : "unavailable", reason: reason)
-            return outcome
+            let outcome = Self.renewalOutcome(error)
+            audit.recordRenewal(CredentialRenewalClient.AuditSubject(provider: .kimi, location: location),
+                                token: .accessToken(presented.accessToken), previous: nil, outcome: outcome, reason: reason)
+            return outcome == "rejected" ? .rejected : .unavailable
         }
     }
 
@@ -420,16 +432,7 @@ final class KimiService: @unchecked Sendable {
                    Date(timeIntervalSince1970: expiresAt) > Date().addingTimeInterval(lifetime) {
                     return .renewed
                 }
-                let fresh: Credential
-                do {
-                    fresh = try await refresh(current)
-                } catch {
-                    audit.record(.renewal, .kimi, location: location, live: true, accessToken: current.accessToken,
-                                 outcome: Self.renewalOutcome(error), reason: reason)
-                    throw error
-                }
-                audit.record(.renewal, .kimi, location: location, live: true, accessToken: fresh.accessToken,
-                             previousAccessToken: current.accessToken, outcome: "renewed", reason: reason)
+                let fresh = try await recordedRefresh(current, location: location, live: true, reason: reason)
                 try writeCredential(fresh, to: managedURL, reason: reason + ".renewal")
                 try writeCredential(fresh, to: liveURL, attributedTo: location, reason: reason + ".renewal")
                 return .renewed
@@ -553,26 +556,24 @@ final class KimiService: @unchecked Sendable {
         return name
     }
 
+    /// Kimi's token endpoint, for `CredentialRenewalClient`: a refused
+    /// grant is answered with 400 or 401, a renewed credential with 200.
+    private var tokenEndpoint: TokenEndpoint {
+        TokenEndpoint(url: authHost.appendingPathComponent("api/oauth/token"), encoding: .form,
+                      fields: ["client_id": clientID], headers: identityHeaders(),
+                      refusesGrant: TokenEndpoint.badRequestOrUnauthorizedRefuses, accepted: 200...200)
+    }
+
     private func refresh(_ current: Credential) async throws -> Credential {
-        var request = URLRequest(url: authHost.appendingPathComponent("api/oauth/token"))
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        applyIdentityHeaders(to: &request)
-        let values = [
-            "client_id": clientID,
-            "grant_type": "refresh_token",
-            "refresh_token": current.refreshToken,
-        ]
-        request.httpBody = values.map { key, value in
-            "\(formEncode(key))=\(formEncode(value))"
-        }.sorted().joined(separator: "&").data(using: .utf8)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        // A refused grant is answered with 400 or 401; anything else says
-        // nothing about the refresh token.
-        if status == 400 || status == 401 { throw KimiServiceError.credentialRejected }
-        guard status == 200 else {
+        let data: Data
+        do {
+            data = try await renewalClient.exchange(tokenEndpoint, refreshToken: current.refreshToken)
+        } catch CredentialRenewalFailure.refused {
+            throw KimiServiceError.credentialRejected
+        } catch CredentialRenewalFailure.status(let status) {
             throw KimiServiceError.requestFailed("token endpoint returned \(status)")
+        } catch CredentialRenewalFailure.transport(let error) {
+            throw error
         }
         var fresh = try JSONDecoder().decode(Credential.self, from: data)
         if let seconds = fresh.expiresIn { fresh.expiresAt = Date().timeIntervalSince1970 + seconds }
@@ -623,39 +624,29 @@ final class KimiService: @unchecked Sendable {
     }
 
     private func applyIdentityHeaders(to request: inout URLRequest) {
-        request.setValue("kimi-code-cli/2.1.1", forHTTPHeaderField: "User-Agent")
-        request.setValue("kimi_code_cli", forHTTPHeaderField: "X-Msh-Platform")
-        request.setValue("2.1.1", forHTTPHeaderField: "X-Msh-Version")
-        request.setValue(Host.current().localizedName ?? "Mac", forHTTPHeaderField: "X-Msh-Device-Name")
-        request.setValue("macOS", forHTTPHeaderField: "X-Msh-Device-Model")
+        for (name, value) in identityHeaders() { request.setValue(value, forHTTPHeaderField: name) }
+    }
+
+    /// The headers Kimi Code identifies itself with.
+    private func identityHeaders() -> [String: String] {
+        var headers = [
+            "User-Agent": "kimi-code-cli/2.1.1",
+            "X-Msh-Platform": "kimi_code_cli",
+            "X-Msh-Version": "2.1.1",
+            "X-Msh-Device-Name": Host.current().localizedName ?? "Mac",
+            "X-Msh-Device-Model": "macOS",
+        ]
         if let id = try? String(contentsOf: home.appendingPathComponent("device_id"), encoding: .utf8) {
-            request.setValue(id.trimmingCharacters(in: .whitespacesAndNewlines), forHTTPHeaderField: "X-Msh-Device-Id")
+            headers["X-Msh-Device-Id"] = id.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        return headers
     }
 
     private func executablePath() -> String? {
         [home.appendingPathComponent("bin/kimi").path, "/opt/homebrew/bin/kimi", "/usr/local/bin/kimi"]
             .first { fileManager.isExecutableFile(atPath: $0) }
     }
-
-    private func formEncode(_ value: String) -> String {
-        value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value
-    }
 }
 
-/// Runs the operations given for one key one after another, in the order
-/// they arrive; operations for different keys run at the same time.
-/// `KimiService` keys its renewals by managed credential.
-actor KimiRenewalQueue {
-    private var last: [String: Task<Void, Never>] = [:]
 
-    func run<T: Sendable>(_ key: String, _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
-        let previous = last[key]
-        let task = Task<T, Error> {
-            await previous?.value
-            return try await operation()
-        }
-        last[key] = Task { _ = try? await task.value }
-        return try await task.value
-    }
-}
+

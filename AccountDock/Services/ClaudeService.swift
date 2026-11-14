@@ -64,6 +64,9 @@ final class ClaudeService: @unchecked Sendable {
 
     private let lock = NSLock()
     private let loginRunner = LoginProcessRunner()
+    /// Sends Claude's token renewals (`refreshStoredToken`).
+    var renewalClient = CredentialRenewalClient()
+
     private var _claudePath: String
     /// Monotonic counter to detect out-of-order setPath completions.
     private var _setPathGeneration: UInt64 = 0
@@ -450,30 +453,17 @@ final class ClaudeService: @unchecked Sendable {
             throw UsageError.expired
         }
 
-        var request = URLRequest(url: URL(string: "https://platform.claude.com/v1/oauth/token")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        var components = URLComponents()
-        components.queryItems = [
-            URLQueryItem(name: "grant_type", value: "refresh_token"),
-            URLQueryItem(name: "refresh_token", value: refreshToken),
-            URLQueryItem(name: "client_id", value: "9d1c250a-e61b-44d9-88ed-5944d1962f5e")
-        ]
-        request.httpBody = (components.percentEncodedQuery ?? "").data(using: .utf8)
-
         let responseData: Data
-        let response: URLResponse
         do {
-            (responseData, response) = try await URLSession.shared.data(for: request)
+            responseData = try await renewalClient.exchange(Self.tokenEndpoint, refreshToken: refreshToken)
+        } catch CredentialRenewalFailure.refused {
+            throw UsageError.expired
+        } catch CredentialRenewalFailure.status(let status) {
+            throw UsageError.network("token endpoint returned \(status)")
+        } catch CredentialRenewalFailure.transport(let error) {
+            throw UsageError.network(error.localizedDescription)
         } catch {
             throw UsageError.network(error.localizedDescription)
-        }
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200...299).contains(status) else {
-            if Self.refreshRejectsGrant(status: status, body: responseData) { throw UsageError.expired }
-            throw UsageError.network("token endpoint returned \(status)")
         }
         guard let refreshed = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
               let accessToken = refreshed["access_token"] as? String,
@@ -495,7 +485,18 @@ final class ClaudeService: @unchecked Sendable {
         return result
     }
 
+    /// Claude's token endpoint, for `CredentialRenewalClient`.
+    static let tokenEndpoint = TokenEndpoint(
+        url: URL(string: "https://platform.claude.com/v1/oauth/token")!,
+        encoding: .form,
+        fields: ["client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e"],
+        headers: ["Accept": "application/json"],
+        timeout: 30,
+        refusesGrant: { refreshRejectsGrant(status: $0, body: $1) }
+    )
+
     /// Whether a failed token-endpoint reply means the refresh token itself
+
     /// is dead: a 401, or a 400 whose error is `invalid_grant`. Throttling,
     /// server errors, other refusals and unreadable replies leave the stored
     /// credential usable later, so `ClaudeCredentialModule` reports them as

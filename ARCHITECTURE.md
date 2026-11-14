@@ -312,8 +312,21 @@ lock on the file, and Kimi Code, finding its refresh token already used,
 replaces the slot with a revoked credential. While the CLI runs, a reading
 whose token has expired reports it as expired and the CLI renews it with its
 next request. Kimi renewals of one managed copy run one after another
-(`KimiRenewalQueue`), and one that finds the copy already renewed while it
-waited uses that result instead of presenting the spent refresh token.
+(`CredentialRenewalClient.Queue`), and one that finds the copy already renewed
+while it waited uses that result instead of presenting the spent refresh token.
+
+Every provider's token renewal goes through `CredentialRenewalClient`. Each
+service describes its endpoint (`TokenEndpoint`: URL, form or JSON body,
+client fields, headers, time limit, which replies refuse the grant and which
+throttle); the client writes the `refresh_token` request, sends it, and tells
+a refused grant (the account needs signing in again: Claude's 401 or 400
+`invalid_grant`, Codex's and Kimi's 400 or 401) from every transient failure
+(throttling, other statuses, no connection), which leave the stored credential
+usable later. A renewal asked for while another presenting the same refresh
+token is under way shares that one's reply instead of presenting the token a
+second time. Each attempt is written to the audit through
+`CredentialAudit.recordRenewal`, as `renewed`, `rejected` or `unavailable`.
+
 
 `KimiSessionIsolation` is Kimi Code's one-session slot. Every slot runs in
 `~/.kimi-code` itself, so all sessions share their history, settings and
