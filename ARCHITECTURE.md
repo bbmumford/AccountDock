@@ -958,8 +958,14 @@ session off the account that runs out first to the destination that leaves
 the latest earliest run-out, charging the destination the session's cache
 rewrite; a move is made only when the hours it gains at that account's burn
 are worth more than the rewrite, a session moves at most once, and a session
-mid-turn never. The result never runs out earlier than before and every move
-pays for itself; it is a local optimum, not always the best assignment.
+mid-turn never. An account that runs out first but no single move helps (one
+at its limit whose readings still rise with the sessions on it, or one whose
+only sessions are mid-turn) is settled: it stays as it is, takes no session,
+and the search goes on with the account that runs out next, so such an
+account does not end the search before the accounts the sessions crowd. The
+run-outs reported then leave out the accounts settled before the first move.
+The result never runs out earlier than before and every move pays for itself;
+it is a local optimum, not always the best assignment.
 Excluded accounts, those needing sign-in and those at their limit are no
 destination. The moves go through `requestedSlotMoves`, so each is recorded.
 With **Rebalance automatically** (off by default) the quota cycle makes the

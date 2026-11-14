@@ -481,4 +481,46 @@ final class BalancingTests: XCTestCase {
         XCTAssertGreaterThan(both.values.filter { $0 == hstlesBrandon }.count, 0)
         XCTAssertGreaterThan(both.values.filter { $0 == personal }.count, 0)
     }
+
+    /// The rebalance preview later that evening: eight sessions on
+    /// HSTLES (brandon), the four on the shared sign-in and four slot
+    /// sessions; Personal with 94% of its week left and one slot session;
+    /// Backup's slot session deep in a turn; ORBTR (brandon) at its limit,
+    /// its readings still rising with its three slot sessions.
+    func testTheEveningRebalanceMovesSlotSessionsToPersonal() throws {
+        let personal = UUID(), backup = UUID(), orbtrBrandon = UUID(), hstlesBrandon = UUID()
+        let ratio = 0.25
+        let sessionTokens = 20_000_000.0
+        let sessionUnits = sessionTokens / 1_000_000 * ratio
+        let groupTokens = 80_000_000.0
+        let accounts = [
+            pacerAccount(hstlesBrandon, left: (99 - 15) * 8, resetIn: 135.5,
+                         burn: groupTokens / 1_000_000 * ratio + 4 * sessionUnits, ratio: ratio),
+            pacerAccount(personal, left: (99 - 6) * 8, resetIn: 147.5, burn: sessionUnits, ratio: ratio),
+            pacerAccount(backup, left: (99 - 98) * 8, resetIn: 35.5, burn: sessionUnits, ratio: ratio),
+            pacerAccount(orbtrBrandon, left: 0, resetIn: 110.5, burn: 3 * sessionUnits, ratio: ratio)
+        ]
+        func session(_ id: String, on account: UUID, movable: Bool = true) -> SessionPacer.RebalanceSession {
+            SessionPacer.RebalanceSession(id: id, account: account, tokensPerHour: sessionTokens, contextTokens: 150_000,
+                                          model: nil, movable: movable)
+        }
+        let sessions = (1...4).map { session("h\($0)", on: hstlesBrandon) } + [session("p1", on: personal)]
+            + [session("b1", on: backup, movable: false)] + (1...3).map { session("o\($0)", on: orbtrBrandon) }
+        // The group leaves HSTLES (brandon) for Personal when the week runs
+        // out there, at 5% of the week an hour in 17 hours.
+        let shared = SessionPacer.SharedGroup(account: hstlesBrandon, tokensPerHour: groupTokens, contextTokens: 600_000,
+                                              models: [], nextAccount: personal,
+                                              switchAt: now.addingTimeInterval(17 * 3600), sessionCount: 4)
+        let plan = SessionPacer().rebalance(accounts: accounts, sessions: sessions,
+                                            destinations: [hstlesBrandon, personal, backup], now: now, sharedGroup: shared)
+        let toPersonal = plan.moves.filter { $0.value == personal }.keys
+        XCTAssertFalse(toPersonal.isEmpty, "ORBTR (brandon) at its limit and Backup's held session no longer end the search")
+        XCTAssertTrue(toPersonal.allSatisfy { $0.hasPrefix("h") }, "slot sessions leave HSTLES (brandon) for Personal")
+        XCTAssertNil(plan.moves["b1"])
+        let before = try XCTUnwrap(plan.earliestRunOutBefore)
+        let after = try XCTUnwrap(plan.earliestRunOutAfter)
+        XCTAssertEqual(before.timeIntervalSince(now) / 3600, 16.8, accuracy: 0.05,
+                       "HSTLES (brandon) at 40% an hour with the group runs out first")
+        XCTAssertGreaterThan(after, before.addingTimeInterval(3 * 3600))
+    }
 }

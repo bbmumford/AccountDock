@@ -911,8 +911,10 @@ extension SessionPacer {
     struct Rebalance: Equatable {
         /// The account each moved session goes to.
         var moves: [String: UUID] = [:]
-        /// When the first account reaches a limit before and after the
-        /// moves; nil when none does before its windows reset.
+        /// When the first account reaches a limit, before and after the
+        /// moves; nil when none does before its windows reset. When moves
+        /// are made, the accounts the search settled before the first of
+        /// them are left out: they run out when they run out whatever moves.
         var earliestRunOutBefore: Date?
         var earliestRunOutAfter: Date?
     }
@@ -952,10 +954,17 @@ extension SessionPacer {
     /// time, and by more than the cache rewrite costs: the hours gained at
     /// the bottleneck account's burn must exceed the rewrite's window
     /// percent. Each session moves at most once, and a mid-turn session
-    /// never. Guarantees: the earliest run-out never gets earlier, every
-    /// move pays for its cache rewrite, and the result is a local optimum
-    /// (no single further move of a session on the first account to run out
-    /// helps), not necessarily the best of all assignments.
+    /// never. A bottleneck no move helps, as an account at its limit that
+    /// its readings show still in use with no session that may leave it,
+    /// is settled: it stays as it is, is no destination from then on, and
+    /// the search goes on with the account that runs out next. Without
+    /// that, such an account would end the search before the accounts the
+    /// sessions actually crowd. Guarantees: no unsettled account's run-out
+    /// gets earlier than the earliest before the step, no settled one's
+    /// changes, every move pays for its cache rewrite, and the result is a
+    /// local optimum (no single further move of a session on the first
+    /// unsettled account to run out helps), not necessarily the best of
+    /// all assignments.
     ///
     /// `sharedGroup`, the sessions on the shared sign-in, is no session it
     /// moves: it counts on the active account until the projected switch
@@ -974,13 +983,24 @@ extension SessionPacer {
                         scopedSpent: scopedSpent[account.id] ?? [:], shared: shares[account.id],
                         unseen: unseen[account.id] ?? 0, now: now)
         }
-        func earliest() -> (account: Account, runway: TimeInterval)? {
-            accounts.map { ($0, runway($0)) }.min { $0.1 < $1.1 }
+        // Accounts no move can change: no destination, and no session that
+        // may leave. Then those settled as bottlenecks no move helps.
+        var settled = Set(accounts.filter { account in
+            !destinations.contains(account.id)
+                && !placed.contains { $0.account == account.id && $0.movable }
+        }.map(\.id))
+        let initial = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, runway($0)) })
+        // The accounts settled before the first move: no move could change
+        // when they run out, so the run-outs reported leave them out.
+        var stuck = Set<UUID>()
+        func earliest(among ids: Set<UUID>) -> (account: Account, runway: TimeInterval)? {
+            accounts.filter { ids.contains($0.id) }.map { ($0, runway($0)) }.min { $0.1 < $1.1 }
         }
         func date(_ runway: TimeInterval) -> Date? { runway.isFinite ? now.addingTimeInterval(runway) : nil }
-        var result = Rebalance(earliestRunOutBefore: earliest().flatMap { date($0.runway) })
-        for _ in 0..<sessions.count {
-            guard let bottleneck = earliest(), bottleneck.runway.isFinite else { break }
+        var result = Rebalance()
+        for _ in 0..<(sessions.count + accounts.count) {
+            let open = Set(accounts.map(\.id)).subtracting(settled)
+            guard let bottleneck = earliest(among: open), bottleneck.runway.isFinite else { break }
             let burn = placed.filter { $0.account == bottleneck.account.id }
                 .reduce(0) { $0 + percent($1.tokensPerHour, on: bottleneck.account) }
                 + (shares[bottleneck.account.id].map { $0.from <= now ? $0.percentPerHour : 0 } ?? 0)
@@ -988,7 +1008,8 @@ extension SessionPacer {
             var best: (index: Int, to: Account, runway: TimeInterval, cost: Double)?
             for (index, session) in placed.enumerated()
             where session.account == bottleneck.account.id && session.movable && !moved.contains(session.id) {
-                for destination in accounts where destination.id != session.account && destinations.contains(destination.id) {
+                for destination in accounts where destination.id != session.account && destinations.contains(destination.id)
+                    && !settled.contains(destination.id) {
                     let cost = moveCost(session.contextTokens, to: destination)
                     var trial = placed
                     trial[index].account = destination.id
@@ -999,7 +1020,7 @@ extension SessionPacer {
                                                   lastSeen: now, cacheLifetime: nil, model: session.model), on: destination) {
                         trialScoped[destination.id, default: [:]][key, default: 0] += cost
                     }
-                    let after = accounts.map { account in
+                    let after = accounts.filter { open.contains($0.id) }.map { account in
                         self.runway(account, sessions: trial.filter { $0.account == account.id },
                                     spent: trialSpent[account.id] ?? 0, scopedSpent: trialScoped[account.id] ?? [:],
                                     shared: shares[account.id], unseen: unseen[account.id] ?? 0, now: now)
@@ -1012,7 +1033,10 @@ extension SessionPacer {
                     }
                 }
             }
-            guard let best else { break }
+            guard let best else {
+                settled.insert(bottleneck.account.id)
+                continue
+            }
             let session = placed[best.index]
             placed[best.index].account = best.to.id
             spent[best.to.id, default: 0] += best.cost
@@ -1021,9 +1045,12 @@ extension SessionPacer {
                 scopedSpent[best.to.id, default: [:]][key, default: 0] += best.cost
             }
             moved.insert(session.id)
+            if result.moves.isEmpty { stuck = settled }
             result.moves[session.id] = best.to.id
         }
-        result.earliestRunOutAfter = earliest().flatMap { date($0.runway) }
+        let reported = Set(accounts.map(\.id)).subtracting(stuck)
+        result.earliestRunOutBefore = reported.compactMap { initial[$0] }.min().flatMap(date)
+        result.earliestRunOutAfter = earliest(among: reported).flatMap { date($0.runway) }
         return result
     }
 
