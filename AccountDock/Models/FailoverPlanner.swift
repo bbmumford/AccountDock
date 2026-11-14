@@ -120,13 +120,15 @@ enum FailoverPlan: Equatable {
 ///
 /// Rules, in order:
 /// 1. A destination must be inside its trigger on *both* windows, with room
-///    for the expected burn over the minimum dwell. Accounts that may be
-///    consumed elsewhere must have been read recently.
+///    for the expected burn over the minimum dwell, and must carry the work
+///    that moves to it for `projectedCarry` (`carries`). Accounts that may
+///    be consumed elsewhere must have been read recently.
 /// 2. Once the active account crosses a trigger it moves to such a
 ///    destination. When none exists it keeps serving up to the provider's
 ///    100% limit, because moving to an account that is merely less full
 ///    than its trigger wastes switches without adding capacity.
-/// 3. At 100% it moves to the usable account with the most headroom.
+/// 3. At 100% it moves to the usable account with the most headroom that
+///    carries the work; with none, it waits as in 4.
 /// 4. When every account is exhausted it waits for the account whose limiting
 ///    windows all reset first.
 /// 5. Balancing (optional) spends accounts in order of their latest feasible
@@ -578,7 +580,7 @@ struct FailoverPlanner {
             return .stay(.holdingForImminentReset)
         }
 
-        let belowTrigger = others.filter { tierOf($0) == .belowTrigger }
+        let belowTrigger = others.filter { tierOf($0) == .belowTrigger && carries($0, from: current, at: now) }
         switch readiness(of: ordered(belowTrigger, recovered: recoveredIDs, now: now), now: now) {
         case .ready(let id): return .switchTo(id, reason)
         case .needsVerification(let id): return .verify([id])
@@ -589,10 +591,7 @@ struct FailoverPlanner {
             return .stay(.drainingToLimit)
         }
 
-        let usable = others.filter { state in
-            guard tierOf(state) == .usable, let projection = projection(state, now: now) else { return false }
-            return headroom(state, projection) >= destinationMinimum(current: current, destination: state)
-        }.sorted { lhs, rhs in
+        let usable = others.filter { tierOf($0) == .usable && carries($0, from: current, at: now) }.sorted { lhs, rhs in
             guard let l = projection(lhs, now: now), let r = projection(rhs, now: now) else { return false }
             return headroom(lhs, l) > headroom(rhs, r)
         }
@@ -604,10 +603,14 @@ struct FailoverPlanner {
 
         // Accounts that may have capacity but cannot be confirmed now are
         // read before anything else happens; they are never switched to or
-        // waited on unread.
+        // waited on unread. One whose reading leaves too little room to
+        // carry the work is not read for it: `nextSwitch` takes an account
+        // `plan` would read as the one it switches to.
         let unconfirmed = others.filter { state in
             let tier = tierOf(state)
-            if tier == .belowTrigger || tier == .usable { return !canSwitchWithoutReading(state, now: now) }
+            if tier == .belowTrigger || tier == .usable {
+                return !canSwitchWithoutReading(state, now: now) && carries(state, from: current, at: now)
+            }
             return state.resetUnverified && state.credentialsUsable && state.workloadAvailable
         }
         if !unconfirmed.isEmpty { return .verify(unconfirmed.map(\.id)) }
@@ -747,15 +750,13 @@ struct FailoverPlanner {
     }
 
     /// Whether some other account could take the workload now or after one
-    /// reading, following the same rotation and tiers as `plan`.
+    /// reading, following the same rotation, tiers and `carries` as `plan`.
     func hasFallback(current: QuotaAccountState, ladder: [QuotaAccountState], now: Date) -> Bool {
         rotation(ladder: ladder, currentID: current.id).contains { state in
             let burn = expectedBurn(movingFrom: current, to: state)
             let tier = tier(state, now: now, expectedSessionBurn: burn.session, expectedWeeklyBurn: burn.weekly)
             guard tier <= .usable, settings.canVerify || canSwitchWithoutReading(state, now: now) else { return false }
-            if tier == .belowTrigger { return true }
-            guard let projection = projection(state, now: now) else { return false }
-            return headroom(state, projection) >= destinationMinimum(current: current, destination: state)
+            return carries(state, from: current, at: now)
         }
     }
 
@@ -792,15 +793,14 @@ struct FailoverPlanner {
     /// would keep it or wait for a reset then. Read by `SessionPacer`'s
     /// shared group, which moves with the active account.
     ///
-    /// Only a destination that `carries` the moving work for
-    /// `projectedCarry` is projected; `plan` is asked again without one
-    /// that does not. `keeping`, the account projected last time
+    /// `plan` switches only to a destination that `carries` the moving
+    /// work, so the account projected here is the one the switch picks.
+    /// `keeping`, the account projected last time
     /// (`AppState.sharedGroupDestination`), stays the projection while
-    /// `plan` would still switch to it and it carries the work, unless
-    /// the account `plan` prefers now has `projectionPreference` times its
-    /// headroom: the pacer keeps room on the projected account, and
-    /// moving that room between two accounts each cycle moves the slot
-    /// sessions placed around it.
+    /// `plan` would still switch to it, unless the account `plan` prefers
+    /// now has `projectionPreference` times its headroom: the pacer keeps
+    /// room on the projected account, and moving that room between two
+    /// accounts each cycle moves the slot sessions placed around it.
     func nextSwitch(current: QuotaAccountState, ladder: [QuotaAccountState],
                     recoveredIDs: Set<UUID> = [], keeping previous: UUID? = nil, now: Date) -> NextSwitch? {
         let withCurrent = ladder.contains { $0.id == current.id } ? ladder : [current] + ladder
@@ -811,17 +811,10 @@ struct FailoverPlanner {
             case .stay, .waitForReset, .noCapacity: nil
             }
         }
-        // The account `plan` switches to at `at`, skipping those that would
-        // not carry the moving work, or nil.
+        // The account `plan` switches to at `at`, or nil.
         func carrier(_ current: QuotaAccountState, among ladder: [QuotaAccountState], at: Date) -> QuotaAccountState? {
-            var ladder = ladder
-            while let id = destination(plan(current: current, ladder: ladder, recoveredIDs: recoveredIDs,
-                                             lastSwitch: nil, now: at), from: current),
-                  let state = ladder.first(where: { $0.id == id }) {
-                if carries(state, from: current, at: at) { return state }
-                ladder.removeAll { $0.id == id }
-            }
-            return nil
+            destination(plan(current: current, ladder: ladder, recoveredIDs: recoveredIDs, lastSwitch: nil, now: at),
+                        from: current).flatMap { id in ladder.first { $0.id == id } }
         }
         func choice(_ current: QuotaAccountState, among ladder: [QuotaAccountState], at: Date) -> NextSwitch? {
             guard let chosen = carrier(current, among: ladder, at: at) else { return nil }
@@ -846,46 +839,84 @@ struct FailoverPlanner {
         return choice(limited, among: ladderAtLimit, at: now.addingTimeInterval(toLimit))
     }
 
-    /// How long a destination `nextSwitch` projects must be able to carry
-    /// the work that moves to it: the lifetime of the prompt caches the
-    /// move writes there (`SessionPacer.defaultCacheLifetime`). The moving
+    /// How long a switch destination must be able to carry the work that
+    /// moves to it (`carries`): the lifetime of the prompt caches the move
+    /// writes there (`SessionPacer.defaultCacheLifetime`). The moving
     /// sessions would leave an account with less within that time and
     /// write their contexts a second time, for the little it served.
     static let projectedCarry: TimeInterval = 60 * 60
+    /// The share of an unused window a destination must have room for
+    /// when the rate would spend a whole window within `projectedCarry`:
+    /// no account carries such a burst for the horizon, and the work must
+    /// still move to the one that carries it longest.
+    static let burstCarryShare = 0.5
     /// How much more headroom the account `plan` prefers must have before
     /// `nextSwitch` drops the account it projected last time for it.
     static let projectionPreference = 2.0
 
-    /// Whether `destination` has the headroom, at `date`, to carry the work
-    /// moving from `current` for `projectedCarry`: the moving burn beside
-    /// its own slot sessions (`expectedBurn`) and its deviation, plus the
-    /// in-flight reserve and the switch's cost, and never less than
-    /// `destinationMinimum`. An account a threshold leaves just under its
-    /// limit can pass `tier`'s dwell margin, which counts long-window
-    /// percent, on a few percent of room.
-    func carries(_ destination: QuotaAccountState, from current: QuotaAccountState, at date: Date) -> Bool {
-        guard let projection = projection(destination, now: date) else { return false }
-        let deviation = current.usage?.fiveHour != nil
-            ? current.sessionBurnStdDev
-            : current.weeklyBurnStdDev * (current.sessionPerWeekly ?? Self.defaultSessionPerWeekly)
-        let burn = expectedBurn(movingFrom: current, to: destination).session + deviation
-        let need = settings.inFlightReservePercent + settings.switchCostPercent + burn * Self.projectedCarry / 3600
-        return headroom(destination, projection) >= max(need, destinationMinimum(current: current, destination: destination))
+    /// What a destination carries per hour once `current`'s work moves to
+    /// it, on the upper estimate, in session and long-window percent: the
+    /// moving work beside its own slot sessions (`expectedBurn`) plus the
+    /// deviation of `current`'s rate, or the destination's own measured
+    /// rate plus its deviation when that is larger. A rate is converted
+    /// from the long window, by the plan's ratio, for an account without a
+    /// session window, whose session rate is never learned.
+    func carriedBurn(from current: QuotaAccountState, to destination: QuotaAccountState) -> (session: Double, weekly: Double) {
+        func sessionDeviation(_ state: QuotaAccountState) -> Double {
+            state.usage?.fiveHour != nil
+                ? state.sessionBurnStdDev
+                : state.weeklyBurnStdDev * (state.sessionPerWeekly ?? Self.defaultSessionPerWeekly)
+        }
+        let moving = expectedBurn(movingFrom: current, to: destination)
+        return (
+            max(moving.session + sessionDeviation(current), expectedSessionBurn(of: destination) + sessionDeviation(destination)),
+            max(moving.weekly + current.weeklyBurnStdDev, destination.weeklyBurnPerHour + destination.weeklyBurnStdDev)
+        )
     }
 
-    /// Headroom a usable account needs to take work from an account at its
-    /// limit: the in-flight reserve, the cost of the move, and
-    /// `minimumDestinationMinutes` of burn on the upper estimate. The burn is
-    /// the larger of the work that moves there beside the destination's own
-    /// slot sessions and the destination's own measured burn, since
-    /// the current account's rate falls to nothing while its sessions are
-    /// paused, and a sliver that looked enough then was used up as soon as
-    /// they resumed on it, which switched straight back.
+    /// Whether `destination` has the room, at `date`, to carry the work
+    /// moving from `current` on each window it has, for `projectedCarry` or
+    /// until that window resets when sooner: the 5-hour window at the session rate of `carriedBurn`, the long
+    /// window at its long-window rate (in session percent by the plan's
+    /// ratio), each beside the in-flight reserve and the switch's cost, and
+    /// never less than `destinationMinimum`. The one rule for a switch
+    /// destination: `plan` switches only to such an account when it fails
+    /// over or crosses a threshold, so `nextSwitch`, which asks
+    /// `plan`, projects the account the switch will pick. `tier`'s dwell
+    /// margin, in long-window percent over the dwell, passes an account a
+    /// few percent from its limit, which the moving work spends in minutes.
+    func carries(_ destination: QuotaAccountState, from current: QuotaAccountState, at date: Date) -> Bool {
+        guard let projection = projection(destination, now: date), let weekly = projection.weekly else { return false }
+        let burn = carriedBurn(from: current, to: destination)
+        // A window that resets within the horizon needs room only until
+        // then, and one no account could carry the rate for that long only
+        // for as long as `burstCarryShare` of an unused window would.
+        func hours(until reset: Date?, rate: Double) -> Double {
+            let untilReset = reset.map { max(0, $0.timeIntervalSince(date)) } ?? Self.projectedCarry
+            let burst = rate > 0 ? Self.burstCarryShare * 100 / rate * 3600 : Self.projectedCarry
+            return min(Self.projectedCarry, untilReset, burst) / 3600
+        }
+        let fixed = settings.inFlightReservePercent + settings.switchCostPercent
+        let k = destination.sessionPerWeekly ?? Self.defaultSessionPerWeekly
+        if let session = projection.session,
+           100 - session < fixed + burn.session * hours(until: projection.sessionReset, rate: burn.session) {
+            return false
+        }
+        let weeklyNeed = burn.weekly * hours(until: projection.weeklyReset, rate: burn.weekly)
+        guard (100 - weekly) * k >= fixed + weeklyNeed * k else { return false }
+        return headroom(destination, projection) >= destinationMinimum(current: current, destination: destination)
+    }
+
+    /// Headroom a destination needs to take work from an account at its
+    /// limit, whatever it carries for longer (`carries`): the in-flight
+    /// reserve, the cost of the move, and `minimumDestinationMinutes` of
+    /// `carriedBurn`'s session rate. The larger of the moving work and the
+    /// destination's own measured rate counts, since the current account's
+    /// rate falls to nothing while its sessions are paused, and a sliver
+    /// that looked enough then is used up as soon as they resume on it,
+    /// which switches straight back.
     func destinationMinimum(current: QuotaAccountState, destination: QuotaAccountState) -> Double {
-        let moving = max(0, current.sessionBurnPerHour - current.stayingSessionBurnPerHour)
-            + destination.stayingSessionBurnPerHour
-        let burn = max(moving + current.sessionBurnStdDev,
-                       destination.sessionBurnPerHour + destination.sessionBurnStdDev)
+        let burn = carriedBurn(from: current, to: destination).session
         return max(
             Self.minimumUsableHeadroom,
             settings.inFlightReservePercent + settings.switchCostPercent + burn * settings.minimumDestinationMinutes / 60

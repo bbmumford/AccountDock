@@ -948,9 +948,13 @@ final class FailoverPlannerTests: XCTestCase {
         let p = planner(policy(session: 90))
         let current = account(session: 100, weekly: 40, active: true, burn: 120)
         let sliver = account(session: 50, weekly: 99.5)
-        let roomy = account(session: 80, weekly: 50)
+        // 60% of a session window carries 120%/h for half an hour, as long
+        // as half an unused window would; 20% would last ten minutes.
+        let roomy = account(session: 40, weekly: 50)
         XCTAssertEqual(p.plan(current: current, ladder: [current, sliver], lastSwitch: nil, now: now).isSwitch, false,
                        "half a weekly percent at 120%/h of session use lasts about two minutes")
+        XCTAssertEqual(p.plan(current: current, ladder: [current, account(session: 80, weekly: 50)], lastSwitch: nil,
+                              now: now).isSwitch, false)
         XCTAssertEqual(p.plan(current: current, ladder: [current, sliver, roomy], lastSwitch: nil, now: now),
                        .switchTo(roomy.id, .exhausted))
         XCTAssertFalse(p.hasFallback(current: current, ladder: [current, sliver], now: now))

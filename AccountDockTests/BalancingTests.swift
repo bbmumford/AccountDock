@@ -127,9 +127,21 @@ final class BalancingTests: XCTestCase {
         let ladder = [weeklyState(roomy, used: 6, resetIn: 147), weeklyState(almostSpent, used: 98, resetIn: 35), current]
         let toTrigger = try XCTUnwrap(planner.secondsUntilTrigger(current, now: now))
         XCTAssertEqual(planner.plan(current: current, ladder: ladder, lastSwitch: nil, now: now.addingTimeInterval(toTrigger)),
-                       .verify([almostSpent]), "balancing prefers the allowance that resets first")
+                       .verify([roomy]), "the allowance that resets first cannot carry the work for an hour")
         let next = try XCTUnwrap(planner.nextSwitch(current: current, ladder: ladder, now: now))
         XCTAssertEqual(next.account, roomy)
+    }
+
+    func testADestinationWithoutASessionWindowNeedsMinutesOfTheWeeklyRateConverted() {
+        let planner = FailoverPlanner(settings: .init(policy: policy(), provider: .claudeCode))
+        let current = weeklyState(UUID(), used: 50, resetIn: 100, active: true, burn: 3)
+        let destination = weeklyState(UUID(), used: 10, resetIn: 100)
+        // 3% of the week an hour is 24 session percent at 8 to 1; ten
+        // minutes of it is 4.
+        XCTAssertEqual(planner.destinationMinimum(current: current, destination: destination), 4, accuracy: 0.001)
+        XCTAssertTrue(planner.carries(destination, from: current, at: now))
+        let sliver = weeklyState(UUID(), used: 98, resetIn: 100)
+        XCTAssertFalse(planner.carries(sliver, from: current, at: now), "16 session percent last 40 minutes at 24 an hour")
     }
 
     func testTheProjectedAccountIsKeptUntilAnotherIsClearlyBetter() throws {
@@ -292,11 +304,11 @@ final class BalancingTests: XCTestCase {
         for (burn, staying) in [(3.0, 5.0), (2.2, 4.0), (4.5, 5.0), (2.8, 6.0), (2.5, 5.0)] {
             let (current, accounts) = ladder(activeBurn: burn, backupStaying: staying)
             if projected == nil {
-                // `plan` alone, as of the switch, prefers Backup's
-                // allowance, which resets first.
+                // As of the switch, Backup's allowance resets first but
+                // cannot carry the group; Personal is read and switched to.
                 let toTrigger = try XCTUnwrap(planner.secondsUntilTrigger(current, now: now))
                 XCTAssertEqual(planner.plan(current: current, ladder: accounts, lastSwitch: nil,
-                                            now: now.addingTimeInterval(toTrigger)), .verify([backup]))
+                                            now: now.addingTimeInterval(toTrigger)), .verify([personal]))
             }
             let next = try XCTUnwrap(planner.nextSwitch(current: current, ladder: accounts, keeping: projected, now: now))
             XCTAssertNotEqual(next.account, backup, "2% of the week carries the group for minutes")
@@ -305,6 +317,21 @@ final class BalancingTests: XCTestCase {
             switchAt = next.at
         }
         XCTAssertEqual(projected, personal)
+
+        // HSTLES (brandon) reaches its limit: the switch goes to Personal,
+        // never onto Backup's 2%.
+        let spentActive = weeklyState(hstlesBrandon, used: 99.5, resetIn: 135.5, active: true, burn: 3)
+        let (_, everyone) = ladder(activeBurn: 3, backupStaying: 5)
+        let atLimit = everyone.map { $0.id == hstlesBrandon ? spentActive : $0 }
+        XCTAssertEqual(planner.plan(current: spentActive, ladder: atLimit, lastSwitch: nil, now: now),
+                       .switchTo(personal, .exhausted))
+        // With only Backup left below its limit, failover waits for the
+        // first reset instead.
+        let withoutPersonal = atLimit.filter { $0.id != personal }
+        XCTAssertEqual(planner.plan(current: spentActive, ladder: withoutPersonal, lastSwitch: nil, now: now),
+                       .waitForReset(hstlesSystem, now.addingTimeInterval(73.5 * 3600)))
+        XCTAssertFalse(planner.hasFallback(current: spentActive, ladder: withoutPersonal, now: now))
+        XCTAssertNil(planner.nextSwitch(current: spentActive, ladder: withoutPersonal, now: now))
 
         // The pacer's view: the pool is the three accounts below their
         // limits; one slot session runs on Personal and one on Backup.

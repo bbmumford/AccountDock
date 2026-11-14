@@ -459,14 +459,29 @@ rule 1, but it never makes the exhausted move of rule 3, moves sessions off
 the account, or waits for a reset; the account serves on until a reading or a
 refusal shows the limit.
 
+Every switch destination must carry the work that moves to it
+(`FailoverPlanner.carries`): the shared group's rate (`expectedBurn`, the
+active account's burn less its slot sessions, beside the destination's own
+slot sessions) plus one deviation, or the destination's own measured rate when
+larger, for an hour (`projectedCarry`, the lifetime of the caches the move
+writes) or until the window resets when sooner, on each window it has: the
+5-hour window at the session rate, the weekly window at the weekly rate. An
+account without a 5-hour window has no learned session rate, so its weekly
+rate is converted by the plan's ratio. A rate that would spend a whole window
+within the hour needs room for as long as half an unused window would carry
+it (`burstCarryShare`). An account a few percent from its weekly limit passes
+the dwell margin of `tier` but is no destination.
+
 1. The active account crosses a threshold (or will within the lookahead):
-   switch to the first account below its thresholds, in the user's order.
+   switch to the first account below its thresholds that carries the work, in
+   the user's order.
 2. No such account: keep serving up to the provider's 100% limit. Moving to an
    account that is merely less full than its threshold adds no capacity and
    causes switch loops.
-3. At its limit: move to the usable account with the most headroom, if that
-   headroom covers the in-flight reserve, the switch cost and ten minutes of the
-   current burn. A smaller sliver would be spent before the move paid off.
+3. At its limit: move to the usable account with the most headroom that
+   carries the work, and has at least the in-flight reserve, the switch cost
+   and ten minutes of the moving burn (`destinationMinimum`). A smaller sliver
+   would be spent before the move paid off; with none, step 5 waits.
 4. Every allowance spent: serve on extra usage if the user allowed it and the
    monthly spending limit has room.
 5. Otherwise: wait for the account whose limiting windows all reset first. A
@@ -790,13 +805,11 @@ the pool weights and which sessions move, each time the pool is rebuilt
   off for the provider or the active account locked, the group stays on the
   active account for the whole horizon. The active account's readings
   already include the group's rate, which its share counts instead.
-  A projected destination must carry the moving work, at its expected
-  burn plus one deviation, for an hour (`FailoverPlanner.carries`,
-  `projectedCarry`, the lifetime of the caches the move writes); an
-  account a few percent short of its limit passes `plan`'s dwell margin
-  but is not projected. The account projected last time
+  `plan` switches only to a destination that carries the moving work
+  (`FailoverPlanner.carries`, above), so the projected account is the one
+  the switch will pick. The account projected last time
   (`AppState.sharedGroupDestination`) stays projected while `plan` would
-  still switch to it and it carries the work, unless the account `plan`
+  still switch to it, unless the account `plan`
   prefers has twice its headroom (`projectionPreference`), so the room the
   pacer keeps does not move between accounts from cycle to cycle.
   While the group is projected to move, new sessions go by the room each
