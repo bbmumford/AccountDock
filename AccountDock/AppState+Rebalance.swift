@@ -62,7 +62,7 @@ extension AppState {
             case .atLimit, .ineligible: break
             }
         }
-        let pacer = SessionPacer()
+        let pacer = SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
         let sessions = slotRebalanceSessions(provider, slots: slots, now: now)
         // The sessions on the shared sign-in are none of these and never
         // move; they count where the active account is and will be.
@@ -137,7 +137,7 @@ extension AppState {
         }
         let strandedIDs = Set(stranded.map(\.id))
         let shared = sharedGroup(provider, sessions: pacerSessions(provider, now: now), now: now)?.group
-        return SessionPacer().place(stranded, accounts: pacerAccounts, running: running.filter { !strandedIDs.contains($0.id) },
+        return SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor).place(stranded, accounts: pacerAccounts, running: running.filter { !strandedIDs.contains($0.id) },
                                     destinations: Set(pacerAccounts.map(\.id)), now: now, sharedGroup: shared)
     }
 

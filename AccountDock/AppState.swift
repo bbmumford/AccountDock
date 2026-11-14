@@ -153,6 +153,18 @@ final class AppState: ObservableObject {
     /// Sessions `handleExternalRequests` was asked to move, by destination;
     /// `serveSessionSlots` moves each at once and forgets it.
     var requestedSlotMoves: [String: UUID] = [:]
+    /// Moves of sessions whose CLI moves only by restarting
+    /// (`ProviderSessionIsolation.movesNeedRestart`), chosen by
+    /// `serveSessionSlots` while each was idle, by session ID; applied by
+    /// `applySlotRestarts` once the pass is over.
+    var pendingSlotRestarts: [String: PendingSlotRestart] = [:]
+    /// Sessions restarted on another account, by session ID, until the
+    /// resumed run has started: `maintainSessionSlots` keeps a spare slot of
+    /// that account and names it in the resume file for them.
+    var slotRestartResumes: [String: SlotRestartResume] = [:]
+    /// Sessions a restart could not reach, recorded once each until one
+    /// succeeds.
+    var slotRestartsNoted: Set<String> = []
     /// Guards `maintainSessionSlots` against running twice at once, and
     /// records a call that arrived meanwhile, which is then run after.
     var slotMaintenanceRunning = false

@@ -123,6 +123,22 @@ struct TurnCostModel: Codable, Equatable {
         sessionSeen.filter { $0.value >= date }.map(\.key)
     }
 
+    /// `sessions(activeSince:)` last served by one of `accounts`, so one
+    /// provider's sessions are counted apart from another's.
+    func sessions(activeSince date: Date, on accounts: Set<UUID>) -> [String] {
+        sessions(activeSince: date).filter { sessionAccount[$0].map(accounts.contains) ?? false }
+    }
+
+    /// `switchCost(sessionsOn:now:)` for the sessions last served by any of
+    /// `accounts`: one provider's.
+    func switchCost(sessionsOnAny accounts: Set<UUID>, now: Date) -> Double {
+        let cutoff = now.addingTimeInterval(-15 * 60)
+        let context = sessionContext.filter { key, _ in
+            (sessionSeen[key] ?? .distantPast) > cutoff && (sessionAccount[key].map(accounts.contains) ?? false)
+        }.values.reduce(0, +)
+        return Double(context) * (1.25 - 0.1) / 1_000_000 * ratio
+    }
+
     /// Session percent spent re-reading every active session's context
     /// into the cache of the account it moves to, when work moves accounts.
     func switchCost(sessionsOn account: UUID?, now: Date) -> Double {

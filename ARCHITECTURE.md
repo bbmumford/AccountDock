@@ -109,6 +109,17 @@ Some data is the same for every provider by construction:
   else the live credential's owner, else the active account. A session on
   the shared sign-in keeps the token it read until it is signalled, so it
   stays on the earlier account after a switch.
+- **Transcripts.** `TranscriptRequestFeed` reads each provider's session
+  transcripts through its `ProviderCapabilities.transcriptSource`, which
+  lists the files and says what each row records: per request the session,
+  time, model, input, cache and output tokens, whether it started a turn,
+  the subagent that made it, the session's name, and usage-limit refusals in
+  the provider's words. `ClaudeTranscriptSource` reads `projects/`,
+  `CodexTranscriptSource` the rollouts under `sessions/` (and names from
+  `session_index.jsonl`), `KimiTranscriptSource` each agent's `wire.jsonl`
+  (and titles from `state.json`). `AppState.ingestTranscriptRequests` learns
+  request cost, models, names and refusals for every provider with a
+  source, whether or not the router serves it.
 - **Cost and activity.** `CostParser.ProviderCostHistory` holds each
   provider's daily cost and today's turns, models, lines, tokens, sessions and
   active time. Claude Code's is built from its per-request cost summary; the
@@ -310,6 +321,29 @@ credential name into `config.toml`, which would point sessions outside
 slots at the slot's credential; every slot pass puts `base_url` and `key`
 back (`restoreSharedState`), unless the file that spelling names holds a
 refresh token (see [provider-cli-facts.md](docs/provider-cli-facts.md)).
+
+`CodexSessionIsolation` is Codex's one-session slot. Every slot runs in
+`~/.codex` itself, so rollouts, history, settings and hooks stay shared. The
+launcher puts `-c` overrides before the user's arguments that select a model
+provider of AccountDock's (`model_provider="accountdock"`) named `OpenAI`,
+which Codex treats as its own, at the ChatGPT Codex endpoint, whose bearer
+token comes from a command: `/bin/sh` printing `access_token` from the
+slot's `credential.json` while its `account_id` still equals
+`ACCOUNTDOCK_CODEX_ACCOUNT_ID`, the account read at launch and sent as
+`ChatGPT-Account-ID`. Codex runs the command again every minute and after a
+401. `cli_auth_credentials_store="ephemeral"` keeps the session away from
+`auth.json`: it never reads, renews or asks for a sign-in. The slot holds the
+access token, account and expiry, no refresh token; AccountDock renews each
+account (the active one in its managed home and `~/.codex` together,
+`CodexService.renewLiveCredentialForSlots`, well before Codex's own window)
+and rewrites the slots. Because the account header is fixed for the
+process, Codex sessions move by restart (`movesNeedRestart`):
+`serveSessionSlots` keeps the slot's account and queues the move, and
+`applySlotRestarts`, only for an idle, unpinned session in agterm whose
+footer reports no running work, fills a spare of the new account, names it
+in the resume file for the session, then types `/exit` and
+`codex resume <id>`. The pacer and rebalance cost such a move three times a
+cache rewrite (`sessionMoveCostFactor`).
 
 ## Claude account switching
 

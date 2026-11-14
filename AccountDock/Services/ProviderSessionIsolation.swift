@@ -29,14 +29,28 @@ protocol ProviderSessionIsolation: Sendable {
     var directoryVariable: String { get }
     /// Launcher lines that point the CLI at the slot directory the shell
     /// expression `slot` names, ending with the exports, written into
-    /// `SessionSlots.launcherScript` where a slot was chosen; they may
-    /// `exec "$real" "$@"` to run the CLI unchanged when the slot cannot
-    /// be read. By default `directoryVariable` names the slot.
+    /// `SessionSlots.launcherScript` where a slot was chosen, just before
+    /// it runs `exec "$real" "$@"`; they may `exec "$real" "$@"` themselves
+    /// to run the CLI unchanged when the slot cannot be read, and may end
+    /// with `set --` to put `launchArguments` before the user's arguments.
+    /// By default `directoryVariable` names the slot.
     func launcherExportLines(slot: String) -> [String]
     /// The variables a session started on the slot `directory` outside the
     /// launcher sets, in order; read by `AppState.sessionLaunch`. By default
     /// `directoryVariable` alone.
     func launchAssignments(forSlot directory: URL) -> [(name: String, value: String)]
+    /// Arguments the CLI is started with, before the user's, to read the
+    /// slot `directory`; read by `AppState.sessionLaunch`, and the same the
+    /// launcher puts first. None by default.
+    func launchArguments(forSlot directory: URL) -> [String]
+    /// Whether a running session reads only the account it started on, so
+    /// moving it to another account means ending it and resuming it in a
+    /// slot written for that account (`AppState.applySlotRestarts`) rather
+    /// than rewriting its slot under it. False by default.
+    var movesNeedRestart: Bool { get }
+    /// What `SessionTerminalActions` types to end a session between turns.
+    /// `/exit` by default.
+    var exitCommand: String { get }
     /// Puts back what a CLI running in a slot may have written into the
     /// CLI's own settings that would make sessions outside slots read a
     /// slot's credential. Called by `AppState.maintainSessionSlots` on every
@@ -109,6 +123,12 @@ extension ProviderSessionIsolation {
     func launchAssignments(forSlot directory: URL) -> [(name: String, value: String)] {
         [(directoryVariable, directory.path)]
     }
+
+    func launchArguments(forSlot directory: URL) -> [String] { [] }
+
+    var movesNeedRestart: Bool { false }
+
+    var exitCommand: String { "/exit" }
 
     func restoreSharedState() {}
 }

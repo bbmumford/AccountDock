@@ -392,6 +392,20 @@ struct SessionSlots: Sendable {
         }
     }
 
+    /// Names `path` in the resume file for `session` at once, replacing any
+    /// line it had, so a session resumed before the next maintenance pass
+    /// starts there; `AppState.applySlotRestarts` calls it for a session it
+    /// is about to restart on another account.
+    func addResume(session: String, path: String) {
+        let text = (try? String(contentsOf: resumeFile, encoding: .utf8)) ?? ""
+        let kept = text.split(separator: "\n").filter { !$0.hasPrefix(session + "\t") }.map { $0 + "\n" }.joined()
+        do {
+            try Data((kept + Self.resumeText([(session, path)])).utf8).write(to: resumeFile, options: .atomic)
+        } catch {
+            log.error("[addResume] Resume file not written: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Running sessions
 
     /// Slot directories named in the environment of the user's running

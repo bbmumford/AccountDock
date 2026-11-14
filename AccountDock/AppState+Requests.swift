@@ -139,6 +139,13 @@ extension AppState {
             if let slot, let root = SessionSlots(provider)?.sessionRoot.path, slot.hasPrefix(root + "/") {
                 requestedSlotMoves[sessionID] = target.id
                 await maintainSessionSlots(now: now)
+                if provider.capabilities.sessionMovesNeedRestart {
+                    if slotRestartResumes[sessionID]?.account == target.id {
+                        return outcome(true, "Restarted in a slot on \(messageName(target)): the session was ended between turns and resumed there.", target)
+                    }
+                    return outcome(requestedSlotMoves[sessionID] == target.id,
+                                   "The session moves to \(messageName(target)) by restarting, once it is idle between turns.", target)
+                }
                 let moved = slotDirectoryServing[slot] == target.id
                 return outcome(moved, moved ? "Moved to \(messageName(target)); the session uses it from its next request."
                                             : "The session's slot could not be written for \(messageName(target)).", target)

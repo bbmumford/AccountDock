@@ -1,8 +1,9 @@
 import Foundation
 
-/// Learns the token use of sessions the router does not carry from their
-/// transcripts, so `SessionPacer` paces and moves them as it does routed
-/// sessions.
+/// Learns the token use, model, name and usage-limit refusals of sessions
+/// the router does not carry from their transcripts, for every provider
+/// with a `ProviderCapabilities.transcriptSource`, so `SessionPacer` paces
+/// and moves them as it does routed sessions.
 extension AppState {
     /// One refusal of a session's request at a usage limit.
     struct SessionRefusal: Equatable {
@@ -61,7 +62,7 @@ extension AppState {
     /// was still on the account it left, and the account it moved to must
     /// not be taken to have refused it.
     func ingestTranscriptRequests(now: Date = Date()) async {
-        for provider in AIProviderType.implementedProviders where provider.capabilities.transcriptDirectory != nil {
+        for provider in AIProviderType.implementedProviders where provider.capabilities.transcriptSource != nil {
             let requests = await TranscriptRequestFeed.shared.newRequests(provider, now: now)
             guard !requests.isEmpty else { continue }
             let learns = learnsRequestCost(provider)
@@ -69,6 +70,7 @@ extension AppState {
             let processes = sessionProcesses(provider)
             var refusedAt: [UUID: Date] = [:]
             for request in requests {
+                if let name = request.sessionName, sessionNames[request.session] != name { sessionNames[request.session] = name }
                 if let model = request.model { noteSessionModel(request.session, model: model, at: request.at) }
                 let process = processes[request.session]
                 var decision = attribution.decide(session: request.session, process: process)

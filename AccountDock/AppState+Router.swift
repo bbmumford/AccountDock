@@ -633,8 +633,9 @@ extension AppState {
         let remainders = movable.flatMap { slotted in
             remainderSpending(provider, pooled: Set(paced.map(\.id)), slotted: slotted.subtracting(onDraining), now: now)
         }
-        let plan = SessionPacer().plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
-                                       fixed: pinned, remainders: remainders)
+        let pacer = SessionPacer(moveCostFactor: movesSessions ? 1 : provider.capabilities.sessionMoveCostFactor)
+        let plan = pacer.plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
+                              fixed: pinned, remainders: remainders)
         // A session is never moved to an account without allowance for the
         // model it uses, nor off a draining account before its limit.
         var moves = plan.moves.filter { session, destination in

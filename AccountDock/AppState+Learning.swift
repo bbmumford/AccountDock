@@ -123,9 +123,17 @@ extension AppState {
     }
 
     /// Whether the provider's per-request cost is learned: the router reports
-    /// each request's tokens for the provider it serves.
+    /// each request's tokens for the provider it serves, and the CLI's
+    /// transcripts (`ProviderCapabilities.transcriptSource`) report them for
+    /// every session.
     func learnsRequestCost(_ provider: AIProviderType) -> Bool {
-        provider == AIProviderType.routedProvider
+        provider == AIProviderType.routedProvider || provider.capabilities.transcriptSource != nil
+    }
+
+    /// The provider's accounts, which the learned models key their
+    /// sessions by.
+    func accountIDs(_ provider: AIProviderType) -> Set<UUID> {
+        Set(accounts.filter { $0.provider == provider }.map(\.id))
     }
 
     /// Session percent a switch of the active account costs its destination.
@@ -133,7 +141,7 @@ extension AppState {
     func switchCostPercent(_ provider: AIProviderType, now: Date = Date()) -> Double {
         guard learnsRequestCost(provider) else { return 0 }
         if failoverConfig.policy(for: provider).distributeSessions, routerInUse { return 0 }
-        return min(25, turnCostModel.switchCost(sessionsOn: nil, now: now))
+        return min(25, turnCostModel.switchCost(sessionsOnAny: accountIDs(provider), now: now))
     }
 
     /// Session percent the provider's requests already under way may still
@@ -143,7 +151,7 @@ extension AppState {
     func inFlightReservePercent(_ provider: AIProviderType, now: Date = Date()) -> Double {
         let learned = learnsRequestCost(provider)
         let measured = learned
-            ? turnCostModel.sessions(activeSince: now.addingTimeInterval(-3 * 60))
+            ? turnCostModel.sessions(activeSince: now.addingTimeInterval(-3 * 60), on: accountIDs(provider))
                 .reduce(0) { $0 + turnCostModel.expectedRequestCost(session: $1) }
             : 0
         let perRequest = learned
