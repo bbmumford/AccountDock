@@ -16,7 +16,7 @@ struct RouterEnvironment: Sendable {
     var stateURL: URL { directory.appendingPathComponent("state.json") }
     var controlKeyURL: URL { directory.appendingPathComponent("control.key") }
     var usageDirectory: URL { directory.appendingPathComponent("usage", isDirectory: true) }
-    var eventsURL: URL { directory.appendingPathComponent("events.jsonl") }
+    var eventsDirectory: URL { directory.appendingPathComponent("events", isDirectory: true) }
     var signaturesURL: URL { directory.appendingPathComponent("signatures.txt") }
     var passthroughURL: URL { directory.appendingPathComponent("passthrough.json") }
     /// The pause gate's directory, beside the router's.
@@ -78,6 +78,7 @@ final class RouterBrain: @unchecked Sendable {
     private var refusedBackends: [String: Date] = [:]
     private var tokens: [String: RouterToken] = [:]
     private var allowedCredentials: Set<String> = []
+    private let events: RouterEventLog
     /// Set once Anthropic rejected thinking signed for another of its
     /// accounts; from then on such blocks are removed before sending.
     private(set) var accountsRejectEachOthersThinking = false
@@ -89,6 +90,7 @@ final class RouterBrain: @unchecked Sendable {
         self.environment = environment
         self.now = now
         lastRequestAt = now()
+        events = RouterEventLog(directory: environment.eventsDirectory)
         try? FileManager.default.createDirectory(at: environment.usageDirectory, withIntermediateDirectories: true)
         if let text = try? String(contentsOf: environment.signaturesURL, encoding: .utf8) {
             for line in text.split(separator: "\n") {
@@ -254,12 +256,9 @@ final class RouterBrain: @unchecked Sendable {
         return Set(refusedBackends.keys)
     }
 
-    /// Appends an event for the app, which reads `events.jsonl` back.
+    /// Appends an event for the app (`RouterEventLog`).
     func event(_ event: RouterEvent) {
-        guard var line = try? RouterConfig.encoder().encode(event) else { return }
-        line.append(0x0A)
-        lock.lock(); defer { lock.unlock() }
-        RouterFiles.append(line, to: environment.eventsURL)
+        events.append(event)
     }
 
     func usage(_ observation: RouterUsageObservation) {

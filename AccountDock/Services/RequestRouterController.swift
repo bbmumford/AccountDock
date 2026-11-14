@@ -419,22 +419,24 @@ enum RequestRouterController {
         }
     }
 
-    /// Router events appended since `offset`, and the offset to read from next.
-    static func events(after offset: UInt64) -> ([RouterEvent], UInt64) {
-        guard let handle = try? FileHandle(forReadingFrom: RouterConfig.eventsURL) else { return ([], 0) }
-        defer { try? handle.close() }
-        let end = (try? handle.seekToEnd()) ?? 0
-        let start = offset > end ? 0 : offset
-        try? handle.seek(toOffset: start)
-        let data = (try? handle.readToEnd()) ?? Data()
-        let decoder = RouterConfig.decoder()
-        let events = data.split(separator: 0x0A).compactMap { try? decoder.decode(RouterEvent.self, from: Data($0)) }
-        // The file is trimmed once it is large; the app reads it every cycle.
-        if end > 4_000_000, let tail = try? Data(contentsOf: RouterConfig.eventsURL).suffix(200_000) {
-            try? Data(tail).write(to: RouterConfig.eventsURL, options: .atomic)
-            return (events, UInt64(tail.count))
-        }
-        return (events, end)
+    /// Router events written after `cursor`, and the cursor to read on
+    /// from (`RouterEventFeed.read`). Nil starts after the last event the
+    /// app acknowledged.
+    static func events(after cursor: RouterEventCursor?) -> (events: [RouterEvent], cursor: RouterEventCursor) {
+        let start = cursor ?? RouterEventCursor(sequence: acknowledgedEvent() ?? 0)
+        return RouterEventFeed.read(directory: RouterConfig.eventsDirectory, after: start)
+    }
+
+    /// The last event the app applied, as it told the router; nil before
+    /// the app applied any.
+    static func acknowledgedEvent() -> UInt64? {
+        RouterEventFeed.acknowledged(directory: RouterConfig.eventsDirectory)
+    }
+
+    /// Tells the router every event through `sequence` was applied, so it
+    /// may remove the segments holding only those.
+    static func acknowledgeEvents(through sequence: UInt64) {
+        RouterEventFeed.acknowledge(sequence, directory: RouterConfig.eventsDirectory)
     }
 
     /// Usage the router saw in response headers, one per credential.

@@ -39,7 +39,8 @@ enum RouterConfig {
     static var controlKeyURL: URL { directory.appendingPathComponent("control.key") }
     static let controlHeader = "X-AccountDock-Control"
     static var usageDirectory: URL { directory.appendingPathComponent("usage", isDirectory: true) }
-    static var eventsURL: URL { directory.appendingPathComponent("events.jsonl") }
+    /// The router's events for the app (`RouterEventLog`).
+    static var eventsDirectory: URL { directory.appendingPathComponent("events", isDirectory: true) }
     static var signaturesURL: URL { directory.appendingPathComponent("signatures.txt") }
     static var logURL: URL {
         if ProcessInfo.processInfo.environment["ACCOUNTDOCK_ROUTER_DIRECTORY"] != nil {
@@ -299,6 +300,9 @@ struct RouterEvent: Codable, Equatable, Sendable {
     /// The pause-gate key of the passthrough provider whose request this
     /// was; nil for the routed provider's own requests.
     var client: String?
+    /// The event's place in the router's log, assigned as it is written
+    /// (`RouterEventLog.append`); the app reads on after the last it applied.
+    var sequence: UInt64?
 }
 
 enum RouterLogic {

@@ -401,7 +401,7 @@ final class AppState: ObservableObject {
     @Published var routedStatus: [AIProviderType: RoutedStatus] = [:]
     /// Set when the user returns requests to Claude themselves.
     var routeOverrideUntil: [AIProviderType: Date] = [:]
-    var routerEventOffset: UInt64 = 0
+    var routerEventCursor: RouterEventCursor?
     var routerCheckedAt: Date?
     var lastRouterFailureNote: Date?
     var lastRouterHoldNote: Date?
