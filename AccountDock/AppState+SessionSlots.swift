@@ -379,8 +379,12 @@ extension AppState {
             }
             if modelSpent, target == nil, let session, let model, sessionsWithoutModelRoom.insert(session.sessionID).inserted {
                 failoverEvents.record(provider, "No account has \(CostParser.shortModelName(model)) allowance left for \(Self.eventName(of: session)); it stays where it is and will be refused until one resets or it changes model.")
+                if let fallback = Self.modelFallback(for: model, policy: failoverConfig.policy(for: provider), provider: provider) {
+                    pendingModelFallbacks[session.sessionID] = fallback
+                }
             } else if !modelSpent, let session {
                 sessionsWithoutModelRoom.remove(session.sessionID)
+                pendingModelFallbacks[session.sessionID] = nil
             }
             guard let target, await serve(slot.directory, target) else {
                 if let id = slot.account { slotDirectoryServing[path] = id }

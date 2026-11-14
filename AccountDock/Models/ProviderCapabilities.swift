@@ -73,6 +73,11 @@ struct ProviderCapabilities: Sendable {
     /// (`UsageAPIResponse.modelWeeklyLimits`); the menu bar then offers the
     /// provider's model-limit module.
     var reportsModelWeeklyLimits = false
+    /// Models a running session can be switched to from its own prompt
+    /// (`SessionTerminalActions.switchModel`), offered by the policy's
+    /// `noRoomModelFallback`; empty when the CLI cannot change model
+    /// within a session.
+    var sessionModelChoices: [SessionModelChoice] = []
     /// The CLI's executable name, for finding its running processes.
     var cliExecutableName: String?
     /// Window percent a request is assumed to cost while the provider has no
@@ -112,6 +117,13 @@ struct ProviderCapabilities: Sendable {
         let days = seconds / 86_400
         return days == 7 ? "Weekly" : "\(days)-day quota"
     }
+}
+
+/// A model a session can be switched to: the identifier its CLI's model
+/// command takes, and the name shown in settings.
+struct SessionModelChoice: Sendable, Hashable, Identifiable {
+    let id: String
+    let label: String
 }
 
 enum CredentialStore: Sendable { case keychain, files }
@@ -302,6 +314,10 @@ extension AIProviderType {
                 supportsExtraUsage: true,
                 reportsLimitResets: true,
                 reportsModelWeeklyLimits: true,
+                sessionModelChoices: [
+                    SessionModelChoice(id: "claude-opus-5-5", label: "Opus 5.5"),
+                    SessionModelChoice(id: "claude-sonnet-5-5", label: "Sonnet 5.5"),
+                ],
                 cliExecutableName: "claude",
                 storageKey: "claude",
                 shortBadge: "C",

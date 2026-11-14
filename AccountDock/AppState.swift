@@ -192,6 +192,11 @@ final class AppState: ObservableObject {
     var routerRefusedAt: [UUID: Date] = [:]
     /// When each provider's standing status becomes an event (`updateStatus`).
     var statusEventGates: [AIProviderType: StatusEventGate] = [:]
+    /// Types into the terminals sessions run in (`SessionTerminalActions`).
+    var sessionTerminal: SessionTerminalInput = AgtermTerminalInput()
+    /// Sessions without allowance for their model anywhere, by session ID,
+    /// with the model `applyModelFallbacks` switches each to once it is idle.
+    var pendingModelFallbacks: [String: String] = [:]
     /// A locally elapsed reset is useful for clearing a stale 100% display,
     /// but it is not proof that the provider has opened a new quota window.
     /// Never fail over to one of these accounts until a fresh API response

@@ -715,6 +715,17 @@ the pool weights and which sessions move, each time the pool is rebuilt
   like a new session (`RouterState.cacheAwareSessions`), since moving it
   loses nothing.
 
+A session whose model's own allowance is spent on every account stays where
+it is and is refused. With the policy's `noRoomModelFallback` (off by
+default, one of the provider's `sessionModelChoices`; none for a CLI that
+cannot change model within a session), `AppState.applyModelFallbacks` types
+`/model <id>` and Enter into the session's terminal once its turn has ended
+(`AgentSession.isIdle`, never mid-turn), through `SessionTerminalInput`:
+`AgtermTerminalInput` finds the agterm session in the process's
+`AGTERM_SESSION_ID` and passes the text to `agtermctl session type --stdin`,
+each call limited to 15 seconds. The switch, or why it could not be made, is
+recorded as an event.
+
 While sessions are served from several accounts, pausing waits for the whole
 pool: sessions pause only when no other included account is below its limit
 with more than `suspensionLead` to go, because each account keeps serving its
