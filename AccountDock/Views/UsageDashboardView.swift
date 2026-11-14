@@ -696,7 +696,9 @@ private struct UngatedSessionsLine: View {
 /// Sessions that read no slot of their own (`AppState.unisolatedSessions`).
 /// Resting the pointer on the line lists them (`AppState.sessionSummary`),
 /// each with a restart into its own slot or why it cannot have one now, and
-/// one action restarting every idle one in agterm.
+/// one action restarting every idle one in agterm. A session in the CLI's
+/// background service (`AppState.backgroundSessionStates`) is marked as
+/// such; its restart stops it and resumes it in its attach client's tab.
 private struct UnisolatedSessionsLine: View {
     @EnvironmentObject private var appState: AppState
     let provider: AIProviderType
@@ -719,15 +721,18 @@ private struct UnisolatedSessionsLine: View {
 
     private var list: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Started outside a slot of its own: by full path, from an IDE or the desktop app, or before the pool was ready. These share the sign-in and cannot be moved one at a time.")
+            Text("Started outside a slot of its own: by full path, from an IDE or the desktop app, before the pool was ready, or in the background service, whose workers read the shared sign-in. These share the sign-in and cannot be moved one at a time.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(sessions, id: \.sessionID) { session in
-                let blocker = AppState.restartBlocker(session, terminal: appState.unisolatedTerminals[session.sessionID])
+                let background = appState.backgroundSessionStates[session.sessionID]
+                let blocker = AppState.restartBlocker(session, terminal: appState.unisolatedTerminals[session.sessionID],
+                                                      background: background)
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(verbatim: appState.sessionSummary([session.sessionID]))
+                        Text(verbatim: appState.sessionSummary([session.sessionID])
+                             + (background != nil ? " · background session" : ""))
                             .font(.caption)
                         if let blocker {
                             Text(blocker)
@@ -742,10 +747,14 @@ private struct UnisolatedSessionsLine: View {
                     }
                     .controlSize(.small)
                     .disabled(blocker != nil)
+                    .help(background != nil
+                          ? "Stops the background session and resumes it in its attach client's agterm tab, through the launcher."
+                          : "Ends the session and resumes it in its agterm tab, through the launcher.")
                 }
             }
             let ready = sessions.filter {
-                AppState.restartBlocker($0, terminal: appState.unisolatedTerminals[$0.sessionID]) == nil
+                AppState.restartBlocker($0, terminal: appState.unisolatedTerminals[$0.sessionID],
+                                        background: appState.backgroundSessionStates[$0.sessionID]) == nil
             }
             if sessions.count > 1 {
                 Button("Restart all idle unisolated sessions") {

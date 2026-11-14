@@ -79,10 +79,15 @@ enum SessionTerminalActions {
         case typed
         /// Mid-turn or not yet stopped: tried again after its next `Stop`.
         case notIdle
+        /// Between turns, but its transcripts or a shell under it are still
+        /// active (`BackgroundSessionState`).
+        case busy
         /// It runs in no terminal `SessionTerminalInput` can type into.
         case notInTerminal
         /// The terminal refused the text.
         case refused
+        /// The CLI did not stop the background session.
+        case notStopped
     }
 
     /// Switches the session's model with the CLI's `/model` command.
@@ -103,6 +108,31 @@ enum SessionTerminalActions {
             return session.isIdle ? .notInTerminal : .notIdle
         }
         guard await SessionTerminalCommand.send(["/exit"], into: target, through: terminal) else { return .refused }
+        if pause > 0 { try? await Task.sleep(nanoseconds: UInt64(pause * 1_000_000_000)) }
+        let resume = "\(executable) --resume \(AppState.shellQuoted(session.sessionID))"
+        return await SessionTerminalCommand.send([resume], into: target, through: terminal) ? .typed : .refused
+    }
+
+    /// Stops a session that runs in a background worker and resumes it by
+    /// ID in its attach client's terminal, so the resumed run starts
+    /// through the launcher and reads a slot of its own. Only once it is
+    /// idle by every sign `state` carries (`AppState.restartBlocker`): its
+    /// last turn stopped, its transcripts quiet, no shell under its worker,
+    /// and an attach client in a terminal `terminal` reaches. `stopper` is
+    /// the CLI's own executable, which `control` runs with the stop
+    /// command; `executable` is typed, so the launcher on the shell's
+    /// `PATH` starts the resumed run. `pause` lets the attach client exit
+    /// and the shell take the terminal back.
+    static func restartBackground(_ session: AgentSession, state: BackgroundSessionState, executable: String,
+                                  stopper: String, support: BackgroundSessionSupport,
+                                  control: BackgroundSessionControl, terminal: SessionTerminalInput,
+                                  pause: TimeInterval = 2, now: Date = Date()) async -> Outcome {
+        guard session.isIdle else { return .notIdle }
+        guard state.transcriptsQuiet(now: now), !state.shellRunning else { return .busy }
+        guard let client = state.attachProcess, let target = await terminal.terminalSession(ofProcess: client) else {
+            return .notInTerminal
+        }
+        guard await control.stop(session.sessionID, executable: stopper, support: support) else { return .notStopped }
         if pause > 0 { try? await Task.sleep(nanoseconds: UInt64(pause * 1_000_000_000)) }
         let resume = "\(executable) --resume \(AppState.shellQuoted(session.sessionID))"
         return await SessionTerminalCommand.send([resume], into: target, through: terminal) ? .typed : .refused

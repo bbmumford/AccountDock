@@ -65,6 +65,7 @@ feature its capabilities declare, and its settings appear with it:
 | `supportsSelectableSwitchMode`, `switchReachesRunningSessions` | The switch method setting; whether a switch waits for a reset and restarts paused sessions to reach them |
 | `credentialSharedAcrossSessions`, `credentialStore` | Whether a switched-away account can still be consumed; the Keychain access notice |
 | `pauseGate`, `lifecycleHooks`, `cliExecutableName` | Pausing sessions, session records and finding the CLI's processes |
+| `sessionSlots`, `backgroundSessions` | One-session slots and their launcher; recognising the CLI's background-session workers and attach clients |
 | `liveUsageFeed` | The status-line usage feed and its setting |
 | `requestRouter` | Which provider's CLI the router serves (`AIProviderType.routedProvider`) and the routing settings |
 | `routeTarget` | The service the provider offers as a route target |
@@ -738,6 +739,24 @@ only, one idle in agterm (its last event `Stop`) is restarted in its own slot:
 `/exit`, Enter, then `claude --resume <id>`, Enter, typed into its agterm
 session, so the resumed run goes through the launcher. A session mid-turn or
 outside agterm is never typed into; the list says why.
+
+A CLI with a background-session service (`backgroundSessions`; Claude
+Code's `claude --bg`, `claude attach <id>`, `claude stop <id>`) runs each
+background session in worker processes its supervisor starts with its own
+environment, so a worker never passes through the launcher and reads the
+shared sign-in. `BackgroundSessionProcesses` reads them from the same process
+list as the slots (`refreshSlotProcesses`): a worker is an unisolated session
+on the shared sign-in, listed as a background session; a process running one
+of the service's commands (the attach client, the supervisor, `stop`, `logs`,
+`rm`, `agents`) or a `--bg` launch is no session. The launcher runs those
+unchanged, as it runs the sign-in commands, and such a process is left out of
+`slotDirectoryByProcess`, so a slot an attach client reads is released
+like any slot no process reads, and no session record it left is counted. Restarting a background session in its own slot, at the user's
+request only, waits until it is idle by every sign: its last event `Stop`,
+its transcript and its subagents' quiet for two minutes, and no shell under
+its worker, as its Bash tool starts; then it runs `claude stop <id>` and
+types `claude --resume <id>` and Enter into the agterm tab of its attach
+client, so the resumed run goes through the launcher.
 
 **Rebalance sessions now** (Settings → Failover and the usage tab, for a
 provider whose sessions run in one-session slots; also the requests action

@@ -205,6 +205,16 @@ final class AppState: ObservableObject {
     @Published var unisolatedTerminals: [String: String] = [:]
     /// Unisolated sessions already recorded as an event.
     var unisolatedNoted: Set<String> = []
+    /// The routed provider's background-session processes, read with the
+    /// slots by `refreshSlotProcesses`: its workers are sessions on the
+    /// shared sign-in, its attach clients and other commands no sessions.
+    var backgroundProcesses = BackgroundSessionProcesses()
+    /// The unisolated sessions that run in a background worker, with what
+    /// decides whether each can be restarted in a slot of its own
+    /// (`noteUnisolatedSessions`), for the usage tab.
+    @Published var backgroundSessionStates: [String: BackgroundSessionState] = [:]
+    /// Ends background sessions (`restartBackgroundSession`).
+    var backgroundSessionControl: BackgroundSessionControl = CLIBackgroundSessionControl()
     /// The session each slot directory serves, as its status line reported
     /// it (`PassiveUsageObservation.slotDirectory`): `serveSessionSlots`
     /// finds a slot's model by it when the slot's process left no session
