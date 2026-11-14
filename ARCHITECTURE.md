@@ -804,6 +804,28 @@ With **Rebalance automatically** (off by default) the quota cycle makes the
 same moves at most once per `balanceMoveInterval`, and only when the first
 account then runs out more than an hour later.
 
+A slot session can be **pinned** to its subscription (`SessionPins`, kept by
+session ID under `app.accountdock.failover.pins`, so `--resume` of the same
+session is pinned too and resumes on the pinned account; a pin goes when its
+session's record is archived or removed). Nothing automatic moves a pinned
+session: `serveSessionSlots` keeps its slot on the pinned account even when
+that account cannot serve it (`AppState.slotChoice`; recorded once per run
+at the limit), drops requested moves for it, and neither `SessionPacer.plan`
+(`fixed`), `rebalance` (not movable, like a session mid-turn, permanently)
+nor `applyModelFallbacks` touches it, though its rate counts as load on its
+account. A session on the shared sign-in cannot be pinned; its row offers a
+restart into its own slot first. A session opened from a tile's session
+button is pinned there unless the menu's **Keep here** is unchecked or
+Option is held while choosing; the slot is pinned first and the session
+reading it takes the pin. Clicking an account card's session count ("4
+sessions · 1 pinned") lists its sessions with a lock each; a pinned session
+refused at its account's limit shows "pinned · refused at limit" with
+**Unpin and move** (unpin, then a requested move to the account with most
+room for its model) and **Switch model**. Settings → Failover lists every
+pin with an unpin button, and the requests interface takes
+`{"action":"pin"|"unpin","session":…}`; `moveSession` refuses a pinned
+session.
+
 While sessions are served from several accounts, pausing waits for the whole
 pool: sessions pause only when no other included account is below its limit
 with more than `suspensionLead` to go, because each account keeps serving its

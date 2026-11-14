@@ -34,7 +34,11 @@ extension AppState {
     /// every quota cycle after `maintainSessionSlots`, which fills the map.
     func applyModelFallbacks() async {
         guard !pendingModelFallbacks.isEmpty else { return }
-        for (sessionID, model) in pendingModelFallbacks {
+        // A pinned session's model changes only at the user's request.
+        for sessionID in pendingModelFallbacks.keys where sessionPins.isPinned(sessionID) {
+            pendingModelFallbacks[sessionID] = nil
+        }
+        for (sessionID, model) in sessionPins.applicableFallbacks(pendingModelFallbacks) {
             guard let (provider, session) = liveSession(sessionID) else {
                 pendingModelFallbacks[sessionID] = nil
                 continue

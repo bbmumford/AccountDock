@@ -417,8 +417,10 @@ struct SessionPacer {
     /// which are not among `sessions`: the account carrying it, now or from
     /// the projected switch, counts it (`shares`), so it gives up slot
     /// sessions, takes none, and takes fewer new sessions, as that load
-    /// requires; the group itself never moves.
-    func plan(accounts: [Account], sessions: [Session], now: Date, sharedGroup: SharedGroup? = nil) -> Plan {
+    /// requires; the group itself never moves. `fixed` sessions, pinned to
+    /// their account, never move either and count as load on it.
+    func plan(accounts: [Account], sessions: [Session], now: Date, sharedGroup: SharedGroup? = nil,
+              fixed: Set<String> = []) -> Plan {
         let ids = Set(accounts.map(\.id))
         let active = sessions.filter { ids.contains($0.account) && now.timeIntervalSince($0.lastSeen) <= Self.activeWithin }
         let shares = shares(sharedGroup, accounts: accounts, now: now)
@@ -488,7 +490,7 @@ struct SessionPacer {
         }
         for source in sources.sorted(by: { $0.limitAt < $1.limitAt }) {
             let candidates = active.filter { session in
-                session.account == source.account.id && plan.moves[session.id] == nil
+                session.account == source.account.id && plan.moves[session.id] == nil && !fixed.contains(session.id)
                     && (source.key.map { scopedKeys(session, on: source.account).contains($0) } ?? true)
             }.sorted {
                 let (first, second) = (movable($0, now: now), movable($1, now: now))

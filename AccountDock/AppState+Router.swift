@@ -587,12 +587,14 @@ extension AppState {
         let shared = movesSessions ? nil : sharedGroup(provider, sessions: sessions, now: now)
         if let shared { sessions.removeAll { shared.members.contains($0.id) } }
         noteSharedGroup(shared?.group, provider: provider)
-        let plan = SessionPacer().plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group)
+        let pinned = Set(sessionPins.pinned(provider).keys)
+        let plan = SessionPacer().plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
+                                       fixed: pinned)
         let onDraining = Set(sessions.filter { draining.contains($0.account) }.map(\.id))
         // A session is never moved to an account without allowance for the
         // model it uses, nor off a draining account before its limit.
         var moves = plan.moves.filter { session, destination in
-            guard !onDraining.contains(session) else { return false }
+            guard !onDraining.contains(session), !pinned.contains(session) else { return false }
             guard let model = sessionModel(session, now: now) else { return true }
             return !accountCannotServe(destination, provider: provider, planner: planner, now: now, model: model)
         }

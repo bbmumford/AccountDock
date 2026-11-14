@@ -12,7 +12,9 @@ extension AppState {
         /// `refresh` reads usage from the provider now; `moveSession` moves
         /// one running session to another account; `rebalance` plans, and
         /// with `apply` makes, the moves that let a provider's slot sessions
-        /// last longest (`AppState.applyRebalance`).
+        /// last longest (`AppState.applyRebalance`); `pin` pins one running
+        /// slot session to the account its slot serves (`SessionPins`), and
+        /// `unpin` frees it.
         var action: String
         var session: String?
         /// An account's ID, label or email. For `refresh`, the account to
@@ -106,6 +108,9 @@ extension AppState {
             func hasRoom(_ account: Account) -> Bool {
                 !accountCannotServe(account.id, provider: provider, planner: planner, now: now, model: model)
             }
+            if sessionPins.isPinned(sessionID) {
+                return outcome(false, "The session is pinned to its account; unpin it first.")
+            }
             let wanted = named(request.account)
             // A session on the shared sign-in keeps the token it holds until
             // it is told to read the sign-in again, so it can still be on an
@@ -116,9 +121,7 @@ extension AppState {
                 moveRunningSessions(provider)
                 return outcome(true, "Sessions on the shared sign-in were told to read it again; \(messageName(active)) is the active account and has allowance left.", active)
             }
-            let target = wanted ?? accounts
-                .filter { $0.provider == provider && $0.id != current && !needsSignIn($0) && !policy.excludedAccountIDs.contains($0.id) && hasRoom($0) }
-                .min { (plannedUsage($0, now: now, model: model)?.sevenDay?.utilization ?? 100) < (plannedUsage($1, now: now, model: model)?.sevenDay?.utilization ?? 100) }
+            let target = wanted ?? moveDestination(provider, current: current, model: model, now: now)
             let modelName = model.map { CostParser.shortModelName($0) } ?? "its model"
             guard let target else { return outcome(false, "No other account has allowance left for \(modelName).") }
             guard target.id != current else { return outcome(false, "The session is already on \(messageName(target)).", target) }
@@ -142,6 +145,17 @@ extension AppState {
             if switched { moveRunningSessions(provider, from: previous) }
             return outcome(switched, switched ? "Switched the active account to \(messageName(target)); every session on the shared sign-in moves with it."
                                               : "The switch to \(messageName(target)) did not complete.", target)
+        case "pin", "unpin":
+            guard let sessionID = request.session, liveSession(sessionID) != nil || sessionPins.isPinned(sessionID) else {
+                return outcome(false, "No running session has that ID.")
+            }
+            let result = request.action == "pin" ? pinSession(sessionID, now: now) : unpinSession(sessionID)
+            let answer = Self.pinRequestOutcome(result) { id in accounts.first { $0.id == id }.map { messageName($0) } ?? "its account" }
+            let account: Account? = switch result {
+            case .pinned(let id), .alreadyPinned(let id), .unpinned(let id): accounts.first { $0.id == id }
+            case .notInSlot, .notPinned: nil
+            }
+            return outcome(answer.ok, answer.detail, account)
         case "rebalance":
             guard let provider = AIProviderType.implementedProviders.first(where: { provider in
                 request.provider.map {

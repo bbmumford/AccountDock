@@ -222,6 +222,12 @@ final class AppState: ObservableObject {
     var slotSessionsByDirectory: [String: String] = [:]
     /// When each provider's sessions were last rebalanced (`applyRebalance`).
     var lastRebalance: [AIProviderType: Date] = [:]
+    /// Sessions pinned to one subscription, kept across launches
+    /// (`SessionPins`); read by every path that moves a slot session.
+    @Published var sessionPins = SessionPins.load()
+    /// Pinned sessions recorded as kept on an account that can no longer
+    /// serve them, until it can again or they are unpinned.
+    var pinnedKeptAtLimit: Set<String> = []
     /// The account each provider's shared group was last projected to move
     /// to, so `noteSharedGroup` records each change once.
     var sharedGroupDestination: [AIProviderType: UUID] = [:]
