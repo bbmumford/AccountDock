@@ -190,6 +190,8 @@ final class AppState: ObservableObject {
     /// When the router last recorded a refusal at the limit by each account,
     /// for `routerRefusedUntil`; a newer live reading with room answers it.
     var routerRefusedAt: [UUID: Date] = [:]
+    /// When each provider's standing status becomes an event (`updateStatus`).
+    var statusEventGates: [AIProviderType: StatusEventGate] = [:]
     /// A locally elapsed reset is useful for clearing a stale 100% display,
     /// but it is not proof that the provider has opened a new quota window.
     /// Never fail over to one of these accounts until a fresh API response

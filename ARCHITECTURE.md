@@ -351,6 +351,17 @@ reset, or no capacity. `AppState+Failover.swift` runs it on a monitoring cycle
 and carries out the plan. Only one evaluation runs at a time, because a second
 one would plan from a half-switched state.
 
+A plan that every account is at its limit (wait for a reset, or no capacity)
+is not acted on during the first ten minutes after launch while an account
+that can be read has neither a reading from this launch nor a stored one
+still fresh (`AppState.awaitsFirstReadings`). The status the plan's standing
+state shows ("Using … up to its limit", "All accounts exhausted …") is
+restated every cycle; it is recorded as an event only once it has differed
+from the provider's last recorded status for two minutes, the longest quota
+cycle (`StatusEventGate`), so two states alternating from cycle to cycle
+record nothing. The outcome of an action ("Switched to …") is recorded when
+it happens.
+
 ### Tiers
 
 Every account is placed in a tier, as it will be 30 seconds from now (one
