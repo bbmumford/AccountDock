@@ -28,7 +28,7 @@ extension AppState {
         /// How the earliest run-out changes, in words.
         var outcome: String {
             func when(_ date: Date?) -> String {
-                date.map { $0.formatted(date: .omitted, time: .shortened) } ?? "not before the resets"
+                date.map { UsageFormat.clock($0) } ?? "not before the resets"
             }
             guard !moves.isEmpty else {
                 return "No move would make the sessions last longer; the first account runs out \(when(earliestRunOutBefore))."

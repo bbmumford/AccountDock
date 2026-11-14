@@ -75,7 +75,10 @@ extension AppState {
     func ingestTranscriptRequests(now: Date = Date()) async {
         for provider in AIProviderType.implementedProviders where provider.capabilities.transcriptSource != nil {
             let requests = await TranscriptRequestFeed.shared.newRequests(provider, now: now)
-            let refused = recordTranscriptRequests(requests, provider: provider, now: now)
+            // Only a refusal of a session's own request is process evidence.
+            let running = requests.contains { $0.limitRefusal != nil && $0.agent == nil }
+                ? await ProcessTable.currentInBackground(maxAge: Self.runningProcessTableAge) : nil
+            let refused = recordTranscriptRequests(requests, provider: provider, running: running, now: now)
             // Checked again until they count anyway (`refusalCounts`).
             let unsettled = sessionRefusals.filter { _, refusal in
                 !Self.refusalCounts(verified: refusal.verified, at: refusal.at, now: now)
@@ -89,7 +92,8 @@ extension AppState {
     /// Records one provider's new transcript requests for
     /// `ingestTranscriptRequests`. Returns the sessions whose refusal was
     /// recorded.
-    private func recordTranscriptRequests(_ requests: [TranscriptRequest], provider: AIProviderType, now: Date) -> [String] {
+    private func recordTranscriptRequests(_ requests: [TranscriptRequest], provider: AIProviderType,
+                                          running: ProcessTable?, now: Date) -> [String] {
         guard !requests.isEmpty else { return [] }
         let learns = learnsRequestCost(provider)
         let attribution = sessionAttribution(provider, now: now)
@@ -125,7 +129,7 @@ extension AppState {
             }
             if let words = request.limitRefusal, request.agent == nil,
                let named = account(namedByRefusal: words, at: request.at, provider: provider) {
-                noteProcessCredential(provider, session: request.session, process: process,
+                noteProcessCredential(provider, session: request.session, process: process, running: running,
                                       observed: named, source: "refusalReset", observedAt: request.at)
             }
             guard learns, let decision else { continue }

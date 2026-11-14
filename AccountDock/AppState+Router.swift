@@ -743,11 +743,7 @@ extension AppState {
     /// running longer (`reason`), then `outcome`.
     nonisolated static func sheddingEvent(account: String, allowance: String?, limitAt: Date,
                                           reason: SessionPacer.ShedReason, outcome: String, now: Date) -> String {
-        func when(_ date: Date) -> String {
-            Calendar.current.isDate(date, inSameDayAs: now)
-                ? date.formatted(date: .omitted, time: .shortened)
-                : date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
-        }
+        func when(_ date: Date) -> String { UsageFormat.clock(date, now: now) }
         let reaches = allowance.map { "At its \($0) sessions' current rate \(account) would use up its \($0) allowance" }
             ?? "At its sessions' current rate \(account) would reach its limit"
         let why = switch reason {
@@ -801,10 +797,8 @@ extension AppState {
     /// `serveSessionSlots`.
     nonisolated static func remainderMoveEvent(session: String, account: String, percentLeft: Int, resetsAt: Date,
                                                now: Date) -> String {
-        let when = Calendar.current.isDate(resetsAt, inSameDayAs: now)
-            ? "at " + resetsAt.formatted(date: .omitted, time: .shortened)
-            : "on " + resetsAt.formatted(.dateTime.weekday(.abbreviated).hour().minute())
-        return "Moved \(session) (light use) to \(account) to use its last \(percentLeft)% before it resets \(when); it rebuilds its cache there."
+        "Moved \(session) (light use) to \(account) to use its last \(percentLeft)% before it resets "
+            + "\(UsageFormat.atClock(resetsAt, now: now)); it rebuilds its cache there."
     }
 
     /// The account as `SessionPacer` sees it: its windows projected to now,

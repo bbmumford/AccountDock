@@ -279,9 +279,10 @@ struct UsageDashboardView: View {
     /// One account's windows, extra usage where the provider has it, and
     /// what stops it from being read.
     private func accountCard(_ account: Account) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            accountHeader(account)
-            if appState.needsSignIn(account) {
+        let status = appState.status(of: account)
+        return VStack(alignment: .leading, spacing: 10) {
+            accountHeader(account, status: status)
+            if status.needsSignIn {
                 signInPrompt(account)
             }
             if let usage = appState.accountUsage[account.id] {
@@ -290,34 +291,20 @@ struct UsageDashboardView: View {
                     extraUsageRow(usage.extraUsage)
                 }
                 limitResetRows(usage.limitResets)
-                staleUsageNotice(account)
-            } else if let errorState = appState.accountUsageErrors[account.id] {
+                if let stale = status.staleReading { staleUsageNotice(stale) }
+            } else if let problem = status.readingProblem {
                 HStack {
-                    Image(systemName: account.providerUnavailableLabel != nil
-                        ? "nosign"
-                        : (errorState.isRateLimited
-                            ? "timer"
-                            : (errorState.isExpired ? "exclamationmark.triangle" : "xmark.circle")))
-                        .foregroundStyle(errorState.isExpired ? .yellow : .red)
-                    Text(errorState.message)
+                    Image(systemName: problem.symbol)
+                        .foregroundStyle(problem.tone.color)
+                    Text(problem.text)
                         .font(.caption)
                         .foregroundStyle(.textSecondary)
                         .lineLimit(2)
                     Spacer()
                 }
                 .padding(.top, 4)
-            } else if account.provider.capabilities.credentialStore == .keychain {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle")
-                        .foregroundStyle(.yellow)
-                    Text("Token expired. Switch to this account in \(account.provider.rawValue) to refresh.")
-                        .font(.caption)
-                        .foregroundStyle(.textSecondary)
-                    Spacer()
-                }
-                .padding(.top, 4)
             }
-            if account.provider.capabilities.credentialStore == .files, account.credentialLocation == nil {
+            if status.needsCapture {
                 Label("Credentials need to be captured again.", systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -471,25 +458,25 @@ struct UsageDashboardView: View {
         .padding(.top, 4)
     }
 
+    /// The reading shown is from before a failed one (`AccountStatus.staleReading`).
     @ViewBuilder
-    private func staleUsageNotice(_ account: Account) -> some View {
-        if let error = appState.accountUsageErrors[account.id],
-           let cachedAt = error.cachedAt {
-            HStack(spacing: 5) {
-                Image(systemName: error.isRateLimited ? "timer" : "clock.arrow.circlepath")
-                Text(error.message)
-                    .lineLimit(1)
-                Spacer()
-                Text(cachedAt, style: .relative)
+    private func staleUsageNotice(_ notice: AccountStatus.Notice) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: notice.symbol)
+            Text(notice.text)
+                .lineLimit(1)
+            Spacer()
+            if let since = notice.since {
+                Text(since, style: .relative)
                     .monospacedDigit()
             }
-            .font(.caption2)
-            .foregroundStyle(.orange)
         }
+        .font(.caption2)
+        .foregroundStyle(notice.tone.color)
     }
 
     @ViewBuilder
-    private func accountHeader(_ account: Account) -> some View {
+    private func accountHeader(_ account: Account, status: AccountStatus) -> some View {
         HStack(spacing: 8) {
             Image(systemName: account.provider.iconName)
                 .font(.subheadline)
@@ -500,9 +487,7 @@ struct UsageDashboardView: View {
                     Text(account.headerTitle(obfuscated: !showFullEmail))
                         .font(.subheadline.weight(.medium))
                         .lineLimit(1)
-                    if account.isActive {
-                        Badge(text: String(localized: "Active", bundle: L10n.bundle), color: .brand)
-                    }
+                    ForEach(status.cardTitleBadges, id: \.text) { Badge($0) }
                     if let sessions = appState.accountSessions[account.id], !sessions.isEmpty {
                         SessionCountLabel(provider: account.provider, sessions: sessions)
                     }
@@ -512,12 +497,7 @@ struct UsageDashboardView: View {
 
             Spacer()
 
-            if let sub = account.displaySubscriptionType {
-                Badge(text: sub, color: .brand)
-            }
-            if let unavailable = account.providerUnavailableLabel {
-                Badge(text: unavailable, color: .orange)
-            }
+            ForEach(status.cardPlanBadges, id: \.text) { Badge($0) }
             sessionButton(account)
         }
     }
@@ -898,7 +878,7 @@ private struct PaceOutlookLine: View {
         var parts: [String] = []
         if let runsOut = outlook.runsOutAt, let limit = outlook.limit {
             let window = outlook.afterCurrentWindow ? " in a later window than this one" : ""
-            let room = outlook.resumesAt.map { ", and has room again at \($0.formatted(date: .omitted, time: .shortened))" } ?? ""
+            let room = outlook.resumesAt.map { ", and has room again \(UsageFormat.atClock($0))" } ?? ""
             parts.append("At the current pace, \(outlook.account) reaches its \(limit)\(window) \(Self.when(runsOut))\(room).")
         } else {
             parts.append("At the current pace, \(outlook.account) does not run out this week.")
@@ -913,20 +893,9 @@ private struct PaceOutlookLine: View {
         return parts.joined(separator: " ")
     }
 
-    /// "in about 40 min (9:12 am)", or the day and time beyond today.
-    static func when(_ date: Date) -> String {
-        let minutes = max(0, Int((date.timeIntervalSinceNow / 60).rounded()))
-        let clock = Calendar.current.isDateInToday(date)
-            ? date.formatted(date: .omitted, time: .shortened)
-            : date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
-        if minutes < 1 { return "now" }
-        if minutes < 60 { return "in about \(minutes) min (\(clock))" }
-        if minutes < 24 * 60 {
-            let hours = minutes / 60, rest = minutes % 60
-            return "in about \(hours) h\(rest > 0 ? " \(rest) min" : "") (\(clock))"
-        }
-        return "around \(clock)"
-    }
+    /// "in about 40 min (9:12 am)", or the day and time beyond a day
+    /// (`UsageFormat.until`).
+    static func when(_ date: Date) -> String { UsageFormat.until(date) }
 }
 
 /// One line summarising the coming week under the current strategy, from

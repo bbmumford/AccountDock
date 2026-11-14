@@ -125,6 +125,30 @@ extension AppState {
         if rejectedCredentialAccounts.contains(account.id) { rejectedCredentialAccounts.remove(account.id) }
     }
 
+    // MARK: - Account status
+
+    /// Decides every account's `AccountStatus` again from its reading, the
+    /// error of its last read and whether its sign-in was rejected; called
+    /// whenever one of those or the account list changes. Published only
+    /// when a status changed.
+    func refreshAccountStatuses() {
+        let statuses = accounts.reduce(into: [UUID: AccountStatus]()) { result, account in
+            result[account.id] = AccountStatus.make(account, hasReading: accountUsage[account.id] != nil,
+                                                    error: accountUsageErrors[account.id],
+                                                    signInRejected: rejectedCredentialAccounts.contains(account.id))
+        }
+        if statuses != accountStatuses { accountStatuses = statuses }
+    }
+
+    /// The status the views draw for `account`: the one last decided, or
+    /// decided now for an account added since.
+    func status(of account: Account) -> AccountStatus {
+        accountStatuses[account.id]
+            ?? AccountStatus.make(account, hasReading: accountUsage[account.id] != nil,
+                                  error: accountUsageErrors[account.id],
+                                  signInRejected: rejectedCredentialAccounts.contains(account.id))
+    }
+
     func quarantineCredentials(of account: Account, reason: String) {
         let alreadyQuarantined = credentialQuarantine[account.id].map { $0 > Date() } ?? false
         credentialQuarantine[account.id] = Date().addingTimeInterval(6 * 60 * 60)

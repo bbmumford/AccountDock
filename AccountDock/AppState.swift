@@ -17,12 +17,22 @@ final class AppState: ObservableObject {
     // MARK: - Published State
 
     @Published var accounts: [Account] = [] {
-        didSet { credentialAuditAccountsChanged(from: oldValue) }
+        didSet {
+            credentialAuditAccountsChanged(from: oldValue)
+            refreshAccountStatuses()
+        }
     }
+    /// What each account's card and account-list row show
+    /// (`AccountStatus.make`), set only by `refreshAccountStatuses`
+    /// whenever the accounts, their readings, their reading errors or the
+    /// rejected sign-ins change; the views only draw it.
+    @Published var accountStatuses: [UUID: AccountStatus] = [:]
     /// Processes whose own evidence names another account than the one
     /// AccountDock believes they read, by session (`noteProcessCredential`).
     @Published var flaggedCredentialProcesses: [String: FlaggedCredentialProcess] = [:]
-    @Published var accountUsage: [UUID: UsageAPIResponse] = [:]
+    @Published var accountUsage: [UUID: UsageAPIResponse] = [:] {
+        didSet { refreshAccountStatuses() }
+    }
     @Published private(set) var accountUsageUpdatedAt: [UUID: Date] = [:]
     /// When each account's usage was last read whole from its provider's own
     /// endpoint, and the long-window use it showed then. A passive reading
@@ -70,7 +80,9 @@ final class AppState: ObservableObject {
         }
     }
     
-    @Published var accountUsageErrors: [UUID: UsageErrorState] = [:]
+    @Published var accountUsageErrors: [UUID: UsageErrorState] = [:] {
+        didSet { refreshAccountStatuses() }
+    }
 
     // MARK: - Services
 
@@ -133,7 +145,9 @@ final class AppState: ObservableObject {
     /// sign-in AccountDock holds for them even after renewal. Failover
     /// leaves them out, and the account views show the re-authenticate
     /// prompt, until a reading or re-authentication succeeds.
-    @Published var rejectedCredentialAccounts: Set<UUID> = []
+    @Published var rejectedCredentialAccounts: Set<UUID> = [] {
+        didSet { refreshAccountStatuses() }
+    }
     /// When each account's saved sign-in last passed the switch check,
     /// which renews it; read by `credentialIsUsable`.
     var credentialVerifiedAt: [UUID: Date] = [:]
@@ -572,7 +586,10 @@ final class AppState: ObservableObject {
         // Index local usage concurrently with provider refreshes. SQLite writes
         // are isolated in UsageIndex, so a slow network or Keychain prompt
         // cannot prevent local history from becoming available.
-        async let usageIndexRefresh: Void = UsageIndex.shared.refreshFromFilesystem()
+        // Codex sessions write rollouts in Codex's own home and in each
+        // account's managed home.
+        let codexHomes = accounts.filter { $0.provider == .codex }.compactMap(\.credentialLocation)
+        async let usageIndexRefresh: Void = UsageIndex.shared.refreshFromFilesystem(codexHomes: codexHomes)
 
         claudeAvailable = await claudeService.isClaudeAvailable()
         codexAvailable = await codexService.isAvailable()
@@ -1885,18 +1902,9 @@ final class AppState: ObservableObject {
 
     // MARK: - Persistence
 
-    private struct PersistedUsageSnapshot: Codable {
-        let usage: UsageAPIResponse
-        let updatedAt: Date
-        /// `accountWholeReadings`; absent in a snapshot saved without one.
-        var wholeAt: Date?
-        var wholeLongUtilization: Double?
-        /// Whether the reading was cleared at a reset no reading has
-        /// confirmed yet (`accountsAwaitingPostResetVerification`): its
-        /// cleared windows then read 0% with no countdown, which
-        /// `loadUsageSnapshots` must not take for a reading.
-        var resetUnverified: Bool?
-    }
+    // Usage snapshots are saved as `PersistedUsageSnapshot`, which holds the
+    // neutral `UsageReading` and still loads a snapshot saved in the reply's
+    // form.
 
     private func loadFailoverRuntime() {
         guard let data = UserDefaults.standard.data(forKey: failoverRuntimeKey),

@@ -379,7 +379,7 @@ struct SessionPacer {
         let hours = max(end.timeIntervalSince(now), 60) / 3600
         let held = shared?.percent(from: now, until: end, fraction: fraction) ?? 0
         let limitAt = shared.map { Self.limitTime(remaining, burn: burn, shared: $0, fraction: fraction, now: now) }
-            ?? (burn > 0 ? now.addingTimeInterval(max(0, remaining) / burn * 3600) : nil)
+            ?? Allowance.runOut(left: remaining, perHour: burn, now: now)
         return Outlook(allowedPerHour: max(0, remaining - held) / hours, burnPerHour: burn,
                        limitAt: limitAt.flatMap { $0 < end ? $0 : nil }, windowEndsAt: end)
     }
@@ -475,11 +475,11 @@ struct SessionPacer {
         var tokensPerHour = shares.isEmpty ? 0 : sharedGroup?.tokensPerHour ?? 0
         for account in accounts where (account.baseWeight > 0 || shares[account.id] != nil) && account.percentPerMillion > 0 {
             let left = windowsLeft(account, spent: spent[account.id] ?? 0, now: now).map(\.left).min() ?? 0
-            tokensLeft += max(0, left) / account.percentPerMillion * 1_000_000
-            tokensPerHour += max(0, burn[account.id] ?? 0) / account.percentPerMillion * 1_000_000
+            tokensLeft += Allowance.millions(max(0, left), percentPerMillion: account.percentPerMillion) * 1_000_000
+            tokensPerHour += Allowance.millions(max(0, burn[account.id] ?? 0),
+                                                percentPerMillion: account.percentPerMillion) * 1_000_000
         }
-        guard tokensPerHour > 0 else { return nil }
-        return now.addingTimeInterval(tokensLeft / tokensPerHour * 3600)
+        return Allowance.runOut(left: tokensLeft, perHour: tokensPerHour, now: now)
     }
 
     /// Window percent the account has left at `horizon` (or at a window's
@@ -490,7 +490,7 @@ struct SessionPacer {
                now: Date) -> Double {
         windowsLeft(account, spent: spent, now: now).map { window in
             let end = min(horizon, window.end)
-            return window.left - burn * max(0, end.timeIntervalSince(now)) / 3600
+            return window.left - Allowance.spent(perHour: burn, from: now, until: end)
                 - (shared?.percent(from: now, until: end) ?? 0)
         }.min() ?? 0
     }
@@ -502,13 +502,12 @@ struct SessionPacer {
     }
 
     func remaining(_ account: Account, now: Date) -> Double {
-        let running = account.resetsAt.map { $0 > now } ?? false
-        return limit - (running ? account.utilization : 0)
+        Allowance.left(limit: limit, used: account.utilization, resetsAt: account.resetsAt, now: now)
     }
 
     /// Window percent per hour `tokensPerHour` costs on the account.
     func percent(_ tokensPerHour: Double, on account: Account) -> Double {
-        tokensPerHour / 1_000_000 * account.percentPerMillion
+        Allowance.percent(millions: tokensPerHour / 1_000_000, percentPerMillion: account.percentPerMillion)
     }
 
     /// Million weighted tokens `windowPercent` of the account's window
@@ -517,7 +516,7 @@ struct SessionPacer {
     /// new-session weights, the destination a shed or stranded session
     /// takes, and whether a rebalancing move pays for its rewrite.
     func millions(_ windowPercent: Double, on account: Account) -> Double {
-        account.percentPerMillion > 0 ? windowPercent / account.percentPerMillion : windowPercent
+        Allowance.millions(windowPercent, percentPerMillion: account.percentPerMillion)
     }
 
     /// Window percent a session spends writing `contextTokens` into the
@@ -862,7 +861,7 @@ struct SessionPacer {
                     let fraction = shares[account.id]?.scopedFractions[key] ?? 0
                     let end = min(runOut, allowance.resetsAt)
                     let own = allowance.remaining - (scopedSpent[account.id]?[key] ?? 0)
-                        - (scopedBurn[account.id]?[key] ?? 0) * max(0, end.timeIntervalSince(now)) / 3600
+                        - Allowance.spent(perHour: scopedBurn[account.id]?[key] ?? 0, from: now, until: end)
                         - (shares[account.id]?.percent(from: now, until: end, fraction: fraction) ?? 0)
                     return account.baseWeight * max(0, millions(min(whole, own), on: account)) / runOutHours
                 }

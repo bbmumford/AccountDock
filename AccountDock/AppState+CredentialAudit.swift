@@ -109,9 +109,16 @@ extension AppState {
     /// the other token after `signalFlaggedProcesses` is listed again for
     /// it. A process on the shared sign-in that holds an account switched
     /// away from is still flagged; the entry says so, since signalling
-    /// moves it.
-    func noteProcessCredential(_ provider: AIProviderType, session: String, process: Int32?, observed: UUID,
-                               source: String, observedAt: Date?) {
+    /// moves it. Only a session whose process runs now is recorded and
+    /// flagged (`processRuns`): a status-line file or transcript outlives
+    /// its session, and a session without a running process has no token
+    /// to read again. `running` is a process table read this cycle.
+    func noteProcessCredential(_ provider: AIProviderType, session: String, process: Int32?, running: ProcessTable?,
+                               observed: UUID, source: String, observedAt: Date?) {
+        guard Self.processRuns(process, in: running) else {
+            flaggedCredentialProcesses[session] = nil
+            return
+        }
         let believed = believedCredentialAccount(provider, process: process)
         var detail: String?
         if believed.account != observed, believed.source != "slot", let away = lastSwitchedAway[observed] {
@@ -131,6 +138,29 @@ extension AppState {
         } else {
             flaggedCredentialProcesses[session] = nil
         }
+    }
+
+    /// How old a process table `noteProcessCredential`'s callers read may
+    /// be; the quota cycle's own reading (`refreshSlotProcesses`) is reused
+    /// within it.
+    static let runningProcessTableAge: TimeInterval = 30
+
+    /// Whether a session's process runs now: it is known (the session has a
+    /// live lifecycle record, `sessionProcesses`) and `table` lists it. Without
+    /// a table, as when `ps` cannot run, the live record's own process check
+    /// (`AgentSessions.live`) stands.
+    nonisolated static func processRuns(_ process: Int32?, in table: ProcessTable?) -> Bool {
+        guard let process else { return false }
+        return table.map { $0.entry(process) != nil } ?? true
+    }
+
+    /// The flags of sessions still running, `live` being the sessions
+    /// `refreshSessions` read; `refreshSessions` drops the rest, so neither
+    /// the Settings audit section nor `signalFlaggedProcesses` offers to
+    /// signal a session that ended.
+    nonisolated static func flagsOfRunningSessions(_ flagged: [String: FlaggedCredentialProcess],
+                                                   live: Set<String>) -> [String: FlaggedCredentialProcess] {
+        flagged.filter { live.contains($0.key) }
     }
 
 

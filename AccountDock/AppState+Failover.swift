@@ -230,6 +230,8 @@ extension AppState {
         let observations = await Task.detached(priority: .utility) {
             PassiveUsageTelemetry.shared.collect(codexHomes: codexHomes, now: Date())
         }.value
+        let running = observations.isEmpty
+            ? nil : await ProcessTable.currentInBackground(maxAge: Self.runningProcessTableAge)
         let now = Date()
         let servedCutoff = now.addingTimeInterval(-SessionAttribution.servedLifetime)
         sessionServedBy = sessionServedBy.filter { $0.value.at > servedCutoff }
@@ -273,8 +275,9 @@ extension AppState {
             // which the audit compares with its slot's account.
             if let session = observation.processKey, observation.observedAt > servedCutoff,
                let evidence = slot == nil ? attributed : attribute(observation), evidence.byResets {
-                noteProcessCredential(provider, session: session, process: processes[session], observed: evidence.account,
-                                      source: "statusLineResets", observedAt: observation.observedAt)
+                noteProcessCredential(provider, session: session, process: processes[session], running: running,
+                                      observed: evidence.account, source: "statusLineResets",
+                                      observedAt: observation.observedAt)
             }
             guard let accountID = slot ?? attributed?.account else { continue }
             if let updatedAt = accountUsageUpdatedAt[accountID], observation.observedAt <= updatedAt { continue }
@@ -984,9 +987,7 @@ extension AppState {
             let rounded = Date(timeIntervalSinceReferenceDate: (date.timeIntervalSinceReferenceDate / 60).rounded() * 60)
             // A reset on another day names the day, so one days away does not
             // read as later today.
-            let resetText = Calendar.current.isDateInToday(rounded)
-                ? rounded.formatted(date: .omitted, time: .shortened)
-                : rounded.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())
+            let resetText = UsageFormat.clock(rounded, dated: true)
             await holdWork(provider, policy: policy, current: current, because: "every included account is exhausted until \(resetText)")
             // A switch that reaches running sessions would restart or reload
             // the paused sessions, and one that moves them to a live
@@ -1521,8 +1522,8 @@ extension AppState {
                 for: provider
             )
             refreshPauseStatus(provider)
-            let minutes = Int((reset.timeIntervalSince(now) / 60).rounded())
-            failoverEvents.record(provider, "\(name) is at its limit and resets in \(minutes) min, before the prompt caches of its \(sessions.count) working session(s) expire: they wait at their next tool call and continue on it after the reset, instead of writing their context again on another account.")
+            let until = UsageFormat.duration(reset.timeIntervalSince(now))
+            failoverEvents.record(provider, "\(name) is at its limit and resets in \(until), before the prompt caches of its \(sessions.count) working session(s) expire: they wait at their next tool call and continue on it after the reset, instead of writing their context again on another account.")
             return
         }
     }

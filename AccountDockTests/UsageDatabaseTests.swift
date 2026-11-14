@@ -75,6 +75,39 @@ final class UsageDatabaseTests: XCTestCase {
         XCTAssertEqual(database.activity(on: "2026-10-02").conversationTurns, 3)
     }
 
+    /// Codex's cost history reads the rollouts of its own home and of every
+    /// managed home, each home once however it is named and each rollout
+    /// once, the longest copy standing.
+    func testCodexRolloutsComeFromEveryHomeEachOnce() throws {
+        let (_, root) = try makeDatabase()
+        func write(_ home: String, _ name: String, bytes: Int) throws -> URL {
+            let day = root.appendingPathComponent("\(home)/sessions/2026/11/15", isDirectory: true)
+            try FileManager.default.createDirectory(at: day, withIntermediateDirectories: true)
+            let url = day.appendingPathComponent(name)
+            try Data(repeating: 0x7B, count: bytes).write(to: url)
+            return url
+        }
+        let shared = "rollout-2026-11-15T09-00-00-11111111-1111-1111-1111-111111111111.jsonl"
+        let own = "rollout-2026-11-15T10-00-00-22222222-2222-2222-2222-222222222222.jsonl"
+        _ = try write("codex", shared, bytes: 10)
+        let resumed = try write("managed-a", shared, bytes: 25)
+        let managed = try write("managed-a", own, bytes: 5)
+        _ = try write("managed-a", "notes.txt", bytes: 5)
+        let homes = [root.appendingPathComponent("codex", isDirectory: true),
+                     root.appendingPathComponent("managed-a", isDirectory: true),
+                     root.appendingPathComponent("codex/../codex", isDirectory: true),
+                     root.appendingPathComponent("managed-b", isDirectory: true)]
+
+        let rollouts = UsageIndex.codexRollouts(homes: homes)
+        XCTAssertEqual(rollouts.map(\.url.lastPathComponent).sorted(), [shared, own].sorted(),
+                       "a rollout in two homes, and a home named twice, count once; other files none")
+        XCTAssertEqual(rollouts.first { $0.url.lastPathComponent == shared }?.url.standardizedFileURL,
+                       resumed.standardizedFileURL, "the longer copy stands")
+        XCTAssertEqual(rollouts.first { $0.url.lastPathComponent == own }?.byteCount, 5)
+        XCTAssertEqual(rollouts.first { $0.url.lastPathComponent == own }?.url.standardizedFileURL,
+                       managed.standardizedFileURL, "a managed home's own rollout is read")
+    }
+
     func testCodexAggregatesShareTheDatabaseAndDeletedFilesAreEvicted() throws {
         let (database, directory) = try makeDatabase()
         defer { database.close(); try? FileManager.default.removeItem(at: directory) }

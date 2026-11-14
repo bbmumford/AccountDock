@@ -257,7 +257,7 @@ struct FailoverPlanner {
         guard age <= max(lifetime, stalePoolReadingLimit) else { return 0 }
         return lifetime / age
     }
-    static let sessionWindow: TimeInterval = 5 * 60 * 60
+    static let sessionWindow = Allowance.sessionWindow
     /// The active account is judged as it will be this long from now, which
     /// covers one monitoring cycle plus the switch itself. Several agents can
     /// spend the last few percent before a trigger in under one cycle.
@@ -373,15 +373,10 @@ struct FailoverPlanner {
 
     /// Session-percentage units of work the account can still serve now.
     func headroom(_ state: QuotaAccountState, _ projection: QuotaProjection) -> Double {
-        let session: Double
-        if let value = projection.session {
-            session = 100 - value
-        } else {
-            session = settings.sessionQuotaMode == .required ? 0 : .infinity
-        }
         guard let weekly = projection.weekly else { return 0 }
-        let k = state.sessionPerWeekly ?? Self.defaultSessionPerWeekly
-        return max(0, min(session, (100 - weekly) * k))
+        return Allowance.sessionRoom(sessionUsed: projection.session, weeklyUsed: weekly,
+                                     sessionPerWeekly: state.sessionPerWeekly ?? Self.defaultSessionPerWeekly,
+                                     sessionRoomWhenUnread: settings.sessionQuotaMode == .required ? 0 : .infinity)
     }
 
     func tier(
@@ -482,12 +477,11 @@ struct FailoverPlanner {
         guard let projection = projection(state, now: now),
               let weekly = projection.weekly,
               let reset = projection.weeklyReset else { return .distantFuture }
-        let k = state.sessionPerWeekly ?? Self.defaultSessionPerWeekly
-        let maximumWeeklyPerHour = projection.session == nil && settings.sessionQuotaMode != .required
-            ? Double.infinity
-            : (100 / k) / (Self.sessionWindow / 3600)
-        let hoursNeeded = (100 - weekly) / maximumWeeklyPerHour
-        return reset.addingTimeInterval(-hoursNeeded * 3600)
+        // Without a session window to read, and none required, nothing caps
+        // how fast the long window drains.
+        let uncapped = projection.session == nil && settings.sessionQuotaMode != .required
+        return Allowance.latestStart(weeklyUsed: weekly, resetsAt: reset,
+                                     sessionPerWeekly: uncapped ? nil : state.sessionPerWeekly ?? Self.defaultSessionPerWeekly)
     }
 
     /// Seconds until the active account is expected to cross a trigger, or
@@ -819,15 +813,13 @@ struct FailoverPlanner {
     /// twentieth the size is a twentieth of the work. Read by
     /// `expectedBurn` and `carriedBurn`.
     func converted(_ percent: Double, from: QuotaAccountState, to: QuotaAccountState) -> Double {
-        guard from.percentPerMillion > 0, to.percentPerMillion > 0 else { return percent }
-        return percent / from.percentPerMillion * to.percentPerMillion
+        Allowance.converted(percent, from: from.percentPerMillion, to: to.percentPerMillion)
     }
 
     /// `percent`, counted at `Settings.referenceRatio`, as `state`'s session
     /// percent: the switch's cost and the in-flight reserve where they land.
     func onAccount(_ percent: Double, _ state: QuotaAccountState) -> Double {
-        guard settings.referenceRatio > 0, state.percentPerMillion > 0 else { return percent }
-        return percent / settings.referenceRatio * state.percentPerMillion
+        Allowance.converted(percent, from: settings.referenceRatio, to: state.percentPerMillion)
     }
 
     /// Million weighted tokens the account can still serve now: its
@@ -836,8 +828,7 @@ struct FailoverPlanner {
     /// 10% of a large one. Read by `plan`'s ordering of destinations and by
     /// `nextSwitch`'s preference for the account it projected.
     func tokenRoom(_ state: QuotaAccountState, _ projection: QuotaProjection) -> Double {
-        let room = headroom(state, projection)
-        return state.percentPerMillion > 0 ? room / state.percentPerMillion : room
+        Allowance.millions(headroom(state, projection), percentPerMillion: state.percentPerMillion)
     }
 
     /// The account `plan` would make active next, and when.

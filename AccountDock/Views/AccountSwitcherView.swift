@@ -146,7 +146,8 @@ struct AccountSwitcherView: View {
     }
 
     private func accountRow(_ account: Account) -> some View {
-        HStack(spacing: 12) {
+        let status = appState.status(of: account)
+        return HStack(spacing: 12) {
             Image(systemName: "line.3.horizontal")
                 .font(.caption)
                 .foregroundStyle(.textSecondary)
@@ -205,19 +206,14 @@ struct AccountSwitcherView: View {
                         .buttonStyle(.plain)
                         .help("Edit label")
 
-                        if account.isActive {
-                            Badge(text: String(localized: "Active", bundle: L10n.bundle), color: .brand)
-                        }
-                        if appState.needsSignIn(account) {
-                            Badge(text: String(localized: "Needs sign-in", bundle: L10n.bundle), color: .orange)
-                        }
+                        ForEach(status.listBadges, id: \.text) { Badge($0) }
                     }
                 }
 
                 AccountEmailLabel(email: account.email, alwaysVisible: showFullEmail)
 
                 HStack(spacing: 8) {
-                    if let sub = account.displaySubscriptionType {
+                    if let sub = status.plan {
                         Label(sub, systemImage: "creditcard")
                             .font(.caption2)
                             .foregroundStyle(.textSecondary)
@@ -226,7 +222,7 @@ struct AccountSwitcherView: View {
                         .font(.caption2)
                         .foregroundStyle(.textSecondary)
                 }
-                if let unavailable = account.providerUnavailableLabel {
+                if let unavailable = status.planUnavailable {
                     Label(unavailable, systemImage: "nosign")
                         .font(.caption2)
                         .foregroundStyle(.orange)

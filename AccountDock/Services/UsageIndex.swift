@@ -81,7 +81,9 @@ actor UsageIndex {
     static let shared = UsageIndex()
 
     private let claudeProjectsDir: String
-    private let codexSessionsDir: URL
+    /// Codex's own home, `~/.codex`, where its sessions and slot sessions
+    /// write their rollouts.
+    private let codexSharedHome: URL
     private let kimiSessionsDir: URL
     private let database: UsageDatabase
 
@@ -113,8 +115,8 @@ actor UsageIndex {
 
     private init() {
         self.claudeProjectsDir = NSHomeDirectory() + "/.claude/projects"
-        self.codexSessionsDir = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".codex/sessions", isDirectory: true)
+        self.codexSharedHome = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".codex", isDirectory: true)
         self.kimiSessionsDir = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent(".kimi-code/sessions", isDirectory: true)
 
@@ -127,11 +129,13 @@ actor UsageIndex {
 
     // MARK: Public API
 
-    /// Walk `~/.claude/projects/**/*.jsonl`, re-parse any file whose mtime
+    /// Walk `~/.claude/projects/**/*.jsonl`, the rollouts of Codex's own
+    /// home and of `codexHomes`, its accounts' managed homes
+    /// (`codexRollouts`), and Kimi's sessions; re-parse any file whose mtime
     /// has changed, evict missing files, persist the result. All work runs
     /// on the actor's executor; the actor is on the cooperative pool, not
     /// the main thread, so the UI is never blocked.
-    func refreshFromFilesystem() async {
+    func refreshFromFilesystem(codexHomes: [String] = []) async {
         if let lastFilesystemRefresh,
            Date().timeIntervalSince(lastFilesystemRefresh) < minimumRefreshInterval {
             log.debug("refresh: skipped; compact index is less than 15 minutes old")
@@ -157,7 +161,7 @@ actor UsageIndex {
         )
         let evicted = database.removeClaudeFiles(notIn: result.livePaths)
         let codexResult = Self.scanCodexAndPersist(
-            sessionsDir: codexSessionsDir,
+            rollouts: Self.codexRollouts(homes: [codexSharedHome] + codexHomes.map { URL(fileURLWithPath: $0, isDirectory: true) }),
             cachedFiles: database.codexFiles(),
             database: database
         )
@@ -462,42 +466,70 @@ actor UsageIndex {
         let changed: Int
     }
 
+    /// One Codex rollout file found by `codexRollouts`.
+    struct CodexRollout: Equatable {
+        let url: URL
+        let modificationTime: TimeInterval
+        let byteCount: UInt64
+    }
+
+    /// The rollouts of every Codex home in `homes`, under each one's
+    /// `sessions`: Codex's own home, which its slots' sessions share, and
+    /// each account's managed home, which a session started with that home
+    /// writes to. A home's `sessions` reached twice (the same resolved
+    /// directory) is read once, and a rollout is counted once by its file
+    /// name, which carries its thread's ID; of copies in several homes the
+    /// longest stands, since a copy resumed elsewhere holds the original's
+    /// turns and its own. Links inside a home are not followed. Read by
+    /// `refreshFromFilesystem`, which indexes the result.
+    static func codexRollouts(homes: [URL]) -> [CodexRollout] {
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]
+        var roots: Set<String> = []
+        var byName: [String: CodexRollout] = [:]
+        for home in homes {
+            let sessions = home.appendingPathComponent("sessions", isDirectory: true)
+            guard roots.insert(sessions.resolvingSymlinksInPath().standardizedFileURL.path).inserted,
+                  let enumerator = FileManager.default.enumerator(
+                      at: sessions, includingPropertiesForKeys: keys,
+                      options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                  ) else { continue }
+            while let url = enumerator.nextObject() as? URL {
+                guard let values = try? url.resourceValues(forKeys: Set(keys)) else { continue }
+                if values.isSymbolicLink == true {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                guard values.isRegularFile == true, url.pathExtension == "jsonl",
+                      let modified = values.contentModificationDate else { continue }
+                let rollout = CodexRollout(url: url, modificationTime: modified.timeIntervalSince1970,
+                                           byteCount: UInt64(values.fileSize ?? 0))
+                if let kept = byName[url.lastPathComponent],
+                   (kept.byteCount, kept.modificationTime) >= (rollout.byteCount, rollout.modificationTime) { continue }
+                byName[url.lastPathComponent] = rollout
+            }
+        }
+        return byName.values.sorted { $0.url.path < $1.url.path }
+    }
+
     private static func scanCodexAndPersist(
-        sessionsDir: URL,
+        rollouts: [CodexRollout],
         cachedFiles: [String: StoredFileMetadata],
         database: UsageDatabase
     ) -> CodexScanResult {
-        guard let enumerator = FileManager.default.enumerator(
-            at: sessionsDir,
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else { return CodexScanResult(livePaths: [], changed: 0) }
-
         var live: Set<String> = []
         var changed = 0
-        while let url = enumerator.nextObject() as? URL {
-            guard let values = try? url.resourceValues(
-                    forKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]
-                  ) else { continue }
-            if values.isSymbolicLink == true {
-                enumerator.skipDescendants()
-                continue
-            }
-            guard values.isRegularFile == true,
-                  url.pathExtension == "jsonl",
-                  let modified = values.contentModificationDate else { continue }
-            let mtime = modified.timeIntervalSince1970
-            let byteCount = UInt64(values.fileSize ?? 0)
-            live.insert(url.path)
-            if let cached = cachedFiles[url.path],
-               cached.modificationTime == mtime,
-               cached.byteCount == byteCount { continue }
+        for rollout in rollouts {
+            let path = rollout.url.path
+            live.insert(path)
+            if let cached = cachedFiles[path],
+               cached.modificationTime == rollout.modificationTime,
+               cached.byteCount == rollout.byteCount { continue }
             autoreleasepool {
                 database.replaceCodexFile(
-                    path: url.path,
-                    modificationTime: mtime,
-                    byteCount: byteCount,
-                    aggregates: CostParser.scanCodexFile(url)
+                    path: path,
+                    modificationTime: rollout.modificationTime,
+                    byteCount: rollout.byteCount,
+                    aggregates: CostParser.scanCodexFile(rollout.url)
                 )
             }
             changed += 1

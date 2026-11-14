@@ -304,7 +304,7 @@ struct FailoverSettingsView: View {
                 .help("Let the paused sessions continue now. They may then reach the usage limit.")
             } label: {
                 Label(
-                    "\(status.manual ? "Paused by you" : "Paused at the limit") since \(status.since.formatted(date: .omitted, time: .shortened))",
+                    "\(status.manual ? "Paused by you" : "Paused at the limit") since \(UsageFormat.clock(status.since))",
                     systemImage: "pause.circle.fill"
                 )
                 .foregroundStyle(.orange)

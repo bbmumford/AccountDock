@@ -61,6 +61,14 @@ reuse it while it is a few seconds old; readers that act on a process at once
 read their own. `CommandRunnerCoverageTests` fails for a launch outside the
 runner or a `ps` outside the table.
 
+What an account's card on the usage tab and its row in the account list say
+about it (Active, its plan and why the plan cannot serve, needs sign-in, a
+failed or stale reading, credentials to capture again) is one
+`AccountStatus`, decided by `AccountStatus.make` and kept in
+`AppState.accountStatuses`, which is recomputed whenever the accounts, their
+readings, their reading errors or the rejected sign-ins change; the views
+only draw it.
+
 
 ## Providers
 
@@ -140,7 +148,11 @@ Some data is the same for every provider by construction:
   figures over the providers the user has not hidden, each metric over the
   providers whose `activityMetrics` report it; the usage dashboard, the cost
   tab, the menu bar and the widget all read it and write costs and tokens with
-  `UsageFormat`.
+  `UsageFormat`, which also writes every time and span AccountDock shows:
+  a time of day, a weekday and time within six days, or a date beyond
+  (`clock`); spans as "2 hr 14 min" (`duration`) or, in narrow cells,
+  "2h 14m" (`compactDuration`); and a window's reset as "Resets in …" or
+  "Resets on …" (`reset`).
 
 | Provider | Service | Credentials | Windows |
 | --- | --- | --- | --- |
@@ -256,7 +268,11 @@ it refused the request. A process holding another account's token than its
 slot's or the live one is flagged with an event, whether it reads a slot, the
 shared sign-in or runs in the CLI's background service, and flagged again by
 every later piece of such evidence; Settings → General → Audit, or the request
-`{"action":"signalSessions"}`, tells it to read its sign-in again.
+`{"action":"signalSessions"}`, tells it to read its sign-in again. Only a
+session whose process runs now (a live lifecycle record whose process the
+process table lists) is recorded and flagged: a status-line file or a
+transcript outlives its session, and a session that ended has no token to
+read again, so its flag is dropped.
 
 
 Query it with the request `{"action":"audit","since":"<ISO time>","account":"<id, label or email>"}`;
@@ -480,6 +496,14 @@ Claude CLI                    Browser                   claude.ai Server
 - The login **always replaces** the current Claude Code session — this is Claude CLI's own behavior
 
 ## Usage readings
+
+A reading's provider-neutral form is `UsageReading`: its windows (`Window`,
+each a session, long or model window with its percent, reset and length),
+extra usage, limit resets and model limits. It converts from and back to the
+reply form the providers' readers return (`UsageAPIResponse`), which the
+planner, pacer, simulator, views and widget still read. Saved usage
+snapshots hold the neutral form (`PersistedUsageSnapshot`), and a snapshot
+saved in the reply's form loads, converted.
 
 AccountDock prefers quota data the agents already record:
 
@@ -773,7 +797,11 @@ week. Each account's percent is therefore converted through its own token
 cost, `AppState.accountRatio` (session percent per million weighted tokens),
 carried as `QuotaAccountState.percentPerMillion` and
 `SessionPacer.Account.percentPerMillion`, whenever a rate or room moves to
-or is compared with another account:
+or is compared with another account. The arithmetic itself (percent to
+tokens and back, conversion between accounts, the room left in a session
+and a long window, percent spent at a rate, run-out and latest-start times)
+is `Allowance`'s, which the planner, the pacer, the simulator and the pace
+outlook all count through:
 
 - `FailoverPlanner.expectedBurn` and `carriedBurn` convert the moving work
   and its deviation into the destination's percent (`converted`), so
@@ -1530,7 +1558,10 @@ the audit trail a person reads.
 
 Costs are computed locally from session logs: Claude Code's JSONL transcripts,
 Codex rollouts and Kimi Code sessions, priced from `litellm-pricing.json`.
-Claude Code turns the router served from a route target name the target's
+Codex rollouts are read from every home a Codex session writes to: `~/.codex`,
+which its slots' sessions share, and each account's managed home; a rollout
+found in several homes is counted once, the longest copy standing
+(`UsageIndex.codexRollouts`). Claude Code turns the router served from a route target name the target's
 model in the transcript; they count as the target provider's usage, priced as
 its model, and are left out of Claude's totals.
 Claude totals must match `ccusage`; see [COST_VERIFICATION.md](COST_VERIFICATION.md).

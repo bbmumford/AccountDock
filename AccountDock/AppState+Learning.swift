@@ -212,8 +212,8 @@ extension AppState {
         let policy = failoverConfig.policy(for: provider)
         let planner = FailoverPlanner(settings: plannerSettings(provider))
         let current = quotaState(for: active, now: now)
-        let perWeekly = max(1, current.sessionPerWeekly ?? FailoverPlanner.defaultSessionPerWeekly)
-        let pace = max(current.weeklyBurnPerHour, current.sessionBurnPerHour / perWeekly)
+        let pace = Allowance.weeklyPace(sessionPerHour: current.sessionBurnPerHour, weeklyPerHour: current.weeklyBurnPerHour,
+                                        sessionPerWeekly: current.sessionPerWeekly ?? FailoverPlanner.defaultSessionPerWeekly)
         guard pace >= Self.minimumOutlookPace, let activeAccount = planner.simulatorAccount(current, now: now) else { return nil }
         var simulator = QuotaSimulator()
         simulator.step = 5 * 60

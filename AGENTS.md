@@ -34,5 +34,5 @@ screenshots, release), `RELEASE_NOTES.md`.
   - `UpdateChecker.swift`: validates GitHub release metadata; never executes updates.
   - `*Parser.swift`, `UsageDatabase.swift`, `UsageIndex.swift`: local session, cost and activity data.
 - **Router**: `AccountDockRouter/Core/RouterCore.swift` (pure logic, shared with the app), `AccountDockRouter/Server/` (HTTP server and launchd entry).
-- **Views**: `MainMenuView.swift` (popover), `UsageDashboardView.swift`, `CostDetailView.swift`, `AccountSwitcherView.swift`, `SettingsView.swift`, `FailoverSettingsView.swift`, `MenuBarStripView.swift` (status item), `HiddenWindowView.swift` (keepalive for the Settings window).
+- **Views**: `MainMenuView.swift` (popover), `UsageDashboardView.swift`, `CostDetailView.swift`, `AccountSwitcherView.swift`, `SettingsView.swift`, `CLISettingsTabView.swift` (every provider's CLI tab, from `ProviderCapabilities.cliSettings`), `FailoverSettingsView.swift`, `MenuBarStripView.swift` (status item), `HiddenWindowView.swift` (keepalive for the Settings window).
 - **Debug only**: `Debug/ScreenshotRenderer.swift` renders README images from sample data.

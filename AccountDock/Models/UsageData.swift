@@ -366,57 +366,17 @@ struct UsageWindow: Codable {
         )
     }
 
-    var resetTimeString: String? {
-        guard let date = resetsAtDate else { return nil }
-        let remaining = date.timeIntervalSinceNow
-        guard remaining > 0 else { return "now" }
-
-        let hours = Int(remaining) / 3600
-        let minutes = (Int(remaining) % 3600) / 60
-
-        if hours > 24 {
-            let formatter = DateFormatter()
-            formatter.dateStyle = .medium
-            formatter.timeStyle = .short
-            return formatter.string(from: date)
-        } else if hours > 0 {
-            return "\(hours) hr \(minutes) min"
-        } else {
-            return "\(minutes) min"
-        }
-    }
-
-    /// A complete, unambiguous label for the usage UI. Longer quota windows
-    /// include the calendar date so a weekday cannot be mistaken for the next
-    /// occurrence of that day.
+    /// The reset as the usage rows name it (`UsageFormat.reset`).
     var resetLabelString: String? {
-        guard let date = resetsAtDate else { return nil }
-        let remaining = date.timeIntervalSinceNow
-        guard remaining > 0 else { return "Resets now" }
-        guard remaining > 86_400 else {
-            return resetTimeString.map { "Resets in \($0)" }
-        }
-
-        let formatter = DateFormatter()
-        formatter.dateFormat = "EEE, d MMM yyyy 'at' h:mm a"
-        return "Resets on \(formatter.string(from: date))"
+        resetsAtDate.map { UsageFormat.reset($0) }
     }
 
-    /// Compact countdown rendering for narrow menu-bar modules.
-    /// Always returns a fixed-shape string ("now", "5m", "2h 14m", "4d 6h").
-    /// Never falls back to a date format — the menu bar can't afford the width.
+    /// The countdown to the reset in the fixed shape a menu-bar module can
+    /// hold ("now", "5m", "2h 14m", "4d 6h"; `UsageFormat.compactDuration`).
     var compactResetString: String? {
         guard let date = resetsAtDate else { return nil }
-        let remaining = Int(date.timeIntervalSinceNow)
-        guard remaining > 0 else { return "now" }
-
-        let days = remaining / 86_400
-        let hours = (remaining % 86_400) / 3600
-        let minutes = (remaining % 3600) / 60
-
-        if days > 0 { return "\(days)d \(hours)h" }
-        if hours > 0 { return "\(hours)h \(minutes)m" }
-        return "\(max(minutes, 1))m"
+        let remaining = date.timeIntervalSinceNow
+        return remaining >= 1 ? UsageFormat.compactDuration(remaining) : "now"
     }
 
     /// How much of the window has already elapsed, as a 0–100 percentage:

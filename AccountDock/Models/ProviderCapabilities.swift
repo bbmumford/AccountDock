@@ -114,6 +114,9 @@ struct ProviderCapabilities: Sendable {
     /// provider's plan sizes are not known, which leaves the learned or
     /// default cost. Read through `Account.planSize`.
     var planSizes: [String: Double] = [:]
+    /// What its CLI settings tab offers (`CLISettingsTabView`); nil for a
+    /// provider whose CLI has no settings of AccountDock's.
+    var cliSettings: CLISettings? = nil
 
     var supportsSessionQuota: Bool { sessionQuotaMode != .unsupported }
     /// How the CLI runs sessions in the background under a supervisor of
@@ -352,7 +355,8 @@ extension AIProviderType {
                 activityMetrics: [.turns, .activeTime, .linesChanged, .cost],
                 planNames: ["max:default_claude_max_20x": "Ultra", "max:default_claude_max_5x": "Max"],
                 // Max 20x holds twenty times Pro's usage, Max 5x five times.
-                planSizes: ["max:default_claude_max_20x": 20, "max:default_claude_max_5x": 5, "pro": 1]
+                planSizes: ["max:default_claude_max_20x": 20, "max:default_claude_max_5x": 5, "pro": 1],
+                cliSettings: .claudeCode
             )
         case .codex:
             ProviderCapabilities(
@@ -393,7 +397,8 @@ extension AIProviderType {
                 storageKey: "codex",
                 shortBadge: "X",
                 activityMetrics: [.turns, .linesChanged, .cost],
-                longWindowReportsLength: true
+                longWindowReportsLength: true,
+                cliSettings: .codex
             )
         case .kimi:
             ProviderCapabilities(
