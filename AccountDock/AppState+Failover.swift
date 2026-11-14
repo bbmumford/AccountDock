@@ -499,8 +499,49 @@ extension AppState {
             sessionBurnStdDev: uncertainty.session,
             weeklyBurnStdDev: uncertainty.weekly,
             extraUsageAvailable: extraUsageAvailable(account),
-            refusedAtLimit: routerRefusedUntil[account.id].map { $0 > now } ?? false
+            refusedAtLimit: (routerRefusedUntil[account.id].map { $0 > now } ?? false)
+                || recordedLimitRefusal(account, model: model, now: now)
         )
+    }
+
+    /// How long a refusal recorded in a transcript stands without a reading.
+    nonisolated static let refusalStanding: TimeInterval = 30 * 60
+
+    /// Whether a session's transcript recorded a refusal at a usage limit on
+    /// `account` (`sessionRefusals`) that no reading has answered since,
+    /// within `refusalStanding`: `quotaState` counts it as a measured limit.
+    ///
+    /// A refused session whose model has an allowance of its own on the
+    /// account may have been refused for that allowance alone: its refusal
+    /// counts only when `model` is that model, and stands until a whole
+    /// reading (`accountWholeReadings`), the only kind that carries a
+    /// model's own limit. Any other refusal counts for every model until any
+    /// newer reading.
+    func recordedLimitRefusal(_ account: Account, model: String?, now: Date) -> Bool {
+        guard !sessionRefusals.isEmpty else { return false }
+        let readAt = accountUsageUpdatedAt[account.id] ?? .distantPast
+        let wholeAt = accountWholeReadings[account.id]?.at ?? .distantPast
+        let keys = (accountUsage[account.id]?.modelWeeklyLimits ?? []).map { $0.model.lowercased() }
+        func key(_ model: String?) -> String? {
+            guard let model = model?.lowercased() else { return nil }
+            return keys.first { model.contains($0) }
+        }
+        let asked = key(model)
+        return sessionRefusals.contains { session, refusal in
+            refusal.account == account.id
+                && Self.refusalStands(at: refusal.at, scopedKey: key(sessionModel(session, now: now)), askedKey: asked,
+                                      readAt: readAt, wholeAt: wholeAt, now: now)
+        }
+    }
+
+    /// `recordedLimitRefusal`'s rule for one refusal at `at`: `scopedKey`
+    /// names the allowance of the refused session's model when it has one
+    /// of its own, `askedKey` that of the model asked about.
+    nonisolated static func refusalStands(at: Date, scopedKey: String?, askedKey: String?,
+                                          readAt: Date, wholeAt: Date, now: Date) -> Bool {
+        guard now.timeIntervalSince(at) < refusalStanding else { return false }
+        if let scopedKey { return scopedKey == askedKey && at > wholeAt }
+        return at > readAt
     }
 
     /// The account's usage with its weekly window narrowed to what work on

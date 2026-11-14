@@ -467,6 +467,13 @@ extension AppState {
             states[account.id] = state
         }
         let anyBelow = candidates.contains { $0.1 == .belowTrigger }
+        // An account the forecast has at its limit, while its reading does
+        // not, keeps the sessions on it but takes no new one while another
+        // account is not so forecast.
+        let forecastAtLimit = Set(candidates.compactMap { candidate in
+            states[candidate.0.id].flatMap { planner.isForecastAtLimit($0, now: now) ? candidate.0.id : nil }
+        })
+        let anyOpen = candidates.contains { !forecastAtLimit.contains($0.0.id) }
         var members: [RouterPoolMember] = []
         for (account, tier, latestStart) in candidates {
             let name = Self.poolTokenFile(account)
@@ -475,7 +482,8 @@ extension AppState {
                 RequestRouterController.setToken(name, token: token.0, expiresAt: token.1)
             }
             let urgent = latestStart.timeIntervalSince(now) < 24 * 60 * 60
-            let weight: Double = tier == .belowTrigger ? (urgent ? 2 : 1) : (anyBelow ? 0 : 1)
+            let weight: Double = forecastAtLimit.contains(account.id) && anyOpen ? 0
+                : tier == .belowTrigger ? (urgent ? 2 : 1) : (anyBelow ? 0 : 1)
             members.append(RouterPoolMember(accountID: account.id.uuidString, tokenFile: name, weight: weight))
         }
         // With every account at its limit, the active account serves every
