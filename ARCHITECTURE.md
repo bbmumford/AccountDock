@@ -1085,12 +1085,27 @@ of the service's commands (the attach client, the supervisor, `stop`, `logs`,
 `rm`, `agents`) or a `--bg` launch is no session. The launcher runs those
 unchanged, as it runs the sign-in commands, and such a process is left out of
 `slotDirectoryByProcess`, so a slot an attach client reads is released
-like any slot no process reads, and no session record it left is counted. Restarting a background session in its own slot, at the user's
-request only, waits until it is idle by every sign: its last event `Stop`,
+like any slot no process reads, and no session record it left is counted. Restarting a background session in its own slot
+waits until it is idle by every sign: its last event `Stop`,
 its transcript and its subagents' quiet for two minutes, and no shell under
 its worker, as its Bash tool starts; then it runs `claude stop <id>` and
 types `claude --resume <id>` and Enter into the agterm tab of its attach
-client, so the resumed run goes through the launcher.
+client, so the resumed run goes through the launcher. A background session
+refused at a usage limit since its last served request counts as idle and
+quiet, since its turns all fail; the shell under its worker and its attach
+client's footer still hold it.
+
+A worker keeps the token it read in memory and does not read the shared
+sign-in again when signalled, so a background session on an account that can
+no longer serve it (refused at its limit there, or flagged by the audit as
+holding that account's token while the account is at its limit) is stuck:
+`handleStuckBackgroundSessions` offers its restart once in the events and
+marks it in the usage tab's list of unisolated sessions, and with **Restart
+stuck background sessions in their own slot** (Settings → Failover, off by
+default) makes the restart itself, at most once every ten minutes per
+session. The audit's `signalSessions` keeps such a session flagged and names
+its restart rather than signalling it.
+
 
 **Rebalance sessions now** (Settings → Failover and the usage tab, for a
 provider whose sessions run in one-session slots; also the requests action

@@ -152,14 +152,18 @@ enum SessionTerminalActions {
     /// the CLI's own executable, which `control` runs with the stop
     /// command; the isolation's `resumeCommand` is typed, so the launcher
     /// on the shell's `PATH` starts the resumed run. `pause` lets the
-    /// attach client exit and the shell take the terminal back.
+    /// attach client exit and the shell take the terminal back. A session
+    /// `refused` at a usage limit since its last served request counts as
+    /// idle with quiet transcripts, as `AppState.restartBlocker` counts it:
+    /// its turns all fail.
     static func restartBackground(_ session: AgentSession, state: BackgroundSessionState,
                                   isolation: any ProviderSessionIsolation,
                                   stopper: String, support: BackgroundSessionSupport,
                                   control: BackgroundSessionControl, terminal: SessionTerminalInput,
-                                  pause: TimeInterval = 2, now: Date = Date()) async -> Outcome {
-        guard session.isIdle else { return .notIdle }
-        guard state.transcriptsQuiet(now: now), !state.shellRunning else { return .busy }
+                                  refused: Bool = false, pause: TimeInterval = 2, now: Date = Date()) async -> Outcome {
+        guard refused || session.isIdle else { return .notIdle }
+        guard refused || state.transcriptsQuiet(now: now), !state.shellRunning else { return .busy }
+
         guard let client = state.attachProcess, let target = await terminal.terminalSession(ofProcess: client) else {
             return .notInTerminal
         }

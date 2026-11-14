@@ -137,19 +137,34 @@ extension AppState {
 
     /// Tells every flagged process to read its sign-in again: sessions on
     /// the shared sign-in through `moveRunningSessions`, and slot sessions
-    /// by having their slot written afresh at the next slot pass. Returns
-    /// what was done, for the request and the Settings button.
+    /// by having their slot written afresh at the next slot pass. A flagged
+    /// session in its CLI's background service stays flagged: its worker
+    /// keeps the token it read, so the answer names its restart instead
+    /// (`handleStuckBackgroundSessions`). Returns what was done, for the
+    /// request and the Settings button.
     @discardableResult
     func signalFlaggedProcesses(_ only: AIProviderType? = nil) -> String {
         let flagged = flaggedCredentialProcesses.values.filter { only == nil || $0.provider == only }
         guard !flagged.isEmpty else { return "No session is flagged." }
-        for provider in Set(flagged.filter { $0.slot == nil }.map(\.provider)) {
+        let background = flagged.filter { runsInBackgroundService($0) }
+        let signalled = flagged.filter { !runsInBackgroundService($0) }
+        for provider in Set(signalled.filter { $0.slot == nil }.map(\.provider)) {
             moveRunningSessions(provider, reason: "audit.signalFlagged")
         }
-        for slot in flagged.compactMap(\.slot) { slotCredentialWritten[slot] = nil }
-        for item in flagged { flaggedCredentialProcesses[item.session] = nil }
-        return "Told \(flagged.count) flagged session(s) to read their sign-in again."
+        for slot in signalled.compactMap(\.slot) { slotCredentialWritten[slot] = nil }
+        for item in signalled { flaggedCredentialProcesses[item.session] = nil }
+        var parts: [String] = []
+        if !signalled.isEmpty { parts.append("Told \(signalled.count) flagged session(s) to read their sign-in again.") }
+        if !background.isEmpty {
+            let restarts = background.contains { failoverConfig.policy(for: $0.provider).restartStuckBackgroundSessions }
+            parts.append("\(background.count) flagged session(s) run in the background service, whose worker keeps the token it read: "
+                + (restarts
+                    ? "AccountDock restarts each in its own slot once its account can no longer serve it and its attach client shows no work running."
+                    : "restart them in their own slot from the usage tab."))
+        }
+        return parts.joined(separator: " ")
     }
+
 
     /// When a refusal's words name the reset of the limit it met, that
     /// reset as a date: a time of day ("resets 2am", "resets 2:30pm

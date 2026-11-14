@@ -126,13 +126,20 @@ extension AppState {
     /// for a session in a background worker, its attach client's, and
     /// `background` says what else must hold for one: its transcripts
     /// quiet for `BackgroundSessionState.quietPeriod` and no shell under
-    /// its worker.
+    /// its worker. A background session `refused` at a usage limit since
+    /// its last served request counts as idle with quiet transcripts: its
+    /// turns all fail, so a restart loses none of them; the shell under its
+    /// worker and its attach client's footer still hold it.
     nonisolated static func restartBlocker(_ session: AgentSession, terminal: String?,
-                                           background: BackgroundSessionState? = nil, now: Date = Date()) -> String? {
-        if session.isWorking { return "Its turn is under way; it can restart once the turn ends." }
-        if !session.isIdle { return "It has not finished a turn yet; it can restart once one ends." }
+                                           background: BackgroundSessionState? = nil, refused: Bool = false,
+                                           now: Date = Date()) -> String? {
+        let failingInBackground = refused && background != nil
+        if !failingInBackground {
+            if session.isWorking { return "Its turn is under way; it can restart once the turn ends." }
+            if !session.isIdle { return "It has not finished a turn yet; it can restart once one ends." }
+        }
         if let background {
-            if !background.transcriptsQuiet(now: now) {
+            if !failingInBackground, !background.transcriptsQuiet(now: now) {
                 return "It or one of its subagents wrote to its transcript in the last two minutes; it can restart once they are quiet."
             }
             if background.shellRunning {
@@ -166,8 +173,12 @@ extension AppState {
     /// agterm session, so the launcher gives it a slot of its own. A
     /// session in a background worker is stopped with the CLI's stop
     /// command and resumed in its attach client's terminal, judged again
-    /// from a fresh read of the processes. Only at the user's request, from
-    /// the usage tab. Returns whether it was typed.
+    /// from a fresh read of the processes; one refused at a usage limit
+    /// since its last served request (`sessionRefusals`) counts as idle
+    /// (`restartBlocker`). At the user's request, from the usage tab, and
+    /// for a background session stuck on an account that can no longer
+    /// serve it (`handleStuckBackgroundSessions`). Returns whether it was
+    /// typed.
     @discardableResult
     func restartInOwnSlot(_ sessionID: String) async -> Bool {
         guard let (provider, session) = liveSession(sessionID), let slots = SessionSlots(provider) else { return false }
@@ -178,7 +189,7 @@ extension AppState {
             let stopper = slots.realExecutable(preferred: slots.isolation.preferredExecutable) ?? slots.executable
             outcome = await SessionTerminalActions.restartBackground(
                 session, state: state, isolation: slots.isolation, stopper: stopper, support: support,
-                control: backgroundSessionControl, terminal: sessionTerminal
+                control: backgroundSessionControl, terminal: sessionTerminal, refused: sessionRefusals[sessionID] != nil
             )
         } else {
             outcome = await SessionTerminalActions.restartInOwnSlot(session, isolation: slots.isolation,
@@ -195,7 +206,9 @@ extension AppState {
         var restarted = 0
         for session in unisolatedSessions[provider] ?? []
         where Self.restartBlocker(session, terminal: unisolatedTerminals[session.sessionID],
-                                  background: backgroundSessionStates[session.sessionID]) == nil {
+                                  background: backgroundSessionStates[session.sessionID],
+                                  refused: sessionRefusals[session.sessionID] != nil) == nil {
+
             if await restartInOwnSlot(session.sessionID) { restarted += 1 }
         }
         return restarted
