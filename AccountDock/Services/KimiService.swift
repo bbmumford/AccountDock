@@ -41,7 +41,7 @@ enum KimiServiceError: LocalizedError {
 final class KimiService: @unchecked Sendable {
     static let shared = KimiService()
 
-    private struct Credential: Codable {
+    private struct Credential: Codable, Sendable {
         var accessToken: String
         var refreshToken: String
         var expiresAt: Double?
@@ -109,6 +109,12 @@ final class KimiService: @unchecked Sendable {
     /// Whether a Kimi Code process is running, which renews the credential
     /// in its slot itself (`renewed`).
     private let cliIsRunning: @Sendable () async -> Bool
+    /// Runs the renewals of one managed credential one after another: Kimi
+    /// rotates the refresh token on every renewal, so a second renewal that
+    /// presented the same token would be refused and mark the account as
+    /// needing sign-in. `renewCredential`, `renewed` and
+    /// `renewLiveCredentialForSlots` all go through it.
+    private let renewals = KimiRenewalQueue()
 
     /// `home`, `managedRoot` and `cliIsRunning` default to the user's
     /// directories and a process scan; tests pass their own.
@@ -229,12 +235,24 @@ final class KimiService: @unchecked Sendable {
     /// slot under a lock of its own and, when the refresh token it renews
     /// with was already used, overwrites the slot with an empty, revoked
     /// credential, so a renewal here racing its own can sign the account out.
+    /// A renewal that finished while this one waited in `renewals` has
+    /// already replaced `credential`'s refresh token; its result is used
+    /// instead of presenting the spent token.
     private func renewed(_ credential: Credential, managedURL: URL, isActive: Bool) async throws -> Credential {
         if isActive, await cliIsRunning() { throw KimiServiceError.liveCredentialExpired }
-        let fresh = try await refresh(credential)
-        try writeCredential(fresh, to: managedURL)
-        if isActive { try writeCredential(fresh, to: activeCredentialURL(in: home)) }
-        return fresh
+        return try await renewals.run(Self.renewalKey(managedURL)) { [self] in
+            let current = (try? newestCredential(at: managedURL, isActive: isActive)) ?? credential
+            if current.refreshToken != credential.refreshToken { return current }
+            let fresh = try await refresh(current)
+            try writeCredential(fresh, to: managedURL)
+            if isActive { try writeCredential(fresh, to: activeCredentialURL(in: home)) }
+            return fresh
+        }
+    }
+
+    /// The key `renewals` orders a managed credential's renewals by.
+    private static func renewalKey(_ managedURL: URL) -> String {
+        managedURL.standardizedFileURL.path
     }
 
     /// Starts the account's 5-hour window with a one-token request to the
@@ -262,11 +280,18 @@ final class KimiService: @unchecked Sendable {
     /// Renews an inactive account's managed credential and saves it there,
     /// without touching the credential slot Kimi's running sessions use.
     /// Called by `KimiCredentialModule`.
+    /// A renewal of the same copy that finished while this one waited in
+    /// `renewals` counts as this one.
     func renewCredential(location: String) async -> CredentialRenewal {
         let managedURL = URL(fileURLWithPath: location)
         do {
-            let renewed = try await refresh(try readCredential(at: managedURL))
-            try writeCredential(renewed, to: managedURL)
+            let presented = try readCredential(at: managedURL)
+            try await renewals.run(Self.renewalKey(managedURL)) { [self] in
+                let current = try readCredential(at: managedURL)
+                guard current.refreshToken == presented.refreshToken else { return }
+                let renewed = try await refresh(current)
+                try writeCredential(renewed, to: managedURL)
+            }
             return .renewed
         } catch KimiServiceError.credentialRejected {
             return .rejected
@@ -283,6 +308,73 @@ final class KimiService: @unchecked Sendable {
         guard let credential = try? readCredential(at: URL(fileURLWithPath: location)),
               let expiresAt = credential.expiresAt else { return false }
         return Date(timeIntervalSince1970: expiresAt) > now.addingTimeInterval(interval)
+    }
+
+    // MARK: - Session slots
+
+    /// The credential, as Kimi Code's credential JSON, that slots serving
+    /// the account copy their access token from: the managed copy, or for
+    /// the account whose credential Kimi Code's home holds (`isActive`)
+    /// whichever of the two is newer (`newestCredential`). Nil when neither
+    /// is complete. Read by `KimiSessionIsolation.currentSlotCredential`.
+    func slotSourceCredential(location: String, isActive: Bool) -> String? {
+        guard let credential = try? newestCredential(at: URL(fileURLWithPath: location), isActive: isActive),
+              let data = try? JSONEncoder().encode(credential) else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Renews the credential of the account whose credential Kimi Code's
+    /// home holds, when slots need its access token to last `lifetime`,
+    /// even while Kimi Code runs: under Kimi Code's own lock on that
+    /// credential (`KimiCredentialLock`), so a renewal of its own and this
+    /// one never overlap, and after reading both copies again under the
+    /// lock, so a renewal Kimi Code finished first is used as it stands and
+    /// its new refresh token is never presented twice. The renewed
+    /// credential goes to the managed copy and to Kimi Code's home, where
+    /// unslotted sessions read it at their next request. `renewed` instead
+    /// leaves this credential to a running Kimi Code, since the router and
+    /// usage readings take no lock. Called by
+    /// `KimiSessionIsolation.currentSlotCredential`; `lockWait` is how long
+    /// a lock Kimi Code keeps fresh is waited for.
+    func renewLiveCredentialForSlots(location: String, lasting lifetime: TimeInterval,
+                                     lockWait: TimeInterval = 15) async -> CredentialRenewal {
+        let managedURL = URL(fileURLWithPath: location)
+        guard let liveURL = try? activeCredentialURL(in: home) else { return .unavailable }
+        let lock = KimiCredentialLock(home: home, name: liveURL.deletingPathExtension().lastPathComponent)
+        do {
+            return try await renewals.run(Self.renewalKey(managedURL)) { [self] in
+                guard await Task.detached(operation: { lock.acquire(waitingUpTo: lockWait) }).value else {
+                    return .unavailable
+                }
+                // The renewal request can outlast the lock's stale period.
+                let keepAlive = Task.detached {
+                    while true {
+                        do { try await Task.sleep(nanoseconds: UInt64(KimiCredentialLock.touchInterval * 1_000_000_000)) }
+                        catch { return }
+                        lock.touch()
+                    }
+                }
+                defer {
+                    keepAlive.cancel()
+                    lock.release()
+                }
+                let current = try newestCredential(at: managedURL, isActive: true)
+                if let expiresAt = current.expiresAt,
+                   Date(timeIntervalSince1970: expiresAt) > Date().addingTimeInterval(lifetime) {
+                    return .renewed
+                }
+                let fresh = try await refresh(current)
+                try writeCredential(fresh, to: managedURL)
+                try writeCredential(fresh, to: liveURL)
+                return .renewed
+            }
+        } catch KimiServiceError.credentialRejected {
+            return .rejected
+        } catch KimiServiceError.invalidCredentials {
+            return .rejected
+        } catch {
+            return .unavailable
+        }
     }
 
     /// The managed credential, replaced by the CLI's copy for the active
@@ -463,5 +555,22 @@ final class KimiService: @unchecked Sendable {
 
     private func formEncode(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value
+    }
+}
+
+/// Runs the operations given for one key one after another, in the order
+/// they arrive; operations for different keys run at the same time.
+/// `KimiService` keys its renewals by managed credential.
+actor KimiRenewalQueue {
+    private var last: [String: Task<Void, Never>] = [:]
+
+    func run<T: Sendable>(_ key: String, _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        let previous = last[key]
+        let task = Task<T, Error> {
+            await previous?.value
+            return try await operation()
+        }
+        last[key] = Task { _ = try? await task.value }
+        return try await task.value
     }
 }
