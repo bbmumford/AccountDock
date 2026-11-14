@@ -739,6 +739,25 @@ only, one idle in agterm (its last event `Stop`) is restarted in its own slot:
 session, so the resumed run goes through the launcher. A session mid-turn or
 outside agterm is never typed into; the list says why.
 
+**Rebalance sessions now** (Settings → Failover and the usage tab, for a
+provider whose sessions run in one-session slots; also the requests action
+`{"action":"rebalance","provider":…,"apply":true|false}`) places the running
+slot sessions so the first account to reach a limit does so as late as
+possible (`SessionPacer.rebalance`). Each session counts at its rate over
+its last hour (at least `defaultSessionRate` with no history) against every
+window and its model's own allowance. A local search moves, one at a time, a
+session off the account that runs out first to the destination that leaves
+the latest earliest run-out, charging the destination the session's cache
+rewrite; a move is made only when the hours it gains at that account's burn
+are worth more than the rewrite, a session moves at most once, and a session
+mid-turn never. The result never runs out earlier than before and every move
+pays for itself; it is a local optimum, not always the best assignment.
+Excluded accounts, those needing sign-in and those at their limit are no
+destination. The moves go through `requestedSlotMoves`, so each is recorded.
+With **Rebalance automatically** (off by default) the quota cycle makes the
+same moves at most once per `balanceMoveInterval`, and only when the first
+account then runs out more than an hour later.
+
 While sessions are served from several accounts, pausing waits for the whole
 pool: sessions pause only when no other included account is below its limit
 with more than `suspensionLead` to go, because each account keeps serving its

@@ -402,6 +402,18 @@ struct FailoverSettingsView: View {
             .help(policy.usesRouter(for: provider)
                 ? "New sessions go to the accounts with the most unused rate for the rest of their 5-hour window. A session keeps its account while its prompt cache lasts. When an account's sessions would reach its limit and stay there for longer than their cache lasts, some of them move to accounts that can carry them, at their next turn. Otherwise they stay; a session that reaches the limit with the reset at most five minutes away, before its cache expires, waits for it on its account. A session idle past its cache's lifetime is placed again at its next turn, as nothing is lost by moving it."
                 : "New sessions go to the accounts with the most unused rate for the rest of their 5-hour window, in proportion to it. A session keeps its account until it exits.")
+            if provider.capabilities.sessionSlots != nil && !policy.usesRouter(for: provider) {
+                HStack {
+                    RebalanceButton(provider: provider)
+                    Toggle("Rebalance automatically", isOn: Binding(
+                        get: { store.policy(for: provider).rebalanceAutomatically },
+                        set: { on in store.update(provider) { $0.rebalanceAutomatically = on } }
+                    ))
+                    .help("Makes the same moves without being asked, at most once every \(Int(AppState.balanceMoveInterval / 60)) minutes, and only when the first account then runs out more than an hour later, so prompt caches are not rewritten for little.")
+                }
+                .padding(.leading, 20)
+                .disabled(!appState.rebalanceAvailable(provider))
+            }
             let choices = provider.capabilities.sessionModelChoices
             if let first = choices.first {
                 Toggle("When no account has allowance for a session's model, switch it to another model", isOn: Binding(

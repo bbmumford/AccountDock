@@ -597,3 +597,123 @@ struct SessionPacer {
         return admitted
     }
 }
+
+// MARK: - Rebalancing
+
+extension SessionPacer {
+    /// A running session as `rebalance` places it.
+    struct RebalanceSession: Equatable {
+        let id: String
+        var account: UUID
+        /// Weighted tokens per hour it is expected to keep using: its rate
+        /// over its last hour, at least its current rate, and
+        /// `defaultSessionRate` when it has no history.
+        var tokensPerHour: Double
+        var contextTokens: Int
+        var model: String?
+        /// False for a session mid-turn: it keeps its account.
+        var movable: Bool
+    }
+
+    struct Rebalance: Equatable {
+        /// The account each moved session goes to.
+        var moves: [String: UUID] = [:]
+        /// When the first account reaches a limit before and after the
+        /// moves; nil when none does before its windows reset.
+        var earliestRunOutBefore: Date?
+        var earliestRunOutAfter: Date?
+    }
+
+    /// How long `account` lasts carrying `sessions` after `spent` percent
+    /// more than its readings show, over its windows and each model's own
+    /// allowance the sessions draw on; infinity when it reaches no limit
+    /// before they reset.
+    func runway(_ account: Account, sessions: [RebalanceSession], spent: Double,
+                scopedSpent: [String: Double] = [:], now: Date) -> TimeInterval {
+        let burn = sessions.reduce(0) { $0 + percent($1.tokensPerHour, on: account) }
+        var times = [outlook(account, spent: spent, burn: burn, now: now).limitAt]
+        for (key, allowance) in account.scoped where allowance.resetsAt > now {
+            let users = sessions.filter { session in session.model?.lowercased().contains(key) == true }
+            guard !users.isEmpty else { continue }
+            let scopedBurn = users.reduce(0) { $0 + percent($1.tokensPerHour, on: account) }
+            times.append(projected(allowance.remaining - (scopedSpent[key] ?? 0), burn: scopedBurn,
+                                   until: allowance.resetsAt, now: now).limitAt)
+        }
+        return times.compactMap { $0?.timeIntervalSince(now) }.min() ?? .infinity
+    }
+
+    /// Places the movable sessions so the first account to reach a limit
+    /// does so as late as possible. `destinations` are the accounts a
+    /// session may move to.
+    ///
+    /// Local search from where the sessions run now: each step takes the
+    /// account that runs out first and tries every movable session on it
+    /// on every other destination, charging the destination the session's
+    /// cache rewrite (`moveCost`), and makes the move that leaves the
+    /// latest earliest run-out. A move is made only when it raises that
+    /// time, and by more than the cache rewrite costs: the hours gained at
+    /// the bottleneck account's burn must exceed the rewrite's window
+    /// percent. Each session moves at most once, and a mid-turn session
+    /// never. Guarantees: the earliest run-out never gets earlier, every
+    /// move pays for its cache rewrite, and the result is a local optimum
+    /// (no single further move of a session on the first account to run out
+    /// helps), not necessarily the best of all assignments.
+    func rebalance(accounts: [Account], sessions: [RebalanceSession], destinations: Set<UUID>, now: Date) -> Rebalance {
+        var placed = sessions.filter { session in accounts.contains { $0.id == session.account } }
+        var spent: [UUID: Double] = [:]
+        var scopedSpent: [UUID: [String: Double]] = [:]
+        var moved = Set<String>()
+        func runway(_ account: Account) -> TimeInterval {
+            self.runway(account, sessions: placed.filter { $0.account == account.id }, spent: spent[account.id] ?? 0,
+                        scopedSpent: scopedSpent[account.id] ?? [:], now: now)
+        }
+        func earliest() -> (account: Account, runway: TimeInterval)? {
+            accounts.map { ($0, runway($0)) }.min { $0.1 < $1.1 }
+        }
+        func date(_ runway: TimeInterval) -> Date? { runway.isFinite ? now.addingTimeInterval(runway) : nil }
+        var result = Rebalance(earliestRunOutBefore: earliest().flatMap { date($0.runway) })
+        for _ in 0..<sessions.count {
+            guard let bottleneck = earliest(), bottleneck.runway.isFinite else { break }
+            let burn = placed.filter { $0.account == bottleneck.account.id }
+                .reduce(0) { $0 + percent($1.tokensPerHour, on: bottleneck.account) }
+            var best: (index: Int, to: Account, runway: TimeInterval, cost: Double)?
+            for (index, session) in placed.enumerated()
+            where session.account == bottleneck.account.id && session.movable && !moved.contains(session.id) {
+                for destination in accounts where destination.id != session.account && destinations.contains(destination.id) {
+                    let cost = moveCost(session.contextTokens, to: destination)
+                    var trial = placed
+                    trial[index].account = destination.id
+                    var trialSpent = spent
+                    trialSpent[destination.id, default: 0] += cost
+                    var trialScoped = scopedSpent
+                    for key in scopedKeys(Session(id: session.id, account: destination.id, tokensPerHour: 0, contextTokens: 0,
+                                                  lastSeen: now, cacheLifetime: nil, model: session.model), on: destination) {
+                        trialScoped[destination.id, default: [:]][key, default: 0] += cost
+                    }
+                    let after = accounts.map { account in
+                        self.runway(account, sessions: trial.filter { $0.account == account.id },
+                                    spent: trialSpent[account.id] ?? 0, scopedSpent: trialScoped[account.id] ?? [:], now: now)
+                    }.min() ?? .infinity
+                    guard after > bottleneck.runway else { continue }
+                    let gained = after.isFinite ? (after - bottleneck.runway) / 3600 * burn : .infinity
+                    guard gained > cost else { continue }
+                    if best.map({ after > $0.runway || (after == $0.runway && cost < $0.cost) }) ?? true {
+                        best = (index, destination, after, cost)
+                    }
+                }
+            }
+            guard let best else { break }
+            let session = placed[best.index]
+            placed[best.index].account = best.to.id
+            spent[best.to.id, default: 0] += best.cost
+            for key in scopedKeys(Session(id: session.id, account: best.to.id, tokensPerHour: 0, contextTokens: 0,
+                                          lastSeen: now, cacheLifetime: nil, model: session.model), on: best.to) {
+                scopedSpent[best.to.id, default: [:]][key, default: 0] += best.cost
+            }
+            moved.insert(session.id)
+            result.moves[session.id] = best.to.id
+        }
+        result.earliestRunOutAfter = earliest().flatMap { date($0.runway) }
+        return result
+    }
+}

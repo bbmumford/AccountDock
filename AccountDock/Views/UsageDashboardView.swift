@@ -89,12 +89,20 @@ struct UsageDashboardView: View {
 
                     ForEach(visibleProviders) { provider in
                         VStack(alignment: .leading, spacing: 12) {
-                            Label(
-                                provider.capabilities.displayName,
-                                systemImage: provider.iconName
-                            )
-                            .font(.headline)
-                            .foregroundStyle(.brand)
+                            HStack {
+                                Label(
+                                    provider.capabilities.displayName,
+                                    systemImage: provider.iconName
+                                )
+                                .font(.headline)
+                                .foregroundStyle(.brand)
+                                Spacer()
+                                if appState.rebalanceAvailable(provider) {
+                                    RebalanceButton(provider: provider)
+                                        .buttonStyle(.borderless)
+                                        .font(.caption)
+                                }
+                            }
                             .sectionPadding()
 
                             if let routed = appState.routedStatus[provider] {
