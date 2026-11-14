@@ -121,10 +121,19 @@ extension AppState {
     }
 
     /// Reads which slot each running process reads, for `refreshSessions`
-    /// and `maintainSessionSlots`; run first on every quota cycle.
+    /// and `maintainSessionSlots`, and the CLI's background-session
+    /// processes; run first on every quota cycle.
     func refreshSlotProcesses() async {
         guard let provider = AIProviderType.routedProvider, let slots = SessionSlots(provider) else { return }
-        slotDirectoryByProcess = await Task.detached(priority: .utility) { slots.directoriesByProcess() }.value
+        let read = await Task.detached(priority: .utility) { () -> ([Int32: String], BackgroundSessionProcesses) in
+            let list = SessionSlots.processList() ?? ""
+            let background = slots.background.map {
+                BackgroundSessionProcesses(processList: list, executable: slots.executable, support: $0)
+            } ?? BackgroundSessionProcesses()
+            return (slots.directoriesByProcess(inProcessList: list), background)
+        }.value
+        backgroundProcesses = read.1
+        slotDirectoryByProcess = Self.sessionSlotDirectories(read.0, background: read.1)
         // A slot in use that `serveSessionSlots` has not served yet, as on
         // the first cycle after launch, serves the account the slot itself
         // records; `refreshSessions` would otherwise count its session on
@@ -135,6 +144,17 @@ extension AppState {
             unknown.reduce(into: [String: UUID]()) { $0[$1] = slots.recordedAccount(forSlotAt: $1) }
         }.value
         for (path, id) in recorded where slotDirectoryServing[path] == nil { slotDirectoryServing[path] = id }
+    }
+
+    /// The slots processes read, less those of processes that are no
+    /// session (`BackgroundSessionProcesses.nonSessions`): an attach client
+    /// started with the slot variable already set, as from a shell a slot
+    /// session opened, reads a slot while its session runs in a worker on
+    /// the shared sign-in, and `serveSessionSlots` releases a slot no listed
+    /// process reads.
+    nonisolated static func sessionSlotDirectories(_ directories: [Int32: String],
+                                                   background: BackgroundSessionProcesses) -> [Int32: String] {
+        directories.filter { !background.nonSessions.contains($0.key) }
     }
 
     /// The account serving the slot a running session reads, when the
@@ -196,7 +216,11 @@ extension AppState {
         // room for one model and none for another.
         var usable: [String: Bool] = [:]
         var targets: [String: UUID] = [:]
-        for (session, entry) in sessionRates.entries where !running.contains(session) {
+        // A pinned session resumes on its pinned account, room or not.
+        for (session, pin) in sessionPins.pinned(provider) where !running.contains(session) {
+            targets[session] = pin.account
+        }
+        for (session, entry) in sessionRates.entries where !running.contains(session) && targets[session] == nil {
             let model = sessionModel(session, now: now)
             let key = entry.account.uuidString + "|" + (model ?? "")
             let canServe = usable[key] ?? !accountCannotServe(entry.account, provider: provider, planner: planner, now: now, model: model)
@@ -315,6 +339,7 @@ extension AppState {
         let sessionsByDirectory: [String: AgentSession] = (liveSessions[provider] ?? []).reduce(into: [:]) { result, session in
             if let pid = session.processID, let directory = slotDirectoryByProcess[pid] { result[directory] = session }
         }
+        maintainPins(provider, sessionsBySlot: sessionsByDirectory.mapValues(\.sessionID), now: now)
         var credentials: [UUID: String] = [:]
         func credential(_ id: UUID) async -> String? {
             if let known = credentials[id] { return known }
@@ -370,21 +395,32 @@ extension AppState {
             let modelSpent = model != nil && slot.account.map {
                 cannotServe($0) && !accountCannotServe($0, provider: provider, planner: planner, now: now, wholeAllowance: true)
             } == true
-            var target = slot.account.flatMap { cannotServe($0) ? nil : $0 }
-                ?? (modelSpent ? byWeight.first { !cannotServe($0) } : fallback)
-            var balanced = false
-            var requested = false
-            if let session, let destination = requestedSlotMoves.removeValue(forKey: session.sessionID) {
-                target = destination
-                requested = true
+            let pinned = sessionPins.account(of: session?.sessionID)
+            let balance = session.flatMap { session -> UUID? in
+                guard let destination = slotSessionMoves[session.sessionID], pooled.contains(destination), !session.isWorking,
+                      model == nil || !cannotServe(destination),
+                      slotDirectoryMovedAt[path].map({ now.timeIntervalSince($0) >= Self.balanceMoveInterval }) ?? true
+                else { return nil }
+                return destination
             }
-            if !requested, let session, let destination = slotSessionMoves[session.sessionID], destination != target,
-               pooled.contains(destination), !session.isWorking, model == nil || !cannotServe(destination),
-               slotDirectoryMovedAt[path].map({ now.timeIntervalSince($0) >= Self.balanceMoveInterval }) ?? true {
-                target = destination
-                balanced = true
+            let choice = Self.slotChoice(current: slot.account, pinned: pinned,
+                                         requested: session.flatMap { requestedSlotMoves.removeValue(forKey: $0.sessionID) },
+                                         balance: balance, cannotServe: cannotServe, modelSpent: modelSpent,
+                                         byWeight: byWeight, fallback: fallback)
+            let target = choice.target
+            let balanced = choice.balanced
+            let requested = choice.requested
+            if let session, let pinned {
+                if choice.keptPinned {
+                    if pinnedKeptAtLimit.insert(session.sessionID).inserted {
+                        let on = accounts.first { $0.id == pinned }.map { messageName($0) } ?? "its account"
+                        failoverEvents.record(provider, "Kept the pinned \(Self.eventName(of: session)) on \(on) although \(on) can no longer serve it; unpin it or switch its model to move on.")
+                    }
+                } else {
+                    pinnedKeptAtLimit.remove(session.sessionID)
+                }
             }
-            if modelSpent, target == nil, let session, let model, sessionsWithoutModelRoom.insert(session.sessionID).inserted {
+            if pinned == nil, modelSpent, target == nil, let session, let model, sessionsWithoutModelRoom.insert(session.sessionID).inserted {
                 failoverEvents.record(provider, "No account has \(CostParser.shortModelName(model)) allowance left for \(Self.eventName(of: session)); it stays where it is and will be refused until one resets or it changes model.")
                 if let fallback = Self.modelFallback(for: model, policy: failoverConfig.policy(for: provider), provider: provider) {
                     pendingModelFallbacks[session.sessionID] = fallback
@@ -410,7 +446,8 @@ extension AppState {
             let spent = slot.account.flatMap { id in accounts.first { $0.id == id } }.flatMap { account in
                 model.flatMap { limitingModel(account, models: [$0], now: now) }
             }
-            let why = requested ? "a request asked for it"
+            let why = pinned != nil ? "it is pinned there"
+                : requested ? "a request asked for it"
                 : spent.map { "\(from) has no \($0) allowance left" + (modelSpent ? "; its other sessions stay" : "") }
                 ?? "\(from) can no longer serve it"
             failoverEvents.record(provider, balanced
@@ -440,6 +477,37 @@ extension AppState {
         return Set(sparesOf.filter { $0.value > 0 }.keys)
     }
 
+    /// What `serveSessionSlots` decides for one claimed slot.
+    struct SlotChoice: Equatable {
+        /// The account the slot serves now; nil when none can.
+        var target: UUID?
+        /// A move asked for through `requestedSlotMoves`.
+        var requested = false
+        /// A move `SessionPacer` chose to balance load.
+        var balanced = false
+        /// The slot's session is pinned and stays on an account that can no
+        /// longer serve it.
+        var keptPinned = false
+    }
+
+    /// The account a claimed slot serves: its own while that can serve the
+    /// session, else, when only the session's model is spent there, the
+    /// first account by weight with room for it, else `fallback`; a
+    /// requested move (`requested`) wins, and failing one a balancing move
+    /// (`balance`, already checked by the caller to be allowed). A pinned
+    /// session (`pinned`) keeps its pinned account whatever else would
+    /// apply, and a request for it is dropped: only unpinning frees it.
+    nonisolated static func slotChoice(current: UUID?, pinned: UUID?, requested: UUID?, balance: UUID?,
+                                       cannotServe: (UUID) -> Bool, modelSpent: Bool, byWeight: [UUID],
+                                       fallback: UUID?) -> SlotChoice {
+        if let pinned { return SlotChoice(target: pinned, keptPinned: cannotServe(pinned)) }
+        let target = current.flatMap { cannotServe($0) ? nil : $0 }
+            ?? (modelSpent ? byWeight.first { !cannotServe($0) } : fallback)
+        if let requested { return SlotChoice(target: requested, requested: true) }
+        if let balance, balance != target { return SlotChoice(target: balance, balanced: true) }
+        return SlotChoice(target: target)
+    }
+
     /// Writes the account's renewed access token to every session slot that
     /// serves it, at once. The renewal revoked the token those slots held,
     /// and a session that reads its slot before the next quota cycle rewrites
@@ -465,7 +533,9 @@ extension AppState {
         return nil
     }
 
-    func sessionLaunch(on account: Account, in directory: URL) async -> String? {
+    /// With `pinned`, the session the command starts is pinned to the
+    /// account (`SessionPins.pinSlot`), so nothing automatic moves it.
+    func sessionLaunch(on account: Account, in directory: URL, pinned: Bool = true) async -> String? {
         guard account.provider.capabilities.sessionSlots != nil, !needsSignIn(account),
               let slots = SessionSlots(account.provider),
               let cli = slots.realExecutable(preferred: ClaudeService.shared.claudePath) else { return nil }
@@ -484,7 +554,11 @@ extension AppState {
         guard let slot else { return readsLiveCredential(account) ? start + Self.shellQuoted(cli) : nil }
         slotDirectoryServing[slot.path] = id
         slotCredentialAccounts.insert(id)
-        slotsLog.info("Slot claimed for a session started on \(messageName(account))")
+        if pinned {
+            sessionPins.pinSlot(slot.path, account: id, provider: account.provider, at: Date())
+            sessionPins.save()
+        }
+        slotsLog.info("Slot claimed for a session started on \(messageName(account))\(pinned ? ", pinned there" : "")")
         return start + "CLAUDE_SECURESTORAGE_CONFIG_DIR=\(Self.shellQuoted(slot.path)) \(Self.shellQuoted(cli))"
     }
 

@@ -786,9 +786,14 @@ extension AppState {
         let now = Date()
         let planner = FailoverPlanner(settings: plannerSettings(provider, canVerify: canVerify))
         let recovered = exhaustedFailoverAccounts[provider, default: []]
+        // Each account's slot sessions stay on it when the active account
+        // changes; the plan charges a destination for them beside the work
+        // that moves.
+        let states = withStayingBurns(ladder.map { quotaState(for: $0, now: now) }, provider: provider, now: now)
         let plan = planner.plan(
-            current: quotaState(for: current, now: now),
-            ladder: ladder.map { quotaState(for: $0, now: now) },
+            current: states.first { $0.id == current.id }
+                ?? withStayingBurns([quotaState(for: current, now: now)], provider: provider, now: now)[0],
+            ladder: states,
             recoveredIDs: recovered,
             lastSwitch: lastAutomaticFailover[provider],
             now: now

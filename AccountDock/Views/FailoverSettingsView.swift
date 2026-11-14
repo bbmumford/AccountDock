@@ -229,6 +229,39 @@ struct FailoverSettingsView: View {
         }
     }
 
+    /// "Pinned sessions": every session pinned to a subscription
+    /// (`AppState.sessionPins`), with the account it is pinned to and a
+    /// button unpinning it.
+    @ViewBuilder
+    private func pinnedSessions(_ provider: AIProviderType) -> some View {
+        let rows = appState.pinnedSessionRows(provider)
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Pinned sessions")
+                .font(.subheadline)
+            if rows.isEmpty {
+                Text("None. Pin a session from the lock beside it in an account card's session list; a session opened from a card's session button is pinned there unless Keep here is unchecked.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(rows, id: \.session) { row in
+                HStack(alignment: .firstTextBaseline) {
+                    Image(systemName: "lock.fill")
+                        .foregroundStyle(.secondary)
+                    Text(verbatim: row.label)
+                        .font(.caption)
+                    Spacer()
+                    Text(verbatim: row.account)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Unpin") { appState.unpinSession(row.session) }
+                        .controlSize(.small)
+                }
+            }
+        }
+        .help("Failover, pacing, rebalancing and the model fallback never move a pinned session; at its account's limit it stays and is refused until you unpin it or switch its model.")
+    }
+
     private func switchMethodHelp(_ mode: FailoverSwitchMethod, provider: AIProviderType) -> String {
         switch mode {
         case .safeRestart:
@@ -413,6 +446,8 @@ struct FailoverSettingsView: View {
                 }
                 .padding(.leading, 20)
                 .disabled(!appState.rebalanceAvailable(provider))
+                pinnedSessions(provider)
+                    .padding(.leading, 20)
             }
             let choices = provider.capabilities.sessionModelChoices
             if let first = choices.first {

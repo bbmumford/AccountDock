@@ -59,6 +59,10 @@ struct ProviderCapabilities: Sendable {
     /// by `SessionSlots`' launcher; nil when the CLI has no per-launch
     /// credential location.
     var sessionSlots: SessionSlotSupport?
+    /// How the CLI runs sessions in the background under a supervisor of
+    /// its own, which `SessionSlots`' launcher never starts; nil when it
+    /// has no such service.
+    var backgroundSessions: BackgroundSessionSupport?
     /// The service this provider's accounts offer as a route target for
     /// another provider's routed requests.
     var routeTarget: RouteTarget?
@@ -169,6 +173,32 @@ struct SessionSlotSupport: Sendable {
     /// First arguments of the CLI's sign-in and sign-out commands, which run
     /// unchanged so they act on the default credential.
     let accountCommands: [String]
+}
+
+/// A CLI's background-session service: a supervisor process starts each
+/// background session in worker processes of its own, with its own
+/// environment, so a worker never passes through `SessionSlots`' launcher
+/// and reads the CLI's default credential, while a client in a terminal
+/// shows the session. Read by `BackgroundSessionProcesses`, the launcher and
+/// `AppState.restartBackgroundSession`.
+struct BackgroundSessionSupport: Sendable {
+    /// First arguments of the worker processes a background session runs
+    /// in, after the CLI's executable name; the session's lifecycle record
+    /// names one of them.
+    let workerCommands: [String]
+    /// First argument of the client that shows a background session in a
+    /// terminal; the session's ID, or its start, follows it.
+    let attachCommand: String
+    /// First argument of the command that ends a background session, whose
+    /// ID follows it.
+    let stopCommand: String
+    /// First arguments of the commands that manage background sessions and
+    /// start none, the attach client and the supervisor included; the
+    /// launcher runs them unchanged and no slot is kept for them.
+    let managementCommands: [String]
+    /// The flag that starts a session in the background; a launch carrying
+    /// it runs unchanged too, since the session itself runs in a worker.
+    let backgroundFlag: String
 }
 
 /// Where a CLI keeps the base URL of its model requests, so
@@ -310,6 +340,13 @@ extension AIProviderType {
                     credentialVariables: ["CLAUDE_SECURESTORAGE_CONFIG_DIR", "CLAUDE_CONFIG_DIR",
                                           "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
                     accountCommands: ["auth", "login", "logout", "setup-token"]
+                ),
+                backgroundSessions: BackgroundSessionSupport(
+                    workerCommands: ["bg-pty-host", "bg-spare"],
+                    attachCommand: "attach",
+                    stopCommand: "stop",
+                    managementCommands: ["attach", "stop", "logs", "rm", "agents", "daemon"],
+                    backgroundFlag: "--bg"
                 ),
                 supportsExtraUsage: true,
                 reportsLimitResets: true,

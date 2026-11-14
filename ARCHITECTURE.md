@@ -65,6 +65,7 @@ feature its capabilities declare, and its settings appear with it:
 | `supportsSelectableSwitchMode`, `switchReachesRunningSessions` | The switch method setting; whether a switch waits for a reset and restarts paused sessions to reach them |
 | `credentialSharedAcrossSessions`, `credentialStore` | Whether a switched-away account can still be consumed; the Keychain access notice |
 | `pauseGate`, `lifecycleHooks`, `cliExecutableName` | Pausing sessions, session records and finding the CLI's processes |
+| `sessionSlots`, `backgroundSessions` | One-session slots and their launcher; recognising the CLI's background-session workers and attach clients |
 | `liveUsageFeed` | The status-line usage feed and its setting |
 | `requestRouter` | Which provider's CLI the router serves (`AIProviderType.routedProvider`) and the routing settings |
 | `routeTarget` | The service the provider offers as a route target |
@@ -438,6 +439,14 @@ refusal shows the limit.
    instead of an account whose weekly window resets days later being
    prepared, which had switched between the two every minute.
 
+A switch moves only the work on the shared sign-in: sessions in one-session
+slots stay on their accounts. Each account's slot sessions' rate is its
+`QuotaAccountState.stayingSessionBurnPerHour` (`AppState.withStayingBurns`),
+so a destination is judged for the work that moves (the active account's
+burn less its own slot sessions) beside the slot sessions already on it
+(`FailoverPlanner.expectedBurn`), and the shared sign-in is not switched
+onto an account its slot sessions are about to exhaust.
+
 A destination whose reading may be out of date is read again before the switch
 (`verify`) rather than skipped, so the user's order is honoured with current
 data. Readings expire after 10 minutes for an account that sessions may be
@@ -714,6 +723,25 @@ the pool weights and which sessions move, each time the pool is rebuilt
 - A session that starts a turn after its cache has expired is placed again
   like a new session (`RouterState.cacheAwareSessions`), since moving it
   loses nothing.
+- With one-session slots, the sessions on the shared sign-in (outside a
+  slot, background workers included) all run on the active account and move
+  together whenever it changes, so the pacer takes them as one group
+  (`SessionPacer.SharedGroup`, built by `AppState.sharedGroup`) and never
+  moves them: their rate over their last hour, context and models. The
+  group counts on the active account until the switch failover projects
+  (`FailoverPlanner.nextSwitch`, which asks `plan` itself as of the moment
+  the active account's burn crosses a threshold, or failing a switch then,
+  reaches its limit), and on the account it would switch to from then until
+  that account's resets, with the cache rewrite of the group's context on
+  arrival (`SessionPacer.shares`). Pool weights, model weights, the runway
+  rule, moves and **Rebalance sessions now** all see that load, so no slot
+  session is placed or moved onto room the group will need. With failover
+  off for the provider or the active account locked, the group stays on the
+  active account for the whole horizon. The active account's readings
+  already include the group's rate, which its share counts instead. When the
+  group is projected to move, an event and the rebalance preview say so
+  ("AccountDock keeps room on B for the 4 sessions on the shared sign-in,
+  which move there at about 3:40 pm.").
 
 A session whose model's own allowance is spent on every account stays where
 it is and is refused. With the policy's `noRoomModelFallback` (off by
@@ -739,6 +767,24 @@ only, one idle in agterm (its last event `Stop`) is restarted in its own slot:
 session, so the resumed run goes through the launcher. A session mid-turn or
 outside agterm is never typed into; the list says why.
 
+A CLI with a background-session service (`backgroundSessions`; Claude
+Code's `claude --bg`, `claude attach <id>`, `claude stop <id>`) runs each
+background session in worker processes its supervisor starts with its own
+environment, so a worker never passes through the launcher and reads the
+shared sign-in. `BackgroundSessionProcesses` reads them from the same process
+list as the slots (`refreshSlotProcesses`): a worker is an unisolated session
+on the shared sign-in, listed as a background session; a process running one
+of the service's commands (the attach client, the supervisor, `stop`, `logs`,
+`rm`, `agents`) or a `--bg` launch is no session. The launcher runs those
+unchanged, as it runs the sign-in commands, and such a process is left out of
+`slotDirectoryByProcess`, so a slot an attach client reads is released
+like any slot no process reads, and no session record it left is counted. Restarting a background session in its own slot, at the user's
+request only, waits until it is idle by every sign: its last event `Stop`,
+its transcript and its subagents' quiet for two minutes, and no shell under
+its worker, as its Bash tool starts; then it runs `claude stop <id>` and
+types `claude --resume <id>` and Enter into the agterm tab of its attach
+client, so the resumed run goes through the launcher.
+
 **Rebalance sessions now** (Settings → Failover and the usage tab, for a
 provider whose sessions run in one-session slots; also the requests action
 `{"action":"rebalance","provider":…,"apply":true|false}`) places the running
@@ -757,6 +803,28 @@ destination. The moves go through `requestedSlotMoves`, so each is recorded.
 With **Rebalance automatically** (off by default) the quota cycle makes the
 same moves at most once per `balanceMoveInterval`, and only when the first
 account then runs out more than an hour later.
+
+A slot session can be **pinned** to its subscription (`SessionPins`, kept by
+session ID under `app.accountdock.failover.pins`, so `--resume` of the same
+session is pinned too and resumes on the pinned account; a pin goes when its
+session's record is archived or removed). Nothing automatic moves a pinned
+session: `serveSessionSlots` keeps its slot on the pinned account even when
+that account cannot serve it (`AppState.slotChoice`; recorded once per run
+at the limit), drops requested moves for it, and neither `SessionPacer.plan`
+(`fixed`), `rebalance` (not movable, like a session mid-turn, permanently)
+nor `applyModelFallbacks` touches it, though its rate counts as load on its
+account. A session on the shared sign-in cannot be pinned; its row offers a
+restart into its own slot first. A session opened from a tile's session
+button is pinned there unless the menu's **Keep here** is unchecked or
+Option is held while choosing; the slot is pinned first and the session
+reading it takes the pin. Clicking an account card's session count ("4
+sessions · 1 pinned") lists its sessions with a lock each; a pinned session
+refused at its account's limit shows "pinned · refused at limit" with
+**Unpin and move** (unpin, then a requested move to the account with most
+room for its model) and **Switch model**. Settings → Failover lists every
+pin with an unpin button, and the requests interface takes
+`{"action":"pin"|"unpin","session":…}`; `moveSession` refuses a pinned
+session.
 
 While sessions are served from several accounts, pausing waits for the whole
 pool: sessions pause only when no other included account is below its limit

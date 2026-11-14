@@ -185,6 +185,56 @@ struct SessionPacer {
         var recentTokensPerHour: Double? = nil
     }
 
+    /// The sessions on the CLI's shared sign-in, which no slot of their own
+    /// isolates: they all run on the active account and move together
+    /// whenever it changes, so neither `plan` nor `rebalance` moves them,
+    /// and each counts their load on the account carrying them, from when
+    /// to when (`shares`).
+    struct SharedGroup: Equatable {
+        /// The active account, which carries the group now.
+        var account: UUID
+        /// Weighted tokens per hour the group is expected to keep using.
+        var tokensPerHour: Double
+        /// The group's context, which a switch writes into the next
+        /// account's cache.
+        var contextTokens: Int
+        /// The model of each of its sessions that has said one; a model's
+        /// own allowance carries the share of the group's rate its sessions
+        /// make up.
+        var models: [String]
+        /// The account the active account would switch to next
+        /// (`FailoverPlanner.nextSwitch`), and when; nil while it would keep
+        /// the active account for the whole horizon, as with failover off
+        /// or the active account locked.
+        var nextAccount: UUID? = nil
+        var switchAt: Date? = nil
+        /// How many sessions the group holds, for the events.
+        var sessionCount = 0
+    }
+
+    /// The part of the shared group's load one account carries: its rate,
+    /// in that account's window percent, from `from` until `until` (nil
+    /// for as long as any of its windows runs), and `arrival`, the cache
+    /// rewrite it costs once at `from`.
+    struct SharedShare: Equatable {
+        var percentPerHour: Double
+        var from: Date
+        var until: Date?
+        var arrival: Double = 0
+        /// The fraction of the rate each of the account's model allowances
+        /// carries, by its key.
+        var scopedFractions: [String: Double] = [:]
+
+        /// Window percent the share spends between `now` and `end`.
+        func percent(from now: Date, until end: Date, fraction: Double = 1) -> Double {
+            let start = max(now, from)
+            let stop = min(end, until ?? end)
+            let running = stop > start ? stop.timeIntervalSince(start) / 3600 * percentPerHour * fraction : 0
+            let arrives = from > now && from < end ? arrival * fraction : 0
+            return running + arrives
+        }
+    }
+
     /// How an account's windows go at its sessions' current rate.
     struct Outlook: Equatable {
         /// Window percent per hour that uses the rest of each window exactly
@@ -241,9 +291,9 @@ struct SessionPacer {
     /// The account's outlook at `burn` percent per hour, after `spent`
     /// percent more than its readings show. The weekly allowance binds when
     /// it runs out before the 5-hour window's does.
-    func outlook(_ account: Account, spent: Double = 0, burn: Double, now: Date) -> Outlook {
+    func outlook(_ account: Account, spent: Double = 0, burn: Double, now: Date, shared: SharedShare? = nil) -> Outlook {
         func projected(_ remaining: Double, until end: Date) -> Outlook {
-            self.projected(remaining, burn: burn, until: end, now: now)
+            self.projected(remaining, burn: burn, until: end, now: now, shared: shared)
         }
         if !account.hasSessionWindow, let weeklyLeft = account.weeklyRemaining,
            let weeklyEnd = account.weeklyResetsAt, weeklyEnd > now {
@@ -258,12 +308,81 @@ struct SessionPacer {
                        limitAt: first?.limitAt, windowEndsAt: first?.windowEndsAt ?? session.windowEndsAt)
     }
 
-    /// How `remaining` percent goes at `burn` percent per hour until `end`.
-    func projected(_ remaining: Double, burn: Double, until end: Date, now: Date) -> Outlook {
+    /// How `remaining` percent goes at `burn` percent per hour until `end`,
+    /// with `shared`, the shared group's share, spent beside it over its own
+    /// span. The rate allowed is what the rest of the window leaves once
+    /// the share is set aside, and `burnPerHour` stays the account's own.
+    func projected(_ remaining: Double, burn: Double, until end: Date, now: Date,
+                   shared: SharedShare? = nil, fraction: Double = 1) -> Outlook {
         let hours = max(end.timeIntervalSince(now), 60) / 3600
-        let limitAt = burn > 0 ? now.addingTimeInterval(max(0, remaining) / burn * 3600) : nil
-        return Outlook(allowedPerHour: max(0, remaining) / hours, burnPerHour: burn,
+        let held = shared?.percent(from: now, until: end, fraction: fraction) ?? 0
+        let limitAt = shared.map { Self.limitTime(remaining, burn: burn, shared: $0, fraction: fraction, now: now) }
+            ?? (burn > 0 ? now.addingTimeInterval(max(0, remaining) / burn * 3600) : nil)
+        return Outlook(allowedPerHour: max(0, remaining - held) / hours, burnPerHour: burn,
                        limitAt: limitAt.flatMap { $0 < end ? $0 : nil }, windowEndsAt: end)
+    }
+
+    /// When `remaining` percent is spent at `burn` percent per hour plus
+    /// the share's rate over its span and its arrival cost at its start;
+    /// nil when it never is.
+    static func limitTime(_ remaining: Double, burn: Double, shared: SharedShare, fraction: Double, now: Date) -> Date? {
+        var left = max(0, remaining)
+        let from = max(now, shared.from)
+        let until = shared.until.map { max(from, $0) }
+        // Before the share starts, during it, and after it.
+        var segments: [(start: Date, end: Date?, rate: Double, lump: Double)] = []
+        if from > now { segments.append((now, from, burn, 0)) }
+        if let until {
+            if until > from { segments.append((from, until, burn + shared.percentPerHour * fraction, shared.from > now ? shared.arrival * fraction : 0)) }
+            segments.append((until, nil, burn, 0))
+        } else {
+            segments.append((from, nil, burn + shared.percentPerHour * fraction, shared.from > now ? shared.arrival * fraction : 0))
+        }
+        for segment in segments {
+            if segment.lump > 0 {
+                if segment.lump >= left { return segment.start }
+                left -= segment.lump
+            }
+            let length = segment.end.map { $0.timeIntervalSince(segment.start) / 3600 }
+            if segment.rate > 0 {
+                let needed = left / segment.rate
+                if length.map({ needed <= $0 }) ?? true { return segment.start.addingTimeInterval(needed * 3600) }
+            }
+            guard let length else { return nil }
+            left -= segment.rate * length
+        }
+        return nil
+    }
+
+    /// The shared group's share of each account that carries it: the
+    /// active account until the projected switch, the next one after it,
+    /// or the active account throughout when no switch is projected. Each
+    /// share's rate is in its account's window percent, and its model
+    /// allowances carry the part of it their models make up.
+    func shares(_ group: SharedGroup?, accounts: [Account], now: Date) -> [UUID: SharedShare] {
+        guard let group, group.tokensPerHour > 0 || group.contextTokens > 0 else { return [:] }
+        func share(on id: UUID, from: Date, until: Date?, arrival: Bool) -> SharedShare? {
+            guard let account = accounts.first(where: { $0.id == id }) else { return nil }
+            var fractions: [String: Double] = [:]
+            let models = group.models.map { $0.lowercased() }
+            if !models.isEmpty {
+                for key in account.scoped.keys {
+                    let using = models.filter { $0.contains(key) }.count
+                    if using > 0 { fractions[key] = Double(using) / Double(models.count) }
+                }
+            }
+            return SharedShare(percentPerHour: percent(group.tokensPerHour, on: account), from: from, until: until,
+                               arrival: arrival ? moveCost(group.contextTokens, to: account) : 0,
+                               scopedFractions: fractions)
+        }
+        var result: [UUID: SharedShare] = [:]
+        if let next = group.nextAccount, next != group.account, let at = group.switchAt {
+            result[group.account] = share(on: group.account, from: .distantPast, until: max(now, at), arrival: false)
+            result[next] = share(on: next, from: max(now, at), until: nil, arrival: true)
+        } else {
+            result[group.account] = share(on: group.account, from: .distantPast, until: nil, arrival: false)
+        }
+        return result
     }
 
     /// The allowances of `account` that only `session`'s model draws on.
@@ -294,9 +413,17 @@ struct SessionPacer {
         session.tokensPerHour / Double(max(session.contextTokens, 10_000))
     }
 
-    func plan(accounts: [Account], sessions: [Session], now: Date) -> Plan {
+    /// `sharedGroup` is the load of the sessions on the shared sign-in,
+    /// which are not among `sessions`: the account carrying it, now or from
+    /// the projected switch, counts it (`shares`), so it gives up slot
+    /// sessions, takes none, and takes fewer new sessions, as that load
+    /// requires; the group itself never moves. `fixed` sessions, pinned to
+    /// their account, never move either and count as load on it.
+    func plan(accounts: [Account], sessions: [Session], now: Date, sharedGroup: SharedGroup? = nil,
+              fixed: Set<String> = []) -> Plan {
         let ids = Set(accounts.map(\.id))
         let active = sessions.filter { ids.contains($0.account) && now.timeIntervalSince($0.lastSeen) <= Self.activeWithin }
+        let shares = shares(sharedGroup, accounts: accounts, now: now)
         var spent: [UUID: Double] = [:]
         var burn: [UUID: Double] = [:]
         // The same two for each allowance only one model's sessions draw on.
@@ -305,7 +432,10 @@ struct SessionPacer {
         for account in accounts {
             let own = active.filter { $0.account == account.id }
             let sessionsBurn = own.reduce(0) { $0 + percent($1.tokensPerHour, on: account) }
-            burn[account.id] = max(account.burnPerHour, sessionsBurn)
+            // The readings of the account carrying the shared group now
+            // include the group's rate, which its share counts instead.
+            let carried = sharedGroup?.account == account.id ? shares[account.id]?.percentPerHour ?? 0 : 0
+            burn[account.id] = max(account.burnPerHour - carried, sessionsBurn)
             for session in own {
                 for key in scopedKeys(session, on: account) {
                     scopedBurn[account.id, default: [:]][key, default: 0] += percent(session.tokensPerHour, on: account)
@@ -316,14 +446,17 @@ struct SessionPacer {
             active.filter { $0.account == id }.compactMap(\.cacheLifetime).max() ?? Self.defaultCacheLifetime
         }
         func current(_ account: Account) -> Outlook {
-            outlook(account, spent: spent[account.id] ?? 0, burn: burn[account.id] ?? 0, now: now)
+            outlook(account, spent: spent[account.id] ?? 0, burn: burn[account.id] ?? 0, now: now, shared: shares[account.id])
         }
         // Nil once the allowance's reset has passed: it no longer limits
         // anything, and the account's next reading carries the new one.
         func currentScoped(_ account: Account, _ key: String, spending: Double = 0, burning: Double = 0) -> Outlook? {
             guard let allowance = account.scoped[key], allowance.resetsAt > now else { return nil }
+            let share = shares[account.id]
+            let fraction = share?.scopedFractions[key] ?? 0
             return projected(allowance.remaining - (scopedSpent[account.id]?[key] ?? 0) - spending,
-                             burn: (scopedBurn[account.id]?[key] ?? 0) + burning, until: allowance.resetsAt, now: now)
+                             burn: (scopedBurn[account.id]?[key] ?? 0) + burning, until: allowance.resetsAt, now: now,
+                             shared: fraction > 0 ? share : nil, fraction: fraction)
         }
         func waitsTooLong(_ outlook: Outlook, on account: Account) -> Bool {
             outlook.limitAt != nil && outlook.waitAtLimit > cacheLifetime(account.id)
@@ -357,7 +490,7 @@ struct SessionPacer {
         }
         for source in sources.sorted(by: { $0.limitAt < $1.limitAt }) {
             let candidates = active.filter { session in
-                session.account == source.account.id && plan.moves[session.id] == nil
+                session.account == source.account.id && plan.moves[session.id] == nil && !fixed.contains(session.id)
                     && (source.key.map { scopedKeys(session, on: source.account).contains($0) } ?? true)
             }.sorted {
                 let (first, second) = (movable($0, now: now), movable($1, now: now))
@@ -373,7 +506,7 @@ struct SessionPacer {
                     let cost = moveCost(session.contextTokens, to: destination)
                     let rate = percent(session.tokensPerHour, on: destination)
                     let after = outlook(destination, spent: (spent[destination.id] ?? 0) + cost,
-                                        burn: (burn[destination.id] ?? 0) + rate, now: now)
+                                        burn: (burn[destination.id] ?? 0) + rate, now: now, shared: shares[destination.id])
                     guard after.limitAt == nil else { continue }
                     // The destination must carry the session within its
                     // model's own allowance too.
@@ -410,7 +543,8 @@ struct SessionPacer {
         // reaches a limit; nil when it reaches none before its resets.
         func runway(_ account: Account, _ key: String?) -> TimeInterval? {
             let rate = percent(typical, on: account)
-            let whole = outlook(account, spent: spent[account.id] ?? 0, burn: (burn[account.id] ?? 0) + rate, now: now)
+            let whole = outlook(account, spent: spent[account.id] ?? 0, burn: (burn[account.id] ?? 0) + rate, now: now,
+                                shared: shares[account.id])
             let scoped = key.flatMap { currentScoped(account, $0, burning: rate) }
             return ([whole] + [scoped].compactMap { $0 }).compactMap { $0.limitAt?.timeIntervalSince(now) }.min()
         }
@@ -629,15 +763,17 @@ extension SessionPacer {
     /// allowance the sessions draw on; infinity when it reaches no limit
     /// before they reset.
     func runway(_ account: Account, sessions: [RebalanceSession], spent: Double,
-                scopedSpent: [String: Double] = [:], now: Date) -> TimeInterval {
+                scopedSpent: [String: Double] = [:], shared: SharedShare? = nil, now: Date) -> TimeInterval {
         let burn = sessions.reduce(0) { $0 + percent($1.tokensPerHour, on: account) }
-        var times = [outlook(account, spent: spent, burn: burn, now: now).limitAt]
+        var times = [outlook(account, spent: spent, burn: burn, now: now, shared: shared).limitAt]
         for (key, allowance) in account.scoped where allowance.resetsAt > now {
             let users = sessions.filter { session in session.model?.lowercased().contains(key) == true }
-            guard !users.isEmpty else { continue }
+            let fraction = shared?.scopedFractions[key] ?? 0
+            guard !users.isEmpty || fraction > 0 else { continue }
             let scopedBurn = users.reduce(0) { $0 + percent($1.tokensPerHour, on: account) }
             times.append(projected(allowance.remaining - (scopedSpent[key] ?? 0), burn: scopedBurn,
-                                   until: allowance.resetsAt, now: now).limitAt)
+                                   until: allowance.resetsAt, now: now,
+                                   shared: fraction > 0 ? shared : nil, fraction: fraction).limitAt)
         }
         return times.compactMap { $0?.timeIntervalSince(now) }.min() ?? .infinity
     }
@@ -658,14 +794,21 @@ extension SessionPacer {
     /// move pays for its cache rewrite, and the result is a local optimum
     /// (no single further move of a session on the first account to run out
     /// helps), not necessarily the best of all assignments.
-    func rebalance(accounts: [Account], sessions: [RebalanceSession], destinations: Set<UUID>, now: Date) -> Rebalance {
+    ///
+    /// `sharedGroup`, the sessions on the shared sign-in, is no session it
+    /// moves: it counts on the active account until the projected switch
+    /// and on the next account after it (`shares`), so no session moves
+    /// onto room the group will need there.
+    func rebalance(accounts: [Account], sessions: [RebalanceSession], destinations: Set<UUID>, now: Date,
+                   sharedGroup: SharedGroup? = nil) -> Rebalance {
         var placed = sessions.filter { session in accounts.contains { $0.id == session.account } }
+        let shares = shares(sharedGroup, accounts: accounts, now: now)
         var spent: [UUID: Double] = [:]
         var scopedSpent: [UUID: [String: Double]] = [:]
         var moved = Set<String>()
         func runway(_ account: Account) -> TimeInterval {
             self.runway(account, sessions: placed.filter { $0.account == account.id }, spent: spent[account.id] ?? 0,
-                        scopedSpent: scopedSpent[account.id] ?? [:], now: now)
+                        scopedSpent: scopedSpent[account.id] ?? [:], shared: shares[account.id], now: now)
         }
         func earliest() -> (account: Account, runway: TimeInterval)? {
             accounts.map { ($0, runway($0)) }.min { $0.1 < $1.1 }
@@ -676,6 +819,7 @@ extension SessionPacer {
             guard let bottleneck = earliest(), bottleneck.runway.isFinite else { break }
             let burn = placed.filter { $0.account == bottleneck.account.id }
                 .reduce(0) { $0 + percent($1.tokensPerHour, on: bottleneck.account) }
+                + (shares[bottleneck.account.id].map { $0.from <= now ? $0.percentPerHour : 0 } ?? 0)
             var best: (index: Int, to: Account, runway: TimeInterval, cost: Double)?
             for (index, session) in placed.enumerated()
             where session.account == bottleneck.account.id && session.movable && !moved.contains(session.id) {
@@ -692,7 +836,8 @@ extension SessionPacer {
                     }
                     let after = accounts.map { account in
                         self.runway(account, sessions: trial.filter { $0.account == account.id },
-                                    spent: trialSpent[account.id] ?? 0, scopedSpent: trialScoped[account.id] ?? [:], now: now)
+                                    spent: trialSpent[account.id] ?? 0, scopedSpent: trialScoped[account.id] ?? [:],
+                                    shared: shares[account.id], now: now)
                     }.min() ?? .infinity
                     guard after > bottleneck.runway else { continue }
                     let gained = after.isFinite ? (after - bottleneck.runway) / 3600 * burn : .infinity
