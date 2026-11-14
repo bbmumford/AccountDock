@@ -179,6 +179,10 @@ struct SessionPacer {
         var lastTurnStart: Date? = nil
         /// The model the session uses; nil when it has not said.
         var model: String? = nil
+        /// Weighted tokens per hour over its last hour, idle time included
+        /// (`SessionRates.demand`); unlike `tokensPerHour`, it does not fade
+        /// to nothing while the session waits between turns.
+        var recentTokensPerHour: Double? = nil
     }
 
     /// How an account's windows go at its sessions' current rate.
@@ -395,15 +399,13 @@ struct SessionPacer {
                 }
             }
         }
-        // A session started now is expected to use what the running ones
-        // use on average, or `defaultSessionRate` when none is running. An
-        // account that could not carry one more such session for
+        // A session started now is expected to use `typicalNewSessionRate`.
+        // An account that could not carry one more such session for
         // `newSessionRunway` takes none while another account can: the
         // session would be refused there, or moved and made to write its
         // cache again, within the hour. `key` adds the allowance of the
         // model the session uses.
-        let rates = active.map(\.tokensPerHour).filter { $0 > 0 }
-        let typical = rates.isEmpty ? Self.defaultSessionRate : rates.reduce(0, +) / Double(rates.count)
+        let typical = Self.typicalNewSessionRate(active)
         // How long the account carries one more such session before it
         // reaches a limit; nil when it reaches none before its resets.
         func runway(_ account: Account, _ key: String?) -> TimeInterval? {
@@ -484,6 +486,20 @@ struct SessionPacer {
     /// Weighted tokens per hour assumed of a session with no history, as
     /// one about to start.
     static let defaultSessionRate = 20_000_000.0
+
+    /// The rate a session started now is expected to use: the median of the
+    /// running sessions' rates over their last hour (the larger of
+    /// `recentTokensPerHour` and the current `tokensPerHour`), at least
+    /// `defaultSessionRate`. A decayed current rate alone reads near zero
+    /// between turns, which would let every account look able to carry
+    /// another session.
+    static func typicalNewSessionRate(_ sessions: [Session]) -> Double {
+        let rates = sessions.map { max($0.tokensPerHour, $0.recentTokensPerHour ?? 0) }.filter { $0 > 0 }.sorted()
+        guard !rates.isEmpty else { return defaultSessionRate }
+        let middle = rates.count / 2
+        let median = rates.count % 2 == 1 ? rates[middle] : (rates[middle - 1] + rates[middle]) / 2
+        return max(defaultSessionRate, median)
+    }
 
     /// The share of its present rate an account's allowance sustains until
     /// its window resets, at most `maximumSustainedShare`: an account barely
