@@ -56,7 +56,7 @@ struct QuotaSimulator {
 
     var step: TimeInterval = 15 * 60
     var horizon: TimeInterval = 7 * 24 * 60 * 60
-    static let sessionWindow: TimeInterval = 5 * 60 * 60
+    static let sessionWindow = Allowance.sessionWindow
 
     func run(
         accounts initial: [Account],
@@ -129,7 +129,7 @@ struct QuotaSimulator {
             account.weekly += taken
             return taken / account.scale
         }
-        let room = min(max(0, 100 - account.weekly), max(0, 100 - account.session) / k)
+        let room = Allowance.weeklyRoom(sessionUsed: account.session, weeklyUsed: account.weekly, sessionPerWeekly: k)
         let taken = min(wanted, room)
         guard taken > 0 else { return 0 }
         if account.sessionReset == nil { account.sessionReset = time.addingTimeInterval(Self.sessionWindow) }
@@ -140,9 +140,8 @@ struct QuotaSimulator {
 
     private func latestStart(_ account: Account) -> Date {
         guard let reset = account.weeklyReset else { return .distantFuture }
-        guard account.hasSessionWindow else { return reset }
-        let rate = (100 / max(1, account.sessionPerWeekly)) / (Self.sessionWindow / 3600)
-        return reset.addingTimeInterval(-(100 - account.weekly) / rate * 3600)
+        return Allowance.latestStart(weeklyUsed: account.weekly, resetsAt: reset,
+                                     sessionPerWeekly: account.hasSessionWindow ? max(1, account.sessionPerWeekly) : nil)
     }
 
     private func order(_ accounts: [Account], strategy: Strategy, now: Date) -> [Int] {

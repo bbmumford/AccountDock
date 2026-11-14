@@ -117,7 +117,7 @@ extension AppState {
         guard let group, let next = group.nextAccount, next != group.account, let at = group.switchAt,
               let account = accounts.first(where: { $0.id == next }) else { return nil }
         let sessions = group.sessionCount == 1 ? "the session" : "the \(group.sessionCount) sessions"
-        return "Keeping room on \(messageName(account)) for \(sessions) on the shared sign-in, which move there at about \(at.formatted(date: .omitted, time: .shortened))."
+        return "Keeping room on \(messageName(account)) for \(sessions) on the shared sign-in, which move there at about \(UsageFormat.clock(at))."
     }
 
     /// Records `sharedGroupNote` once each time the account the group is

@@ -56,7 +56,7 @@ struct AgentPauseBanner: View {
     private var detail: String {
         var parts: [String] = []
         if let resumeAt = status.resumeAt {
-            parts.append("Resumes when capacity returns, expected \(resumeAt.formatted(date: .omitted, time: .shortened)).")
+            parts.append("Resumes when capacity returns, expected \(UsageFormat.clock(resumeAt)).")
         } else {
             parts.append("Resumes when an account has capacity again.")
         }
@@ -66,7 +66,7 @@ struct AgentPauseBanner: View {
                 ? "All are waiting before their next request."
                 : "\(waiting) waiting now; the others pause at their next tool call.")
         }
-        parts.append("New turns wait until then. Paused since \(status.since.formatted(date: .omitted, time: .shortened)).")
+        parts.append("New turns wait until then. Paused since \(UsageFormat.clock(status.since)).")
         if status.waiting > 0 {
             parts.append("\(SessionResumeShortcut.display) resumes the session in the front window.")
         }

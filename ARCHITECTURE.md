@@ -140,7 +140,11 @@ Some data is the same for every provider by construction:
   figures over the providers the user has not hidden, each metric over the
   providers whose `activityMetrics` report it; the usage dashboard, the cost
   tab, the menu bar and the widget all read it and write costs and tokens with
-  `UsageFormat`.
+  `UsageFormat`, which also writes every time and span AccountDock shows:
+  a time of day, a weekday and time within six days, or a date beyond
+  (`clock`); spans as "2 hr 14 min" (`duration`) or, in narrow cells,
+  "2h 14m" (`compactDuration`); and a window's reset as "Resets in …" or
+  "Resets on …" (`reset`).
 
 | Provider | Service | Credentials | Windows |
 | --- | --- | --- | --- |
@@ -777,7 +781,11 @@ week. Each account's percent is therefore converted through its own token
 cost, `AppState.accountRatio` (session percent per million weighted tokens),
 carried as `QuotaAccountState.percentPerMillion` and
 `SessionPacer.Account.percentPerMillion`, whenever a rate or room moves to
-or is compared with another account:
+or is compared with another account. The arithmetic itself (percent to
+tokens and back, conversion between accounts, the room left in a session
+and a long window, percent spent at a rate, run-out and latest-start times)
+is `Allowance`'s, which the planner, the pacer, the simulator and the pace
+outlook all count through:
 
 - `FailoverPlanner.expectedBurn` and `carriedBurn` convert the moving work
   and its deviation into the destination's percent (`converted`), so

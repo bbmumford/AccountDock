@@ -898,7 +898,7 @@ private struct PaceOutlookLine: View {
         var parts: [String] = []
         if let runsOut = outlook.runsOutAt, let limit = outlook.limit {
             let window = outlook.afterCurrentWindow ? " in a later window than this one" : ""
-            let room = outlook.resumesAt.map { ", and has room again at \($0.formatted(date: .omitted, time: .shortened))" } ?? ""
+            let room = outlook.resumesAt.map { ", and has room again \(UsageFormat.atClock($0))" } ?? ""
             parts.append("At the current pace, \(outlook.account) reaches its \(limit)\(window) \(Self.when(runsOut))\(room).")
         } else {
             parts.append("At the current pace, \(outlook.account) does not run out this week.")
@@ -913,20 +913,9 @@ private struct PaceOutlookLine: View {
         return parts.joined(separator: " ")
     }
 
-    /// "in about 40 min (9:12 am)", or the day and time beyond today.
-    static func when(_ date: Date) -> String {
-        let minutes = max(0, Int((date.timeIntervalSinceNow / 60).rounded()))
-        let clock = Calendar.current.isDateInToday(date)
-            ? date.formatted(date: .omitted, time: .shortened)
-            : date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
-        if minutes < 1 { return "now" }
-        if minutes < 60 { return "in about \(minutes) min (\(clock))" }
-        if minutes < 24 * 60 {
-            let hours = minutes / 60, rest = minutes % 60
-            return "in about \(hours) h\(rest > 0 ? " \(rest) min" : "") (\(clock))"
-        }
-        return "around \(clock)"
-    }
+    /// "in about 40 min (9:12 am)", or the day and time beyond a day
+    /// (`UsageFormat.until`).
+    static func when(_ date: Date) -> String { UsageFormat.until(date) }
 }
 
 /// One line summarising the coming week under the current strategy, from

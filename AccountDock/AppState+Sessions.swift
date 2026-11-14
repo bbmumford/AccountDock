@@ -67,7 +67,7 @@ extension AppState {
                                           model: sessionModel(id, now: now).map { CostParser.shortModelName($0) })
             guard let refusal = sessionRefusals[id] else { return label }
             let by = accounts.first { $0.id == refusal.account }.map { messageName($0) } ?? "its account"
-            return "\(label) — refused at a limit on \(by) at \(refusal.at.formatted(date: .omitted, time: .shortened)), not served since"
+            return "\(label) — refused at a limit on \(by) at \(UsageFormat.clock(refusal.at)), not served since"
         }.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }.joined(separator: "\n")
     }
 

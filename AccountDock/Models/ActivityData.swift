@@ -24,12 +24,9 @@ struct ActivityStats: Sendable {
         toolUsage.values.reduce(0, +)
     }
 
+    /// "45m", "2h 5m": the active coding time in the fixed shape the
+    /// activity cells hold (`UsageFormat.compactDuration`).
     var activeCodingTimeString: String {
-        if activeCodingMinutes < 60 {
-            return "\(activeCodingMinutes)m"
-        }
-        let hours = activeCodingMinutes / 60
-        let mins = activeCodingMinutes % 60
-        return mins > 0 ? "\(hours)h \(mins)m" : "\(hours)h"
+        UsageFormat.compactDuration(TimeInterval(activeCodingMinutes) * 60)
     }
 }

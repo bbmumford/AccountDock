@@ -31,10 +31,10 @@ struct RoutedRequestsBanner: View {
     }
 
     private var detail: String {
-        var parts = ["\(status.model) on \(status.backingAccount) since \(status.since.formatted(date: .omitted, time: .shortened)); sessions keep running."]
+        var parts = ["\(status.model) on \(status.backingAccount) since \(UsageFormat.clock(status.since)); sessions keep running."]
         if status.turns > 0 { parts.append("\(status.turns) turn(s) served.") }
         if let resumeAt = status.resumeAt {
-            parts.append("Back when capacity returns, expected \(resumeAt.formatted(date: .omitted, time: .shortened)).")
+            parts.append("Back when capacity returns, expected \(UsageFormat.clock(resumeAt)).")
         } else {
             parts.append("Back when an account has capacity again.")
         }

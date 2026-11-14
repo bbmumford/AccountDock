@@ -987,9 +987,7 @@ extension AppState {
             let rounded = Date(timeIntervalSinceReferenceDate: (date.timeIntervalSinceReferenceDate / 60).rounded() * 60)
             // A reset on another day names the day, so one days away does not
             // read as later today.
-            let resetText = Calendar.current.isDateInToday(rounded)
-                ? rounded.formatted(date: .omitted, time: .shortened)
-                : rounded.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())
+            let resetText = UsageFormat.clock(rounded, dated: true)
             await holdWork(provider, policy: policy, current: current, because: "every included account is exhausted until \(resetText)")
             // A switch that reaches running sessions would restart or reload
             // the paused sessions, and one that moves them to a live
@@ -1524,8 +1522,8 @@ extension AppState {
                 for: provider
             )
             refreshPauseStatus(provider)
-            let minutes = Int((reset.timeIntervalSince(now) / 60).rounded())
-            failoverEvents.record(provider, "\(name) is at its limit and resets in \(minutes) min, before the prompt caches of its \(sessions.count) working session(s) expire: they wait at their next tool call and continue on it after the reset, instead of writing their context again on another account.")
+            let until = UsageFormat.duration(reset.timeIntervalSince(now))
+            failoverEvents.record(provider, "\(name) is at its limit and resets in \(until), before the prompt caches of its \(sessions.count) working session(s) expire: they wait at their next tool call and continue on it after the reset, instead of writing their context again on another account.")
             return
         }
     }
