@@ -24,6 +24,14 @@ struct TranscriptRequest: Equatable, Sendable {
     /// Such a request used nothing, and `AppState.ingestTranscriptRequests`
     /// reads the refusing account whole instead of recording it.
     var limitRefusal: String? = nil
+    /// Cache read tokens, part of `contextTokens`; with `cacheWriteTokens`
+    /// they show `CredentialAudit.noteRequest` a cache rebuilt whole.
+    var cacheReadTokens: Int = 0
+    /// For a subagent's request, its transcript's path under the session's
+    /// `subagents` directory without the extension, naming the agent.
+    var agent: String? = nil
+    /// The model a subagent's request used, which `model` leaves out.
+    var agentModel: String? = nil
 }
 
 /// Reads each request's token use from the session transcripts a CLI writes
@@ -123,7 +131,13 @@ actor TranscriptRequestFeed {
                     var quiet = true
                     for item in list(directory) {
                         if item.pathExtension == "jsonl" {
+                            let agent = String(item.deletingPathExtension().path.dropFirst(subagents.path.count + 1))
                             requests += readIfChanged(item, session: entry.lastPathComponent, subagent: true, cutoff: cutoff)
+                                .map { request in
+                                    var request = request
+                                    request.agent = agent.isEmpty ? item.deletingPathExtension().lastPathComponent : agent
+                                    return request
+                                }
                             let itemModified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?
                                 .contentModificationDate ?? .distantFuture
                             if itemModified > cutoff { quiet = false }
@@ -262,7 +276,9 @@ actor TranscriptRequestFeed {
             session: subagent ? session : (row["sessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? session,
             at: at, contextTokens: input + write + read, cacheWriteTokens: write, cacheWriteLongTokens: long,
             outputTokens: int(usage["output_tokens"]), cacheLifetime: lifetime, startsTurn: startsTurn,
-            model: subagent ? nil : message["model"] as? String
+            model: subagent ? nil : message["model"] as? String,
+            cacheReadTokens: read,
+            agentModel: subagent ? message["model"] as? String : nil
         )
     }
 

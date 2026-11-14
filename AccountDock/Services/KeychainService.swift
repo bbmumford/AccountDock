@@ -73,6 +73,9 @@ final class KeychainService: Sendable {
     private let backupsFilePath: String
     private let legacyBackupsFilePath: String
     private let identityFile: ClaudeIdentityFile
+    /// Where every read for use, write and removal of a Claude credential
+    /// here is recorded.
+    private let audit = CredentialAudit.shared
 
     private init() {
         self.claudeAccount = NSUserName()
@@ -104,13 +107,18 @@ final class KeychainService: Sendable {
     /// as the saved accounts.
     private var claudeSlot: SecurityToolKeychain { SecurityToolKeychain(service: claudeService) }
 
-    func readClaudeToken() -> String? {
+    /// The live credential, recorded as a `liveRead` by `reason`, the
+    /// caller's code path, attributed to `account` or else the active
+    /// Claude account.
+    func readClaudeToken(reason: String, account: UUID? = nil) -> String? {
         guard let token = claudeSlot.read(account: claudeAccount)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !token.isEmpty else {
             log.error("[readClaudeToken] No token found!")
+            audit.record(.liveRead, .claudeCode, account: account, live: true, outcome: "missing", reason: reason)
             return nil
         }
         log.info("[readClaudeToken] Found via security CLI, length=\(token.count)")
+        audit.record(.liveRead, .claudeCode, account: account, live: true, credential: token, outcome: "ok", reason: reason)
         return token
     }
 
@@ -118,11 +126,16 @@ final class KeychainService: Sendable {
     /// never observe a moment without one, and confirms the write by reading
     /// it back. The value travels on the standard input of `security -i`
     /// only: a credential too long for it is refused, never passed as a
-    /// process argument, which every process on the Mac can read.
-    func writeClaudeToken(_ token: String) -> Bool {
+    /// process argument, which every process on the Mac can read. Recorded
+    /// as a `liveWrite` for `account` (the active account when nil) by
+    /// `reason`, with the credential it replaced.
+    func writeClaudeToken(_ token: String, account: UUID?, reason: String) -> Bool {
         let value = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let replaced = claudeSlot.read(account: claudeAccount)
         let written = claudeSlot.apply(writes: [(account: claudeAccount, value: value)])
         log.info("[writeClaudeToken] Result: \(written)")
+        audit.record(.liveWrite, .claudeCode, account: account, live: true, credential: value, previousCredential: replaced,
+                     outcome: written ? "ok" : "failed", reason: reason)
         return written
     }
 
@@ -152,23 +165,50 @@ final class KeychainService: Sendable {
 
     // MARK: - Account Backup Operations (token + oauthAccount)
 
-    func saveAccountBackup(token: String, oauthAccount: [String: AnyCodable], forAccountId accountId: String) -> Bool {
+    /// Saves `token` and `oauthAccount` as the account's copy, recorded as a
+    /// `savedCopyWrite` by `reason` with the copy it replaced.
+    func saveAccountBackup(token: String, oauthAccount: [String: AnyCodable], forAccountId accountId: String,
+                           reason: String) -> Bool {
         let email = (oauthAccount["emailAddress"]?.value as? String) ?? "?"
+        let id = UUID(uuidString: accountId)
         guard AccountBackup.isCompleteCredential(token) else {
             log.error("[saveBackup] Refusing to save an incomplete credential for \(accountId) (\(email)), length=\(token.count)")
+            audit.record(.savedCopyWrite, .claudeCode, account: id, credential: token, outcome: "refusedIncomplete", reason: reason)
             return false
         }
         log.info("[saveBackup] Saving for \(accountId) (\(email)), token length=\(token.count)")
+        var replaced: String?
         let result = updateBackupStore { store in
             let existing = store[accountId]
+            replaced = existing?.token
             let previous = existing.map { $0.token == token ? $0.previousToken : $0.token } ?? nil
             store[accountId] = AccountBackup(token: token, oauthAccount: oauthAccount, previousToken: previous)
         }
         log.info("[saveBackup] Result: \(result)")
+        audit.record(.savedCopyWrite, .claudeCode, account: id, credential: token, previousCredential: replaced,
+                     outcome: result ? "ok" : "storeUnavailable", reason: reason)
         return result
     }
 
-    func getAccountBackup(forAccountId accountId: String) -> AccountBackup? {
+    /// The account's copy, recorded as a `savedCopyRead` by `reason`.
+    func getAccountBackup(forAccountId accountId: String, reason: String) -> AccountBackup? {
+        let backup = storedBackup(forAccountId: accountId)
+        audit.record(.savedCopyRead, .claudeCode, account: UUID(uuidString: accountId), credential: backup?.token,
+                     outcome: backup == nil ? "missing" : "ok", reason: reason)
+        return backup
+    }
+
+    /// Whether the account has a copy; reads no credential for use.
+    func hasAccountBackup(forAccountId accountId: String) -> Bool {
+        loadBackupStore()?[accountId] != nil
+    }
+
+    /// The identity saved with the account's copy, without its credential.
+    func savedIdentity(forAccountId accountId: String) -> [String: AnyCodable]? {
+        loadBackupStore()?[accountId]?.oauthAccount
+    }
+
+    private func storedBackup(forAccountId accountId: String) -> AccountBackup? {
         guard let store = loadBackupStore() else { return nil }
         let backup = store[accountId]
         if let backup {
@@ -180,15 +220,21 @@ final class KeychainService: Sendable {
         return backup
     }
 
+    /// Deletes the account's copy, recorded as a `savedCopyRemove` by
+    /// `reason` with the credential removed.
     @discardableResult
-    func removeAccountBackup(forAccountId accountId: String) -> Bool {
+    func removeAccountBackup(forAccountId accountId: String, reason: String) -> Bool {
         log.info("[removeBackup] Removing for accountId=\(accountId)")
-        return updateBackupStore { $0.removeValue(forKey: accountId) }
+        var removed: String?
+        let result = updateBackupStore { removed = $0.removeValue(forKey: accountId)?.token }
+        audit.record(.savedCopyRemove, .claudeCode, account: UUID(uuidString: accountId), credential: removed,
+                     outcome: result ? (removed == nil ? "absent" : "ok") : "storeUnavailable", reason: reason)
+        return result
     }
 
     // Legacy compatibility — read token string only (for diagnostics)
     func getAccountToken(forAccountId accountId: String) -> String? {
-        return getAccountBackup(forAccountId: accountId)?.token
+        return getAccountBackup(forAccountId: accountId, reason: "getAccountToken")?.token
     }
 
     // MARK: - App Keychain operations (Backups)
@@ -402,6 +448,15 @@ final class KeychainService: Sendable {
             writes.append((Self.indexAccount, text))
         }
         let success = accountStore.apply(writes: writes, deletes: deletes)
+        for (id, backup) in store where writes.contains(where: { $0.account == id }) {
+            audit.record(.savedCopyPersist, .claudeCode, account: UUID(uuidString: id), credential: backup.token,
+                         previousCredential: writtenStore[id]?.token, outcome: success ? "ok" : "failed",
+                         reason: "KeychainService.writeBackupStore")
+        }
+        for id in deletes where id != Self.indexAccount && !id.hasSuffix(Self.previousSuffix) {
+            audit.record(.savedCopyPersist, .claudeCode, account: UUID(uuidString: id), credential: writtenStore[id]?.token,
+                         outcome: success ? "deleted" : "failed", reason: "KeychainService.writeBackupStore")
+        }
         if success {
             writtenStore = store
             log.debug("[saveBackupStore] Saved \(store.count) entries (\(writes.count) items written, \(deletes.count) deleted)")

@@ -705,7 +705,8 @@ final class ClaudeService: @unchecked Sendable {
         // Keep an exact snapshot of the live state. A target credential can
         // exist in AccountDock yet have expired or been revoked since capture;
         // verification must therefore be transactional.
-        let originalToken = keychain.readClaudeToken()
+        let audit = CredentialAudit.shared
+        let originalToken = keychain.readClaudeToken(reason: "switchAccount.snapshot", account: currentAccount.id)
         let originalOAuth = keychain.readOAuthAccount()
 
         func restoreOriginalCredentials() {
@@ -713,7 +714,8 @@ final class ClaudeService: @unchecked Sendable {
                 log.error("[switchAccount] Rollback unavailable: original credentials could not be read")
                 return
             }
-            let tokenRestored = keychain.writeClaudeToken(originalToken)
+            let tokenRestored = keychain.writeClaudeToken(originalToken, account: currentAccount.id,
+                                                          reason: "switchAccount.rollBack")
             let identityRestored = keychain.writeOAuthAccount(originalOAuth)
             log.info("[switchAccount] Rolled back rejected target credentials: token=\(tokenRestored), identity=\(identityRestored)")
         }
@@ -728,7 +730,8 @@ final class ClaudeService: @unchecked Sendable {
 
         // 2. Retrieve target account's backup
         log.info("[switchAccount] Step 2: Reading backup for target account...")
-        guard var targetBackup = keychain.getAccountBackup(forAccountId: targetAccount.id.uuidString) else {
+        guard var targetBackup = keychain.getAccountBackup(forAccountId: targetAccount.id.uuidString,
+                                                           reason: "switchAccount.target") else {
             log.error("[switchAccount] Step 2: No backup found for target account!")
             throw ClaudeServiceError.noTokenForAccount(targetAccount.id.uuidString)
         }
@@ -745,7 +748,7 @@ final class ClaudeService: @unchecked Sendable {
 
         // 3. Write target token to keychain + target oauthAccount to ~/.claude.json
         log.info("[switchAccount] Step 3: Writing target credentials...")
-        guard keychain.writeClaudeToken(targetBackup.token) else {
+        guard keychain.writeClaudeToken(targetBackup.token, account: targetAccount.id, reason: "switchAccount.install") else {
             log.error("[switchAccount] Step 3: Failed to write token to keychain!")
             throw ClaudeServiceError.keychainWriteFailed
         }
@@ -761,8 +764,22 @@ final class ClaudeService: @unchecked Sendable {
         return try await Self.verifySwitch(to: targetAccount, writtenToken: targetBackup.token, identity: identity,
                                            now: Date(), io: SwitchVerificationIO(
             authStatus: { try await self.getAuthStatus() },
-            profileEmail: { try await self.getProfileIdentity(accessToken: $0).email },
-            liveToken: { keychain.readClaudeToken() },
+            profileEmail: { access in
+                do {
+                    let email = try await self.getProfileIdentity(accessToken: access).email
+                    audit.record(.ownershipCheck, .claudeCode, account: targetAccount.id, accessToken: access,
+                                 outcome: email.map { targetAccount.matches(email: $0) ? "own" : "notOwn" } ?? "noOwner",
+                                 reason: "switchAccount.verify", owner: email)
+                    return email
+                } catch {
+                    let outcome: String
+                    if case UsageError.expired = error { outcome = "rejected" } else { outcome = "unavailable" }
+                    audit.record(.ownershipCheck, .claudeCode, account: targetAccount.id, accessToken: access,
+                                 outcome: outcome, reason: "switchAccount.verify")
+                    throw error
+                }
+            },
+            liveToken: { keychain.readClaudeToken(reason: "switchAccount.verify", account: targetAccount.id) },
             identityEmail: { keychain.readOAuthAccount()?["emailAddress"]?.value as? String },
             restoreIdentity: { keychain.writeOAuthAccount(identity) },
             rollBack: restoreOriginalCredentials

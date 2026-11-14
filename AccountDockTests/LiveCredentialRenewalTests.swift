@@ -147,7 +147,7 @@ final class LiveCredentialRenewalTests: XCTestCase {
         } catch KimiServiceError.liveCredentialExpired {
         }
         do {
-            _ = try await files.service.freshAccessToken(location: files.managed.path, isActive: true, minimumLifetime: 60)
+            _ = try await files.service.freshAccessToken(location: files.managed.path, isActive: true, minimumLifetime: 60, reason: "test")
             XCTFail("the router's token must not renew the live credential either")
         } catch KimiServiceError.liveCredentialExpired {
         }

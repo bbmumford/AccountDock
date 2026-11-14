@@ -16,13 +16,20 @@ extension AppState {
             live[provider] = sessions
             let attribution = sessionAttribution(provider, now: now)
             for session in sessions {
-                if let account = attribution.decide(session: session.sessionID, process: session.processID)?.account {
-                    byAccount[account, default: []].insert(session.sessionID)
+                if let decision = attribution.decide(session: session.sessionID, process: session.processID) {
+                    byAccount[decision.account, default: []].insert(session.sessionID)
+                    recordServed(provider, session: session, decision: decision, now: now)
                 }
             }
         }
         for (account, sessions) in routedSessions {
             byAccount[account, default: []].formUnion(sessions)
+            for session in sessions {
+                guard let provider = accounts.first(where: { $0.id == account })?.provider else { continue }
+                credentialAudit.recordServed(provider, session: session, account: account, source: "router",
+                                             model: sessionModel(session, now: now),
+                                             observedAt: routedSessionSeen[session]?.at)
+            }
         }
         if live != liveSessions { liveSessions = live }
         if byAccount != accountSessions { accountSessions = byAccount }

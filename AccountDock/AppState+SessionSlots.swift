@@ -279,7 +279,46 @@ extension AppState {
     /// Seconds a session in a moved slot may still be using the account it
     /// left: the CLI reads its slot again only before a request, and caches
     /// what it read for about half a minute.
-    static let slotMoveSettling: TimeInterval = 2 * 60
+    nonisolated static let slotMoveSettling: TimeInterval = 2 * 60
+
+    /// One assignment of a slot to an account (`slotAccountHistory`).
+    struct SlotAssignment: Equatable {
+        var account: UUID
+        var at: Date
+    }
+
+    /// Records that the slot at `path` now serves `account`, after `from`.
+    /// A slot first seen moving is taken to have served `from` until then.
+    func noteSlotAssignment(_ path: String, from: UUID?, to account: UUID, at: Date) {
+        var history = slotAccountHistory[path] ?? []
+        if history.isEmpty, let from { history.append(SlotAssignment(account: from, at: .distantPast)) }
+        history.append(SlotAssignment(account: account, at: at))
+        slotAccountHistory[path] = Array(history.suffix(16))
+    }
+
+    /// The account serving a slot's session at `time`: the first
+    /// assignment, then each later one made by `time` once
+    /// `slotMoveSettling` has passed since it, or once the session's cache
+    /// was rebuilt whole (`rebuiltAt`) between the move and `time`, which
+    /// shows its requests reached the new account. Until then the CLI may
+    /// still hold the token it read before the move. Nil without history.
+    nonisolated static func servingSlotAccount(at time: Date, history: [SlotAssignment], rebuiltAt: Date?) -> UUID? {
+        guard var current = history.first?.account else { return nil }
+        for assignment in history.dropFirst() where assignment.at <= time {
+            let settled = time.timeIntervalSince(assignment.at) >= slotMoveSettling
+            let rebuilt = rebuiltAt.map { $0 >= assignment.at && $0 <= time } ?? false
+            if settled || rebuilt { current = assignment.account }
+        }
+        return current
+    }
+
+    /// The account serving `session` at `time` by its slot's history, when
+    /// it reads a slot AccountDock has seen move; nil otherwise.
+    func slotAccount(forSession session: String, process: Int32?, at time: Date) -> UUID? {
+        guard let process, let directory = slotDirectoryByProcess[process],
+              let history = slotAccountHistory[directory] else { return nil }
+        return Self.servingSlotAccount(at: time, history: history, rebuiltAt: sessionCacheRebuiltAt[session])
+    }
 
     /// Whether something the session reported at `reportedAt` came too
     /// soon after its slot moved to tell which account served it. Judged by
@@ -400,13 +439,17 @@ extension AppState {
     /// the same credential was written or found there within `recheck`.
     /// Every slot is served on every quota cycle and each `serve` reads the
     /// slot's credential back, which may start a process, so most cycles
-    /// skip it.
+    /// skip it. `account`, `reason`, `session` and `process` are what the
+    /// audit records for a write.
     func serveSlot(_ slots: SessionSlots, _ directory: URL, credential: SlotCredential, recheck: TimeInterval,
+                   account: UUID?, reason: String, session: String? = nil, process: Int32? = nil,
                    now: Date = Date()) async -> Bool {
         let digest = Self.credentialDigest(credential.contents)
         if let written = slotCredentialWritten[directory.path], written.digest == digest,
            now.timeIntervalSince(written.at) < recheck { return true }
-        let served = await Task.detached(priority: .utility) { slots.serve(directory, credential: credential) }.value
+        let served = await Task.detached(priority: .utility) {
+            slots.serve(directory, credential: credential, account: account, reason: reason, session: session, process: process)
+        }.value
         slotCredentialWritten[directory.path] = served ? (digest, now) : nil
         return served
     }
@@ -462,10 +505,13 @@ extension AppState {
             credentials[id] = current
             return current
         }
-        func serve(_ directory: URL, _ id: UUID, spare: Bool = false) async -> Bool {
+        func serve(_ directory: URL, _ id: UUID, spare: Bool = false, reason: String,
+                   session: AgentSession? = nil) async -> Bool {
             guard let value = await credential(id) else { return false }
             return await serveSlot(slots, directory, credential: value,
-                                   recheck: spare ? Self.spareRecheckInterval : Self.claimedRecheckInterval, now: now)
+                                   recheck: spare ? Self.spareRecheckInterval : Self.claimedRecheckInterval,
+                                   account: id, reason: reason, session: session?.sessionID,
+                                   process: session?.processID, now: now)
         }
         let spareTarget = Self.spareTarget(peakSessions: recentSessionPeak(provider, now: now))
         var sparesOf: [UUID: Int] = [:]
@@ -475,7 +521,7 @@ extension AppState {
             let path = slot.directory.path
             guard let claimedAt = slot.claimedAt else {
                 guard let id = slot.account, open.contains(id), sparesOf[id, default: 0] < spareTarget,
-                      await serve(slot.directory, id, spare: true) else {
+                      await serve(slot.directory, id, spare: true, reason: "serveSessionSlots.spare") else {
                     removeSpares.append(slot.directory)
                     continue
                 }
@@ -544,19 +590,22 @@ extension AppState {
                 sessionsWithoutModelRoom.remove(session.sessionID)
                 pendingModelFallbacks[session.sessionID] = nil
             }
-            guard let target, await serve(slot.directory, target) else {
+            let serveReason = slot.account == target ? "serveSessionSlots.claimed" : "serveSessionSlots.move"
+            guard let target, await serve(slot.directory, target, reason: serveReason, session: session) else {
                 if let id = slot.account { sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = id }
                 continue
             }
             sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = target
             guard slot.account != target else { continue }
-            slots.assign(slot.directory, to: target)
+            slots.assign(slot.directory, to: target, reason: "serveSessionSlots.move", session: session?.sessionID,
+                         process: session?.processID)
             // The session's first request there writes its whole context.
             quotaTrends[target]?.settle(at: now)
             let from = slot.account.flatMap { id in accounts.first { $0.id == id } }.map { messageName($0) } ?? "its account"
             let to = accounts.first { $0.id == target }.map { messageName($0) } ?? "another account"
             let subject = Self.eventName(of: session)
             slotDirectoryMovedAt[path] = now
+            noteSlotAssignment(path, from: slot.account, to: target, at: now)
             // The model's own limit is named when it is what the account
             // has run out of, whether or not the account's other sessions
             // can stay.
@@ -575,7 +624,7 @@ extension AppState {
             guard let value = await credential(id) else { continue }
             let missing = spareTarget - sparesOf[id, default: 0]
             let made = await Task.detached(priority: .utility) {
-                (0..<missing).filter { _ in slots.makeSpare(for: id, credential: value) }.count
+                (0..<missing).filter { _ in slots.makeSpare(for: id, credential: value, reason: "serveSessionSlots.newSpare") }.count
             }.value
             sparesOf[id, default: 0] += made
         }
@@ -583,12 +632,13 @@ extension AppState {
             for directory in remove {
                 sessionSlotStates[provider]?.directoryServing[directory.path] = nil
                 slotDirectoryMovedAt[directory.path] = nil
+                slotAccountHistory[directory.path] = nil
                 slotSessionsByDirectory[directory.path] = nil
             }
             for directory in remove + removeSpares { slotCredentialWritten[directory.path] = nil }
             await Task.detached(priority: .utility) {
-                remove.forEach(slots.remove)
-                removeSpares.forEach { slots.removeSpare($0) }
+                remove.forEach { slots.remove($0, reason: "serveSessionSlots.sessionGone") }
+                removeSpares.forEach { slots.removeSpare($0, reason: "serveSessionSlots.spareNotWanted") }
             }.value
         }
         return Set(sparesOf.filter { $0.value > 0 }.keys)
@@ -664,13 +714,14 @@ extension AppState {
         var slot: URL?
         if let credential {
             slot = await Task.detached(priority: .userInitiated, operation: {
-                slots.makeRequestedSlot(for: id, credential: credential)
+                slots.makeRequestedSlot(for: id, credential: credential, reason: "sessionLaunch")
             }).value
         }
         // The sessions of the account the CLI's own credential belongs to
         // can still read it when no slot could be filled.
         guard let slot else { return readsLiveCredential(account) ? start + Self.shellQuoted(cli) : nil }
         sessionSlotStates[account.provider, default: SessionSlotState()].directoryServing[slot.path] = id
+        noteSlotAssignment(slot.path, from: nil, to: id, at: Date())
         sessionSlotStates[account.provider, default: SessionSlotState()].credentialAccounts.insert(id)
         if pinned {
             sessionPins.pinSlot(slot.path, account: id, provider: account.provider, at: Date())
@@ -687,7 +738,8 @@ extension AppState {
 
     func reissueSlotCredential(for account: Account) async {
         guard let slots = SessionSlots(account.provider),
-              let saved = credentialModule(for: account.provider)?.liveCredential?.savedCopy(account),
+              let saved = credentialModule(for: account.provider)?.liveCredential?.savedCopy(account,
+                                                                                             reason: "reissueSlotCredential"),
               let credential = slots.isolation.slotCredential(from: saved) else { return }
         let id = account.id
         let serving = sessionSlotStates[account.provider]?.directoryServing ?? [:]
@@ -695,8 +747,11 @@ extension AppState {
         // The renewal revoked what these slots held, so each is written now
         // whatever `serveSlot` last found there.
         for path in holding { slotCredentialWritten[path] = nil }
+        let processes = slotDirectoryByProcess.reduce(into: [String: Int32]()) { $0[$1.value] = $1.key }
         var written = 0
-        for path in holding where await serveSlot(slots, URL(fileURLWithPath: path), credential: credential, recheck: 0) {
+        for path in holding where await serveSlot(slots, URL(fileURLWithPath: path), credential: credential, recheck: 0,
+                                                  account: id, reason: "reissueSlotCredential",
+                                                  session: slotSessionsByDirectory[path], process: processes[path]) {
             written += 1
         }
         slotsLog.info("Renewed credential of \(messageName(account)) written to \(written) slot(s)")
@@ -742,7 +797,8 @@ extension AppState {
             guard let credential = credentials[servingID] else { continue }
             let directory = slots.directory(for: slot)
             let recheck = running.contains(slot) ? Self.claimedRecheckInterval : Self.spareRecheckInterval
-            if await serveSlot(slots, directory, credential: credential, recheck: recheck) {
+            if await serveSlot(slots, directory, credential: credential, recheck: recheck, account: servingID,
+                               reason: running.contains(slot) ? "serveRunning.running" : "serveRunning.newSession") {
                 ready.insert(slot)
             } else {
                 slotsLog.error("Slot for \(slot.uuidString) not written")
@@ -761,7 +817,7 @@ extension AppState {
         }
         if !stale.isEmpty {
             for directory in stale { slotCredentialWritten[directory.path] = nil }
-            await Task.detached(priority: .utility) { stale.forEach(slots.remove) }.value
+            await Task.detached(priority: .utility) { stale.forEach { slots.remove($0, reason: "serveRunning.stale") } }.value
         }
         return ready.intersection(newSessions)
     }

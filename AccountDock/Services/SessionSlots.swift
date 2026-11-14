@@ -25,6 +25,9 @@ private let log = FileLog("SessionSlots")
 struct SessionSlots: Sendable {
     let isolation: any ProviderSessionIsolation
     let home: URL
+    /// Where every slot credential written, slot assigned and slot removed
+    /// is recorded, with the slot, the account and the caller's `reason`.
+    let audit: CredentialAudit
 
     var executable: String { isolation.executable }
     /// The CLI's background-session service, whose commands and launches
@@ -55,9 +58,19 @@ struct SessionSlots: Sendable {
         self.init(isolation: isolation, home: home)
     }
 
-    init(isolation: any ProviderSessionIsolation, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+    init(isolation: any ProviderSessionIsolation, home: URL = FileManager.default.homeDirectoryForCurrentUser,
+         audit: CredentialAudit = .shared) {
         self.isolation = isolation
         self.home = home.standardizedFileURL
+        self.audit = audit
+    }
+
+    /// The provider an entry names: the one whose isolation this is, else
+    /// the provider of the slot's account; nil records nothing, which only
+    /// an isolation no provider declares and no saved account uses reaches.
+    private func auditProvider(_ account: UUID?) -> AIProviderType? {
+        AIProviderType.allCases.first { $0.capabilities.sessionIsolation?.executable == isolation.executable }
+            ?? account.flatMap(audit.provider(ofAccount:))
     }
 
     /// First arguments the launcher runs the CLI unchanged for: the
@@ -190,15 +203,16 @@ struct SessionSlots: Sendable {
     /// Fills a new spare slot for `account`. The account file is written
     /// last, so the launcher never claims a slot without its credential.
     @discardableResult
-    func makeSpare(for account: UUID, credential: SlotCredential) -> Bool {
-        makeSlot(for: account, credential: credential) != nil
+    func makeSpare(for account: UUID, credential: SlotCredential, reason: String) -> Bool {
+        makeSlot(for: account, credential: credential, reason: reason) != nil
     }
 
     /// Fills a new one-session slot for `account`; nil when it could not be
     /// written.
-    func makeSlot(for account: UUID, credential: SlotCredential) -> URL? {
+    func makeSlot(for account: UUID, credential: SlotCredential, reason: String) -> URL? {
         let directory = sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        guard serve(directory, credential: credential), assign(directory, to: account) else { return nil }
+        guard serve(directory, credential: credential, account: account, reason: reason),
+              assign(directory, to: account, reason: reason) else { return nil }
         return directory
     }
 
@@ -206,7 +220,7 @@ struct SessionSlots: Sendable {
     /// filled: an unclaimed slot is a spare, which a launcher may take and
     /// `AppState.maintainSessionSlots` may remove at any moment. Nil when it
     /// could not be written.
-    func makeRequestedSlot(for account: UUID, credential: SlotCredential) -> URL? {
+    func makeRequestedSlot(for account: UUID, credential: SlotCredential, reason: String) -> URL? {
         let directory = sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         do {
             try isolation.prepareSlot(directory)
@@ -214,8 +228,9 @@ struct SessionSlots: Sendable {
             log.error("[makeRequestedSlot] Slot not created: \(error.localizedDescription)")
             return nil
         }
-        guard claimRequested(directory), serve(directory, credential: credential), assign(directory, to: account) else {
-            remove(directory)
+        guard claimRequested(directory), serve(directory, credential: credential, account: account, reason: reason),
+              assign(directory, to: account, reason: reason) else {
+            remove(directory, reason: reason + ".unfilled")
             return nil
         }
         return directory
@@ -235,33 +250,60 @@ struct SessionSlots: Sendable {
         }
     }
 
-    /// Records the account a one-session slot serves.
+    /// Records the account a one-session slot serves, as a `slotAssign`
+    /// from the account it served before, by `reason`, for the session and
+    /// process using it when known.
     @discardableResult
-    func assign(_ directory: URL, to account: UUID) -> Bool {
+    func assign(_ directory: URL, to account: UUID, reason: String, session: String? = nil,
+                process: Int32? = nil) -> Bool {
+        let previous = recordedAccount(forSlotAt: directory.path)
+        let written: Bool
         do {
             try Data(account.uuidString.utf8).write(to: directory.appendingPathComponent(Self.accountFile), options: .atomic)
-            return true
+            written = true
         } catch {
             log.error("[assign] Slot account not written: \(error.localizedDescription)")
-            return false
+            written = false
         }
+        if let provider = auditProvider(account) {
+            audit.record(.slotAssign, provider, account: account, outcome: written ? "ok" : "failed", reason: reason,
+                         slot: directory.path, session: session, process: process,
+                         detail: previous.map { $0 == account ? "unchanged" : "from \($0.uuidString)" })
+        }
+        return written
     }
 
     // MARK: - Credential
 
     /// Writes `credential` to the slot through the isolation when the slot
     /// holds anything else, then tells a CLI reading it. Returns whether
-    /// the slot holds it afterwards.
-    func serve(_ directory: URL, credential: SlotCredential) -> Bool {
-        if isolation.readCredential(in: directory) == credential { return true }
+    /// the slot holds it afterwards. A write is recorded as a `slotWrite`
+    /// for `account` by `reason`, with the token it replaced and the
+    /// session and process using the slot when known.
+    func serve(_ directory: URL, credential: SlotCredential, account: UUID?, reason: String,
+               session: String? = nil, process: Int32? = nil) -> Bool {
+        let held = isolation.readCredential(in: directory)
+        if held == credential { return true }
+        let provider = auditProvider(account)
+        func note(_ outcome: String) {
+            guard let provider else { return }
+            audit.record(.slotWrite, provider, account: account, credential: credential.contents,
+                         previousCredential: held?.contents, outcome: outcome, reason: reason,
+                         slot: directory.path, session: session, process: process)
+        }
         do {
             try isolation.prepareSlot(directory)
         } catch {
             log.error("[serve] Slot directory not created: \(error.localizedDescription)")
+            note("noDirectory")
             return false
         }
-        guard isolation.writeCredential(credential, to: directory) else { return false }
+        guard isolation.writeCredential(credential, to: directory) else {
+            note("failed")
+            return false
+        }
         isolation.signalReread(directory)
+        note("ok")
         return true
     }
 
@@ -269,14 +311,14 @@ struct SessionSlots: Sendable {
     /// with the same `mkdir`, so a spare it took in the meantime is left to
     /// its session. Returns whether the slot was removed.
     @discardableResult
-    func removeSpare(_ directory: URL) -> Bool {
+    func removeSpare(_ directory: URL, reason: String) -> Bool {
         do {
             try FileManager.default.createDirectory(at: directory.appendingPathComponent(Self.claimedMarker),
                                                     withIntermediateDirectories: false)
         } catch {
             return false
         }
-        remove(directory)
+        remove(directory, reason: reason)
         return true
     }
 
@@ -291,10 +333,18 @@ struct SessionSlots: Sendable {
         return !names.isEmpty
     }
 
-    /// Deletes what the isolation keeps for the slot, then its directory.
-    func remove(_ directory: URL) {
+    /// Deletes what the isolation keeps for the slot, then its directory,
+    /// recorded as a `slotRemove` of the account the slot served and the
+    /// token it held, by `reason`.
+    func remove(_ directory: URL, reason: String) {
+        let account = recordedAccount(forSlotAt: directory.path)
+        let held = isolation.readCredential(in: directory)
         isolation.removeSlot(directory)
         try? FileManager.default.removeItem(at: directory)
+        if let provider = auditProvider(account) {
+            audit.record(.slotRemove, provider, account: account, credential: held?.contents,
+                         outcome: held == nil ? "empty" : "ok", reason: reason, slot: directory.path)
+        }
     }
 
     /// Every slot directory on disk.

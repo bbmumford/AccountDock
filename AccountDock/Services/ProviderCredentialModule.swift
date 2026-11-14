@@ -23,6 +23,8 @@ enum LiveCredentialError: Error {
 /// for failover and the account views, and when a renewed live credential
 /// is adopted. A module does only what needs the provider's own storage or
 /// endpoints. `AppState.credentialModule(for:)` registers one per provider.
+/// Every `reason` names the caller's code path for `CredentialAudit`, which
+/// records each read for use, write, renewal and ownership answer.
 @MainActor
 protocol ProviderCredentialModule {
     /// Whether AccountDock holds a saved copy of the account's credential;
@@ -31,7 +33,7 @@ protocol ProviderCredentialModule {
     func hasSavedCopy(_ account: Account) -> Bool?
     /// Renews the account's saved copy without changing the credential the
     /// CLI's running sessions use, and saves the renewed copy.
-    func renewSavedCopy(_ account: Account) async -> CredentialRenewal
+    func renewSavedCopy(_ account: Account, reason: String) async -> CredentialRenewal
     /// Whether the saved copy's access token is still valid `interval` from
     /// now.
     func savedCopyLasts(_ account: Account, for interval: TimeInterval) -> Bool
@@ -46,21 +48,21 @@ protocol ProviderCredentialModule {
 @MainActor
 protocol LiveCredentialModule {
     /// The live credential, when it can be read and is complete.
-    func read() -> String?
+    func read(reason: String) -> String?
     /// The account the credential belongs to. Throws
     /// `LiveCredentialError.rejected` when the provider refuses it.
-    func owner(of credential: String) async throws -> CredentialOwner
+    func owner(of credential: String, reason: String) async throws -> CredentialOwner
     /// The email of the identity the CLI is signed in as, which a session
     /// renewing its credential does not change.
     func signedInEmail() -> String?
     /// The provider's identifier for the account its saved copy belongs to.
     func providerAccountID(ofSavedCopy account: Account) -> String?
     /// The account's saved copy of the credential.
-    func savedCopy(_ account: Account) -> String?
+    func savedCopy(_ account: Account, reason: String) -> String?
     /// Saves a live credential as the account's copy.
-    func save(_ credential: String, asCopyOf account: Account) -> Bool
+    func save(_ credential: String, asCopyOf account: Account, reason: String) -> Bool
     /// Makes the account's saved copy the live credential.
-    func install(savedCopyOf account: Account) -> Bool
+    func install(savedCopyOf account: Account, reason: String) -> Bool
     /// Writes the identity saved with the account's copy as the one the CLI
     /// is signed in as, for when a session on another account rewrote it.
     func restoreSignedInIdentity(of account: Account) -> Bool
@@ -68,5 +70,5 @@ protocol LiveCredentialModule {
     func rateLimitTier(of credential: String) -> String?
     /// Tells running sessions the live credential changed, so each uses it
     /// from its next request; without this they keep the token they hold.
-    func signalRunningSessions()
+    func signalRunningSessions(reason: String)
 }

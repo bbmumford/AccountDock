@@ -115,14 +115,20 @@ final class KimiService: @unchecked Sendable {
     /// needing sign-in. `renewCredential`, `renewed` and
     /// `renewLiveCredentialForSlots` all go through it.
     private let renewals = KimiRenewalQueue()
+    /// Where every write, removal, renewal, read for use and ownership
+    /// answer of a Kimi credential here is recorded.
+    private let audit: CredentialAudit
 
     /// `home`, `managedRoot` and `cliIsRunning` default to the user's
-    /// directories and a process scan; tests pass their own.
+    /// directories and a process scan; tests pass their own, and may pass
+    /// an `audit` of their own.
     init(
         home: URL? = nil,
         managedRoot: URL? = nil,
-        cliIsRunning: @escaping @Sendable () async -> Bool = { await CLIProcessScan.isRunning(.kimi) }
+        cliIsRunning: @escaping @Sendable () async -> Bool = { await CLIProcessScan.isRunning(.kimi) },
+        audit: CredentialAudit = .shared
     ) {
+        self.audit = audit
         self.home = home ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".kimi-code", isDirectory: true)
         self.managedRoot = managedRoot ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -152,8 +158,12 @@ final class KimiService: @unchecked Sendable {
             )
             let source = try activeCredentialURL(in: directory)
             let destination = directory.appendingPathComponent("credentials.json")
-            try atomicCopy(source, to: destination)
-            return (try await identity(location: destination.path), destination.path)
+            try atomicCopy(source, to: destination, reason: "loginManagedAccount")
+            let signedIn = try await identity(location: destination.path, reason: "loginManagedAccount")
+            audit.record(.isolatedLogin, .kimi, location: destination.path,
+                         accessToken: (try? readCredential(at: destination))?.accessToken,
+                         outcome: "signedIn", reason: "loginManagedAccount", owner: signedIn.identifier)
+            return (signedIn, destination.path)
         } catch {
             try? fileManager.removeItem(at: directory)
             throw error
@@ -163,16 +173,20 @@ final class KimiService: @unchecked Sendable {
     func captureCurrentAccount() async throws -> (KimiIdentity, String) {
         let id = UUID()
         let location = try captureSystemAccount(accountID: id)
-        return (try await identity(location: location), location)
+        return (try await identity(location: location, reason: "captureCurrentAccount"), location)
     }
 
-    func identity(location: String) async throws -> KimiIdentity {
+    /// The account the credential at `location` signs in as, from Kimi's
+    /// profile endpoint; recorded as an `ownershipCheck` by `reason`.
+    func identity(location: String, reason: String) async throws -> KimiIdentity {
         let credential = try readCredential(at: URL(fileURLWithPath: location))
         var request = URLRequest(url: apiRoot.appendingPathComponent("me"))
         request.httpMethod = "GET"
         applyHeaders(to: &request, accessToken: credential.accessToken)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            audit.record(.ownershipCheck, .kimi, location: location, accessToken: credential.accessToken,
+                         outcome: "status \((response as? HTTPURLResponse)?.statusCode ?? 0)", reason: reason)
             throw KimiServiceError.requestFailed(
                 "profile endpoint returned \((response as? HTTPURLResponse)?.statusCode ?? 0)"
             )
@@ -183,6 +197,8 @@ final class KimiService: @unchecked Sendable {
         let nickname = profile.nickname?.trimmingCharacters(in: .whitespacesAndNewlines)
         let displayName = nickname?.isEmpty == false ? nickname! : identifier
         let tier = profile.userLevelName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        audit.record(.ownershipCheck, .kimi, location: location, accessToken: credential.accessToken,
+                     outcome: "answered", reason: reason, owner: identifier)
         return KimiIdentity(
             identifier: identifier,
             displayName: displayName,
@@ -190,42 +206,52 @@ final class KimiService: @unchecked Sendable {
         )
     }
 
-    func promoteToSystem(location: String) throws {
+    /// Makes the account's copy at `location` Kimi Code's live credential,
+    /// recorded as a `liveWrite` of that account by `reason`.
+    func promoteToSystem(location: String, reason: String) throws {
         let source = URL(fileURLWithPath: location)
         _ = try readCredential(at: source)
         let target = try activeCredentialURL(in: home)
         try fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try atomicCopy(source, to: target)
+        try atomicCopy(source, to: target, attributedTo: location, reason: reason)
     }
 
-    func syncSystemCredentials(toManagedLocation location: String) throws {
-        try atomicCopy(try activeCredentialURL(in: home), to: URL(fileURLWithPath: location))
+    func syncSystemCredentials(toManagedLocation location: String, reason: String) throws {
+        try atomicCopy(try activeCredentialURL(in: home), to: URL(fileURLWithPath: location), reason: reason)
     }
 
     /// Deletes the account directory holding `location`, which must be one
     /// `makeManagedDirectory` created: a directory inside `managedRoot`, not
-    /// the root itself or anything outside it.
-    func removeManagedAccount(location: String) throws {
+    /// the root itself or anything outside it. Recorded as a
+    /// `savedCopyRemove` by `reason`.
+    func removeManagedAccount(location: String, reason: String) throws {
         let directory = URL(fileURLWithPath: location).standardizedFileURL.deletingLastPathComponent()
         let root = managedRoot.standardizedFileURL.path
         guard directory.path.hasPrefix(root + "/"), directory.path != root else {
+            audit.record(.savedCopyRemove, .kimi, location: location, outcome: "refusedUnsafeLocation", reason: reason)
             throw KimiServiceError.unsafeCredentialLocation
         }
+        let removed = (try? readCredential(at: URL(fileURLWithPath: location)))?.accessToken
         if fileManager.fileExists(atPath: directory.path) {
             try fileManager.removeItem(at: directory)
         }
+        audit.record(.savedCopyRemove, .kimi, location: location, accessToken: removed,
+                     outcome: removed == nil ? "absent" : "ok", reason: reason)
     }
 
     /// An access token valid for at least `minimumLifetime`, for the request
     /// router. The active account's CLI copy is used when it is newer, since
     /// the Kimi CLI renews it itself; the token is renewed here only when
     /// neither copy lasts long enough.
-    func freshAccessToken(location: String, isActive: Bool, minimumLifetime: TimeInterval) async throws -> (String, Date) {
+    func freshAccessToken(location: String, isActive: Bool, minimumLifetime: TimeInterval,
+                          reason: String) async throws -> (String, Date) {
         let managedURL = URL(fileURLWithPath: location)
-        var credential = try newestCredential(at: managedURL, isActive: isActive)
+        var credential = try newestCredential(at: managedURL, isActive: isActive, reason: reason)
         if credential.expiresAt.map({ Date(timeIntervalSince1970: $0) <= Date().addingTimeInterval(minimumLifetime) }) != false {
-            credential = try await renewed(credential, managedURL: managedURL, isActive: isActive)
+            credential = try await renewed(credential, managedURL: managedURL, isActive: isActive, reason: reason)
         }
+        audit.record(.savedCopyRead, .kimi, location: location, accessToken: credential.accessToken, outcome: "ok",
+                     reason: reason)
         return (credential.accessToken, Date(timeIntervalSince1970: credential.expiresAt ?? Date().timeIntervalSince1970))
     }
 
@@ -238,15 +264,35 @@ final class KimiService: @unchecked Sendable {
     /// A renewal that finished while this one waited in `renewals` has
     /// already replaced `credential`'s refresh token; its result is used
     /// instead of presenting the spent token.
-    private func renewed(_ credential: Credential, managedURL: URL, isActive: Bool) async throws -> Credential {
+    private func renewed(_ credential: Credential, managedURL: URL, isActive: Bool, reason: String) async throws -> Credential {
         if isActive, await cliIsRunning() { throw KimiServiceError.liveCredentialExpired }
         return try await renewals.run(Self.renewalKey(managedURL)) { [self] in
-            let current = (try? newestCredential(at: managedURL, isActive: isActive)) ?? credential
+            let current = (try? newestCredential(at: managedURL, isActive: isActive, reason: reason)) ?? credential
             if current.refreshToken != credential.refreshToken { return current }
-            let fresh = try await refresh(current)
-            try writeCredential(fresh, to: managedURL)
-            if isActive { try writeCredential(fresh, to: activeCredentialURL(in: home)) }
+            let fresh: Credential
+            do {
+                fresh = try await refresh(current)
+            } catch {
+                audit.record(.renewal, .kimi, location: managedURL.path, accessToken: current.accessToken,
+                             outcome: Self.renewalOutcome(error), reason: reason)
+                throw error
+            }
+            audit.record(.renewal, .kimi, location: managedURL.path, accessToken: fresh.accessToken,
+                         previousAccessToken: current.accessToken, outcome: "renewed", reason: reason)
+            try writeCredential(fresh, to: managedURL, reason: reason + ".renewal")
+            if isActive {
+                try writeCredential(fresh, to: activeCredentialURL(in: home), attributedTo: managedURL.path,
+                                    reason: reason + ".renewal")
+            }
             return fresh
+        }
+    }
+
+    /// How a failed renewal is recorded.
+    private static func renewalOutcome(_ error: Error) -> String {
+        switch error {
+        case KimiServiceError.credentialRejected, KimiServiceError.invalidCredentials: "rejected"
+        default: "unavailable"
         }
     }
 
@@ -258,7 +304,8 @@ final class KimiService: @unchecked Sendable {
     /// Starts the account's 5-hour window with a one-token request to the
     /// coding endpoint, which is what Kimi Code itself calls.
     func warmQuotaWindow(location: String, isActive: Bool) async throws {
-        let (accessToken, _) = try await freshAccessToken(location: location, isActive: isActive, minimumLifetime: 60)
+        let (accessToken, _) = try await freshAccessToken(location: location, isActive: isActive, minimumLifetime: 60,
+                                                          reason: "warmQuotaWindow")
         var request = URLRequest(url: apiRoot.appendingPathComponent("messages"))
         request.httpMethod = "POST"
         applyHeaders(to: &request, accessToken: accessToken)
@@ -282,23 +329,30 @@ final class KimiService: @unchecked Sendable {
     /// Called by `KimiCredentialModule`.
     /// A renewal of the same copy that finished while this one waited in
     /// `renewals` counts as this one.
-    func renewCredential(location: String) async -> CredentialRenewal {
+    func renewCredential(location: String, reason: String) async -> CredentialRenewal {
         let managedURL = URL(fileURLWithPath: location)
+        let presented: Credential
         do {
-            let presented = try readCredential(at: managedURL)
+            presented = try readCredential(at: managedURL)
+        } catch {
+            audit.record(.renewal, .kimi, location: location, outcome: "rejected", reason: reason)
+            return .rejected
+        }
+        do {
             try await renewals.run(Self.renewalKey(managedURL)) { [self] in
                 let current = try readCredential(at: managedURL)
                 guard current.refreshToken == presented.refreshToken else { return }
                 let renewed = try await refresh(current)
-                try writeCredential(renewed, to: managedURL)
+                audit.record(.renewal, .kimi, location: location, accessToken: renewed.accessToken,
+                             previousAccessToken: current.accessToken, outcome: "renewed", reason: reason)
+                try writeCredential(renewed, to: managedURL, reason: reason + ".renewal")
             }
             return .renewed
-        } catch KimiServiceError.credentialRejected {
-            return .rejected
-        } catch KimiServiceError.invalidCredentials {
-            return .rejected
         } catch {
-            return .unavailable
+            let outcome: CredentialRenewal = Self.renewalOutcome(error) == "rejected" ? .rejected : .unavailable
+            audit.record(.renewal, .kimi, location: location, accessToken: presented.accessToken,
+                         outcome: outcome == .rejected ? "rejected" : "unavailable", reason: reason)
+            return outcome
         }
     }
 
@@ -318,8 +372,11 @@ final class KimiService: @unchecked Sendable {
     /// whichever of the two is newer (`newestCredential`). Nil when neither
     /// is complete. Read by `KimiSessionIsolation.currentSlotCredential`.
     func slotSourceCredential(location: String, isActive: Bool) -> String? {
-        guard let credential = try? newestCredential(at: URL(fileURLWithPath: location), isActive: isActive),
+        guard let credential = try? newestCredential(at: URL(fileURLWithPath: location), isActive: isActive,
+                                                     reason: "slotSourceCredential"),
               let data = try? JSONEncoder().encode(credential) else { return nil }
+        audit.record(.savedCopyRead, .kimi, location: location, accessToken: credential.accessToken, outcome: "ok",
+                     reason: "slotSourceCredential")
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -337,7 +394,7 @@ final class KimiService: @unchecked Sendable {
     /// `KimiSessionIsolation.currentSlotCredential`; `lockWait` is how long
     /// a lock Kimi Code keeps fresh is waited for.
     func renewLiveCredentialForSlots(location: String, lasting lifetime: TimeInterval,
-                                     lockWait: TimeInterval = 15) async -> CredentialRenewal {
+                                     lockWait: TimeInterval = 15, reason: String) async -> CredentialRenewal {
         let managedURL = URL(fileURLWithPath: location)
         guard let liveURL = try? activeCredentialURL(in: home) else { return .unavailable }
         let lock = KimiCredentialLock(home: home, name: liveURL.deletingPathExtension().lastPathComponent)
@@ -358,14 +415,23 @@ final class KimiService: @unchecked Sendable {
                     keepAlive.cancel()
                     lock.release()
                 }
-                let current = try newestCredential(at: managedURL, isActive: true)
+                let current = try newestCredential(at: managedURL, isActive: true, reason: reason)
                 if let expiresAt = current.expiresAt,
                    Date(timeIntervalSince1970: expiresAt) > Date().addingTimeInterval(lifetime) {
                     return .renewed
                 }
-                let fresh = try await refresh(current)
-                try writeCredential(fresh, to: managedURL)
-                try writeCredential(fresh, to: liveURL)
+                let fresh: Credential
+                do {
+                    fresh = try await refresh(current)
+                } catch {
+                    audit.record(.renewal, .kimi, location: location, live: true, accessToken: current.accessToken,
+                                 outcome: Self.renewalOutcome(error), reason: reason)
+                    throw error
+                }
+                audit.record(.renewal, .kimi, location: location, live: true, accessToken: fresh.accessToken,
+                             previousAccessToken: current.accessToken, outcome: "renewed", reason: reason)
+                try writeCredential(fresh, to: managedURL, reason: reason + ".renewal")
+                try writeCredential(fresh, to: liveURL, attributedTo: location, reason: reason + ".renewal")
                 return .renewed
             }
         } catch KimiServiceError.credentialRejected {
@@ -380,31 +446,34 @@ final class KimiService: @unchecked Sendable {
     /// The managed credential, replaced by the CLI's copy for the active
     /// account when that is newer: the Kimi CLI renews its own copy, which
     /// revokes the managed copy's refresh token, so `refresh` on the older
-    /// one is refused though the account is still signed in.
-    private func newestCredential(at managedURL: URL, isActive: Bool) throws -> Credential {
+    /// one is refused though the account is still signed in. The copy
+    /// taken from the CLI is recorded as a `savedCopyWrite` by `reason`.
+    private func newestCredential(at managedURL: URL, isActive: Bool, reason: String) throws -> Credential {
         let credential = try readCredential(at: managedURL)
         guard isActive, let activeURL = try? activeCredentialURL(in: home),
               let active = try? readCredential(at: activeURL),
               (active.expiresAt ?? 0) > (credential.expiresAt ?? 0) else { return credential }
-        try writeCredential(active, to: managedURL)
+        try writeCredential(active, to: managedURL, reason: reason + ".adoptLive")
         return active
     }
 
     func getUsageLimits(location: String, isActive: Bool) async throws -> UsageAPIResponse {
         let managedURL = URL(fileURLWithPath: location)
-        var credential = try newestCredential(at: managedURL, isActive: isActive)
+        var credential = try newestCredential(at: managedURL, isActive: isActive, reason: "getUsageLimits")
         var renewedHere = false
         if credential.expiresAt.map({ Date(timeIntervalSince1970: $0) <= Date().addingTimeInterval(60) }) != false {
-            credential = try await renewed(credential, managedURL: managedURL, isActive: isActive)
+            credential = try await renewed(credential, managedURL: managedURL, isActive: isActive, reason: "getUsageLimits")
             renewedHere = true
         }
         var (data, status) = try await usageResponse(accessToken: credential.accessToken)
         if status == 401, !renewedHere {
             // The access token was refused before its recorded expiry: renew
             // it once and read again.
-            credential = try await renewed(credential, managedURL: managedURL, isActive: isActive)
+            credential = try await renewed(credential, managedURL: managedURL, isActive: isActive, reason: "getUsageLimits")
             (data, status) = try await usageResponse(accessToken: credential.accessToken)
         }
+        audit.record(.savedCopyRead, .kimi, location: location, accessToken: credential.accessToken,
+                     outcome: "status \(status)", reason: "getUsageLimits")
         if status == 401 {
             // A renewed token refused again shows the sign-in is no longer
             // accepted; for the active account Kimi Code may still renew its
@@ -444,7 +513,7 @@ final class KimiService: @unchecked Sendable {
         _ = try readCredential(at: source)
         let directory = try makeManagedDirectory(accountID: accountID)
         let destination = directory.appendingPathComponent("credentials.json")
-        try atomicCopy(source, to: destination)
+        try atomicCopy(source, to: destination, reason: "captureCurrentAccount")
         return destination.path
     }
 
@@ -519,16 +588,32 @@ final class KimiService: @unchecked Sendable {
         return credential
     }
 
-    private func writeCredential(_ credential: Credential, to url: URL) throws {
+    /// Replaces the credential file at `url`, recorded by `reason` as a
+    /// `liveWrite` when `url` is Kimi Code's own credential and a
+    /// `savedCopyWrite` otherwise, attributed to the account whose copy is
+    /// at `attributedTo` (by default `url` itself), with the token replaced.
+    private func writeCredential(_ credential: Credential, to url: URL, attributedTo location: String? = nil,
+                                 reason: String) throws {
+        let live = (try? activeCredentialURL(in: home))?.standardizedFileURL.path == url.standardizedFileURL.path
+        let replaced = (try? readCredential(at: url))?.accessToken
         let data = try JSONEncoder().encode(credential)
-        try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try PrivateFile.writeAtomically(data, to: url, mode: 0o600)
+        do {
+            try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try PrivateFile.writeAtomically(data, to: url, mode: 0o600)
+        } catch {
+            audit.record(live ? .liveWrite : .savedCopyWrite, .kimi, location: location ?? url.path, live: live,
+                         accessToken: credential.accessToken, previousAccessToken: replaced, outcome: "failed", reason: reason)
+            throw error
+        }
+        audit.record(live ? .liveWrite : .savedCopyWrite, .kimi, location: location ?? url.path, live: live,
+                     accessToken: credential.accessToken, previousAccessToken: replaced, outcome: "ok", reason: reason)
     }
 
-    private func atomicCopy(_ source: URL, to destination: URL) throws {
+    private func atomicCopy(_ source: URL, to destination: URL, attributedTo location: String? = nil,
+                            reason: String) throws {
         let data = try Data(contentsOf: source)
         let credential = try JSONDecoder().decode(Credential.self, from: data)
-        try writeCredential(credential, to: destination)
+        try writeCredential(credential, to: destination, attributedTo: location, reason: reason)
     }
 
     private func applyHeaders(to request: inout URLRequest, accessToken: String) {
