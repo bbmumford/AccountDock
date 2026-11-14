@@ -16,7 +16,12 @@ private let log = FileLog("AppState")
 final class AppState: ObservableObject {
     // MARK: - Published State
 
-    @Published var accounts: [Account] = []
+    @Published var accounts: [Account] = [] {
+        didSet { credentialAuditAccountsChanged(from: oldValue) }
+    }
+    /// Processes whose own evidence names another account than the one
+    /// AccountDock believes they read, by session (`noteProcessCredential`).
+    @Published var flaggedCredentialProcesses: [String: FlaggedCredentialProcess] = [:]
     @Published var accountUsage: [UUID: UsageAPIResponse] = [:]
     @Published private(set) var accountUsageUpdatedAt: [UUID: Date] = [:]
     /// When each account's usage was last read whole from its provider's own
@@ -162,6 +167,13 @@ final class AppState: ObservableObject {
     var liveCredentialRenewal: Task<String?, Never>?
     /// When each one-session slot last moved to another account.
     var slotDirectoryMovedAt: [String: Date] = [:]
+    /// The accounts each one-session slot was assigned, oldest first, so a
+    /// request is attributed to the account serving it at its own time
+    /// (`servingSlotAccount`).
+    var slotAccountHistory: [String: [SlotAssignment]] = [:]
+    /// When each session's transcript last showed its cache rebuilt whole
+    /// (`CredentialAudit.noteRequest`), which shows a slot move took effect.
+    var sessionCacheRebuiltAt: [String: Date] = [:]
     /// Accounts a threshold or balancing switch left, whose running sessions
     /// stay on them until `moveSessionsOffLimitedAccounts` moves them.
     var sessionsLeftOn: [AIProviderType: Set<UUID>] = [:]
@@ -400,6 +412,8 @@ final class AppState: ObservableObject {
         log.info("[init] Loading accounts from UserDefaults...")
         keychain.preloadBackupStore()
         loadAccounts()
+        syncCredentialAuditAccounts()
+        installCredentialAuditEvents()
         loadUsageSnapshots()
         loadLearning()
         // Older builds stored permanent per-account warm-up markers. They
@@ -643,8 +657,10 @@ final class AppState: ObservableObject {
         let unavailableError: Error
         let login: () async throws -> ManagedProviderIdentity
         let captureCurrent: () async throws -> ManagedProviderIdentity
-        let activate: (String) throws -> Void
-        let remove: (String) throws -> Void
+        /// Makes the copy at a location live; the second argument is the audit reason.
+        let activate: (String, String) throws -> Void
+        /// Deletes the copy at a location; the second argument is the audit reason.
+        let remove: (String, String) throws -> Void
     }
 
     private func managedProviderAdapter(for provider: AIProviderType) -> ManagedProviderAdapter? {
@@ -674,8 +690,8 @@ final class AppState: ObservableObject {
                         credentialLocation: location
                     )
                 },
-                activate: { [codexService] in try codexService.promoteToSystem(homePath: $0) },
-                remove: { [codexService] in try codexService.removeManagedAccount(homePath: $0) }
+                activate: { [codexService] in try codexService.promoteToSystem(homePath: $0, reason: $1) },
+                remove: { [codexService] in try codexService.removeManagedAccount(homePath: $0, reason: $1) }
             )
         case .kimi:
             return ManagedProviderAdapter(
@@ -702,8 +718,8 @@ final class AppState: ObservableObject {
                         credentialLocation: location
                     )
                 },
-                activate: { [kimiService] in try kimiService.promoteToSystem(location: $0) },
-                remove: { [kimiService] in try kimiService.removeManagedAccount(location: $0) }
+                activate: { [kimiService] in try kimiService.promoteToSystem(location: $0, reason: $1) },
+                remove: { [kimiService] in try kimiService.removeManagedAccount(location: $0, reason: $1) }
             )
         default:
             return nil
@@ -719,11 +735,11 @@ final class AppState: ObservableObject {
             $0.provider == adapter.provider &&
                 $0.email.caseInsensitiveCompare(identity.identifier) == .orderedSame
         }) {
-            try? adapter.remove(identity.credentialLocation)
+            try? adapter.remove(identity.credentialLocation, "registerManagedAccount.duplicate")
             throw ManagedProviderError.duplicate(adapter.provider.capabilities.displayName)
         }
         if makeActive {
-            try adapter.activate(identity.credentialLocation)
+            try adapter.activate(identity.credentialLocation, "registerManagedAccount.first")
             for index in accounts.indices where accounts[index].provider == adapter.provider {
                 accounts[index].isActive = false
             }
@@ -773,7 +789,7 @@ final class AppState: ObservableObject {
             // provider becomes it.
             let previous = activeAccount(for: provider)
             try registerManagedAccount(try await adapter.captureCurrent(), using: adapter, makeActive: previous == nil)
-            if let location = previous?.credentialLocation { try adapter.activate(location) }
+            if let location = previous?.credentialLocation { try adapter.activate(location, "captureCurrentManagedAccount.restorePrevious") }
         } catch {
             errorMessage = error.localizedDescription
             log.error("[provider-auth] \(provider.rawValue) capture failed: \(error.localizedDescription)")
@@ -787,13 +803,13 @@ final class AppState: ObservableObject {
         do {
             let identity = try await adapter.login()
             guard identity.identifier.caseInsensitiveCompare(account.email) == .orderedSame else {
-                try? adapter.remove(identity.credentialLocation)
+                try? adapter.remove(identity.credentialLocation, "reauthenticateManagedAccount.wrongAccount")
                 throw KimiServiceError.requestFailed(
                     "Logged in as \(identity.identifier), expected \(account.email)."
                 )
             }
             guard let index = accounts.firstIndex(where: { $0.id == account.id }) else {
-                try? adapter.remove(identity.credentialLocation)
+                try? adapter.remove(identity.credentialLocation, "reauthenticateManagedAccount.accountGone")
                 return
             }
             let oldLocation = accounts[index].credentialLocation
@@ -801,12 +817,12 @@ final class AppState: ObservableObject {
             accounts[index].displayName = identity.displayName
             accounts[index].orgName = identity.accountMetadata
             accounts[index].subscriptionType = identity.planType
-            if account.isActive { try adapter.activate(identity.credentialLocation) }
+            if account.isActive { try adapter.activate(identity.credentialLocation, "reauthenticateManagedAccount.active") }
             credentialQuarantine[account.id] = nil
             rejectedCredentialAccounts.remove(account.id)
             saveAccounts(refreshWidget: true)
             if let oldLocation, oldLocation != identity.credentialLocation {
-                try? adapter.remove(oldLocation)
+                try? adapter.remove(oldLocation, "reauthenticateManagedAccount.replaced")
             }
             log.info("[provider-auth] Re-authenticated \(account.provider.rawValue) account")
         } catch {
@@ -854,7 +870,7 @@ final class AppState: ObservableObject {
         await performSwitch(to: previous, refreshAfter: false)
         if activeAccount(for: account.provider)?.id == previous.id {
             // Sessions that read the sign-in while it was `added`'s read it again.
-            moveRunningSessions(account.provider, from: added)
+            moveRunningSessions(account.provider, from: added, reason: "keepActiveAfterAdding")
             log.info("[addAccount] Kept the account that was active")
         } else {
             failoverEvents.record(account.provider, "\(messageName(account)) was added and is now the active account, because \(messageName(previous)) could not be put back; sessions on the shared sign-in follow it.")
@@ -899,7 +915,7 @@ final class AppState: ObservableObject {
             log.info("[addAccount] Created account model, id=\(account.id)")
 
             log.info("[addAccount] Capturing token from keychain...")
-            let captured = await captureOwnCredential(of: account)
+            let captured = await captureOwnCredential(of: account, reason: "addAccount")
             if captured != .saved {
                 errorMessage = Self.captureFailure(captured, account: account)
                 log.error("[addAccount] Token capture failed!")
@@ -933,14 +949,14 @@ final class AppState: ObservableObject {
             // The sign-in runs isolated (`ClaudeIsolatedLogin`): the live
             // sign-in and every session on it are left as they are.
             log.info("[loginNewAccount] Running isolated `claude auth login`...")
-            let (signIn, outcome) = try await isolatedClaudeSignIn(reauthenticating: nil)
+            let (signIn, outcome) = try await isolatedClaudeSignIn(reauthenticating: nil, reason: "loginNewAccount.isolated")
             switch outcome {
             case .wrongAccount:
                 return
             case .refresh(let id):
                 log.info("[loginNewAccount] Account already exists, refreshing its saved sign-in")
                 guard let existing = accounts.first(where: { $0.id == id }) else { return }
-                saveIsolatedSignIn(signIn, for: existing)
+                saveIsolatedSignIn(signIn, for: existing, reason: "loginNewAccount.refresh")
                 errorMessage = String(localized: "Account already exists - credentials refreshed", bundle: L10n.bundle)
                 return
             case .add(let email):
@@ -958,7 +974,7 @@ final class AppState: ObservableObject {
                 )
                 accounts.append(account)
                 excludeAddedAccountFromFailover(account)
-                saveIsolatedSignIn(signIn, for: account)
+                saveIsolatedSignIn(signIn, for: account, reason: "loginNewAccount.add")
                 saveAccounts(refreshWidget: true)
                 log.info("[loginNewAccount] Added \(account.id) (active: \(first)). Total: \(self.accounts.count)")
             }
@@ -1052,9 +1068,9 @@ final class AppState: ObservableObject {
     private func finishRemoving(_ account: Account) {
         log.info("[removeAccount] Removing account \(account.id)")
         if let adapter = managedProviderAdapter(for: account.provider) {
-            if let location = account.credentialLocation { try? adapter.remove(location) }
+            if let location = account.credentialLocation { try? adapter.remove(location, "removeAccount") }
         } else {
-            keychain.removeAccountBackup(forAccountId: account.id.uuidString)
+            keychain.removeAccountBackup(forAccountId: account.id.uuidString, reason: "removeAccount")
         }
         accounts.removeAll { $0.id == account.id }
         forgetAccount(account.id)
@@ -1268,7 +1284,7 @@ final class AppState: ObservableObject {
             errorMessage = Self.keychainWaitMessage
             return
         }
-        guard keychain.getAccountBackup(forAccountId: account.id.uuidString) != nil else {
+        guard keychain.hasAccountBackup(forAccountId: account.id.uuidString) else {
             log.error("[switchTo] ABORT: no backup for target account")
             errorMessage = String(localized: "No stored credentials for \(account.email). Use re-authenticate to fix.", bundle: L10n.bundle)
             return
@@ -1278,12 +1294,14 @@ final class AppState: ObservableObject {
         // when the provider says it is that account's: sessions on the
         // shared sign-in rewrite the slot and the identity file at any time.
         if currentActive.id != account.id {
-            let backup = await captureOwnCredential(of: currentActive)
+            let backup = await captureOwnCredential(of: currentActive, reason: "switchTo.backupCurrent")
             log.info("[switchTo] Backup of the outgoing account: \(String(describing: backup))")
         }
 
         do {
             let status = try await claudeService.switchAccount(from: currentActive, to: account)
+            credentialAudit.record(.switch, .claudeCode, account: account.id, outcome: "ok", reason: "switchTo",
+                                   detail: "from \(currentActive.id.uuidString)")
             rejectedCredentialAccounts.remove(account.id)
             credentialQuarantine[account.id] = nil
             // Claude processes keep the credential they hold until signalled,
@@ -1291,10 +1309,10 @@ final class AppState: ObservableObject {
             // switch. A switch the user asks for moves them at once.
             lastSwitchedAway[currentActive.id] = Date()
             noteLiveCredentialOwner(.claudeCode, account: account.id)
-            if refreshAfter { moveRunningSessions(.claudeCode, from: currentActive.id) }
+            if refreshAfter { moveRunningSessions(.claudeCode, from: currentActive.id, reason: "switchTo") }
 
             var verifiedSubscription = status.subscriptionType
-            if let tokenJSON = keychain.readClaudeToken(),
+            if let tokenJSON = keychain.readClaudeToken(reason: "switchTo.livePlan", account: account.id),
                let accessToken = ClaudeService.extractAccessToken(from: tokenJSON) {
                 do {
                     // A successful profile response is authoritative even when
@@ -1320,7 +1338,7 @@ final class AppState: ObservableObject {
             }
             // Preserve any token rotation performed while validating the newly
             // active profile so the managed copy is current on the next switch.
-            _ = await captureOwnCredential(of: account)
+            _ = await captureOwnCredential(of: account, reason: "switchTo.keepRenewed")
             saveAccounts()
             await routerFollowActiveAccount()
 
@@ -1330,6 +1348,8 @@ final class AppState: ObservableObject {
             }
             log.info("[switchTo] ===== Switch completed =====")
         } catch {
+            credentialAudit.record(.switch, .claudeCode, account: account.id, outcome: "failed", reason: "switchTo",
+                                   detail: "from \(currentActive.id.uuidString): \(error.localizedDescription)")
             errorMessage = error.localizedDescription
             if Self.switchFailureQuarantines(error) {
                 quarantineCredentials(of: account, reason: error.localizedDescription)
@@ -1380,9 +1400,9 @@ final class AppState: ObservableObject {
             // account and every session on the shared sign-in stay as they
             // are, so nothing needs putting back.
             log.info("[reauth] Running isolated `claude auth login`...")
-            let (signIn, outcome) = try await isolatedClaudeSignIn(reauthenticating: account)
+            let (signIn, outcome) = try await isolatedClaudeSignIn(reauthenticating: account, reason: "reauthenticate.isolated")
             guard case .refresh = outcome else { return }
-            saveIsolatedSignIn(signIn, for: account)
+            saveIsolatedSignIn(signIn, for: account, reason: "reauthenticate.save")
             if let index = accounts.firstIndex(where: { $0.id == account.id }) {
                 if let orgName = signIn.identity["organizationName"]?.value as? String { accounts[index].orgName = orgName }
                 if let plan = ClaudeIsolatedLogin.subscriptionType(of: signIn.token) { accounts[index].subscriptionType = plan }
@@ -1576,7 +1596,7 @@ final class AppState: ObservableObject {
         guard let location = account.credentialLocation else { return .skipped }
         do {
             let usage = try await kimiService.getUsageLimits(location: location, isActive: readsLiveCredential(account))
-            if includeMetadata, let identity = try? await kimiService.identity(location: location),
+            if includeMetadata, let identity = try? await kimiService.identity(location: location, reason: "readKimiUsage.metadata"),
                let index = accounts.firstIndex(where: { $0.id == account.id }),
                accounts[index].email != identity.identifier
                 || accounts[index].displayName != identity.displayName
@@ -1606,15 +1626,15 @@ final class AppState: ObservableObject {
         var tokenJSON: String?
         var usesSavedCopy = false
         if readsLiveCredential(account) {
-            tokenJSON = keychain.readClaudeToken()
+            tokenJSON = keychain.readClaudeToken(reason: "readClaudeUsage.live", account: account.id)
         } else {
             usesSavedCopy = true
-            tokenJSON = keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
+            tokenJSON = keychain.getAccountBackup(forAccountId: account.id.uuidString, reason: "readClaudeUsage.saved")?.token
             // An idle account's token is renewed before it expires, which
             // saves the rejected request a stale token would cost.
             if let stored = tokenJSON, ClaudeCredentialModule.expires(stored, within: 2 * 60),
-               await renewSavedCredential(account) == .renewed {
-                tokenJSON = keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
+               await renewSavedCredential(account, reason: "readClaudeUsage.expiring") == .renewed {
+                tokenJSON = keychain.getAccountBackup(forAccountId: account.id.uuidString, reason: "readClaudeUsage.renewed")?.token
             }
         }
         guard let tokenJSON, let accessToken = ClaudeService.extractAccessToken(from: tokenJSON) else {
@@ -1662,7 +1682,7 @@ final class AppState: ObservableObject {
                 if !status.loggedIn {
                     return .credentialRejected("Claude Code is signed out. Reauthenticate this account.")
                 }
-                guard let refreshed = keychain.readClaudeToken().flatMap(ClaudeService.extractAccessToken(from:)) else {
+                guard let refreshed = keychain.readClaudeToken(reason: "readClaudeUsage.liveRenewed", account: account.id).flatMap(ClaudeService.extractAccessToken(from:)) else {
                     throw ClaudeService.UsageError.expired
                 }
                 accessToken = refreshed
@@ -1671,9 +1691,9 @@ final class AppState: ObservableObject {
                 return .credentialUnrenewed(String(localized: "Token expired. Switch to refresh.", bundle: L10n.bundle))
             }
         } else {
-            switch await renewSavedCredential(account) {
+            switch await renewSavedCredential(account, reason: "readClaudeUsage.rejected") {
             case .renewed:
-                let stored = keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
+                let stored = keychain.getAccountBackup(forAccountId: account.id.uuidString, reason: "readClaudeUsage.renewed")?.token
                 guard let refreshed = stored.flatMap(ClaudeService.extractAccessToken(from:)) else { return .skipped }
                 accessToken = refreshed
             case .rejected:
@@ -2264,7 +2284,7 @@ final class AppState: ObservableObject {
             )
             accounts.append(account)
             saveAccounts()
-            Task { _ = await self.captureOwnCredential(of: account) }
+            Task { _ = await self.captureOwnCredential(of: account, reason: "updateActiveAccount") }
             log.info("[updateActiveAccount] Auto-created first account, id=\(account.id)")
         } else {
             log.info("[updateActiveAccount] Logged-in account not in our list (might be new)")
@@ -2373,13 +2393,14 @@ final class AppState: ObservableObject {
                let currentLocation = current.credentialLocation {
                 try codexService.syncSystemCredentials(
                     toManagedHome: currentLocation,
-                    expectedEmail: current.email
+                    expectedEmail: current.email,
+                    reason: "switchToCodex.saveCurrent"
                 )
             }
             if let current = activeAccount(for: .codex), liveProcesses.isEmpty, processes.isEmpty {
                 lastSwitchedAway[current.id] = Date()
             }
-            try codexService.promoteToSystem(homePath: location)
+            try codexService.promoteToSystem(homePath: location, reason: "switchToCodex")
             guard codexService.systemIdentity()?.email.caseInsensitiveCompare(account.email) == .orderedSame else {
                 throw CodexServiceError.loginFailed("The promoted credentials did not match \(account.email).")
             }
@@ -2460,9 +2481,9 @@ final class AppState: ObservableObject {
         guard !account.isActive, let location = account.credentialLocation else { return }
         do {
             if let current = activeAccount(for: .kimi), let currentLocation = current.credentialLocation {
-                try kimiService.syncSystemCredentials(toManagedLocation: currentLocation)
+                try kimiService.syncSystemCredentials(toManagedLocation: currentLocation, reason: "switchToKimi.saveCurrent")
             }
-            try kimiService.promoteToSystem(location: location)
+            try kimiService.promoteToSystem(location: location, reason: "switchToKimi")
             for index in accounts.indices where accounts[index].provider == .kimi {
                 accounts[index].isActive = accounts[index].id == account.id
                 if accounts[index].id == account.id { accounts[index].lastUsed = Date() }

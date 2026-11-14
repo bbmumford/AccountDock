@@ -201,6 +201,39 @@ confirmed (no request allowance, or no answer) reads no usage for its account
 (`AppState.recordsReading`); the check is made again at the next reading, and a
 reading the user asks for always makes it.
 
+### Credential audit
+
+Every read of a credential for use, every write, removal, renewal,
+ownership answer, switch, session signal, warm-up and slot change, for every
+provider, appends one JSON line to `~/Library/Logs/AccountDock-credentials.jsonl`
+(`CredentialAudit`). An entry names the action, the account AccountDock
+attributes it to, the code path (`reason`), the slot, session and process
+for slot actions, and the token only as a fingerprint: the first 12
+hexadecimal digits of the SHA-256 of its access token. No token text and
+nothing of a refresh token is written; plan fields (`subscriptionType`,
+`rateLimitTier`) are.
+
+The audit learns whose each fingerprint is from the provider's answers
+(profile checks before saving or switching, isolated sign-ins, the saved-copy
+check before a reading, a Codex token's own signed identity) and keeps the
+map beside the file. A later entry with a known fingerprint names the real
+owner; one attributed to another account is marked `mismatch` and raises an
+event once per token and account.
+
+The trail also records which account served each session and agent
+(`served`, once per change), a session's or agent's prompt cache rebuilt
+whole right after a warm read (`servedChange`, the change of account the
+transcript itself shows), and what a running process's status line or
+refusal reset times say about the token it holds (`processCredential`).
+A process holding another account's token than its slot's or the live one
+is flagged with an event; Settings → General → Audit, or the request
+`{"action":"signalSessions"}`, tells it to read its sign-in again.
+
+Query it with the request `{"action":"audit","since":"<ISO time>","account":"<id, label or email>"}`;
+Settings → General → Audit opens the file. `CredentialAuditCoverageTests`
+reads the sources and fails for any credential operation called without a
+`reason:` outside a function that records an entry.
+
 ### Token JSON format
 
 The token stored in keychain is a single JSON object (captured from real keychain entry):
@@ -1347,6 +1380,8 @@ Session records contain no prompt or transcript content.
 | `~/Library/Logs/AccountDock-app.log` | App log |
 | `~/Library/Logs/AccountDock-router.log` | Router log |
 | `~/Library/Logs/AccountDock-failover.json` | Failover activity log (account identity obfuscated, capped at 500) |
+| `~/Library/Logs/AccountDock-credentials.jsonl` | Credential audit trail, JSON Lines, owner-only, rotated at 20 MB keeping `.1`–`.3` |
+| `~/Library/Logs/AccountDock-credentials-owners.json` | Token fingerprint → owner map the audit learned (obfuscated email, account ID) |
 | `UserDefaults` `app.accountdock.mac` | Accounts, usage snapshots, failover settings and runtime, learning |
 
 ## Costs

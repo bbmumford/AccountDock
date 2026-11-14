@@ -141,7 +141,7 @@ final class SessionSlotsTests: XCTestCase {
         func sessionSlot(_ id: UUID, claimed: Bool) throws -> String {
             let directory = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
             try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-            XCTAssertTrue(slots.assign(directory, to: id))
+            XCTAssertTrue(slots.assign(directory, to: id, reason: "test"))
             if claimed { try fm.createDirectory(at: directory.appendingPathComponent(SessionSlots.claimedMarker), withIntermediateDirectories: true) }
             return directory.path
         }
@@ -216,8 +216,8 @@ final class SessionSlotsTests: XCTestCase {
         try FileManager.default.createDirectory(at: spare, withIntermediateDirectories: true)
         let other = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
-        XCTAssertTrue(slots.assign(spare, to: account))
-        XCTAssertTrue(slots.assign(other, to: UUID()))
+        XCTAssertTrue(slots.assign(spare, to: account, reason: "test"))
+        XCTAssertTrue(slots.assign(other, to: UUID(), reason: "test"))
         slots.writePool([(slot.path, 1)])
         XCTAssertEqual(try launch(["-p"]), spare.path + "|-p")
         XCTAssertEqual(slots.sessionSlots().first { $0.directory.lastPathComponent == spare.lastPathComponent }?.account, account)
@@ -233,7 +233,7 @@ final class SessionSlotsTests: XCTestCase {
             for _ in 0..<100 {
                 if slots.takeSpareRequests() {
                     try? FileManager.default.createDirectory(at: late, withIntermediateDirectories: true)
-                    _ = slots.assign(late, to: account)
+                    _ = slots.assign(late, to: account, reason: "test")
                     asked.fulfill()
                     return
                 }
@@ -247,10 +247,10 @@ final class SessionSlotsTests: XCTestCase {
         // A spare is removed only while unclaimed.
         let unclaimed = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: unclaimed, withIntermediateDirectories: true)
-        XCTAssertTrue(slots.assign(unclaimed, to: account))
-        XCTAssertFalse(slots.removeSpare(late), "a spare a session has claimed is left to it")
+        XCTAssertTrue(slots.assign(unclaimed, to: account, reason: "test"))
+        XCTAssertFalse(slots.removeSpare(late, reason: "test"), "a spare a session has claimed is left to it")
         XCTAssertTrue(FileManager.default.fileExists(atPath: late.path))
-        XCTAssertTrue(slots.removeSpare(unclaimed))
+        XCTAssertTrue(slots.removeSpare(unclaimed, reason: "test"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: unclaimed.path))
 
         // A session resumed by ID goes back to the account its history ran
@@ -258,7 +258,7 @@ final class SessionSlotsTests: XCTestCase {
         let home2 = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: home2, withIntermediateDirectories: true)
         let otherAccount = UUID()
-        XCTAssertTrue(slots.assign(home2, to: otherAccount))
+        XCTAssertTrue(slots.assign(home2, to: otherAccount, reason: "test"))
         slots.writeResumes([(session: "abc-123", path: slots.directory(for: otherAccount).path),
                             (session: "on-active", path: SessionSlots.activeEntry)])
         XCTAssertEqual(try launch(["--resume", "abc-123"]), home2.path + "|--resume abc-123")
@@ -349,7 +349,7 @@ final class SessionSlotsTests: XCTestCase {
         let account = UUID()
         let directory = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        XCTAssertTrue(slots.assign(directory, to: account))
+        XCTAssertTrue(slots.assign(directory, to: account, reason: "test"))
         XCTAssertEqual(slots.sessionSlots().first?.requested, false)
         XCTAssertNil(slots.sessionSlots().first?.claimedAt)
 
@@ -410,8 +410,8 @@ final class SessionSlotsTests: XCTestCase {
         XCTAssertNil(slot.account)
         XCTAssertNotNil(slot.claimedAt)
         XCTAssertTrue(slot.requested)
-        XCTAssertFalse(slots.removeSpare(directory), "a claimed slot is not removed as a spare")
-        XCTAssertTrue(slots.assign(directory, to: UUID()))
+        XCTAssertFalse(slots.removeSpare(directory, reason: "test"), "a claimed slot is not removed as a spare")
+        XCTAssertTrue(slots.assign(directory, to: UUID(), reason: "test"))
     }
 
     func testSparesCoverEverySessionSeenRunningAtOnce() {

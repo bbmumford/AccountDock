@@ -451,16 +451,34 @@ final class CodexService: @unchecked Sendable {
     /// Whether a Codex process is running, which renews the live credential
     /// itself (`getUsageSnapshot`).
     private let cliIsRunning: @Sendable () async -> Bool
+    /// Where every write, removal, renewal and read for use of a Codex
+    /// credential here is recorded.
+    private let audit: CredentialAudit
 
     /// `systemHome` and `cliIsRunning` default to the user's `~/.codex` and
-    /// a process scan; tests pass their own.
+    /// a process scan; tests pass their own, and may pass an `audit`.
     init(
         systemHome: URL? = nil,
-        cliIsRunning: @escaping @Sendable () async -> Bool = { await CLIProcessScan.isRunning(.codex) }
+        cliIsRunning: @escaping @Sendable () async -> Bool = { await CLIProcessScan.isRunning(.codex) },
+        audit: CredentialAudit = .shared
     ) {
         self.systemHome = systemHome
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex", isDirectory: true)
         self.cliIsRunning = cliIsRunning
+        self.audit = audit
+    }
+
+    /// Whether `home` is `systemHome`, whose credential is the live one.
+    private func isSystemHome(_ home: URL) -> Bool {
+        home.standardizedFileURL.path == systemHome.standardizedFileURL.path
+    }
+
+    /// The access token of an `auth.json` file, for the audit's fingerprint.
+    private static func accessToken(inAuthFile url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url),
+              let auth = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = auth["tokens"] as? [String: Any] else { return nil }
+        return tokens["access_token"] as? String
     }
 
     /// Whether this reader may renew the credential in `home`. The live one
@@ -470,7 +488,7 @@ final class CodexService: @unchecked Sendable {
     /// the server has already used, and Codex then asks the user to sign in
     /// again.
     private func mayRenewCredential(in home: URL) async -> Bool {
-        guard home.standardizedFileURL.path == systemHome.standardizedFileURL.path else { return true }
+        guard isSystemHome(home) else { return true }
         return !(await cliIsRunning())
     }
 
@@ -531,15 +549,18 @@ final class CodexService: @unchecked Sendable {
               var tokens = auth["tokens"] as? [String: Any] else {
             throw CodexServiceError.invalidCredentials
         }
+        let live = isSystemHome(home)
         if Self.credentialsNeedRefresh(auth),
            let refreshToken = tokens["refresh_token"] as? String,
            !refreshToken.isEmpty {
             guard await mayRenewCredential(in: home) else { throw CodexServiceError.liveCredentialExpired }
-            tokens = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
+            tokens = try await renewTokens(tokens, refreshToken: refreshToken, home: home, reason: "getUsageSnapshot")
             auth["tokens"] = tokens
             auth["last_refresh"] = ISO8601DateFormatter().string(from: Date())
-            try Self.writePrivateAuth(auth, to: authURL)
+            try Self.writePrivateAuth(auth, to: authURL, live: live, reason: "getUsageSnapshot.renewal", audit: audit)
         }
+        audit.record(live ? .liveRead : .savedCopyRead, .codex, location: home.path, live: live,
+                     accessToken: tokens["access_token"] as? String, outcome: "ok", reason: "getUsageSnapshot")
         var result = try await fetchUsageResponse(tokens: tokens)
         if result.statusCode == 401,
            let refreshToken = tokens["refresh_token"] as? String,
@@ -549,10 +570,10 @@ final class CodexService: @unchecked Sendable {
             // upgrade/downgrade immediately publishes its new tier and windows.
             guard await mayRenewCredential(in: home) else { throw CodexServiceError.liveCredentialExpired }
             codexLog.info("[usage] Access token rejected before expiry; refreshing and retrying")
-            tokens = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
+            tokens = try await renewTokens(tokens, refreshToken: refreshToken, home: home, reason: "getUsageSnapshot.rejected")
             auth["tokens"] = tokens
             auth["last_refresh"] = ISO8601DateFormatter().string(from: Date())
-            try Self.writePrivateAuth(auth, to: authURL)
+            try Self.writePrivateAuth(auth, to: authURL, live: live, reason: "getUsageSnapshot.renewal", audit: audit)
             result = try await fetchUsageResponse(tokens: tokens)
         }
         if result.statusCode == 403 {
@@ -664,10 +685,29 @@ final class CodexService: @unchecked Sendable {
         return merged
     }
 
+    /// `refreshOAuthTokens` recorded as a `renewal` of the credential in
+    /// `home` by `reason`, whatever its outcome.
+    private func renewTokens(_ tokens: [String: Any], refreshToken: String, home: URL,
+                             reason: String) async throws -> [String: Any] {
+        let live = isSystemHome(home)
+        let presented = tokens["access_token"] as? String
+        do {
+            let renewed = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
+            audit.record(.renewal, .codex, location: home.path, live: live, accessToken: renewed["access_token"] as? String,
+                         previousAccessToken: presented, outcome: "renewed", reason: reason)
+            return renewed
+        } catch {
+            let outcome = if case CodexServiceError.credentialRejected = error { "rejected" } else { "unavailable" }
+            audit.record(.renewal, .codex, location: home.path, live: live, accessToken: presented,
+                         outcome: outcome, reason: reason)
+            throw error
+        }
+    }
+
     /// Renews the credential in a managed Codex home and saves it there,
     /// without touching the system `auth.json` running sessions use. Called
     /// by `CodexCredentialModule`.
-    func renewCredential(codexHome: String) async -> CredentialRenewal {
+    func renewCredential(codexHome: String, reason: String) async -> CredentialRenewal {
         let home = URL(fileURLWithPath: codexHome, isDirectory: true).standardizedFileURL
         let authURL = home.appendingPathComponent("auth.json")
         do {
@@ -675,10 +715,13 @@ final class CodexService: @unchecked Sendable {
             guard var auth = try JSONSerialization.jsonObject(with: Data(contentsOf: authURL)) as? [String: Any],
                   let tokens = auth["tokens"] as? [String: Any],
                   let refreshToken = tokens["refresh_token"] as? String,
-                  !refreshToken.isEmpty else { return .rejected }
-            auth["tokens"] = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
+                  !refreshToken.isEmpty else {
+                audit.record(.renewal, .codex, location: home.path, outcome: "noRefreshToken", reason: reason)
+                return .rejected
+            }
+            auth["tokens"] = try await renewTokens(tokens, refreshToken: refreshToken, home: home, reason: reason)
             auth["last_refresh"] = ISO8601DateFormatter().string(from: Date())
-            try Self.writePrivateAuth(auth, to: authURL)
+            try Self.writePrivateAuth(auth, to: authURL, live: false, reason: reason + ".renewal", audit: audit)
             return .renewed
         } catch CodexServiceError.credentialRejected {
             return .rejected
@@ -737,9 +780,24 @@ final class CodexService: @unchecked Sendable {
         return formatter.date(from: value)
     }
 
-    static func writePrivateAuth(_ auth: [String: Any], to url: URL) throws {
+    /// Replaces an `auth.json`, recorded by `reason` as a `liveWrite` when
+    /// it is the system home's (`live`) and a `savedCopyWrite` of the
+    /// account whose home holds it otherwise, with the token replaced.
+    static func writePrivateAuth(_ auth: [String: Any], to url: URL, live: Bool, reason: String,
+                                 audit: CredentialAudit = .shared) throws {
+        let replaced = accessToken(inAuthFile: url)
+        let token = (auth["tokens"] as? [String: Any])?["access_token"] as? String
+        let home = url.deletingLastPathComponent().path
         let data = try JSONSerialization.data(withJSONObject: auth, options: [.prettyPrinted, .sortedKeys])
-        try PrivateFile.writeAtomically(data, to: url, mode: 0o600)
+        do {
+            try PrivateFile.writeAtomically(data, to: url, mode: 0o600)
+        } catch {
+            audit.record(live ? .liveWrite : .savedCopyWrite, .codex, location: home, live: live, accessToken: token,
+                         previousAccessToken: replaced, outcome: "failed", reason: reason)
+            throw error
+        }
+        audit.record(live ? .liveWrite : .savedCopyWrite, .codex, location: home, live: live, accessToken: token,
+                     previousAccessToken: replaced, outcome: "ok", reason: reason)
     }
 
     static func decodeUsage(_ data: Data) throws -> UsageAPIResponse {
@@ -776,6 +834,8 @@ final class CodexService: @unchecked Sendable {
         let home = try makeManagedHome()
         try copyAuth(from: source, toHome: home)
         let identity = try readIdentity(home: home)
+        audit.record(.capture, .codex, location: home.path, accessToken: Self.accessToken(inAuthFile: source),
+                     outcome: "ok", reason: "captureSystemAccount", owner: identity.email)
         return (identity, home.path)
     }
 
@@ -791,6 +851,9 @@ final class CodexService: @unchecked Sendable {
                 environment: environment
             )
             let identity = try readIdentity(home: home)
+            audit.record(.isolatedLogin, .codex, location: home.path,
+                         accessToken: Self.accessToken(inAuthFile: home.appendingPathComponent("auth.json")),
+                         outcome: "signedIn", reason: "loginManagedAccount", owner: identity.email)
             return (identity, home.path)
         } catch {
             try? removeManagedHome(home)
@@ -802,40 +865,59 @@ final class CodexService: @unchecked Sendable {
         loginRunner.cancel()
     }
 
-    func promoteToSystem(homePath: String) throws {
+    /// Makes the managed home's credential the system `auth.json`, recorded
+    /// as a `liveWrite` of the account whose home it is by `reason`.
+    func promoteToSystem(homePath: String, reason: String) throws {
         let home = URL(fileURLWithPath: homePath, isDirectory: true).standardizedFileURL
         try validateManagedHome(home)
         let source = home.appendingPathComponent("auth.json")
-        guard fileManager.fileExists(atPath: source.path) else { throw CodexServiceError.invalidCredentials }
+        guard fileManager.fileExists(atPath: source.path) else {
+            audit.record(.liveWrite, .codex, location: home.path, outcome: "noCredential", reason: reason)
+            throw CodexServiceError.invalidCredentials
+        }
 
         try fileManager.createDirectory(at: systemHome, withIntermediateDirectories: true)
         let destination = systemHome.appendingPathComponent("auth.json")
+        let replaced = Self.accessToken(inAuthFile: destination)
         let staged = systemHome.appendingPathComponent(".auth.accountdock-\(UUID().uuidString).json")
-        try fileManager.copyItem(at: source, to: staged)
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staged.path)
-        if fileManager.fileExists(atPath: destination.path) {
-            _ = try fileManager.replaceItemAt(destination, withItemAt: staged)
-        } else {
-            try fileManager.moveItem(at: staged, to: destination)
+        do {
+            try fileManager.copyItem(at: source, to: staged)
+            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staged.path)
+            if fileManager.fileExists(atPath: destination.path) {
+                _ = try fileManager.replaceItemAt(destination, withItemAt: staged)
+            } else {
+                try fileManager.moveItem(at: staged, to: destination)
+            }
+        } catch {
+            audit.record(.liveWrite, .codex, location: home.path, accessToken: Self.accessToken(inAuthFile: source),
+                         previousAccessToken: replaced, outcome: "failed", reason: reason)
+            throw error
         }
+        audit.record(.liveWrite, .codex, location: home.path, accessToken: Self.accessToken(inAuthFile: destination),
+                     previousAccessToken: replaced, outcome: "ok", reason: reason)
         codexLog.info("[promote] Promoted managed Codex account to system auth.json")
     }
 
     /// Saves refreshed system credentials back into the active managed home
-    /// before another account is promoted.
-    func syncSystemCredentials(toManagedHome homePath: String, expectedEmail: String) throws {
+    /// before another account is promoted. Recorded as a `capture` by
+    /// `reason`, with the identity the live token itself names as its owner.
+    func syncSystemCredentials(toManagedHome homePath: String, expectedEmail: String, reason: String) throws {
         let home = URL(fileURLWithPath: homePath, isDirectory: true).standardizedFileURL
         try validateManagedHome(home)
         let source = systemHome.appendingPathComponent("auth.json")
         guard fileManager.fileExists(atPath: source.path) else { throw CodexServiceError.notLoggedIn }
         let liveIdentity = try readIdentity(home: systemHome)
+        let token = Self.accessToken(inAuthFile: source)
         guard liveIdentity.email.caseInsensitiveCompare(expectedEmail) == .orderedSame else {
+            audit.record(.capture, .codex, location: home.path, accessToken: token, outcome: "refusedOtherAccount",
+                         reason: reason, owner: liveIdentity.email)
             throw CodexServiceError.loginFailed(
                 "System Codex account is \(liveIdentity.email), expected \(expectedEmail). Credentials were not overwritten."
             )
         }
 
         let destination = home.appendingPathComponent("auth.json")
+        let replaced = Self.accessToken(inAuthFile: destination)
         let staged = home.appendingPathComponent(".auth.accountdock-\(UUID().uuidString).json")
         try fileManager.copyItem(at: source, to: staged)
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staged.path)
@@ -844,11 +926,23 @@ final class CodexService: @unchecked Sendable {
         } else {
             try fileManager.moveItem(at: staged, to: destination)
         }
+        audit.record(.capture, .codex, location: home.path, accessToken: token, previousAccessToken: replaced,
+                     outcome: "ok", reason: reason, owner: liveIdentity.email)
         codexLog.info("[sync] Saved refreshed system credentials into managed Codex home")
     }
 
-    func removeManagedAccount(homePath: String) throws {
-        try removeManagedHome(URL(fileURLWithPath: homePath, isDirectory: true))
+    /// Deletes a managed home, recorded as a `savedCopyRemove` by `reason`.
+    func removeManagedAccount(homePath: String, reason: String) throws {
+        let home = URL(fileURLWithPath: homePath, isDirectory: true)
+        let removed = Self.accessToken(inAuthFile: home.appendingPathComponent("auth.json"))
+        do {
+            try removeManagedHome(home)
+        } catch {
+            audit.record(.savedCopyRemove, .codex, location: homePath, accessToken: removed, outcome: "failed", reason: reason)
+            throw error
+        }
+        audit.record(.savedCopyRemove, .codex, location: homePath, accessToken: removed,
+                     outcome: removed == nil ? "absent" : "ok", reason: reason)
     }
 
     func systemIdentity() -> CodexIdentity? {
@@ -867,6 +961,8 @@ final class CodexService: @unchecked Sendable {
         return home
     }
 
+    /// Copies a live `auth.json` into a new managed home; its caller,
+    /// `captureSystemAccount`, records the copy once the identity is read.
     private func copyAuth(from source: URL, toHome home: URL) throws {
         let destination = home.appendingPathComponent("auth.json")
         try fileManager.copyItem(at: source, to: destination)

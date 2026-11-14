@@ -261,6 +261,13 @@ extension AppState {
                sessionServedBy[session].map({ $0.at < observation.observedAt }) ?? true {
                 sessionServedBy[session] = SessionAttribution.Observation(account: attributed.account, at: observation.observedAt)
             }
+            // The same reset times name the token a slot's session holds,
+            // which the audit compares with its slot's account.
+            if let session = observation.processKey, observation.observedAt > servedCutoff,
+               let evidence = slot == nil ? attributed : attribute(observation), evidence.byResets {
+                noteProcessCredential(provider, session: session, process: processes[session], observed: evidence.account,
+                                      source: "statusLineResets", observedAt: observation.observedAt)
+            }
             guard let accountID = slot ?? attributed?.account else { continue }
             if let updatedAt = accountUsageUpdatedAt[accountID], observation.observedAt <= updatedAt { continue }
             if Self.describesSupersededWindow(observation.usage, stored: accountUsage[accountID]) { continue }
@@ -1664,7 +1671,7 @@ extension AppState {
         // place.
         if reachesSessions, hadSuspendedAgents { await releasePausedAgents(provider) }
         if Self.switchMovesRunningSessions(reason) {
-            moveRunningSessions(provider, from: current.id)
+            moveRunningSessions(provider, from: current.id, reason: "failover.switch")
         } else if credentialModule(for: provider)?.liveCredential != nil {
             sessionsLeftOn[provider, default: []].insert(current.id)
         }

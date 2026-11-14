@@ -150,8 +150,8 @@ final class KimiSessionIsolationTests: XCTestCase {
         let account = UUID(), other = UUID()
         let credential = try XCTUnwrap(isolation.slotCredential(from: stored("a1")))
         let otherCredential = try XCTUnwrap(isolation.slotCredential(from: stored("b2")))
-        let spare = try XCTUnwrap(slots.makeSlot(for: account, credential: credential))
-        let otherSpare = try XCTUnwrap(slots.makeSlot(for: other, credential: otherCredential))
+        let spare = try XCTUnwrap(slots.makeSlot(for: account, credential: credential, reason: "test"))
+        let otherSpare = try XCTUnwrap(slots.makeSlot(for: other, credential: otherCredential, reason: "test"))
         slots.writePool([(slots.directory(for: account).path, 1)])
 
         func launch(_ arguments: [String], environment: [String: String] = [:]) throws -> String {
@@ -187,14 +187,14 @@ final class KimiSessionIsolationTests: XCTestCase {
         // on, by either spelling of the option.
         slots.writeResumes([(session: "s-1", path: slots.directory(for: other).path)])
         XCTAssertEqual(try launch(["-S", "s-1"]), try expected(otherSpare, "-S s-1"))
-        let again = try XCTUnwrap(slots.makeSlot(for: other, credential: otherCredential))
+        let again = try XCTUnwrap(slots.makeSlot(for: other, credential: otherCredential, reason: "test"))
         XCTAssertEqual(try launch(["--session=s-1"]), try expected(again, "--session=s-1"))
 
         // A new session claims a spare of the pool's account.
         XCTAssertEqual(try launch(["-y"]), try expected(spare, "-y"))
 
         // A spare whose pair cannot be read runs the CLI unchanged.
-        let broken = try XCTUnwrap(slots.makeSlot(for: account, credential: credential))
+        let broken = try XCTUnwrap(slots.makeSlot(for: account, credential: credential, reason: "test"))
         try FileManager.default.removeItem(at: broken.appendingPathComponent(KimiSessionIsolation.baseURLFile))
         XCTAssertEqual(try launch(["-y"]), "|||-y")
 
@@ -367,10 +367,10 @@ final class KimiSessionIsolationTests: XCTestCase {
         let slots = SessionSlots(isolation: isolation, home: root.appendingPathComponent("home", isDirectory: true))
         let first = try XCTUnwrap(isolation.slotCredential(from: stored("a1")))
         let second = try XCTUnwrap(isolation.slotCredential(from: stored("b2", expiresAt: 1_900_000_500)))
-        let slot = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: first))
+        let slot = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: first, reason: "test"))
         XCTAssertEqual(isolation.readCredential(in: slot), first)
 
-        XCTAssertTrue(slots.serve(slot, credential: second))
+        XCTAssertTrue(slots.serve(slot, credential: second, account: nil, reason: "test"))
         let fields = try object(try XCTUnwrap(isolation.readCredential(in: slot)))
         XCTAssertEqual(fields["access_token"] as? String, "b2")
         XCTAssertEqual(fields["refresh_token"] as? String, "")
@@ -383,12 +383,12 @@ final class KimiSessionIsolationTests: XCTestCase {
         let isolation = isolation()
         let slots = SessionSlots(isolation: isolation, home: root.appendingPathComponent("home", isDirectory: true))
         let credential = try XCTUnwrap(isolation.slotCredential(from: stored("a1")))
-        let removed = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: credential))
-        let kept = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: credential))
+        let removed = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: credential, reason: "test"))
+        let kept = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: credential, reason: "test"))
         let removedFile = try XCTUnwrap(isolation.credentialFile(in: removed))
         let before = try snapshot()
 
-        slots.remove(removed)
+        slots.remove(removed, reason: "test")
 
         var expected = before
         expected["/credentials/\(removedFile.lastPathComponent)"] = nil
@@ -397,14 +397,14 @@ final class KimiSessionIsolationTests: XCTestCase {
         XCTAssertEqual(isolation.readCredential(in: kept), credential)
 
         // A removed slot leaves its spelling free for the next one.
-        let next = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: credential))
+        let next = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: credential, reason: "test"))
         XCTAssertEqual(isolation.credentialFile(in: next), removedFile)
     }
 
     func testRemovingASlotKeepsACredentialConfigTomlStillNames() throws {
         let isolation = isolation()
         let slots = SessionSlots(isolation: isolation, home: root.appendingPathComponent("home", isDirectory: true))
-        let slot = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: try XCTUnwrap(isolation.slotCredential(from: stored("a1")))))
+        let slot = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: try XCTUnwrap(isolation.slotCredential(from: stored("a1"))), reason: "test"))
         let file = try XCTUnwrap(isolation.credentialFile(in: slot))
         let selector = try XCTUnwrap(isolation.selector(in: slot))
         // config.toml names the slot's spelling, and the file under that
@@ -413,7 +413,7 @@ final class KimiSessionIsolationTests: XCTestCase {
                   to: kimiHome.appendingPathComponent("config.toml"))
         try write(stored("signed-in"), to: file)
 
-        slots.remove(slot)
+        slots.remove(slot, reason: "test")
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
     }
 
@@ -513,7 +513,7 @@ final class KimiSessionIsolationTests: XCTestCase {
                 ? (200, [:], Data(#"{"access_token":"new","refresh_token":"refresh-new","expires_in":900,"token_type":"Bearer"}"#.utf8))
                 : (599, [:], Data())
         }
-        let outcome = await files.service.renewLiveCredentialForSlots(location: files.managed.path, lasting: 630)
+        let outcome = await files.service.renewLiveCredentialForSlots(location: files.managed.path, lasting: 630, reason: "test")
         XCTAssertEqual(outcome, .renewed)
         for url in [files.live, files.managed] {
             let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
@@ -530,7 +530,7 @@ final class KimiSessionIsolationTests: XCTestCase {
         // Kimi Code renewed its own copy while AccountDock waited.
         try write(#"{"access_token":"kimis","refresh_token":"refresh-kimis","expires_at":\#(Date().addingTimeInterval(900).timeIntervalSince1970),"expires_in":900}"#,
                   to: files.live)
-        let outcome = await files.service.renewLiveCredentialForSlots(location: files.managed.path, lasting: 630)
+        let outcome = await files.service.renewLiveCredentialForSlots(location: files.managed.path, lasting: 630, reason: "test")
         XCTAssertEqual(outcome, .renewed)
         XCTAssertEqual(StubURLProtocol.requested, [])
         let source = try XCTUnwrap(files.service.slotSourceCredential(location: files.managed.path, isActive: true))
@@ -542,7 +542,7 @@ final class KimiSessionIsolationTests: XCTestCase {
         let lock = KimiCredentialLock(home: files.live.deletingLastPathComponent().deletingLastPathComponent(), name: "kimi-code")
         XCTAssertTrue(lock.acquire(waitingUpTo: 0), "Kimi Code is renewing")
         defer { lock.release() }
-        let outcome = await files.service.renewLiveCredentialForSlots(location: files.managed.path, lasting: 630, lockWait: 0.3)
+        let outcome = await files.service.renewLiveCredentialForSlots(location: files.managed.path, lasting: 630, lockWait: 0.3, reason: "test")
         XCTAssertEqual(outcome, .unavailable)
         XCTAssertEqual(StubURLProtocol.requested, [])
     }

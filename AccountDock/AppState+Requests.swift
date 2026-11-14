@@ -14,7 +14,10 @@ extension AppState {
         /// with `apply` makes, the moves that let a provider's slot sessions
         /// last longest (`AppState.applyRebalance`); `pin` pins one running
         /// slot session to the account its slot serves (`SessionPins`), and
-        /// `unpin` frees it.
+        /// `unpin` frees it; `audit` returns credential audit entries
+        /// (`CredentialAudit.entries`), and `signalSessions` tells the
+        /// sessions the audit flagged, of `provider` when given, to read
+        /// their sign-in again (`signalFlaggedProcesses`).
         var action: String
         var session: String?
         /// An account's ID, label or email. For `refresh`, the account to
@@ -31,6 +34,12 @@ extension AppState {
         /// For `rebalance`: make the moves; false or absent returns the
         /// plan only (`AppState.rebalancePreview`).
         var apply: Bool?
+        /// For `audit`: entries observed or written at or after this ISO
+        /// 8601 time; all when absent. With `account` (an ID, label or
+        /// email), only entries attributed to it or naming it as owner.
+        var since: String?
+        /// For `audit`: the newest this many entries; 1,000 when absent.
+        var limit: Int?
     }
 
     struct ExternalOutcome: Codable {
@@ -40,6 +49,8 @@ extension AppState {
         var handledAt: Date
         /// For `rebalance`: one line per move, session from → to.
         var moves: [String]?
+        /// For `audit`: the matching credential audit entries, oldest first.
+        var entries: [CredentialAuditEntry]?
     }
 
     nonisolated static var requestDirectory: URL {
@@ -118,7 +129,7 @@ extension AppState {
             // room for its model, reading the sign-in again is the whole move.
             if slot == nil, let active = activeAccount(for: provider), wanted == nil || wanted?.id == active.id,
                credentialModule(for: provider)?.liveCredential != nil, hasRoom(active) {
-                moveRunningSessions(provider)
+                moveRunningSessions(provider, reason: "request.moveSession")
                 return outcome(true, "Sessions on the shared sign-in were told to read it again; \(messageName(active)) is the active account and has allowance left.", active)
             }
             let target = wanted ?? moveDestination(provider, current: current, model: model, now: now)
@@ -142,7 +153,7 @@ extension AppState {
             let previous = activeAccount(for: provider)?.id
             await switchTo(target, refreshAfter: false)
             let switched = activeAccount(for: provider)?.id == target.id
-            if switched { moveRunningSessions(provider, from: previous) }
+            if switched { moveRunningSessions(provider, from: previous, reason: "request.moveSession") }
             return outcome(switched, switched ? "Switched the active account to \(messageName(target)); every session on the shared sign-in moves with it."
                                               : "The switch to \(messageName(target)) did not complete.", target)
         case "pin", "unpin":
@@ -169,6 +180,29 @@ extension AppState {
             var result = outcome(true, (request.apply == true ? "" : "Not applied. ") + preview.outcome)
             result.moves = preview.lines
             return result
+        case "audit":
+            let since: Date?
+            if let text = request.since {
+                guard let parsed = CredentialAudit.date(text) else {
+                    return outcome(false, "`since` is not an ISO 8601 time.")
+                }
+                since = parsed
+            } else {
+                since = nil
+            }
+            let entries = credentialAudit.entries(since: since, account: request.account, limit: request.limit ?? 1_000)
+            var result = outcome(true, "\(entries.count) credential audit entr\(entries.count == 1 ? "y" : "ies").",
+                                 named(request.account))
+            result.entries = entries
+            return result
+        case "signalSessions":
+            let provider = request.provider.flatMap { text in
+                AIProviderType.implementedProviders.first {
+                    $0.rawValue.caseInsensitiveCompare(text) == .orderedSame
+                        || $0.capabilities.displayName.caseInsensitiveCompare(text) == .orderedSame
+                }
+            }
+            return outcome(true, signalFlaggedProcesses(provider))
         default:
             return outcome(false, "Unknown action \(request.action).")
         }

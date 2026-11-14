@@ -56,7 +56,7 @@ final class CredentialFileTests: XCTestCase {
         try Data("{}".utf8).write(to: url)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
 
-        try CodexService.writePrivateAuth(["tokens": ["refresh_token": "r"]], to: url)
+        try CodexService.writePrivateAuth(["tokens": ["refresh_token": "r"]], to: url, live: false, reason: "test")
 
         XCTAssertEqual(try mode(of: url), 0o600)
         let auth = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
@@ -116,7 +116,7 @@ final class CredentialFileTests: XCTestCase {
         try Data("{}".utf8).write(to: slot)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: slot.path)
 
-        try KimiService(home: home, managedRoot: try directory("managed")).promoteToSystem(location: location.path)
+        try KimiService(home: home, managedRoot: try directory("managed")).promoteToSystem(location: location.path, reason: "test")
 
         XCTAssertEqual(try mode(of: slot), 0o600)
         let written = try JSONSerialization.jsonObject(with: Data(contentsOf: slot)) as? [String: Any]
@@ -134,7 +134,7 @@ final class CredentialFileTests: XCTestCase {
             managedRoot.appendingPathComponent("credentials.json").path,
             managedRoot.appendingPathComponent("account/../../elsewhere/credentials.json").path,
         ] {
-            XCTAssertThrowsError(try service.removeManagedAccount(location: location), location) { error in
+            XCTAssertThrowsError(try service.removeManagedAccount(location: location, reason: "test"), location) { error in
                 guard case KimiServiceError.unsafeCredentialLocation = error else {
                     return XCTFail("unexpected error \(error)")
                 }
@@ -145,7 +145,7 @@ final class CredentialFileTests: XCTestCase {
 
         let account = try directory("managed/\(UUID().uuidString)")
         try Data(credentialJSON.utf8).write(to: account.appendingPathComponent("credentials.json"))
-        try service.removeManagedAccount(location: account.appendingPathComponent("credentials.json").path)
+        try service.removeManagedAccount(location: account.appendingPathComponent("credentials.json").path, reason: "test")
         XCTAssertFalse(FileManager.default.fileExists(atPath: account.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: managedRoot.path))
     }

@@ -107,7 +107,7 @@ extension AppState {
         case .kimi:
             guard let location = account.credentialLocation else { return nil }
             return try? await kimiService.freshAccessToken(location: location, isActive: readsLiveCredential(account),
-                                                          minimumLifetime: minimumLifetime)
+                                                          minimumLifetime: minimumLifetime, reason: "routerAccessToken")
         case .codex, .gemini:
             return nil
         }
@@ -121,13 +121,16 @@ extension AppState {
         switch account.provider {
         case .claudeCode:
             let json = readsLive
-                ? keychain.readClaudeToken()
-                : keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
+                ? keychain.readClaudeToken(reason: "currentAccessToken", account: account.id)
+                : keychain.getAccountBackup(forAccountId: account.id.uuidString, reason: "currentAccessToken")?.token
             return json.flatMap(ClaudeService.extractAccessToken(from:))
         case .codex:
             let homes = [readsLive ? (account.provider.configDirectory as NSString).expandingTildeInPath : nil,
                          account.credentialLocation]
-            return homes.compactMap { $0 }.lazy.compactMap(CodexService.accessToken(codexHome:)).first
+            let token = homes.compactMap { $0 }.lazy.compactMap(CodexService.accessToken(codexHome:)).first
+            credentialAudit.record(readsLive ? .liveRead : .savedCopyRead, .codex, account: account.id, accessToken: token,
+                                   outcome: token == nil ? "missing" : "ok", reason: "currentAccessToken")
+            return token
         case .kimi, .gemini:
             return nil
         }
@@ -870,19 +873,19 @@ extension AppState {
     /// `liveCredentialSlotLifetime` left, since a slot's session cannot.
     func claudeCredential(_ account: Account, minimumLifetime: TimeInterval) async -> String? {
         if readsLiveCredential(account) {
-            guard let json = keychain.readClaudeToken(), let token = Self.claudeAccessToken(json) else { return nil }
+            guard let json = keychain.readClaudeToken(reason: "claudeCredential.live", account: account.id), let token = Self.claudeAccessToken(json) else { return nil }
             if Self.liveRenewalIsDue(expiry: token.1, slotsHoldIt: slotCredentialAccounts.contains(account.id), now: Date()),
                let renewed = await renewLiveClaudeCredential(account, current: json) {
                 return renewed
             }
             return token.1 > Date().addingTimeInterval(60) ? json : nil
         }
-        let stored = keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token
+        let stored = keychain.getAccountBackup(forAccountId: account.id.uuidString, reason: "claudeCredential.saved")?.token
         if let stored, let token = Self.claudeAccessToken(stored), token.1 > Date().addingTimeInterval(minimumLifetime) {
             return stored
         }
-        guard await renewSavedCredential(account) == .renewed,
-              let renewed = keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token,
+        guard await renewSavedCredential(account, reason: "claudeCredential.expiring") == .renewed,
+              let renewed = keychain.getAccountBackup(forAccountId: account.id.uuidString, reason: "claudeCredential.renewed")?.token,
               Self.claudeAccessToken(renewed) != nil else { return nil }
         return renewed
     }
@@ -908,14 +911,14 @@ extension AppState {
         if let running = liveCredentialRenewal { return await running.value }
         let task = Task<String?, Never> { @MainActor [weak self] in
             guard let self, !self.isLoggingIn, let module = self.credentialModule(for: .claudeCode),
-                  await self.captureOwnCredential(of: account) == .saved
+                  await self.captureOwnCredential(of: account, reason: "renewLiveClaudeCredential") == .saved
             else { return nil }
-            let outcome = await module.renewSavedCopy(account)
-            let unchanged = self.keychain.readClaudeToken() == current
+            let outcome = await module.renewSavedCopy(account, reason: "renewLiveClaudeCredential")
+            let unchanged = self.keychain.readClaudeToken(reason: "renewLiveClaudeCredential.recheck", account: account.id) == current
             switch outcome {
             case .renewed:
-                guard let renewed = self.keychain.getAccountBackup(forAccountId: account.id.uuidString)?.token else { return nil }
-                guard (0..<3).contains(where: { _ in self.keychain.writeClaudeToken(renewed) }) else {
+                guard let renewed = self.keychain.getAccountBackup(forAccountId: account.id.uuidString, reason: "renewLiveClaudeCredential")?.token else { return nil }
+                guard (0..<3).contains(where: { _ in self.keychain.writeClaudeToken(renewed, account: account.id, reason: "renewLiveClaudeCredential") }) else {
                     self.failoverEvents.record(.claudeCode, "\(self.messageName(account))'s renewed sign-in could not be written for Claude Code; re-authenticate it if its sessions ask to sign in.")
                     return nil
                 }

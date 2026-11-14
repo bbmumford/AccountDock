@@ -56,26 +56,33 @@ extension AppState {
     func savedCopyIsOwn(_ account: Account, tokenJSON: String, accessToken: String, forced: Bool = false) async -> SavedCopyCheck {
         let digest = Self.credentialDigest(tokenJSON)
         if savedCopyVerified[account.id] == digest { return .own }
-        guard forced || spendUsageRequest(account.provider, .background),
-              let email = try? await claudeService.getProfileIdentity(accessToken: accessToken).email else { return .unchecked }
+        guard forced || spendUsageRequest(account.provider, .background) else { return .unchecked }
+        guard let email = try? await claudeService.getProfileIdentity(accessToken: accessToken).email else {
+            credentialAudit.record(.ownershipCheck, .claudeCode, account: account.id, credential: tokenJSON,
+                                   outcome: "unavailable", reason: "savedCopyIsOwn")
+            return .unchecked
+        }
         let owner = Self.savedCopyOwner(profileEmail: email, account: account, accounts: accounts)
+        credentialAudit.record(.ownershipCheck, .claudeCode, account: account.id, credential: tokenJSON,
+                               outcome: owner == .own ? "own" : "notOwn", reason: "savedCopyIsOwn", owner: email)
         guard owner != .own else {
             savedCopyVerified[account.id] = digest
             return .own
         }
         var handedTo: Account?
         if case .other(let id) = owner, let other = accounts.first(where: { $0.id == id }),
-           let held = keychain.getAccountBackup(forAccountId: id.uuidString) {
+           let held = keychain.getAccountBackup(forAccountId: id.uuidString, reason: "savedCopyIsOwn.handOn") {
             let heldExpiry = Self.claudeAccessToken(held.token)?.1 ?? .distantPast
             let thisExpiry = Self.claudeAccessToken(tokenJSON)?.1 ?? .distantPast
             if thisExpiry > heldExpiry,
-               keychain.saveAccountBackup(token: tokenJSON, oauthAccount: held.oauthAccount, forAccountId: id.uuidString) {
+               keychain.saveAccountBackup(token: tokenJSON, oauthAccount: held.oauthAccount, forAccountId: id.uuidString,
+                                          reason: "savedCopyIsOwn.handOn") {
                 handedTo = other
                 savedCopyVerified[id] = digest
                 rejectedCredentialAccounts.remove(id)
             }
         }
-        keychain.removeAccountBackup(forAccountId: account.id.uuidString)
+        keychain.removeAccountBackup(forAccountId: account.id.uuidString, reason: "savedCopyIsOwn.notOwn")
         forgetUsage(of: account.id)
         let name = messageName(account)
         let moved = handedTo.map { " It was saved for \(messageName($0)), whose sign-in it is." } ?? ""
@@ -165,15 +172,30 @@ extension AppState {
 
     /// `captureLiveCredential` on the live slot, identity file and copies,
     /// pausing a second between reads. A copy saved or handed on counts as
-    /// checked (`savedCopyVerified`).
-    func captureOwnCredential(of account: Account) async -> CaptureOutcome {
+    /// checked (`savedCopyVerified`). `reason` names the caller for the
+    /// audit, which records each read as `account`'s, each owner the
+    /// provider names as a `capture`, and each copy saved.
+    func captureOwnCredential(of account: Account, reason: String) async -> CaptureOutcome {
+        let audit = credentialAudit
         let result = await Self.captureLiveCredential(for: account, accounts: accounts, io: CredentialCaptureIO(
-            liveToken: { self.keychain.readClaudeToken() },
+            liveToken: { self.keychain.readClaudeToken(reason: reason + ".capture", account: account.id) },
             liveIdentity: { self.keychain.readOAuthAccount() },
-            profileEmail: { try await self.claudeService.getProfileIdentity(accessToken: $0).email },
-            held: { self.keychain.getAccountBackup(forAccountId: $0.uuidString) },
+            profileEmail: { access in
+                do {
+                    let email = try await self.claudeService.getProfileIdentity(accessToken: access).email
+                    audit.record(.capture, .claudeCode, account: account.id, accessToken: access,
+                                 outcome: email == nil ? "noOwner" : "ownerAnswered", reason: reason, owner: email)
+                    return email
+                } catch {
+                    audit.record(.capture, .claudeCode, account: account.id, accessToken: access,
+                                 outcome: "ownerUnavailable", reason: reason)
+                    throw error
+                }
+            },
+            held: { self.keychain.getAccountBackup(forAccountId: $0.uuidString, reason: reason + ".capture") },
             save: { token, identity, id in
-                guard self.keychain.saveAccountBackup(token: token, oauthAccount: identity, forAccountId: id.uuidString) else {
+                guard self.keychain.saveAccountBackup(token: token, oauthAccount: identity, forAccountId: id.uuidString,
+                                                      reason: reason + ".capture") else {
                     return false
                 }
                 self.savedCopyVerified[id] = Self.credentialDigest(token)

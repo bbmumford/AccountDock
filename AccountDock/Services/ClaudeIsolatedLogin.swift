@@ -56,13 +56,22 @@ struct ClaudeIsolatedLogin {
         return environment
     }
 
-    /// The live CLI, Keychain items and temporary directory.
-    static func live(service: ClaudeService) -> ClaudeIsolatedLogin {
+    /// The live CLI, Keychain items and temporary directory. The removal of
+    /// the directory's Keychain item is recorded as an `isolatedLogin`
+    /// cleanup with the token it held.
+    static func live(service: ClaudeService, audit: CredentialAudit = .shared) -> ClaudeIsolatedLogin {
         let isolation = ClaudeSessionIsolation()
         return ClaudeIsolatedLogin(
             run: { try await service.login(isolatedIn: $0) },
             keychainCredential: { isolation.store(for: $0).read(account: NSUserName()) },
-            removeKeychainCredential: { _ = isolation.store(for: $0).apply(writes: [], deletes: [NSUserName()]) }
+            removeKeychainCredential: { directory in
+                let store = isolation.store(for: directory)
+                let held = store.read(account: NSUserName())
+                let removed = store.apply(writes: [], deletes: [NSUserName()])
+                audit.record(.isolatedLogin, .claudeCode, credential: held,
+                             outcome: held == nil ? "nothingToRemove" : (removed ? "removed" : "removeFailed"),
+                             reason: "ClaudeIsolatedLogin.cleanup", slot: directory.path)
+            }
         )
     }
 
