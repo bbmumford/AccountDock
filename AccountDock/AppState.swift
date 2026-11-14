@@ -572,7 +572,10 @@ final class AppState: ObservableObject {
         // Index local usage concurrently with provider refreshes. SQLite writes
         // are isolated in UsageIndex, so a slow network or Keychain prompt
         // cannot prevent local history from becoming available.
-        async let usageIndexRefresh: Void = UsageIndex.shared.refreshFromFilesystem()
+        // Codex sessions write rollouts in Codex's own home and in each
+        // account's managed home.
+        let codexHomes = accounts.filter { $0.provider == .codex }.compactMap(\.credentialLocation)
+        async let usageIndexRefresh: Void = UsageIndex.shared.refreshFromFilesystem(codexHomes: codexHomes)
 
         claudeAvailable = await claudeService.isClaudeAvailable()
         codexAvailable = await codexService.isAvailable()

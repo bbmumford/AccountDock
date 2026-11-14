@@ -1542,7 +1542,10 @@ the audit trail a person reads.
 
 Costs are computed locally from session logs: Claude Code's JSONL transcripts,
 Codex rollouts and Kimi Code sessions, priced from `litellm-pricing.json`.
-Claude Code turns the router served from a route target name the target's
+Codex rollouts are read from every home a Codex session writes to: `~/.codex`,
+which its slots' sessions share, and each account's managed home; a rollout
+found in several homes is counted once, the longest copy standing
+(`UsageIndex.codexRollouts`). Claude Code turns the router served from a route target name the target's
 model in the transcript; they count as the target provider's usage, priced as
 its model, and are left out of Claude's totals.
 Claude totals must match `ccusage`; see [COST_VERIFICATION.md](COST_VERIFICATION.md).
