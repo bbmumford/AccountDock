@@ -355,7 +355,22 @@ extension AppState {
             return age > 120 ? .background : nil
         }
         let recentlyAway = lastSwitchedAway[account.id].map { now.timeIntervalSince($0) < FailoverPlanner.sessionWindow } ?? false
-        return age >= (recentlyAway ? 10 * 60 : 30 * 60) ? .background : nil
+        let atLimit = Self.readingIsAtALimit(accountUsage[account.id])
+        return age >= (recentlyAway || atLimit ? Self.idleAtLimitReadingInterval : 30 * 60) ? .background : nil
+    }
+
+    /// How often an idle account at one of its limits is read: a provider
+    /// can reset an allowance before its scheduled time, and such an account
+    /// takes no work until a reading shows the reset.
+    nonisolated static let idleAtLimitReadingInterval: TimeInterval = 10 * 60
+    /// Percent of a window or a model's own limit at which an idle account
+    /// counts as at that limit for `idleAtLimitReadingInterval`.
+    nonisolated static let atLimitPercent = 95.0
+
+    nonisolated static func readingIsAtALimit(_ usage: UsageAPIResponse?) -> Bool {
+        guard let usage else { return false }
+        let windows = [usage.fiveHour?.utilization, usage.sevenDay?.utilization].compactMap { $0 }
+        return (windows + usage.modelWeeklyLimits.map(\.percent)).contains { $0 >= atLimitPercent }
     }
 
     func spendUsageRequest(_ provider: AIProviderType, _ priority: UsageRequestBudget.Priority) -> Bool {

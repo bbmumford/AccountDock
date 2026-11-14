@@ -1484,8 +1484,9 @@ final class AppState: ObservableObject {
         switch outcome {
         case .reading(let usage):
             usageBudgets[account.provider]?.recordSuccess()
-            recordUsage(usage, for: account.id)
+            // Before `recordUsage`, which saves the snapshot this goes into.
             accountWholeReadings[account.id] = WholeReading(at: Date(), longUtilization: usage.sevenDay?.utilization)
+            recordUsage(usage, for: account.id)
             accountUsageErrors[account.id] = nil
             usageRetryAfter[account.id] = nil
             if !account.isActive { credentialQuarantine[account.id] = nil }
