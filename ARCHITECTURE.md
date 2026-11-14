@@ -349,8 +349,11 @@ AccountDock prefers quota data the agents already record:
 Provider usage endpoints are a scarce, rate-limited resource. Each provider has
 one `UsageRequestBudget` (a token bucket), so the active account can always be
 read when a decision depends on it, while idle accounts are read sparsely.
-Accounts are read active first, then oldest reading first, so the account at
-the end of the list is not the one left unread whenever the budget runs short.
+Accounts are read active first, then the accounts sessions run on, then the
+idle ones, each oldest reading first (`AppState.readUrgencyOrder`), so the
+account at the end of the list is not the one left unread whenever the
+budget runs short, and idle accounts at their limits do not spend the budget
+before an account sessions are using.
 Throttling backs off for every account of that provider, from one minute up to
 fifteen. While a provider throttles, `QuotaTrend` projects the active account's
 usage forward from its learned burn rate so failover still acts on time.
@@ -428,9 +431,15 @@ A burn rate is the median of the account's last five measured intervals
 15 minutes, and its spread is estimated from the median absolute deviation,
 so one burst sets neither the rate nor its uncertainty. Readings in the five
 minutes after a window starts (its reset moves, or an unstarted window gets
-one) or after paused sessions resume (`AppState.endPause`, an admission, or
-a reading taken while the pause holds them) teach no rate: each session's
-first request then re-sends its whole context.
+one), after a window's use falls within the same window (a reset granted
+early, which can leave the reset time as it was), after a slot session moves
+to the account, or after paused sessions resume (`AppState.endPause`, an
+admission, or a reading taken while the pause holds them) teach no rate:
+each session's first request then re-sends its whole context. A failover
+switch holds the new account's rate for ten minutes
+(`QuotaTrend.arrivalSettlePeriod`), since the sessions on the shared
+sign-in arrive together and those between turns send their first request
+minutes later.
 
 ### Rules, in order
 
@@ -739,7 +748,21 @@ the pool weights and which sessions move, each time the pool is rebuilt
   it. One reset holds its account's sessions once.
 - New sessions go to accounts by unused rate, the pool weight times the
   rate the account can still add without reaching its limit; with none
-  left anywhere, by the pool weights alone.
+  left anywhere, by the share of the time to its reset each account lasts
+  at its rate (`SessionPacer.sustainedShare`), the shared group's share
+  included.
+- An account sessions run on whose reading is older than its sessions'
+  latest request, and older than ten minutes, stays in the pool for up to
+  an hour with its weight scaled by ten minutes over the reading's age
+  (`FailoverPlanner.poolReadingConfidence`); its tier is judged on the
+  reading grown by its learned burn.
+- A slot session whose account can no longer serve it goes where the pool
+  lasts longest with it (`SessionPacer.place`, through
+  `AppState.strandedPlacements`): one at a time, largest rate first, to the
+  account that leaves the earliest run-out among the accounts taking
+  sessions latest, as **Rebalance sessions now** measures it. The sessions
+  an exhausted account gives up spread over the accounts with room instead
+  of all going to the account with the largest pool weight.
 - An account a threshold switch left with room still on it drains
   (`AppState.drainingAccounts`): above its thresholds it keeps a pool weight
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when
@@ -766,7 +789,27 @@ the pool weights and which sessions move, each time the pool is rebuilt
   session is placed or moved onto room the group will need. With failover
   off for the provider or the active account locked, the group stays on the
   active account for the whole horizon. The active account's readings
-  already include the group's rate, which its share counts instead. When the
+  already include the group's rate, which its share counts instead.
+  A projected destination must carry the moving work, at its expected
+  burn plus one deviation, for an hour (`FailoverPlanner.carries`,
+  `projectedCarry`, the lifetime of the caches the move writes); an
+  account a few percent short of its limit passes `plan`'s dwell margin
+  but is not projected. The account projected last time
+  (`AppState.sharedGroupDestination`) stays projected while `plan` would
+  still switch to it and it carries the work, unless the account `plan`
+  prefers has twice its headroom (`projectionPreference`), so the room the
+  pacer keeps does not move between accounts from cycle to cycle.
+  While the group is projected to move, new sessions go by the room each
+  account has left (`SessionPacer.spare`) at the pool's run-out
+  (`poolRunOut`: when the accounts taking sessions and the group's, at
+  their rates and the group's, would together have spent what they have,
+  counted in tokens): the group spends the active account's room until the
+  switch and the next account's after it, but not past that run-out.
+  Measured to each account's reset instead, the group's rate over the
+  days to a weekly reset would exceed the next account's room and leave
+  it no weight, while the active account, which the group leaves at the
+  switch, would look free, and new sessions placed there bring the switch
+  closer. When the
   group is projected to move, an event and the rebalance preview say so
   ("AccountDock keeps room on B for the 4 sessions on the shared sign-in,
   which move there at about 3:40 pm.").
@@ -826,7 +869,12 @@ provider whose sessions run in one-session slots; also the requests action
 slot sessions so the first account to reach a limit does so as late as
 possible (`SessionPacer.rebalance`). Each session counts at its rate over
 its last hour (at least `defaultSessionRate` with no history) against every
-window and its model's own allowance. A local search moves, one at a time, a
+window and its model's own allowance, and each account also carries the use
+its readings show beyond its sessions and the shared group
+(`SessionPacer.unseenBurn`), which stays wherever the sessions go: the rate
+the pacer counts for an account is the larger of its readings' rate and its
+sessions' total, and with this the preview's run-out is measured at the
+same rate. A local search moves, one at a time, a
 session off the account that runs out first to the destination that leaves
 the latest earliest run-out, charging the destination the session's cache
 rewrite; a move is made only when the hours it gains at that account's burn
