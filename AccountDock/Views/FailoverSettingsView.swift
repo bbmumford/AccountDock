@@ -116,7 +116,7 @@ struct FailoverSettingsView: View {
             }
 
             Toggle("Intelligent long-window balancing", isOn: binding(provider, \.intelligentBalancingEnabled))
-                .help("Spends included accounts in the order their allowances would otherwise expire: an account whose weekly or monthly limit resets sooner, or whose remaining allowance its 5-hour cap could no longer drain in time, is used first. Destinations must be below their thresholds on both windows.")
+                .help("Spends included accounts in the order their allowances would otherwise expire: an account whose weekly or monthly limit resets sooner, or whose remaining allowance its 5-hour cap could no longer drain in time, is used first. Destinations must be below their thresholds on both windows. An allowance too small to carry the sessions on the shared sign-in is not switched to; with pacing on, the lightest idle session in its own slot moves there to use it before it resets, when that session's use fits in what is left and is worth the cache it rebuilds there, at most once every \(Int(AppState.balanceMoveInterval / 60)) minutes per account.")
             if policy.intelligentBalancingEnabled {
                 LabeledContent("Switch advantage") {
                     Stepper(

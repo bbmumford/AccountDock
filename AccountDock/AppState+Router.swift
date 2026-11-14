@@ -620,9 +620,18 @@ extension AppState {
         if let shared { sessions.removeAll { shared.members.contains($0.id) } }
         noteSharedGroup(shared?.group, provider: provider)
         let pinned = Set(sessionPins.pinned(provider).keys)
-        let plan = SessionPacer().plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
-                                       fixed: pinned)
         let onDraining = Set(sessions.filter { draining.contains($0.account) }.map(\.id))
+        // Without the router only sessions in one-session slots can move.
+        let movable = movesSessions ? nil : Set((liveSessions[provider] ?? []).compactMap { session -> String? in
+            guard let pid = session.processID, let directory = slotDirectoryByProcess[pid],
+                  let root = SessionSlots(provider)?.sessionRoot.path, directory.hasPrefix(root + "/") else { return nil }
+            return session.sessionID
+        })
+        let remainders = movable.flatMap { slotted in
+            remainderSpending(provider, pooled: Set(paced.map(\.id)), slotted: slotted.subtracting(onDraining), now: now)
+        }
+        let plan = SessionPacer().plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
+                                       fixed: pinned, remainders: remainders)
         // A session is never moved to an account without allowance for the
         // model it uses, nor off a draining account before its limit.
         var moves = plan.moves.filter { session, destination in
@@ -637,12 +646,15 @@ extension AppState {
             routerSessionMoves = movesSessions ? moves : [:]
         }
         sessionSlotStates[provider, default: SessionSlotState()].sessionMoves = movesSessions ? [:] : moves
-        // Without the router only sessions in one-session slots can move.
-        let movable = movesSessions ? nil : Set((liveSessions[provider] ?? []).compactMap { session -> String? in
-            guard let pid = session.processID, let directory = slotDirectoryByProcess[pid],
-                  let root = SessionSlots(provider)?.sessionRoot.path, directory.hasPrefix(root + "/") else { return nil }
-            return session.sessionID
-        })
+        sessionSlotStates[provider, default: SessionSlotState()].remainderMoves = movesSessions ? [:]
+            : plan.remainders.reduce(into: [:]) { result, entry in
+                let (session, remainder) = entry
+                guard moves[session] == remainder.account else { return }
+                let weekly = states[remainder.account].flatMap { planner.projection($0, now: now)?.weekly }
+                result[session] = RemainderMove(account: remainder.account,
+                                                percentLeft: max(1, Int((100 - (weekly ?? 99)).rounded())),
+                                                resetsAt: remainder.resetsAt)
+            }
         for (id, outlook) in plan.shedding where !pacingShedding.contains(id) {
             guard let account = accounts.first(where: { $0.id == id }), let limitAt = outlook.limitAt,
                   let reason = plan.shedReasons[id] else { continue }
@@ -723,6 +735,54 @@ extension AppState {
             "before the sessions on the shared sign-in are due to move off it at \(when(at)), so moving its own sessions puts that switch off"
         }
         return "\(reaches) at \(when(limitAt)), \(why); \(outcome)"
+    }
+
+    /// A slot session moving to spend an allowance that would otherwise
+    /// expire: the account, the whole percent of its week left, and when
+    /// that week resets, for `remainderMoveEvent`.
+    struct RemainderMove: Equatable {
+        var account: UUID
+        var percentLeft: Int
+        var resetsAt: Date
+    }
+
+    /// What `SessionPacer.plan` may spend on allowances that would
+    /// otherwise expire, with intelligent balancing on: the pool's accounts
+    /// (`pooled`) other than the active one that cannot carry the work a
+    /// switch would move there (`FailoverPlanner.carries`, judged as
+    /// `nextActiveSwitch` judges it, slot sessions staying where they are),
+    /// leaving out any a session moved to for a remainder within
+    /// `balanceMoveInterval`; and the `slotted` sessions not mid-turn. A
+    /// balance switch moves the whole shared group, so such an account's
+    /// remainder is otherwise left to expire. Nil when balancing is off or
+    /// no account qualifies.
+    func remainderSpending(_ provider: AIProviderType, pooled: Set<UUID>, slotted: Set<String>,
+                           now: Date) -> SessionPacer.RemainderSpending? {
+        let policy = failoverConfig.policy(for: provider)
+        guard policy.intelligentBalancingEnabled, !slotted.isEmpty,
+              let active = activeAccount(for: provider)?.id else { return nil }
+        let planner = FailoverPlanner(settings: plannerSettings(provider))
+        let ladder = accounts.filter { $0.provider == provider && ($0.id == active || pooled.contains($0.id)) }
+        let states = withStayingBurns(ladder.map { quotaState(for: $0, now: now) }, provider: provider, now: now)
+        guard let current = states.first(where: { $0.id == active }) else { return nil }
+        let small = Set(states.filter { state in
+            state.id != active && !planner.carries(state, from: current, at: now)
+                && (remainderMovedAt[state.id].map { now.timeIntervalSince($0) >= Self.balanceMoveInterval } ?? true)
+        }.map(\.id))
+        guard !small.isEmpty else { return nil }
+        let working = Set((liveSessions[provider] ?? []).filter(\.isWorking).map(\.sessionID))
+        return SessionPacer.RemainderSpending(accounts: small, sessions: slotted.subtracting(working))
+    }
+
+    /// The event for a slot session moved to spend what an account has
+    /// left before its weekly reset (`RemainderMove`), recorded by
+    /// `serveSessionSlots`.
+    nonisolated static func remainderMoveEvent(session: String, account: String, percentLeft: Int, resetsAt: Date,
+                                               now: Date) -> String {
+        let when = Calendar.current.isDate(resetsAt, inSameDayAs: now)
+            ? "at " + resetsAt.formatted(date: .omitted, time: .shortened)
+            : "on " + resetsAt.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+        return "Moved \(session) (light use) to \(account) to use its last \(percentLeft)% before it resets \(when); it rebuilds its cache there."
     }
 
     /// The account as `SessionPacer` sees it: its windows projected to now,

@@ -574,6 +574,33 @@ destination must carry the moving work as any switch destination must
 (`FailoverPlanner.carries`); a remainder too small for that is spent by slot
 sessions and new sessions the pool sizes to it, never by the group.
 
+With pacing on, `SessionPacer.plan` spends such a remainder
+(`SessionPacer.RemainderSpending`, built by `AppState.remainderSpending`):
+an account in the pool, other than the active one, that fails `carries`
+and whose weekly allowance the accounts' present rates would leave unused
+at its reset takes the lightest slot session (by `SessionPacer.lightRate`,
+the larger of its current rate and its last hour's) that is between turns
+(quiet for `betweenTurns`, and not working by its record), not pinned, not
+on a draining account and not on another such account, whose use until the
+reset plus its cache rewrite (`moveCost`) fits in what is left, keeping the
+account within every window and its model's own allowance, and whose use
+is at least `remainderWorth` (2) times the rewrite. A second session
+follows only while more than half of the remainder would still go unused.
+Accounts that reset first are served first; the account carrying the
+group's share, now or from the projected switch, spends nothing this way,
+and an account giving sessions up takes none. The move goes through the
+pacer's moves and `serveSessionSlots`, which records "Moved session X
+(light use) to Backup to use its last 2% before it resets on Mon 7:59 am;
+it rebuilds its cache there." (`AppState.remainderMoveEvent`) and offers
+that account again only `balanceMoveInterval` later
+(`AppState.remainderMovedAt`). A session placed so reaches no limit there
+before the reset, so shedding leaves it; if the account reaches its limit
+after all, the session moves on as any stranded slot session does. For new
+sessions, `carriesNewSession` and the pacer's runway rule let such an
+account take one while it can carry a typical session for an hour, and the
+pacer weighs it by the room it has left, a small share beside an account
+with most of its week.
+
 Whether an account has a session window is read from each reading, account by
 account, because a plan can drop it while others keep it (Claude's Ultra plan
 for verified accounts; Max keeps it). A reading with the long window and no

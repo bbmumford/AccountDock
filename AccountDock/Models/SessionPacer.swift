@@ -127,7 +127,9 @@ struct SessionRates: Codable, Equatable {
 /// reach its limit only shortly before the reset keeps its sessions and
 /// their cache; the router holds one refused there when the reset is close
 /// (`RouterLogic.holdUntil`). New sessions go to the accounts with the most
-/// unused rate. Consumed by `AppState.buildPool`.
+/// unused rate. An allowance that would expire unused on an account too
+/// small to carry the shared group is spent by the lightest idle slot
+/// sessions (`RemainderSpending`). Consumed by `AppState.buildPool`.
 ///
 /// An allowance only one model's sessions draw on (`Account.scoped`) is
 /// paced the same way for those sessions alone: an account whose sessions
@@ -286,7 +288,40 @@ struct SessionPacer {
         /// Accounts giving up sessions on one model, by that model's
         /// allowance, with how the allowance would have gone.
         var scopedShedding: [UUID: [String: Outlook]] = [:]
+        /// The sessions among `moves` that go to spend an allowance that
+        /// would otherwise expire unused, with that allowance; read by
+        /// `AppState` for the event the slot move records.
+        var remainders: [String: Remainder] = [:]
     }
+
+    /// What `plan` may spend on allowances that would otherwise expire:
+    /// `accounts`, too small to carry the shared group
+    /// (`FailoverPlanner.carries`, the test a balance switch applies) and
+    /// free to take a session for one now, and `sessions`, the slot
+    /// sessions that may move for one. Built by `AppState.remainderSpending`.
+    struct RemainderSpending: Equatable {
+        var accounts: Set<UUID>
+        var sessions: Set<String>
+    }
+
+    /// An allowance a light session moves to spend (`Plan.remainders`):
+    /// the window percent the account would have left unused at its weekly
+    /// reset before the move, and that reset.
+    struct Remainder: Equatable {
+        var account: UUID
+        var unused: Double
+        var resetsAt: Date
+    }
+
+    /// How many times the cache rewrite a move costs the use a session
+    /// moved to spend a remainder must make of it, so the move is clearly
+    /// worth more than the rewrite.
+    static let remainderWorth = 2.0
+    /// The share of a remainder the first session moved to it must leave
+    /// unused by the reset for a second to follow.
+    static let remainderSecondSession = 0.5
+    /// The most sessions moved to one remainder at a time.
+    static let remainderSessions = 2
 
     /// The window percent treated as the limit, which leaves the in-flight
     /// turns room.
@@ -488,8 +523,10 @@ struct SessionPacer {
     /// sessions, takes none, and takes fewer new sessions, as that load
     /// requires; the group itself never moves. `fixed` sessions, pinned to
     /// their account, never move either and count as load on it.
+    /// `remainders` lets light slot sessions spend allowances that would
+    /// otherwise expire (`spendRemainders`); nil spends none.
     func plan(accounts: [Account], sessions: [Session], now: Date, sharedGroup: SharedGroup? = nil,
-              fixed: Set<String> = []) -> Plan {
+              fixed: Set<String> = [], remainders: RemainderSpending? = nil) -> Plan {
         let ids = Set(accounts.map(\.id))
         let active = sessions.filter { ids.contains($0.account) && now.timeIntervalSince($0.lastSeen) <= Self.activeWithin }
         let shares = shares(sharedGroup, accounts: accounts, now: now)
@@ -645,6 +682,74 @@ struct SessionPacer {
                 }
             }
         }
+        // An allowance the accounts' present rates leave unused at its
+        // weekly reset, on an account too small to carry the shared group,
+        // is spent by light slot sessions instead of expiring: a balance
+        // switch would move the whole group there, which `carries` refuses.
+        // Accounts whose reset comes first are served first. The lightest
+        // candidate goes whose use until the reset, with its cache rewrite,
+        // fits in what is left, keeping the account within every window and
+        // its model's own allowance, and whose use is worth `remainderWorth`
+        // times the rewrite; a second follows only while more than
+        // `remainderSecondSession` of the remainder would still go unused.
+        // A session placed so reaches no limit before the reset, so the
+        // shedding above leaves it there. Accounts giving sessions up spend
+        // nothing here, and a session leaves no other remainder account.
+        if let remainders {
+            let targets = accounts.compactMap { account -> (account: Account, reset: Date)? in
+                guard remainders.accounts.contains(account.id), shares[account.id] == nil,
+                      plan.shedding[account.id] == nil, account.weeklyRemaining != nil,
+                      let reset = account.weeklyResetsAt, reset > now else { return nil }
+                return (account, reset)
+            }.sorted { $0.reset < $1.reset }
+            for (account, reset) in targets {
+                let hours = reset.timeIntervalSince(now) / 3600
+                func unused() -> Double {
+                    windowsLeft(account, spent: spent[account.id] ?? 0, now: now)
+                        .filter { $0.end == reset }.map(\.left).min().map { $0 - (burn[account.id] ?? 0) * hours } ?? 0
+                }
+                let before = unused()
+                guard before > 0 else { continue }
+                let candidates = active.filter { session in
+                    remainders.sessions.contains(session.id) && session.account != account.id
+                        && !remainders.accounts.contains(session.account) && plan.moves[session.id] == nil
+                        && !fixed.contains(session.id) && now.timeIntervalSince(session.lastSeen) > Self.betweenTurns
+                }.sorted { Self.lightRate($0) == Self.lightRate($1) ? $0.id < $1.id : Self.lightRate($0) < Self.lightRate($1) }
+                var chosen = 0
+                for session in candidates {
+                    let left = unused()
+                    guard chosen < Self.remainderSessions,
+                          chosen == 0 || left > before * Self.remainderSecondSession else { break }
+                    let rate = percent(Self.lightRate(session), on: account)
+                    let cost = moveCost(session.contextTokens, to: account)
+                    let use = rate * hours
+                    guard use > 0, use >= Self.remainderWorth * cost, cost + use <= left else { continue }
+                    let after = outlook(account, spent: (spent[account.id] ?? 0) + cost,
+                                        burn: (burn[account.id] ?? 0) + rate, now: now)
+                    guard after.limitAt == nil else { continue }
+                    let keys = scopedKeys(session, on: account)
+                    guard keys.allSatisfy({ currentScoped(account, $0, spending: cost, burning: rate)?.limitAt == nil }) else {
+                        continue
+                    }
+                    plan.moves[session.id] = account.id
+                    plan.remainders[session.id] = Remainder(account: account.id, unused: before, resetsAt: reset)
+                    if let source = accounts.first(where: { $0.id == session.account }) {
+                        let leaving = percent(session.tokensPerHour, on: source)
+                        burn[source.id, default: 0] -= leaving
+                        for key in scopedKeys(session, on: source) {
+                            scopedBurn[source.id, default: [:]][key, default: 0] -= leaving
+                        }
+                    }
+                    burn[account.id, default: 0] += rate
+                    spent[account.id, default: 0] += cost
+                    for key in keys {
+                        scopedBurn[account.id, default: [:]][key, default: 0] += rate
+                        scopedSpent[account.id, default: [:]][key, default: 0] += cost
+                    }
+                    chosen += 1
+                }
+            }
+        }
         // A session started now is expected to use `typicalNewSessionRate`.
         // An account that could not carry one more such session for
         // `newSessionRunway` takes none while another account can: the
@@ -775,11 +880,20 @@ struct SessionPacer {
     /// between turns, which would let every account look able to carry
     /// another session.
     static func typicalNewSessionRate(_ sessions: [Session]) -> Double {
-        let rates = sessions.map { max($0.tokensPerHour, $0.recentTokensPerHour ?? 0) }.filter { $0 > 0 }.sorted()
+        let rates = sessions.map(lightRate).filter { $0 > 0 }.sorted()
         guard !rates.isEmpty else { return defaultSessionRate }
         let middle = rates.count / 2
         let median = rates.count % 2 == 1 ? rates[middle] : (rates[middle - 1] + rates[middle]) / 2
         return max(defaultSessionRate, median)
+    }
+
+    /// The rate a session is expected to keep using: the larger of its
+    /// current rate and its rate over its last hour, idle time included,
+    /// since the current rate alone fades to nothing between turns. Read
+    /// by `typicalNewSessionRate` and by `plan` to find the lightest
+    /// sessions to spend a remainder.
+    static func lightRate(_ session: Session) -> Double {
+        max(session.tokensPerHour, session.recentTokensPerHour ?? 0)
     }
 
     /// The share of its present rate an account's allowance sustains until

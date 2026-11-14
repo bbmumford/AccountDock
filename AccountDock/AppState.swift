@@ -204,6 +204,11 @@ final class AppState: ObservableObject {
     var slotSessionsByDirectory: [String: String] = [:]
     /// When each provider's sessions were last rebalanced (`applyRebalance`).
     var lastRebalance: [AIProviderType: Date] = [:]
+    /// When a slot session last moved to each account to spend an allowance
+    /// that would otherwise expire (`serveSessionSlots`);
+    /// `remainderSpending` offers that account again only
+    /// `balanceMoveInterval` later.
+    var remainderMovedAt: [UUID: Date] = [:]
     /// Sessions pinned to one subscription, kept across launches
     /// (`SessionPins`); read by every path that moves a slot session.
     @Published var sessionPins = SessionPins.load()
@@ -1099,6 +1104,7 @@ final class AppState: ObservableObject {
         userResumes = userResumes.mapValues { $0.filter { $0.value != id } }
         sessionAdmissions = sessionAdmissions.mapValues { $0.filter { $0.value.account != id } }
         requestedSlotMoves = requestedSlotMoves.filter { $0.value != id }
+        remainderMovedAt[id] = nil
         routerSessionMoves = routerSessionMoves.filter { $0.value != id }
         routedSessionSeen = routedSessionSeen.filter { $0.value.account != id }
         sessionServedBy = sessionServedBy.filter { $0.value.account != id }

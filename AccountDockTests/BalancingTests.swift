@@ -523,4 +523,192 @@ final class BalancingTests: XCTestCase {
                        "HSTLES (brandon) at 40% an hour with the group runs out first")
         XCTAssertGreaterThan(after, before.addingTimeInterval(3 * 3600))
     }
+
+    // MARK: - Spending a remainder that would otherwise expire
+
+    /// The evening again, with Backup idle at 98% of its week and 31 hours
+    /// to its reset: three heavy slot sessions and one light idle one on
+    /// HSTLES (brandon) beside the shared group, a lighter one mid-turn and
+    /// a lighter one pinned there, and Personal's one session.
+    private struct RemainderEvening {
+        let personal = UUID(), backup = UUID(), hstlesBrandon = UUID()
+        let ratio = 0.25
+        let sessionTokens = 20_000_000.0
+        let groupTokens = 80_000_000.0
+    }
+
+    private func remainderAccounts(_ evening: RemainderEvening, backupLeft: Double = (99 - 98) * 8,
+                                   backupResetIn: Double = 31) -> [SessionPacer.Account] {
+        let units = evening.sessionTokens / 1_000_000 * evening.ratio
+        return [
+            pacerAccount(evening.hstlesBrandon, left: (99 - 15) * 8, resetIn: 135.5,
+                         burn: evening.groupTokens / 1_000_000 * evening.ratio + 3 * units, ratio: evening.ratio),
+            pacerAccount(evening.personal, left: (99 - 6) * 8, resetIn: 147.5, burn: units, ratio: evening.ratio),
+            pacerAccount(evening.backup, left: backupLeft, resetIn: backupResetIn, ratio: evening.ratio)
+        ]
+    }
+
+    private func remainderSessions(_ evening: RemainderEvening, light: Double = 800_000,
+                                   lightContext: Int = 100_000) -> [SessionPacer.Session] {
+        func session(_ id: String, on account: UUID, current: Double, recent: Double, quietFor seconds: TimeInterval,
+                     context: Int = 150_000) -> SessionPacer.Session {
+            SessionPacer.Session(id: id, account: account, tokensPerHour: current, contextTokens: context,
+                                 lastSeen: now.addingTimeInterval(-seconds), cacheLifetime: 3600,
+                                 lastTurnStart: now.addingTimeInterval(-seconds - 60), recentTokensPerHour: recent)
+        }
+        let heavy = (1...3).map {
+            session("h\($0)", on: evening.hstlesBrandon, current: evening.sessionTokens, recent: evening.sessionTokens,
+                    quietFor: 60 * Double($0))
+        }
+        return heavy + [
+            // Between turns for ten minutes; its rate fades, its last hour's does not.
+            session("light", on: evening.hstlesBrandon, current: light / 2, recent: light, quietFor: 10 * 60,
+                    context: lightContext),
+            // Lighter still, but mid-turn: its last request was moments ago.
+            session("busy", on: evening.hstlesBrandon, current: 400_000, recent: 400_000, quietFor: 20),
+            // Lighter still, but pinned to HSTLES (brandon).
+            session("pinned", on: evening.hstlesBrandon, current: 0, recent: 300_000, quietFor: 15 * 60),
+            session("p1", on: evening.personal, current: evening.sessionTokens, recent: evening.sessionTokens, quietFor: 60)
+        ]
+    }
+
+    private func remainderGroup(_ evening: RemainderEvening) -> SessionPacer.SharedGroup {
+        SessionPacer.SharedGroup(account: evening.hstlesBrandon, tokensPerHour: evening.groupTokens, contextTokens: 600_000,
+                                 models: [], nextAccount: evening.personal, switchAt: now.addingTimeInterval(17 * 3600),
+                                 sessionCount: 4)
+    }
+
+    func testALightIdleSlotSessionSpendsBackupsLastPercentBeforeItResets() throws {
+        let evening = RemainderEvening()
+        // Failover's view: Backup's 2% cannot carry the group, so neither
+        // balancing nor a switch moves it there.
+        let planner = FailoverPlanner(settings: .init(policy: policy(), provider: .claudeCode))
+        let current = weeklyState(evening.hstlesBrandon, used: 15, resetIn: 135.5, active: true, burn: 3)
+        let backupState = weeklyState(evening.backup, used: 98, resetIn: 31, consumedElsewhere: true)
+        let ladder = [weeklyState(evening.personal, used: 6, resetIn: 147.5, staying: 5, consumedElsewhere: true),
+                      backupState, current]
+        XCTAssertFalse(planner.carries(backupState, from: current, at: now))
+        XCTAssertEqual(planner.plan(current: current, ladder: ladder, lastSwitch: nil, now: now), .stay(.healthy),
+                       "the shared group stays where it is")
+
+        // The pacer's view: Backup is offered as a remainder, every slot
+        // session as a candidate.
+        let sessions = remainderSessions(evening)
+        let spending = SessionPacer.RemainderSpending(accounts: [evening.backup], sessions: Set(sessions.map(\.id)))
+        let plan = SessionPacer().plan(accounts: remainderAccounts(evening), sessions: sessions, now: now,
+                                       sharedGroup: remainderGroup(evening), fixed: ["pinned"], remainders: spending)
+        XCTAssertEqual(plan.moves, ["light": evening.backup],
+                       "the light idle session goes; the heavy ones, the mid-turn and the pinned one stay")
+        let remainder = try XCTUnwrap(plan.remainders["light"])
+        XCTAssertEqual(remainder.account, evening.backup)
+        XCTAssertEqual(remainder.unused, 8, accuracy: 0.001, "1% of the week below the limit at 8 to 1, none of it in use")
+        XCTAssertEqual(remainder.resetsAt, now.addingTimeInterval(31 * 3600))
+        XCTAssertNil(plan.shedding[evening.backup], "a session placed for the remainder reaches no limit there")
+        // 0.8M an hour for 31 hours is 6.2% at 0.25 per million: a second
+        // session would follow only with more than half of the 8% left.
+        XCTAssertEqual(plan.remainders.count, 1)
+
+        // New sessions: Backup keeps a small weight for what is left of it.
+        let backupWeight = plan.weights[evening.backup] ?? 0
+        XCTAssertGreaterThan(backupWeight, 0)
+        XCTAssertLessThan(backupWeight, (plan.weights[evening.personal] ?? 0) * 0.02)
+
+        // Once there, the session stays: Backup no longer offers enough
+        // unused allowance to move another session, and gives none up.
+        let arrived = sessions.map { session -> SessionPacer.Session in
+            var session = session
+            if session.id == "light" { session.account = evening.backup }
+            return session
+        }
+        let next = SessionPacer().plan(accounts: remainderAccounts(evening, backupLeft: 8 - 0.03), sessions: arrived, now: now,
+                                       sharedGroup: remainderGroup(evening), fixed: ["pinned"], remainders: spending)
+        XCTAssertTrue(next.moves.isEmpty)
+
+        XCTAssertEqual(
+            AppState.remainderMoveEvent(session: "session 1234abcd", account: "Backup", percentLeft: 2,
+                                        resetsAt: now.addingTimeInterval(31 * 3600), now: now)
+                .hasPrefix("Moved session 1234abcd (light use) to Backup to use its last 2% before it resets on "), true)
+        XCTAssertTrue(AppState.remainderMoveEvent(session: "session 1234abcd", account: "Backup", percentLeft: 2,
+                                                  resetsAt: now.addingTimeInterval(31 * 3600), now: now)
+            .hasSuffix("; it rebuilds its cache there."))
+    }
+
+    func testARemainderBelowOneCacheRewriteMovesNothing() {
+        let evening = RemainderEvening()
+        let sessions = remainderSessions(evening)
+        let spending = SessionPacer.RemainderSpending(accounts: [evening.backup], sessions: Set(sessions.map(\.id)))
+        // The light session's 100,000-token context costs 0.029% to write
+        // there; 0.02% is left.
+        let tiny = SessionPacer().plan(accounts: remainderAccounts(evening, backupLeft: 0.02), sessions: sessions, now: now,
+                                       sharedGroup: remainderGroup(evening), fixed: ["pinned"], remainders: spending)
+        XCTAssertTrue(tiny.moves.isEmpty)
+        // Room for the session, but its use is not clearly worth the
+        // rewrite: a 2M-token context costs 0.575%, its use 0.6% by a
+        // reset in three hours.
+        let unworthy = SessionPacer().plan(accounts: remainderAccounts(evening, backupResetIn: 3),
+                                           sessions: remainderSessions(evening, lightContext: 2_000_000), now: now,
+                                           sharedGroup: remainderGroup(evening), fixed: ["pinned"], remainders: spending)
+        XCTAssertTrue(unworthy.moves.isEmpty)
+        // A session too heavy for the remainder is not sent to spend it.
+        let heavy = SessionPacer().plan(accounts: remainderAccounts(evening), sessions: remainderSessions(evening, light: 2_000_000),
+                                        now: now, sharedGroup: remainderGroup(evening), fixed: ["pinned"], remainders: spending)
+        XCTAssertTrue(heavy.moves.isEmpty, "2M an hour for 31 hours is 15.5%, more than the 8% left")
+        // Nor is anything moved without a remainder offered.
+        let none = SessionPacer().plan(accounts: remainderAccounts(evening), sessions: sessions, now: now,
+                                       sharedGroup: remainderGroup(evening), fixed: ["pinned"])
+        XCTAssertTrue(none.moves.isEmpty)
+    }
+
+    func testAMidTurnOrPinnedLightSessionIsNotChosen() {
+        let evening = RemainderEvening()
+        // Only the mid-turn and the pinned sessions are light enough.
+        let sessions = remainderSessions(evening).filter { $0.id != "light" }
+        let spending = SessionPacer.RemainderSpending(accounts: [evening.backup], sessions: Set(sessions.map(\.id)))
+        let plan = SessionPacer().plan(accounts: remainderAccounts(evening), sessions: sessions, now: now,
+                                       sharedGroup: remainderGroup(evening), fixed: ["pinned"], remainders: spending)
+        XCTAssertTrue(plan.moves.isEmpty)
+        // A session `AppState.remainderSpending` leaves out, as it does one
+        // its record shows working, is not chosen either.
+        let all = remainderSessions(evening)
+        let without = SessionPacer.RemainderSpending(accounts: [evening.backup],
+                                                     sessions: Set(all.map(\.id)).subtracting(["light"]))
+        XCTAssertTrue(SessionPacer().plan(accounts: remainderAccounts(evening), sessions: all, now: now,
+                                          sharedGroup: remainderGroup(evening), fixed: ["pinned"], remainders: without)
+            .moves.isEmpty)
+    }
+
+    func testTheSharedGroupIsNeverMovedForARemainder() {
+        let evening = RemainderEvening()
+        let sessions = remainderSessions(evening)
+        // Personal, the account the group is projected to move to, would
+        // also leave some of its week unused; it carries the group's share,
+        // so it spends nothing as a remainder, and no session leaves it.
+        let spending = SessionPacer.RemainderSpending(accounts: [evening.personal, evening.backup],
+                                                      sessions: Set(sessions.map(\.id)))
+        let plan = SessionPacer().plan(accounts: remainderAccounts(evening), sessions: sessions, now: now,
+                                       sharedGroup: remainderGroup(evening), fixed: ["pinned"], remainders: spending)
+        XCTAssertEqual(plan.moves, ["light": evening.backup])
+        XCTAssertFalse(plan.moves.values.contains(evening.personal))
+        // The group's own sessions are never among the pacer's sessions; the
+        // failover plan, which alone moves the group, never takes it to
+        // Backup at its limit either.
+        let planner = FailoverPlanner(settings: .init(policy: policy(), provider: .claudeCode))
+        let spentActive = weeklyState(evening.hstlesBrandon, used: 99.5, resetIn: 135.5, active: true, burn: 3)
+        let ladder = [weeklyState(evening.backup, used: 98, resetIn: 31, consumedElsewhere: true), spentActive]
+        XCTAssertNotEqual(planner.plan(current: spentActive, ladder: ladder, lastSwitch: nil, now: now),
+                          .switchTo(evening.backup, .exhausted))
+    }
+
+    func testASecondLightSessionFollowsWhenTheFirstLeavesMostOfTheRemainder() {
+        let evening = RemainderEvening()
+        var sessions = remainderSessions(evening)
+        sessions.append(SessionPacer.Session(id: "light2", account: evening.hstlesBrandon, tokensPerHour: 0,
+                                             contextTokens: 100_000, lastSeen: now.addingTimeInterval(-5 * 60),
+                                             cacheLifetime: 3600, recentTokensPerHour: 1_000_000))
+        let spending = SessionPacer.RemainderSpending(accounts: [evening.backup], sessions: Set(sessions.map(\.id)))
+        // 3% of the week, 24 session percent: the first uses 6.2 of it.
+        let plan = SessionPacer().plan(accounts: remainderAccounts(evening, backupLeft: 24), sessions: sessions, now: now,
+                                       sharedGroup: remainderGroup(evening), fixed: ["pinned"], remainders: spending)
+        XCTAssertEqual(plan.moves, ["light": evening.backup, "light2": evening.backup])
+    }
 }

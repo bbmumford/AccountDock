@@ -29,6 +29,10 @@ extension AppState {
         /// Sessions `SessionPacer` moves to another account to balance
         /// load, applied to one-session slots by `serveSessionSlots`.
         var sessionMoves: [String: UUID] = [:]
+        /// The sessions among `sessionMoves` that move to spend an
+        /// allowance that would otherwise expire (`SessionPacer.Plan.remainders`),
+        /// for the event `serveSessionSlots` records when it moves one.
+        var remainderMoves: [String: RemainderMove] = [:]
         /// The CLI's background-session processes, read with the slots: its
         /// workers are sessions on the shared sign-in, its attach clients
         /// and other commands no sessions.
@@ -43,6 +47,7 @@ extension AppState {
             credentialAccounts.remove(id)
             directoryServing = directoryServing.filter { $0.value != id }
             sessionMoves = sessionMoves.filter { $0.value != id }
+            remainderMoves = remainderMoves.filter { $0.value.account != id }
         }
     }
 
@@ -567,6 +572,16 @@ extension AppState {
                 : requested ? "a request asked for it"
                 : spent.map { "\(from) has no \($0) allowance left" + (modelSpent ? "; its other sessions stay" : "") }
                 ?? "\(from) can no longer serve it"
+            // A move to spend an allowance that would otherwise expire names
+            // that allowance, and holds the account for `balanceMoveInterval`.
+            if balanced, let session, let remainder = sessionSlotStates[provider]?.remainderMoves[session.sessionID],
+               remainder.account == target {
+                remainderMovedAt[target] = now
+                failoverEvents.record(provider, Self.remainderMoveEvent(session: subject, account: to,
+                                                                        percentLeft: remainder.percentLeft,
+                                                                        resetsAt: remainder.resetsAt, now: now))
+                continue
+            }
             failoverEvents.record(provider, balanced
                 ? "Moved \(subject) from \(from) to \(to) to balance load; it rebuilds its prompt cache there at its next request."
                 : "Moved \(subject) from \(from) to \(to): \(why).")
