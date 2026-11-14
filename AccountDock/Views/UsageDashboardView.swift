@@ -31,6 +31,7 @@ private struct SessionCountLabel: View {
     let provider: AIProviderType
     let sessions: Set<String>
     @State private var showsList = false
+    @State private var isHovering = false
 
     var body: some View {
         let pinned = sessions.filter { appState.sessionPins.isPinned($0) }.count
@@ -48,12 +49,24 @@ private struct SessionCountLabel: View {
             }
         }
         .buttonStyle(.plain)
-        .help(appState.sessionSummary(sessions))
-        .popover(isPresented: $showsList, arrowEdge: .bottom) {
-            SessionPinList(provider: provider, sessions: sessions.sorted {
-                appState.sessionSummary([$0]).localizedCaseInsensitiveCompare(appState.sessionSummary([$1])) == .orderedAscending
-            })
-            .environmentObject(appState)
+        // Resting the pointer on it lists the sessions at once, as `.help`
+        // does only after a delay; a click keeps the list open with its locks.
+        .onHover { isHovering = $0 }
+        .popover(isPresented: Binding(get: { showsList || isHovering },
+                                      set: { if !$0 { showsList = false; isHovering = false } }),
+                 arrowEdge: .bottom) {
+            if showsList {
+                SessionPinList(provider: provider, sessions: sessions.sorted {
+                    appState.sessionSummary([$0]).localizedCaseInsensitiveCompare(appState.sessionSummary([$1])) == .orderedAscending
+                })
+                .environmentObject(appState)
+            } else {
+                Text(verbatim: appState.sessionSummary(sessions))
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(8)
+                    .frame(minWidth: 180, maxWidth: 440, alignment: .leading)
+            }
         }
     }
 }
