@@ -21,6 +21,9 @@ extension AppState {
         var earliestRunOutAfter: Date?
         /// One line per move: the session (`sessionSummary`), from → to.
         var lines: [String] = []
+        /// The room kept on the account the sessions on the shared sign-in
+        /// move to (`AppState.sharedGroupNote`); nil while they stay.
+        var sharedNote: String?
 
         /// How the earliest run-out changes, in words.
         var outcome: String {
@@ -74,17 +77,22 @@ extension AppState {
             return SessionPacer.RebalanceSession(
                 id: id, account: account, tokensPerHour: measured > 0 ? measured : SessionPacer.defaultSessionRate,
                 contextTokens: entry?.contextTokens ?? 0, model: model,
-                movable: !session.isWorking && pacer.movable(pacing, now: now)
+                movable: !session.isWorking && pacer.movable(pacing, now: now) && !sessionPins.isPinned(id)
             )
         }
-        let plan = pacer.rebalance(accounts: pacerAccounts, sessions: sessions, destinations: destinations, now: now)
+        // The sessions on the shared sign-in are none of these and never
+        // move; they count where the active account is and will be.
+        let shared = sharedGroup(provider, sessions: pacerSessions(provider, now: now), now: now)?.group
+        let plan = pacer.rebalance(accounts: pacerAccounts, sessions: sessions, destinations: destinations, now: now,
+                                   sharedGroup: shared)
         let from = sessions.reduce(into: [String: UUID]()) { $0[$1.id] = $1.account }
         let moves = plan.moves.compactMap { id, to in from[id].map { RebalanceMove(session: id, from: $0, to: to) } }
             .sorted { $0.session < $1.session }
         func name(_ id: UUID) -> String { accounts.first { $0.id == id }.map { messageName($0) } ?? "an account" }
         return RebalancePreview(
             moves: moves, earliestRunOutBefore: plan.earliestRunOutBefore, earliestRunOutAfter: plan.earliestRunOutAfter,
-            lines: moves.map { "\(sessionSummary([$0.session], now: now)): \(name($0.from)) → \(name($0.to))" }
+            lines: moves.map { "\(sessionSummary([$0.session], now: now)): \(name($0.from)) → \(name($0.to))" },
+            sharedNote: sharedGroupNote(shared)
         )
     }
 
@@ -97,7 +105,8 @@ extension AppState {
         guard !preview.moves.isEmpty else { return preview }
         for move in preview.moves { requestedSlotMoves[move.session] = move.to }
         lastRebalance[provider] = now
-        failoverEvents.record(provider, "Rebalancing sessions: \(preview.outcome)")
+        failoverEvents.record(provider, "Rebalancing sessions: \(preview.outcome)"
+                              + (preview.sharedNote.map { " " + $0 } ?? ""))
         await maintainSessionSlots(now: now)
         return preview
     }

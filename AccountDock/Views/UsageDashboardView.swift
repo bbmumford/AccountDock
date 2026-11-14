@@ -20,34 +20,109 @@ private struct StatWithTooltip<Content: View>: View {
     }
 }
 
-/// An account card's session count, with how many of the sessions were
-/// refused at a usage limit. Resting the pointer on it lists the sessions
-/// (`AppState.sessionSummary`) in a popover, which opens at once inside the
-/// status-item panel.
+/// An account card's session count, with how many of its sessions are
+/// pinned (`AppState.sessionPins`) and how many were refused at a usage
+/// limit. Clicking it lists the sessions in a popover, one row each
+/// (`AppState.sessionSummary`) with a lock that pins the session to this
+/// subscription or unpins it; resting the pointer on it shows the same list
+/// as text.
 private struct SessionCountLabel: View {
-    let count: Int
-    let refused: Int
-    let summary: String
-    @State private var isHovering = false
+    @EnvironmentObject private var appState: AppState
+    let provider: AIProviderType
+    let sessions: Set<String>
+    @State private var showsList = false
 
     var body: some View {
-        HStack(spacing: 4) {
-            Text(count == 1 ? "1 session" : "\(count) sessions")
-                .font(.caption2)
-                .foregroundStyle(.textSecondary)
-            if refused > 0 {
-                Text("\(refused) refused at a limit")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.red)
+        let pinned = sessions.filter { appState.sessionPins.isPinned($0) }.count
+        let refused = sessions.filter { appState.sessionRefusals[$0] != nil }.count
+        Button { showsList.toggle() } label: {
+            HStack(spacing: 4) {
+                Text((sessions.count == 1 ? "1 session" : "\(sessions.count) sessions") + (pinned > 0 ? " · \(pinned) pinned" : ""))
+                    .font(.caption2)
+                    .foregroundStyle(.textSecondary)
+                if refused > 0 {
+                    Text("\(refused) refused at a limit")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.red)
+                }
             }
         }
-        .onHover { isHovering = $0 }
-        .popover(isPresented: $isHovering, arrowEdge: .bottom) {
-            Text(verbatim: summary)
-                .font(.caption)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(8)
-                .frame(minWidth: 180, maxWidth: 440, alignment: .leading)
+        .buttonStyle(.plain)
+        .help(appState.sessionSummary(sessions))
+        .popover(isPresented: $showsList, arrowEdge: .bottom) {
+            SessionPinList(provider: provider, sessions: sessions.sorted {
+                appState.sessionSummary([$0]).localizedCaseInsensitiveCompare(appState.sessionSummary([$1])) == .orderedAscending
+            })
+            .environmentObject(appState)
+        }
+    }
+}
+
+/// One row per session of an account card: the session, a lock pinning it
+/// to its subscription (`AppState.pinSession`), and for a pinned session
+/// refused at its account's limit, the ways out: "Unpin and move" and
+/// "Switch model". A session on the shared sign-in cannot be pinned; its
+/// row offers its restart into a slot of its own first.
+private struct SessionPinList: View {
+    @EnvironmentObject private var appState: AppState
+    let provider: AIProviderType
+    let sessions: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(sessions, id: \.self) { id in
+                row(id)
+            }
+        }
+        .padding(8)
+        .frame(minWidth: 260, maxWidth: 480, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func row(_ id: String) -> some View {
+        let pinned = appState.sessionPins.isPinned(id)
+        let inSlot = appState.slotAccount(ofSession: id, provider: provider) != nil
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Button {
+                    if pinned { appState.unpinSession(id) } else { appState.pinSession(id) }
+                } label: {
+                    Image(systemName: pinned ? "lock.fill" : "lock.open")
+                        .foregroundStyle(pinned ? Color.accentColor : Color.secondary)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!pinned && !inSlot)
+                .help(pinned
+                    ? "Pinned: failover, pacing, rebalancing and the model fallback leave it on this subscription. Click to unpin."
+                    : inSlot ? "Pin this session to its subscription, so nothing automatic moves it."
+                    : "It runs on the shared sign-in and moves with the active account, so it cannot be pinned.")
+                Text(verbatim: appState.sessionSummary([id]))
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if pinned, appState.sessionRefusals[id] != nil {
+                HStack(spacing: 8) {
+                    Text("pinned · refused at limit")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.red)
+                    Button("Unpin and move") { Task { await appState.unpinAndMove(id) } }
+                        .controlSize(.small)
+                    if let choice = appState.switchModelChoice(for: id, provider: provider) {
+                        Button("Switch model") { Task { await appState.switchSessionModel(id) } }
+                            .controlSize(.small)
+                            .help("Switches this session to \(choice.label) from its terminal once its turn has ended.")
+                    }
+                }
+                .padding(.leading, 22)
+            } else if !pinned, !inSlot, let session = appState.unisolatedSessions[provider]?.first(where: { $0.sessionID == id }) {
+                let blocker = AppState.restartBlocker(session, terminal: appState.unisolatedTerminals[id],
+                                                      background: appState.backgroundSessionStates[id])
+                Button("Restart in its own slot first") { Task { await appState.restartInOwnSlot(id) } }
+                    .controlSize(.small)
+                    .disabled(blocker != nil)
+                    .help(blocker ?? "Restarts it in a slot of its own, which can then be pinned.")
+                    .padding(.leading, 22)
+            }
         }
     }
 }
@@ -58,6 +133,9 @@ struct UsageDashboardView: View {
     @AppStorage("showFullEmail") private var showFullEmail = false
     @AppStorage(ProviderVisibility.storageKey) private var hiddenProviders = ""
     @AppStorage("sessionLaunchDirectory") private var sessionLaunchDirectory = ""
+    /// The tile session button's "Keep here": whether a session it opens
+    /// is pinned to the subscription.
+    @AppStorage("keepOpenedSessionsHere") private var keepOpenedSessionsHere = true
     @State private var sessionLaunchError: String?
 
     var body: some View {
@@ -412,9 +490,7 @@ struct UsageDashboardView: View {
                         Badge(text: String(localized: "Active", bundle: L10n.bundle), color: .brand)
                     }
                     if let sessions = appState.accountSessions[account.id], !sessions.isEmpty {
-                        SessionCountLabel(count: sessions.count,
-                                          refused: sessions.filter { appState.sessionRefusals[$0] != nil }.count,
-                                          summary: appState.sessionSummary(sessions))
+                        SessionCountLabel(provider: account.provider, sessions: sessions)
                     }
                 }
                 AccountEmailLabel(email: account.email, alwaysVisible: showFullEmail)
@@ -433,8 +509,10 @@ struct UsageDashboardView: View {
     }
 
     /// Starts a session on this subscription in the terminal chosen from the
-    /// menu, in a folder chosen next. It stays on the subscription until
-    /// failover or balancing moves it (`AppState.sessionLaunch`).
+    /// menu, in a folder chosen next. It is pinned there
+    /// (`AppState.sessionLaunch`) unless "Keep here" is unchecked or Option
+    /// is held while choosing (`SessionPins.pinsOpenedSession`); unpinned,
+    /// it stays until failover or balancing moves it.
     @ViewBuilder
     private func sessionButton(_ account: Account) -> some View {
         if account.provider.capabilities.sessionSlots != nil {
@@ -442,11 +520,17 @@ struct UsageDashboardView: View {
             Menu {
                 ForEach(SessionTerminal.available) { terminal in
                     Button {
-                        Task { await openSession(on: account, using: terminal) }
+                        let pinned = SessionPins.pinsOpenedSession(
+                            keepHere: keepOpenedSessionsHere,
+                            optionHeld: NSEvent.modifierFlags.contains(.option))
+                        Task { await openSession(on: account, using: terminal, pinned: pinned) }
                     } label: {
                         Label(terminal.title, systemImage: terminal.systemImage)
                     }
                 }
+                Divider()
+                Toggle("Keep here", isOn: $keepOpenedSessionsHere)
+                    .help("Pins the session to this subscription, so nothing automatic moves it. Hold Option while choosing a terminal to open one unpinned.")
             } label: {
                 Image(systemName: "plus.rectangle.on.rectangle")
                     .font(.caption)
@@ -455,18 +539,18 @@ struct UsageDashboardView: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .disabled(blocker != nil)
-            .help(blocker ?? "Open a session on this subscription. It stays here until failover or balancing moves it.")
+            .help(blocker ?? "Open a session on this subscription, pinned here unless Keep here is unchecked or Option is held.")
         }
     }
 
     @MainActor
-    private func openSession(on account: Account, using terminal: SessionTerminal) async {
+    private func openSession(on account: Account, using terminal: SessionTerminal, pinned: Bool) async {
         if let blocker = appState.sessionLaunchBlocker(account) {
             sessionLaunchError = blocker
             return
         }
         guard let directory = chooseSessionDirectory() else { return }
-        guard let command = await appState.sessionLaunch(on: account, in: directory) else {
+        guard let command = await appState.sessionLaunch(on: account, in: directory, pinned: pinned) else {
             sessionLaunchError = "\(appState.messageName(account)) cannot start a session right now. Check that it is signed in."
             return
         }
@@ -696,7 +780,9 @@ private struct UngatedSessionsLine: View {
 /// Sessions that read no slot of their own (`AppState.unisolatedSessions`).
 /// Resting the pointer on the line lists them (`AppState.sessionSummary`),
 /// each with a restart into its own slot or why it cannot have one now, and
-/// one action restarting every idle one in agterm.
+/// one action restarting every idle one in agterm. A session in the CLI's
+/// background service (`AppState.backgroundSessionStates`) is marked as
+/// such; its restart stops it and resumes it in its attach client's tab.
 private struct UnisolatedSessionsLine: View {
     @EnvironmentObject private var appState: AppState
     let provider: AIProviderType
@@ -719,15 +805,18 @@ private struct UnisolatedSessionsLine: View {
 
     private var list: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Started outside a slot of its own: by full path, from an IDE or the desktop app, or before the pool was ready. These share the sign-in and cannot be moved one at a time.")
+            Text("Started outside a slot of its own: by full path, from an IDE or the desktop app, before the pool was ready, or in the background service, whose workers read the shared sign-in. These share the sign-in and cannot be moved one at a time.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(sessions, id: \.sessionID) { session in
-                let blocker = AppState.restartBlocker(session, terminal: appState.unisolatedTerminals[session.sessionID])
+                let background = appState.backgroundSessionStates[session.sessionID]
+                let blocker = AppState.restartBlocker(session, terminal: appState.unisolatedTerminals[session.sessionID],
+                                                      background: background)
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(verbatim: appState.sessionSummary([session.sessionID]))
+                        Text(verbatim: appState.sessionSummary([session.sessionID])
+                             + (background != nil ? " · background session" : ""))
                             .font(.caption)
                         if let blocker {
                             Text(blocker)
@@ -742,10 +831,14 @@ private struct UnisolatedSessionsLine: View {
                     }
                     .controlSize(.small)
                     .disabled(blocker != nil)
+                    .help(background != nil
+                          ? "Stops the background session and resumes it in its attach client's agterm tab, through the launcher."
+                          : "Ends the session and resumes it in its agterm tab, through the launcher.")
                 }
             }
             let ready = sessions.filter {
-                AppState.restartBlocker($0, terminal: appState.unisolatedTerminals[$0.sessionID]) == nil
+                AppState.restartBlocker($0, terminal: appState.unisolatedTerminals[$0.sessionID],
+                                        background: appState.backgroundSessionStates[$0.sessionID]) == nil
             }
             if sessions.count > 1 {
                 Button("Restart all idle unisolated sessions") {

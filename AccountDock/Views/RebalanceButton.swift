@@ -30,7 +30,7 @@ struct RebalanceButton: View {
                 Button("Cancel", role: .cancel) { preview = nil }
             }
         } message: { plan in
-            Text(([plan.outcome] + plan.lines).joined(separator: "\n"))
+            Text(([plan.outcome] + plan.lines + [plan.sharedNote].compactMap { $0 }).joined(separator: "\n"))
         }
     }
 }
