@@ -1998,7 +1998,11 @@ final class AppState: ObservableObject {
             .compactMap { $0 }
             .joined(separator: " + ")
 
-        guard spendUsageRequest(account.provider, .background) else {
+        // A warm-up runs once per window and starts a countdown the account's
+        // whole window depends on, so it draws on the allowance kept for
+        // verifying candidates rather than waiting behind background reads,
+        // which can hold it back for half an hour when the budget is tight.
+        guard spendUsageRequest(account.provider, .candidate) else {
             scheduleWarmupRetry(accountID: accountID, windows: windows)
             return
         }
