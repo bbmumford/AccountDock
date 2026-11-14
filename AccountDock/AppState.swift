@@ -222,6 +222,9 @@ final class AppState: ObservableObject {
     var slotSessionsByDirectory: [String: String] = [:]
     /// When each provider's sessions were last rebalanced (`applyRebalance`).
     var lastRebalance: [AIProviderType: Date] = [:]
+    /// The account each provider's shared group was last projected to move
+    /// to, so `noteSharedGroup` records each change once.
+    var sharedGroupDestination: [AIProviderType: UUID] = [:]
     /// A locally elapsed reset is useful for clearing a stale 100% display,
     /// but it is not proof that the provider has opened a new quota window.
     /// Never fail over to one of these accounts until a fresh API response
