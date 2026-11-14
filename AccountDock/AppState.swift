@@ -1344,14 +1344,26 @@ final class AppState: ObservableObject {
             log.info("[switchTo] ===== Switch completed =====")
         } catch {
             errorMessage = error.localizedDescription
-            switch error {
-            case ClaudeServiceError.switchVerificationFailed, ClaudeServiceError.switchWrongAccount,
-                 ClaudeServiceError.noTokenForAccount:
+            if Self.switchFailureQuarantines(error) {
                 quarantineCredentials(of: account, reason: error.localizedDescription)
-            default:
-                break
             }
             log.error("[switchTo] Switch failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Whether a failed Claude switch (`ClaudeService.switchAccount`) shows
+    /// the target's saved credential unusable, so the target is kept from
+    /// automatic switching until it signs in again: no saved credential,
+    /// the provider rejecting it, or the provider naming another account
+    /// as its owner. A switch nothing confirmed or refuted quarantines
+    /// nothing.
+    nonisolated static func switchFailureQuarantines(_ error: Error) -> Bool {
+        switch error {
+        case ClaudeServiceError.switchVerificationFailed, ClaudeServiceError.switchWrongAccount,
+             ClaudeServiceError.noTokenForAccount:
+            true
+        default:
+            false
         }
     }
 

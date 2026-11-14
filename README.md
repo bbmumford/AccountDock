@@ -261,8 +261,9 @@ ID, working directory, state, host and time, never prompt or transcript content.
 
 ## Switching and session recovery
 
-**Claude Code.** Switching replaces the credential Claude Code uses and checks
-the result with `claude auth status`, rolling back if the target is rejected.
+**Claude Code.** Switching replaces the credential Claude Code uses and asks
+Claude whose the new credential is, rolling back if it is another account's or
+rejected.
 Running sessions are never terminated or restarted.
 
 **Codex** has three switch methods for automatic failover:

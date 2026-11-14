@@ -777,20 +777,113 @@ final class ClaudeService: @unchecked Sendable {
         }
         log.info("[switchAccount] Step 3: Both token and oauthAccount written")
 
-        // 4. Verify
-        log.info("[switchAccount] Step 4: Verifying with `claude auth status`...")
-        do {
-            let status = try await getAuthStatus()
-            if let failure = Self.verificationFailure(of: status, switchingTo: targetAccount) {
-                log.error("[switchAccount] Step 4: Not confirmed (loggedIn=\(status.loggedIn), email=\(status.email ?? "nil"), expected \(targetAccount.email))")
-                throw failure
+        // 4. Verify by the credential written
+        let identity = targetBackup.oauthAccount
+        return try await Self.verifySwitch(to: targetAccount, writtenToken: targetBackup.token, identity: identity,
+                                           now: Date(), io: SwitchVerificationIO(
+            authStatus: { try await self.getAuthStatus() },
+            profileEmail: { try await self.getProfileIdentity(accessToken: $0).email },
+            liveToken: { keychain.readClaudeToken() },
+            identityEmail: { keychain.readOAuthAccount()?["emailAddress"]?.value as? String },
+            restoreIdentity: { keychain.writeOAuthAccount(identity) },
+            rollBack: restoreOriginalCredentials
+        ))
+    }
+
+    /// What `verifySwitch` reads and writes: the live CLI, Keychain slot,
+    /// identity file and profile endpoint in `switchAccount`, fakes in tests.
+    struct SwitchVerificationIO {
+        /// `claude auth status`, which may refresh an expired access token.
+        var authStatus: () async throws -> AuthStatus
+        /// The email the provider's profile endpoint names for an access
+        /// token (`getProfileIdentity`); throws `UsageError.expired` when
+        /// the provider rejects the token.
+        var profileEmail: (String) async throws -> String?
+        /// The credential in the CLI's Keychain slot now.
+        var liveToken: () -> String?
+        /// The email `~/.claude.json` names now.
+        var identityEmail: () -> String?
+        /// Writes the target's identity to `~/.claude.json` again.
+        var restoreIdentity: () -> Bool
+        /// Puts back the credential and identity the switch replaced.
+        var rollBack: () -> Void
+    }
+
+    /// Confirms a switch whose credential (`writtenToken`) and identity
+    /// were just written for `target`, by asking the provider whose that
+    /// credential is. Every running Claude session rewrites
+    /// `~/.claude.json` with its own account, so the identity
+    /// `claude auth status` reports can be a session's rather than the one
+    /// just written, within a second of the write: the identity file
+    /// cannot confirm or refute a switch while sessions run.
+    ///
+    /// The profile naming `target` confirms it; the identity file is then
+    /// written again if a session replaced it. The profile naming another
+    /// account throws `switchWrongAccount` (`switchUnconfirmed` when the
+    /// token asked about was read back from the Keychain slot), the
+    /// provider rejecting the token throws `switchVerificationFailed`; each
+    /// rolls back, and
+    /// `AppState.switchTo` quarantines the target for them. When the
+    /// profile cannot be asked, `claude auth status` naming `target`
+    /// confirms the switch, and anything else rolls it back with
+    /// `switchUnconfirmed`, which quarantines nothing. An access token past
+    /// its expiry is asked about as the CLI refreshed it into the Keychain
+    /// slot during `claude auth status`.
+    static func verifySwitch(to target: Account, writtenToken: String, identity: [String: AnyCodable], now: Date,
+                             io: SwitchVerificationIO) async throws -> AuthStatus {
+        log.info("[switchAccount] Step 4: Verifying the written credential with the provider...")
+        let status = try? await io.authStatus()
+        let written = AppState.claudeAccessToken(writtenToken).flatMap { $0.1 > now ? $0.0 : nil }
+        let token = written ?? io.liveToken().flatMap { extractAccessToken(from: $0) }
+        var profileEmail: String?
+        if let token {
+            do {
+                profileEmail = try await io.profileEmail(token)
+            } catch UsageError.expired {
+                log.error("[switchAccount] Step 4: The provider rejected the target credential")
+                io.rollBack()
+                throw ClaudeServiceError.switchVerificationFailed
+            } catch {
+                log.warning("[switchAccount] Step 4: Profile check unavailable: \(error.localizedDescription)")
             }
-            log.info("[switchAccount] Step 4: Switch verified — logged in as \(status.email ?? "")")
-            return status
-        } catch {
-            restoreOriginalCredentials()
-            throw error
         }
+        if let profileEmail {
+            guard target.matches(email: profileEmail) else {
+                log.error("[switchAccount] Step 4: The credential asked about is \(profileEmail)'s, expected \(target.email)")
+                io.rollBack()
+                // The Keychain slot, read when the written token had
+                // expired, can hold a running session's own credential.
+                throw written != nil
+                    ? ClaudeServiceError.switchWrongAccount(expected: target.email, actual: profileEmail)
+                    : ClaudeServiceError.switchUnconfirmed
+            }
+            if !target.matches(email: io.identityEmail()) {
+                let restored = io.restoreIdentity()
+                log.info("[switchAccount] Step 4: A running session rewrote the identity file; written again: \(restored)")
+            }
+            log.info("[switchAccount] Step 4: Switch verified by the provider's profile — \(profileEmail)")
+            if let status, status.loggedIn, target.matches(email: status.email) { return status }
+            return authStatus(of: target, identity: identity)
+        }
+        guard let status, verificationFailure(of: status, switchingTo: target) == nil else {
+            log.error("[switchAccount] Step 4: Not confirmed (loggedIn=\(status?.loggedIn ?? false), email=\(status?.email ?? "nil"), expected \(target.email))")
+            io.rollBack()
+            throw ClaudeServiceError.switchUnconfirmed
+        }
+        log.info("[switchAccount] Step 4: Switch verified by `claude auth status` — \(status.email ?? "")")
+        return status
+    }
+
+    /// The signed-in state `verifySwitch` reports when the provider
+    /// confirmed the credential but `claude auth status` named a running
+    /// session's account: `target`'s, from the identity saved with its
+    /// credential and the plan last known for it, which `AppState.switchTo`
+    /// replaces with the live one when the profile answers.
+    static func authStatus(of target: Account, identity: [String: AnyCodable]) -> AuthStatus {
+        AuthStatus(loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", email: target.email,
+                   orgId: identity["organizationUuid"]?.value as? String,
+                   orgName: (identity["organizationName"]?.value as? String) ?? target.orgName,
+                   subscriptionType: target.subscriptionType)
     }
 
     /// Capture the current Claude auth token + oauthAccount and associate with an account
@@ -974,8 +1067,9 @@ final class ClaudeService: @unchecked Sendable {
     // MARK: - CLI Runner
 
     /// How long one `claude` command may run. `switchAccount` waits for
-    /// `claude auth status` with the target credential already written, and
-    /// rolls back when it does not answer within this.
+    /// `claude auth status` with the target credential already written;
+    /// without an answer within this, only the provider's profile can
+    /// confirm the switch (`verifySwitch`).
     static let cliTimeout: TimeInterval = 30
 
     private func runClaude(args: [String]) async throws -> String {
@@ -1050,6 +1144,9 @@ enum ClaudeServiceError: LocalizedError {
     case oauthAccountWriteFailed
     case switchVerificationFailed
     case switchWrongAccount(expected: String, actual: String)
+    /// Neither the provider's profile nor `claude auth status` confirmed
+    /// the switch; nothing says the target's credential is wrong.
+    case switchUnconfirmed
     case cliTimedOut(seconds: TimeInterval)
 
     var errorDescription: String? {
@@ -1070,6 +1167,8 @@ enum ClaudeServiceError: LocalizedError {
             return "Failed to write oauthAccount to ~/.claude.json"
         case .switchVerificationFailed:
             return "The target Claude credentials are no longer valid. Re-authenticate that account before switching. The previous profile was restored."
+        case .switchUnconfirmed:
+            return "The switch could not be confirmed, so the previous profile was restored. It is tried again at the next decision."
         case .switchWrongAccount(let expected, let actual):
             return "Switch failed: expected \(expected) but got \(actual). Try removing and re-adding the account."
         }

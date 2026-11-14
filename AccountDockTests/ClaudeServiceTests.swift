@@ -300,3 +300,128 @@ final class ClaudeServiceTests: XCTestCase {
         XCTAssertEqual(CodexLimitResets.resets(from: all).availableGroups.map(\.ready), [true], "without the field every credit applies")
     }
 }
+
+/// A switch is confirmed by whose the written credential is, as the
+/// provider's profile says, not by the identity file running sessions
+/// rewrite.
+final class SwitchVerificationTests: XCTestCase {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let backup = Account(email: "backup@mail.example", displayName: "Backup")
+
+    /// The identity file, the Keychain slot and what the fakes were asked to do.
+    final class Fake {
+        var identityEmail: String?
+        var rolledBack = false
+        var restoredIdentity = false
+        var askedToken: String?
+    }
+
+    private func token(_ access: String, expiresIn seconds: TimeInterval) -> String {
+        let ms = Int(now.addingTimeInterval(seconds).timeIntervalSince1970 * 1000)
+        return #"{"claudeAiOauth":{"accessToken":"\#(access)","refreshToken":"refresh","expiresAt":\#(ms)}}"#
+    }
+
+    private func status(_ email: String?) -> AuthStatus {
+        AuthStatus(loggedIn: email != nil, authMethod: "claude.ai", apiProvider: "firstParty", email: email,
+                   orgId: nil, orgName: nil, subscriptionType: "max")
+    }
+
+    private func io(_ fake: Fake, profile: @escaping (String) throws -> String?,
+                    authStatus: @escaping () throws -> AuthStatus, live: String? = nil) -> ClaudeService.SwitchVerificationIO {
+        ClaudeService.SwitchVerificationIO(
+            authStatus: { try authStatus() },
+            profileEmail: { fake.askedToken = $0; return try profile($0) },
+            liveToken: { live },
+            identityEmail: { fake.identityEmail },
+            restoreIdentity: { fake.restoredIdentity = true; fake.identityEmail = "backup@mail.example"; return true },
+            rollBack: { fake.rolledBack = true }
+        )
+    }
+
+    func testASessionRewritingTheIdentityFileDoesNotFailASwitchTheProviderConfirms() async throws {
+        let fake = Fake()
+        // A running session writes its own account over the identity
+        // written a moment before, so `claude auth status` names it.
+        fake.identityEmail = "hstles@mail.example"
+        let confirmed = try await ClaudeService.verifySwitch(
+            to: backup, writtenToken: token("tok-backup", expiresIn: 3600),
+            identity: ["emailAddress": AnyCodable("backup@mail.example"), "organizationName": AnyCodable("Backup org")],
+            now: now,
+            io: io(fake, profile: { $0 == "tok-backup" ? "backup@mail.example" : "hstles@mail.example" },
+                   authStatus: { self.status("hstles@mail.example") }))
+        XCTAssertEqual(fake.askedToken, "tok-backup", "the credential written is the one asked about")
+        XCTAssertEqual(confirmed.email, "backup@mail.example")
+        XCTAssertEqual(confirmed.orgName, "Backup org")
+        XCTAssertTrue(fake.restoredIdentity)
+        XCTAssertEqual(fake.identityEmail, "backup@mail.example")
+        XCTAssertFalse(fake.rolledBack)
+    }
+
+    func testACredentialTheProviderNamesAnotherAccountsIsRolledBackAndQuarantined() async {
+        let fake = Fake()
+        fake.identityEmail = "backup@mail.example"
+        do {
+            _ = try await ClaudeService.verifySwitch(
+                to: backup, writtenToken: token("tok-other", expiresIn: 3600),
+                identity: ["emailAddress": AnyCodable("backup@mail.example")], now: now,
+                io: io(fake, profile: { _ in "personal@mail.example" }, authStatus: { self.status("backup@mail.example") }))
+            XCTFail("a credential that is another account's must not be switched to")
+        } catch {
+            XCTAssertEqual(error.localizedDescription,
+                           ClaudeServiceError.switchWrongAccount(expected: "backup@mail.example",
+                                                                 actual: "personal@mail.example").localizedDescription)
+            XCTAssertTrue(AppState.switchFailureQuarantines(error))
+        }
+        XCTAssertTrue(fake.rolledBack)
+        XCTAssertFalse(fake.restoredIdentity)
+    }
+
+    func testARejectedCredentialIsRolledBackAndQuarantined() async {
+        let fake = Fake()
+        do {
+            _ = try await ClaudeService.verifySwitch(
+                to: backup, writtenToken: token("tok-backup", expiresIn: 3600),
+                identity: ["emailAddress": AnyCodable("backup@mail.example")], now: now,
+                io: io(fake, profile: { _ in throw ClaudeService.UsageError.expired }, authStatus: { self.status(nil) }))
+            XCTFail("a rejected credential must not be switched to")
+        } catch {
+            XCTAssertTrue(AppState.switchFailureQuarantines(error))
+        }
+        XCTAssertTrue(fake.rolledBack)
+    }
+
+    func testWithoutTheProfileTheIdentityFileDecidesButQuarantinesNothing() async throws {
+        let unreachable: (String) throws -> String? = { _ in throw ClaudeService.UsageError.network("offline") }
+        let fake = Fake()
+        let confirmed = try await ClaudeService.verifySwitch(
+            to: backup, writtenToken: token("tok-backup", expiresIn: 3600),
+            identity: ["emailAddress": AnyCodable("backup@mail.example")], now: now,
+            io: io(fake, profile: unreachable, authStatus: { self.status("backup@mail.example") }))
+        XCTAssertEqual(confirmed.email, "backup@mail.example")
+        XCTAssertFalse(fake.rolledBack)
+
+        let raced = Fake()
+        do {
+            _ = try await ClaudeService.verifySwitch(
+                to: backup, writtenToken: token("tok-backup", expiresIn: 3600),
+                identity: ["emailAddress": AnyCodable("backup@mail.example")], now: now,
+                io: io(raced, profile: unreachable, authStatus: { self.status("hstles@mail.example") }))
+            XCTFail("an unconfirmed switch is rolled back")
+        } catch {
+            XCTAssertFalse(AppState.switchFailureQuarantines(error), "nothing showed the credential wrong")
+        }
+        XCTAssertTrue(raced.rolledBack)
+    }
+
+    func testAnExpiredWrittenTokenIsAskedAboutAsTheCLIRefreshedIt() async throws {
+        let fake = Fake()
+        fake.identityEmail = "backup@mail.example"
+        let confirmed = try await ClaudeService.verifySwitch(
+            to: backup, writtenToken: token("tok-stale", expiresIn: -60),
+            identity: ["emailAddress": AnyCodable("backup@mail.example")], now: now,
+            io: io(fake, profile: { $0 == "tok-fresh" ? "backup@mail.example" : nil },
+                   authStatus: { self.status("backup@mail.example") }, live: token("tok-fresh", expiresIn: 3600)))
+        XCTAssertEqual(fake.askedToken, "tok-fresh")
+        XCTAssertEqual(confirmed.email, "backup@mail.example")
+    }
+}

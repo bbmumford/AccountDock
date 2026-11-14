@@ -261,9 +261,19 @@ token and identity first and restores them if any later step fails.
    that file, so `ClaudeIdentityFile` replaces the text of `oauthAccount` only,
    keeps every other byte and the file's permissions, and replaces the file
    only if it is unchanged since it was read, reading it again otherwise.
-4. **Verify.** `claude auth status` must report the target's email, in any
-   case, and be logged in, within `ClaudeService.cliTimeout`. Anything else,
-   a CLI that does not answer included, rolls back to the snapshot.
+4. **Verify** (`ClaudeService.verifySwitch`). The provider's profile
+   endpoint is asked whose the written token is (the token as `claude auth
+   status` refreshed it, when the written one had expired). Running sessions
+   rewrite `~/.claude.json` with their own account within a second of the
+   write, so the identity `claude auth status` reports cannot confirm or
+   refute a switch while sessions run. The profile naming the target
+   confirms it, and the target's identity is written again if a session
+   replaced it. The profile naming another account, or the provider
+   rejecting the token, rolls back to the snapshot and quarantines the
+   target (`AppState.switchFailureQuarantines`). When the profile cannot be
+   asked, `claude auth status` naming the target and logged in, within
+   `ClaudeService.cliTimeout`, confirms it; anything else rolls back without
+   quarantine (`switchUnconfirmed`).
 
 Running Claude Code processes keep the token they started with until they
 refresh it, so a switch moves new requests, not requests already in flight.
