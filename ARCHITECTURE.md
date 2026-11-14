@@ -214,7 +214,27 @@ neither can see a renewal AccountDock is making at that moment: Codex takes no
 lock on the file, and Kimi Code, finding its refresh token already used,
 replaces the slot with a revoked credential. While the CLI runs, a reading
 whose token has expired reports it as expired and the CLI renews it with its
-next request.
+next request. Kimi renewals of one managed copy run one after another
+(`KimiRenewalQueue`), and one that finds the copy already renewed while it
+waited uses that result instead of presenting the spent refresh token.
+
+`KimiSessionIsolation` is Kimi Code's one-session slot, built but not yet
+set as Kimi's `sessionIsolation`. A slot is a `KIMI_CODE_HOME` directory
+with `config.toml`, `tui.toml`, `mcp.json`, `device_id` and `region` copied
+from `~/.kimi-code`, and `credentials/<name>.json` holding the account's
+access token, its real expiry and an empty refresh token, written by atomic
+rename while holding Kimi Code's own lock (`KimiCredentialLock`). Kimi Code
+reads that file before every request and, with no refresh token, never
+renews in the slot, so AccountDock keeps every slot's token above Kimi
+Code's renewal threshold (`max(300, expires_in / 2)` seconds) plus a
+margin, renewing the active account's credential under the lock in
+`~/.kimi-code` (`KimiService.renewLiveCredentialForSlots`). It stays unset
+because `KIMI_CODE_HOME` also moves the session history, its index, input
+history, workspace trust and project records, which no variable or setting
+points elsewhere: a slot would keep its sessions' history to itself, where
+`kimi -S` from another home and AccountDock's Kimi readers cannot see it,
+and removing the slot would delete it (see
+[provider-cli-facts.md](docs/provider-cli-facts.md)).
 
 ## Claude account switching
 
