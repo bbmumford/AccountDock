@@ -318,6 +318,17 @@ final class BalancingTests: XCTestCase {
         }
         XCTAssertEqual(projected, personal)
 
+        // Balancing would spend Backup's allowance first, since it resets
+        // a hundred hours before HSTLES (brandon)'s, but Backup cannot
+        // carry the group; Personal resets later, so the work stays.
+        let (healthy, all) = ladder(activeBurn: 3, backupStaying: 5)
+        XCTAssertEqual(planner.latestStart(healthy, now: now).timeIntervalSince(
+            planner.latestStart(all.first(where: { $0.id == backup })!, now: now)) / 3600, 100, accuracy: 0.01,
+                       "without a 5-hour window an allowance's latest start is its reset")
+        XCTAssertEqual(planner.plan(current: healthy, ladder: all, lastSwitch: nil, now: now), .stay(.healthy))
+        XCTAssertEqual(AppState.balanceSwitchEvent(source: "HSTLES (brandon)", target: "Backup", hours: 100),
+                       "Balancing moves work from HSTLES (brandon) to Backup: Backup's allowance must start being used 100 hour(s) before HSTLES (brandon)'s for each to be used up before it resets.")
+
         // HSTLES (brandon) reaches its limit: the switch goes to Personal,
         // never onto Backup's 2%.
         let spentActive = weeklyState(hstlesBrandon, used: 99.5, resetIn: 135.5, active: true, burn: 3)

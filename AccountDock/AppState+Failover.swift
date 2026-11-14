@@ -640,6 +640,16 @@ extension AppState {
             .max { $0.percent < $1.percent }?.model
     }
 
+    /// The event for a balance switch from `source` to `target` decided by
+    /// latest start (`FailoverPlan.SwitchReason.balance`): `hours` is how
+    /// much earlier `target`'s allowance must start being used than
+    /// `source`'s for each to be used up before it resets. Without a 5-hour
+    /// window an allowance can be used at any pace, so its latest start is
+    /// its reset, and the figure is how much sooner `target` resets.
+    nonisolated static func balanceSwitchEvent(source: String, target: String, hours: Double) -> String {
+        "Balancing moves work from \(source) to \(target): \(target)'s allowance must start being used \(Int(hours.rounded())) hour(s) before \(source)'s for each to be used up before it resets."
+    }
+
     /// The event for an exhausted switch away from `source`; `modelLimit`
     /// names the model whose own allowance ran out for the sessions on the
     /// shared sign-in, when that is the limit (`limitingModel`).
@@ -1596,7 +1606,7 @@ extension AppState {
             // The forecast decided: staying would leave more allowance unused.
             failoverEvents.record(provider, "Balancing moves work from \(sourceName) to \(targetName): over the coming week this leaves less of their allowances unused.")
         case .balance(let hours):
-            failoverEvents.record(provider, "Balancing moves work from \(sourceName) to \(targetName): its allowance must start being used \(Int(hours.rounded())) hour(s) sooner to be fully consumed before it resets.")
+            failoverEvents.record(provider, Self.balanceSwitchEvent(source: sourceName, target: targetName, hours: hours))
         case .threshold:
             failoverEvents.record(provider, "Threshold reached; switching \(sourceName) → \(targetName).")
         case .exhausted:

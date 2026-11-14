@@ -519,7 +519,13 @@ latestStart = R_w − (100 − w) / ((100 / k) / 5 h)
 
 where `R_w` is the weekly reset. An allowance that resets sooner, or that the
 5-hour cap could no longer drain in time, is used first. A minimum deadline
-advantage and dwell prevent oscillation.
+advantage and dwell prevent oscillation. Without a session window nothing caps
+the pace, so the latest start is the reset itself, and the event's figure
+("must start being used N hour(s) before …'s") is how much sooner the
+destination resets. A balance switch moves the whole shared group, so its
+destination must carry the moving work as any switch destination must
+(`FailoverPlanner.carries`); a remainder too small for that is spent by slot
+sessions and new sessions the pool sizes to it, never by the group.
 
 Whether an account has a session window is read from each reading, account by
 account, because a plan can drop it while others keep it (Claude's Ultra plan

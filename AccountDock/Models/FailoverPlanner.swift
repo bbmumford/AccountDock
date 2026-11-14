@@ -103,6 +103,9 @@ enum FailoverPlan: Equatable {
     enum SwitchReason: Equatable {
         case threshold
         case exhausted
+        /// `advantageHours`: how much earlier the destination's latest
+        /// start (`FailoverPlanner.latestStart`) comes than the active
+        /// account's, or below 1 when the demand forecast decided.
         case balance(advantageHours: Double)
         case workloadUnavailable
     }
@@ -647,7 +650,11 @@ struct FailoverPlanner {
         }
         let candidates = others.filter {
             let burn = expectedBurn(movingFrom: current, to: $0)
+            // A balance switch moves the whole shared group, as failover
+            // does: a small remainder is left to the slot sessions and new
+            // sessions the pool sizes to it.
             return tier($0, now: now, expectedSessionBurn: burn.session, expectedWeeklyBurn: burn.weekly) == .belowTrigger
+                && carries($0, from: current, at: now)
         }.sorted { latestStart($0, now: now) < latestStart($1, now: now) }
         guard let best = candidates.first else { return .stay(.healthy) }
         let advantage = latestStart(current, now: now).timeIntervalSince(latestStart(best, now: now)) / 3600
@@ -880,8 +887,8 @@ struct FailoverPlanner {
     /// window at its long-window rate (in session percent by the plan's
     /// ratio), each beside the in-flight reserve and the switch's cost, and
     /// never less than `destinationMinimum`. The one rule for a switch
-    /// destination: `plan` switches only to such an account when it fails
-    /// over or crosses a threshold, so `nextSwitch`, which asks
+    /// destination: `plan` switches only to such an account, failing over,
+    /// crossing a threshold or balancing, so `nextSwitch`, which asks
     /// `plan`, projects the account the switch will pick. `tier`'s dwell
     /// margin, in long-window percent over the dwell, passes an account a
     /// few percent from its limit, which the moving work spends in minutes.
