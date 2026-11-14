@@ -1438,6 +1438,19 @@ Each component is a provider and a kind (`lifecycle`, `liveUsageFeed`,
 `pauseGate`, `router`), offered when the provider's capabilities declare it and
 required when its CLI is installed and the feature is on.
 
+The session hooks and the pause gate are written by one editor,
+`HookConfigEditor`, with an adapter per file format: `JSONHookFile` for
+Claude Code's `settings.json` and Codex's `hooks.json`, `TOMLHookConfig` for
+Kimi Code's `config.toml`. Each hook carries a marker in its command or table
+header. Installing replaces an event's marked hooks with one; removing deletes
+them, and an event left with no hooks. A JSON edit adds a group after the
+event's last one, in the file's own indentation, and removes one with the
+separator before it, so every other byte of the file is kept and an edit that
+changes nothing leaves the file untouched; a file that is empty, not a JSON
+object or changed while being edited is never replaced.
+`HookConfigEditorTests` holds the exact text each edit leaves.
+
+
 | Component | File changed | Purpose |
 | --- | --- | --- |
 | Claude Code session hooks | `~/.claude/settings.json` | Record session ID, directory and state for recovery |

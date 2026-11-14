@@ -153,17 +153,26 @@ enum TOMLHookConfig {
         }
     }
 
+    /// `text` without the marked tables, each with the one blank line
+    /// `install` writes before it, so removing what `install` added gives
+    /// back the file as it was. A table removed from the end of the file
+    /// takes the file's last line break with it, which is put back.
     static func removing(marker: String, from text: String) -> String {
         var kept: [Substring] = []
+        var removedLast = false
         for run in runs(text) {
             if isMarked(run, marker: marker) {
-                while kept.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { kept.removeLast() }
+                if kept.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { kept.removeLast() }
+                removedLast = true
             } else {
                 kept += run
+                removedLast = false
             }
         }
+        if removedLast, text.hasSuffix("\n"), let last = kept.last, !last.isEmpty { kept.append("") }
         return kept.joined(separator: "\n")
     }
+
 
     private static func markedTables(in text: String, marker: String) -> [String] {
         runs(text).filter { isMarked($0, marker: marker) }.map { run in
