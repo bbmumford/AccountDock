@@ -63,6 +63,11 @@ struct AccountDockApp: App {
                         // it opens; the pool and spares their launchers wait for
                         // come before anything slower.
                         if appState.sessionSlotsWanted { await appState.maintainSessionSlots() }
+                        // The account cards' session counts, before the first
+                        // refresh, which reads every account and can take a
+                        // minute.
+                        await appState.refreshSlotProcesses()
+                        appState.refreshSessions()
                         await appState.refresh()
                         appState.startAutoRefresh(interval: refreshInterval)
                     }
