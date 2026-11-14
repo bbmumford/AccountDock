@@ -497,6 +497,14 @@ Claude CLI                    Browser                   claude.ai Server
 
 ## Usage readings
 
+A reading's provider-neutral form is `UsageReading`: its windows (`Window`,
+each a session, long or model window with its percent, reset and length),
+extra usage, limit resets and model limits. It converts from and back to the
+reply form the providers' readers return (`UsageAPIResponse`), which the
+planner, pacer, simulator, views and widget still read. Saved usage
+snapshots hold the neutral form (`PersistedUsageSnapshot`), and a snapshot
+saved in the reply's form loads, converted.
+
 AccountDock prefers quota data the agents already record:
 
 - the rate limits Claude Code passes to its status-line command with every

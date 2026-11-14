@@ -1902,18 +1902,9 @@ final class AppState: ObservableObject {
 
     // MARK: - Persistence
 
-    private struct PersistedUsageSnapshot: Codable {
-        let usage: UsageAPIResponse
-        let updatedAt: Date
-        /// `accountWholeReadings`; absent in a snapshot saved without one.
-        var wholeAt: Date?
-        var wholeLongUtilization: Double?
-        /// Whether the reading was cleared at a reset no reading has
-        /// confirmed yet (`accountsAwaitingPostResetVerification`): its
-        /// cleared windows then read 0% with no countdown, which
-        /// `loadUsageSnapshots` must not take for a reading.
-        var resetUnverified: Bool?
-    }
+    // Usage snapshots are saved as `PersistedUsageSnapshot`, which holds the
+    // neutral `UsageReading` and still loads a snapshot saved in the reply's
+    // form.
 
     private func loadFailoverRuntime() {
         guard let data = UserDefaults.standard.data(forKey: failoverRuntimeKey),

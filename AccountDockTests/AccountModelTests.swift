@@ -374,4 +374,57 @@ final class AccountModelTests: XCTestCase {
         XCTAssertNil(AccountStatus.make(inactive, hasReading: false, error: nil, signInRejected: false).readingProblem
                         .flatMap { AIProviderType.codex.capabilities.credentialStore == .keychain ? nil : $0 })
     }
+
+    /// The neutral reading keeps every window, percent, reset and length of
+    /// the reply it came from, and gives the same reply back.
+    func testAUsageReadingConvertsBothWays() throws {
+        let json = #"""
+        {"five_hour":{"utilization":42,"resets_at":"2026-11-15T12:00:00.000Z","window_seconds":18000},
+         "seven_day":{"utilization":10.5,"resets_at":"2026-11-20T01:00:00Z"},
+         "seven_day_opus":{"utilization":3,"resets_at":null},
+         "extra_usage":null}
+        """#
+        let response = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(json.utf8))
+        let reading = UsageReading(response)
+        XCTAssertEqual(reading.windows.map(\.kind), [.session, .long, .model])
+        XCTAssertEqual(reading.session?.percent, 42)
+        XCTAssertEqual(reading.session?.length, 18000)
+        XCTAssertEqual(reading.session?.resetsAt, response.fiveHour?.resetsAtDate)
+        XCTAssertEqual(reading.long?.percent, 10.5)
+        XCTAssertNil(reading.windows.last?.resetsAt)
+
+        let back = reading.response
+        XCTAssertEqual(back.fiveHour?.utilization, 42)
+        XCTAssertEqual(back.fiveHour?.windowSeconds, 18000)
+        XCTAssertEqual(back.fiveHour?.resetsAtDate, response.fiveHour?.resetsAtDate)
+        XCTAssertEqual(back.sevenDay?.resetsAtDate, response.sevenDay?.resetsAtDate)
+        XCTAssertEqual(back.sevenDayOpus?.utilization, 3)
+        XCTAssertNil(back.sevenDaySonnet)
+    }
+
+    /// A usage snapshot saved in the reply's form loads, converted, and a
+    /// snapshot saved now holds the neutral reading and loads the same.
+    func testASavedUsageSnapshotOfTheOldFormLoads() throws {
+        let stored = #"""
+        {"usage":{"five_hour":{"utilization":42,"resets_at":"2026-11-15T12:00:00.000Z"},
+                  "seven_day":{"utilization":10,"resets_at":"2026-11-20T01:00:00Z","window_seconds":604800}},
+         "updatedAt":785000000,"wholeAt":785000100,"wholeLongUtilization":10,"resetUnverified":true}
+        """#
+        let old = try JSONDecoder().decode(PersistedUsageSnapshot.self, from: Data(stored.utf8))
+        XCTAssertEqual(old.usage.fiveHour?.utilization, 42)
+        XCTAssertEqual(old.usage.sevenDay?.windowSeconds, 604800)
+        XCTAssertEqual(old.usage.sevenDay?.resetsAtDate, UsageWindow.parseProviderDate("2026-11-20T01:00:00Z"))
+        XCTAssertEqual(old.updatedAt, Date(timeIntervalSinceReferenceDate: 785000000))
+        XCTAssertEqual(old.wholeAt, Date(timeIntervalSinceReferenceDate: 785000100))
+        XCTAssertEqual(old.wholeLongUtilization, 10)
+        XCTAssertEqual(old.resetUnverified, true)
+
+        let saved = try JSONEncoder().encode(old)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [String: Any])
+        XCTAssertNotNil(object["reading"], "a snapshot is saved as the neutral reading")
+        XCTAssertNil(object["usage"])
+        let reloaded = try JSONDecoder().decode(PersistedUsageSnapshot.self, from: saved)
+        XCTAssertEqual(reloaded.reading.windows, old.reading.windows)
+        XCTAssertEqual(reloaded.resetUnverified, true)
+    }
 }
