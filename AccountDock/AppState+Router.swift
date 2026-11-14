@@ -696,7 +696,8 @@ extension AppState {
             return SessionPacer.Session(id: id, account: placed[id] ?? serving,
                                         tokensPerHour: sessionRates.tokensPerHour(id, now: now),
                                         contextTokens: entry.contextTokens, lastSeen: entry.lastSeen, cacheLifetime: entry.cacheLifetime,
-                                        lastTurnStart: entry.lastTurnStart, model: sessionModel(id, now: now))
+                                        lastTurnStart: entry.lastTurnStart, model: sessionModel(id, now: now),
+                                        recentTokensPerHour: sessionRates.demand(id, until: now))
         }
     }
 

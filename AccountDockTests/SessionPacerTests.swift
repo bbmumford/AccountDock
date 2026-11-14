@@ -90,6 +90,24 @@ final class SessionPacerTests: XCTestCase {
         XCTAssertGreaterThan(short.weights[b] ?? 0, 0)
     }
 
+    func testIdleRunningSessionsDoNotMakeANewSessionLookCheap() {
+        let pacer = SessionPacer()
+        // A session costs 20% an hour at the default rate here, so `a`'s
+        // 14% left lasts under the hour a new session needs.
+        let nearlySpent = account(a, used: 85, resetIn: 3)
+        let roomy = account(b, used: 10, resetIn: 4)
+        let idle = [session("s1", on: b, burn: 0.5, idle: 10), session("s2", on: b, burn: 0.3, idle: 10)]
+        let plan = pacer.plan(accounts: [nearlySpent, roomy], sessions: idle, now: now)
+        XCTAssertEqual(plan.weights[a] ?? -1, 0, "between turns the running sessions' decayed rates are no guide")
+        XCTAssertGreaterThan(plan.weights[b] ?? 0, 0)
+
+        // A session's last hour counts even when its current rate has faded.
+        var busy = session("s3", on: b, burn: 0.1, idle: 10)
+        busy.recentTokensPerHour = 40_000_000
+        XCTAssertEqual(SessionPacer.typicalNewSessionRate([busy]), 40_000_000)
+        XCTAssertEqual(SessionPacer.typicalNewSessionRate(idle), SessionPacer.defaultSessionRate)
+    }
+
     func testNewSessionsGoWhereTheMostRateIsUnused() {
         // a: 59% left over 1 h, using 50/h; b: 89% left over 4 h, idle.
         let plan = SessionPacer().plan(accounts: [account(a, used: 40, resetIn: 1, burn: 50), account(b, used: 10, resetIn: 4)],
