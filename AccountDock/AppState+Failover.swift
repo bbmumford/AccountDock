@@ -92,6 +92,7 @@ extension AppState {
         await ingestTranscriptRequests()
         await maintainSessionSlots(processesRead: true)
         await applyModelFallbacks()
+        await noteUnisolatedSessions()
         await evaluateFailover()
         saveLearningIfDue()
         for provider in AgentPauseGate.providers { prunePausedSessions(provider) }

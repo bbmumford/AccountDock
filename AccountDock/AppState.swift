@@ -197,6 +197,14 @@ final class AppState: ObservableObject {
     /// Sessions without allowance for their model anywhere, by session ID,
     /// with the model `applyModelFallbacks` switches each to once it is idle.
     var pendingModelFallbacks: [String: String] = [:]
+    /// Running sessions that read no slot of their own, by provider
+    /// (`noteUnisolatedSessions`), for the usage tab.
+    @Published var unisolatedSessions: [AIProviderType: [AgentSession]] = [:]
+    /// The terminal session each of those runs in, when
+    /// `sessionTerminal` can reach it.
+    @Published var unisolatedTerminals: [String: String] = [:]
+    /// Unisolated sessions already recorded as an event.
+    var unisolatedNoted: Set<String> = []
     /// A locally elapsed reset is useful for clearing a stale 100% display,
     /// but it is not proof that the provider has opened a new quota window.
     /// Never fail over to one of these accounts until a fresh API response

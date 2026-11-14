@@ -96,6 +96,41 @@ final class SessionSlotsTests: XCTestCase {
         XCTAssertEqual(SessionSlots.addingLine(line, to: ""), line + "\n")
     }
 
+    func testTheLauncherLineGoesWhereEveryZshReadsItAndLeavesTheRestUntouched() throws {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        let slots = try XCTUnwrap(SessionSlots(.claudeCode, home: temp))
+        XCTAssertEqual(slots.profileURL.lastPathComponent, ".zshenv")
+        let rc = "eval \"$(/opt/homebrew/bin/brew shellenv)\"\nalias ll='ls -l'\n# no newline at the end"
+        try rc.write(to: slots.interactiveProfileURL, atomically: true, encoding: .utf8)
+        let env = "export EDITOR=vim\n"
+        try env.write(to: slots.profileURL, atomically: true, encoding: .utf8)
+
+        try slots.installLauncher()
+        XCTAssertTrue(slots.launcherInstalled)
+        XCTAssertEqual(try String(contentsOf: slots.profileURL, encoding: .utf8), env + slots.profileLine + "\n")
+        XCTAssertEqual(try String(contentsOf: slots.interactiveProfileURL, encoding: .utf8), rc + "\n" + slots.profileLine + "\n")
+        try slots.installLauncher()
+        XCTAssertEqual(try String(contentsOf: slots.profileURL, encoding: .utf8), env + slots.profileLine + "\n", "added once")
+
+        // A shell that is not interactive finds the launcher first.
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-c", "command -v claude"]
+        process.environment = ["HOME": temp.path, "ZDOTDIR": temp.path, "PATH": "/usr/bin:/bin"]
+        process.standardOutput = pipe
+        try process.run()
+        let found = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        XCTAssertEqual(found.trimmingCharacters(in: .whitespacesAndNewlines), slots.launcher.path)
+
+        slots.removeLauncher()
+        XCTAssertEqual(try String(contentsOf: slots.profileURL, encoding: .utf8), env)
+        XCTAssertEqual(try String(contentsOf: slots.interactiveProfileURL, encoding: .utf8), rc + "\n")
+    }
+
     func testARenewedTokenGoesToEverySlotHoldingTheAccountsPreviousOne() throws {
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: temp) }
