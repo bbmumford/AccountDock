@@ -65,6 +65,27 @@ final class BalancingTests: XCTestCase {
                              "five minutes leave the later arrivals in the rate")
     }
 
+    func testASessionTheRouterMovesSettlesTheAccountItArrivesOn() {
+        let from = UUID(), to = UUID()
+        let seen: [String: (account: UUID, at: Date)] = ["s": (from, now.addingTimeInterval(-120))]
+        XCTAssertTrue(AppState.routedArrival("s", on: to, seen: seen))
+        XCTAssertFalse(AppState.routedArrival("s", on: from, seen: seen), "a session staying where it was arrives nowhere")
+        XCTAssertFalse(AppState.routedArrival("new", on: to, seen: seen), "nor does one seen for the first time")
+        // Settled as a slot move is: the rewrite of the arriving session's
+        // context teaches no rate; the work's own rate does.
+        var trend = QuotaTrend()
+        func read(_ used: Double, at seconds: TimeInterval) {
+            trend.record(weeklyReading(used, resetIn: 100), at: now.addingTimeInterval(seconds))
+        }
+        for (step, used) in [20.0, 22, 24, 26].enumerated() { read(used, at: Double(step) * 360) }
+        if AppState.routedArrival("s", on: to, seen: seen) { trend.settle(at: now.addingTimeInterval(1080)) }
+        read(30, at: 1150)
+        read(33, at: 1300)
+        read(35, at: 1660)
+        read(37, at: 2020)
+        XCTAssertEqual(trend.weeklyBurnPerHour, 20, accuracy: 0.01)
+    }
+
     // MARK: - Pool readings
 
     func testAnAccountInUseKeepsAShareOfItsWeightOnAnOldReading() {

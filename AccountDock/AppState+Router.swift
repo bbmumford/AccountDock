@@ -665,6 +665,19 @@ extension AppState {
         }
     }
 
+    /// Whether a routed session reaching `account` arrives there from
+    /// another account, as one the router moves (`RouterState.moves`) does:
+    /// it was last seen on another. The arrival's account then starts a
+    /// settle period (`QuotaTrend.settle`), as a failover switch or a slot
+    /// session's move starts one, so the cache rewrite its first requests
+    /// bring is not learned as the account's rate. A session seen for the
+    /// first time arrives nowhere.
+    nonisolated static func routedArrival(_ session: String, on account: UUID,
+                                          seen: [String: (account: UUID, at: Date)]) -> Bool {
+        guard let previous = seen[session] else { return false }
+        return previous.account != account
+    }
+
     /// The event for an account giving sessions up (`SessionPacer.Plan`):
     /// when it reaches its limit, or the limit of the `allowance` only one
     /// model's sessions draw on, and why moving its sessions keeps the work
@@ -950,6 +963,11 @@ extension AppState {
             let accountID = event.accountID.flatMap(UUID.init(uuidString:))
                 ?? event.detail.flatMap { credentialFingerprints[$0] }
             if let session = event.session, let accountID, event.kind == .assigned || event.kind == .turnUsage {
+                // A session the router moved writes its whole context into
+                // the new account's cache at its first request there.
+                if Self.routedArrival(session, on: accountID, seen: routedSessionSeen) {
+                    quotaTrends[accountID]?.settle(at: event.at)
+                }
                 routedSessionSeen[session] = (accountID, event.at)
             }
             switch event.kind {

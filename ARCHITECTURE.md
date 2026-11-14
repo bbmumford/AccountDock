@@ -478,7 +478,9 @@ so one burst sets neither the rate nor its uncertainty. Readings in the five
 minutes after a window starts (its reset moves, or an unstarted window gets
 one), after a window's use falls within the same window (a reset granted
 early, which can leave the reset time as it was), after a slot session moves
-to the account, or after paused sessions resume (`AppState.endPause`, an
+to the account, after the router moves a session to it (a routed session's
+request seen on another account than its last, `AppState.routedArrival`), or
+after paused sessions resume (`AppState.endPause`, an
 admission, or a reading taken while the pause holds them) teach no rate:
 each session's first request then re-sends its whole context. A failover
 switch holds the new account's rate for ten minutes
