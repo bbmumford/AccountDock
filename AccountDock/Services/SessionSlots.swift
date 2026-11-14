@@ -26,6 +26,10 @@ struct SessionSlots: Sendable {
     let support: SessionSlotSupport
     let executable: String
     let home: URL
+    /// The CLI's background-session service, whose commands and launches
+    /// the launcher runs unchanged: their sessions run in the supervisor's
+    /// workers, which never read a slot.
+    let background: BackgroundSessionSupport?
 
     /// Pool-file entry for the CLI's default credential.
     static let activeEntry = "-"
@@ -51,6 +55,14 @@ struct SessionSlots: Sendable {
         self.support = support
         self.executable = executable
         self.home = home.standardizedFileURL
+        background = provider.capabilities.backgroundSessions
+    }
+
+    /// First arguments the launcher runs the CLI unchanged for: the
+    /// background service's commands, which start no session of their own,
+    /// then the sign-in commands.
+    var passThroughCommands: [String] {
+        (background?.managementCommands ?? []) + support.accountCommands
     }
 
     var base: URL { home.appendingPathComponent(".accountdock", isDirectory: true) }
@@ -367,26 +379,37 @@ struct SessionSlots: Sendable {
     /// process ID; `AppState.slotAccount(forSession:)` credits a session's
     /// usage readings to the account serving its slot.
     func directoriesByProcess() -> [Int32: String] {
+        directoriesByProcess(inProcessList: Self.processList() ?? "")
+    }
+
+    func directoriesByProcess(inProcessList text: String) -> [Int32: String] {
+        Self.directoriesByProcess(inProcessList: text, variable: support.directoryVariable, root: root.path)
+    }
+
+    /// The user's processes as `ps -Eww -o pid=,ppid=,command=` lists
+    /// them, arguments then environment; read once a quota cycle by
+    /// `AppState.refreshSlotProcesses` for the slots processes read and for
+    /// `BackgroundSessionProcesses`. Nil when `ps` cannot run.
+    static func processList() -> String? {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-Eww", "-o", "pid=,command=", "-U", String(getuid())]
+        process.arguments = ["-Eww", "-o", "pid=,ppid=,command=", "-U", String(getuid())]
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         do {
             try process.run()
         } catch {
-            log.error("[directoriesByProcess] ps failed: \(error.localizedDescription)")
-            return [:]
+            log.error("[processList] ps failed: \(error.localizedDescription)")
+            return nil
         }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        return Self.directoriesByProcess(inProcessList: String(decoding: data, as: UTF8.self),
-                                         variable: support.directoryVariable, root: root.path)
+        return String(decoding: data, as: UTF8.self)
     }
 
     /// Values of `variable` under `root` in `ps -E -o pid=,command=` output,
-    /// by the process ID that starts each line.
+    /// or `pid=,ppid=,command=`, by the process ID that starts each line.
     static func directoriesByProcess(inProcessList text: String, variable: String, root: String) -> [Int32: String] {
         var found: [Int32: String] = [:]
         for line in text.split(separator: "\n") {
@@ -479,12 +502,17 @@ struct SessionSlots: Sendable {
     /// The launcher: starts the first other `executable` on `PATH`, on an
     /// account picked from the pool file at random by weight. It starts the
     /// CLI unchanged when the launch already decides its credential, signs
-    /// in or out, or the pool file is missing, or stale and not written
-    /// again within `spareWaitSeconds` of asking (`poolRequestMarker`).
+    /// in or out, manages or starts a background session
+    /// (`passThroughCommands`, `BackgroundSessionSupport.backgroundFlag`),
+    /// or the pool file is missing, or stale and not written again within
+    /// `spareWaitSeconds` of asking (`poolRequestMarker`).
     func launcherScript() -> String {
         let passThrough = support.credentialVariables
             .map { "[ -n \"${\($0):-}\" ] && exec \"$real\" \"$@\"" }
             .joined(separator: "\n")
+        let backgroundFlag = background.map { flag in
+            "for argument in \"$@\"; do [ \"$argument\" = \(Self.shellQuoted(flag.backgroundFlag)) ] && exec \"$real\" \"$@\"; done"
+        } ?? ""
         return #"""
         #!/bin/sh
         # Installed by AccountDock: starts \#(executable) on one of the accounts in
@@ -510,8 +538,9 @@ struct SessionSlots: Sendable {
         fi
         \#(passThrough)
         case "${1:-}" in
-          \#(support.accountCommands.joined(separator: "|"))) exec "$real" "$@" ;;
+          \#(passThroughCommands.joined(separator: "|"))) exec "$real" "$@" ;;
         esac
+        \#(backgroundFlag)
         # A stale pool, as after a restart before AccountDock has written a
         # new one, is asked for again the way a spare is, and given
         # \#(Self.spareWaitSeconds) seconds; without AccountDock running the CLI starts unchanged.

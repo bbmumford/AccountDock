@@ -121,10 +121,19 @@ extension AppState {
     }
 
     /// Reads which slot each running process reads, for `refreshSessions`
-    /// and `maintainSessionSlots`; run first on every quota cycle.
+    /// and `maintainSessionSlots`, and the CLI's background-session
+    /// processes; run first on every quota cycle.
     func refreshSlotProcesses() async {
         guard let provider = AIProviderType.routedProvider, let slots = SessionSlots(provider) else { return }
-        slotDirectoryByProcess = await Task.detached(priority: .utility) { slots.directoriesByProcess() }.value
+        let read = await Task.detached(priority: .utility) { () -> ([Int32: String], BackgroundSessionProcesses) in
+            let list = SessionSlots.processList() ?? ""
+            let background = slots.background.map {
+                BackgroundSessionProcesses(processList: list, executable: slots.executable, support: $0)
+            } ?? BackgroundSessionProcesses()
+            return (slots.directoriesByProcess(inProcessList: list), background)
+        }.value
+        backgroundProcesses = read.1
+        slotDirectoryByProcess = Self.sessionSlotDirectories(read.0, background: read.1)
         // A slot in use that `serveSessionSlots` has not served yet, as on
         // the first cycle after launch, serves the account the slot itself
         // records; `refreshSessions` would otherwise count its session on
@@ -135,6 +144,17 @@ extension AppState {
             unknown.reduce(into: [String: UUID]()) { $0[$1] = slots.recordedAccount(forSlotAt: $1) }
         }.value
         for (path, id) in recorded where slotDirectoryServing[path] == nil { slotDirectoryServing[path] = id }
+    }
+
+    /// The slots processes read, less those of processes that are no
+    /// session (`BackgroundSessionProcesses.nonSessions`): an attach client
+    /// started with the slot variable already set, as from a shell a slot
+    /// session opened, reads a slot while its session runs in a worker on
+    /// the shared sign-in, and `serveSessionSlots` releases a slot no listed
+    /// process reads.
+    nonisolated static func sessionSlotDirectories(_ directories: [Int32: String],
+                                                   background: BackgroundSessionProcesses) -> [Int32: String] {
+        directories.filter { !background.nonSessions.contains($0.key) }
     }
 
     /// The account serving the slot a running session reads, when the

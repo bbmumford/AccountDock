@@ -11,7 +11,10 @@ extension AppState {
         var live: [AIProviderType: [AgentSession]] = [:]
         var byAccount: [UUID: Set<String>] = [:]
         for provider in AIProviderType.implementedProviders {
-            let sessions = AgentSessions.live(provider, now: now)
+            var sessions = AgentSessions.live(provider, now: now)
+            if provider == AIProviderType.routedProvider {
+                sessions = Self.excludingNonSessions(sessions, background: backgroundProcesses)
+            }
             live[provider] = sessions
             let attribution = sessionAttribution(provider, now: now)
             for session in sessions {
@@ -36,6 +39,16 @@ extension AppState {
             let kept = sessionRefusals.filter { running.contains($0.key) }
             if kept.count != sessionRefusals.count { sessionRefusals = kept }
         }
+    }
+
+    /// `sessions` less any whose record names a process of the CLI's
+    /// background service that is no session, such as an attach client
+    /// (`BackgroundSessionProcesses.nonSessions`): the session it shows
+    /// runs in a worker with a record of its own.
+    nonisolated static func excludingNonSessions(_ sessions: [AgentSession],
+                                                 background: BackgroundSessionProcesses) -> [AgentSession] {
+        guard !background.nonSessions.isEmpty else { return sessions }
+        return sessions.filter { session in session.processID.map { !background.nonSessions.contains($0) } ?? true }
     }
 
     /// What an account card shows when the pointer rests on its session
