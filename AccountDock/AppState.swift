@@ -730,6 +730,7 @@ final class AppState: ObservableObject {
             credentialLocation: identity.credentialLocation
         )
         accounts.append(added)
+        excludeAddedAccountFromFailover(added)
         saveAccounts(refreshWidget: true)
         log.info("[provider-auth] Imported \(adapter.provider.rawValue) account; total=\(accounts.count)")
     }
@@ -819,6 +820,16 @@ final class AppState: ObservableObject {
         log.info("[login] User cancelled browser login")
     }
 
+    /// Leaves an account just added out of automatic failover and balancing:
+    /// the user includes it in the provider's failover settings when it
+    /// should take work. The first account of a provider is included, since
+    /// it is the one the provider's sessions run on.
+    func excludeAddedAccountFromFailover(_ account: Account) {
+        guard accounts.contains(where: { $0.provider == account.provider && $0.id != account.id }) else { return }
+        failoverConfig.update(account.provider) { $0.excludedAccountIDs.insert(account.id) }
+        failoverEvents.record(account.provider, "\(messageName(account)) was added with failover off; include it under Failover in Settings when it should take work.")
+    }
+
     /// Keeps `previous` the active account after a sign-in left the CLI
     /// signed in to `added`, an account just added: the sign-in is captured
     /// for `added`, then `previous` is switched back, so adding an account
@@ -893,6 +904,7 @@ final class AppState: ObservableObject {
 
             let previous = activeAccount(for: .claudeCode)
             accounts.append(account)
+            excludeAddedAccountFromFailover(account)
             await keepActiveAfterAdding(account.id, previous: previous)
             log.info("[addAccount] Account saved. Total accounts: \(self.accounts.count)")
         } catch {
@@ -979,6 +991,7 @@ final class AppState: ObservableObject {
 
             // 6. Mark new account as active
             accounts.append(account)
+            excludeAddedAccountFromFailover(account)
             await keepActiveAfterAdding(account.id, previous: displacedByLogin)
             log.info("[loginNewAccount] Step 6: New account active. Total: \(self.accounts.count)")
 
