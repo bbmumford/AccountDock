@@ -775,6 +775,57 @@ final class FailoverPlannerTests: XCTestCase {
         XCTAssertTrue(hour.canSpend(.critical, now: now.addingTimeInterval(6 * 60)))
     }
 
+    func testAReadingOfAnAccountInUseStandsUntilSomethingUsesTheAccount() {
+        let read = now.addingTimeInterval(-20 * 60)
+        XCTAssertEqual(FailoverPlanner.poolReadingLifetime(inUse: true, observedAt: read, lastRequest: read.addingTimeInterval(-60)),
+                       FailoverPlanner.idleFallbackFreshness, "its sessions have been idle since the reading")
+        XCTAssertEqual(FailoverPlanner.poolReadingLifetime(inUse: true, observedAt: read, lastRequest: read.addingTimeInterval(60)),
+                       FailoverPlanner.liveFreshness)
+        XCTAssertEqual(FailoverPlanner.poolReadingLifetime(inUse: true, observedAt: read, lastRequest: nil),
+                       FailoverPlanner.idleFallbackFreshness)
+        XCTAssertEqual(FailoverPlanner.poolReadingLifetime(inUse: false, observedAt: read, lastRequest: now),
+                       FailoverPlanner.idleFallbackFreshness)
+    }
+
+    func testTheActiveAccountsSuccessorIsAnotherUsableAccountOfItsProvider() {
+        let leaving = Account(email: "a@mail.example", displayName: "A", provider: .claudeCode, isActive: true)
+        let signedOut = Account(email: "b@mail.example", displayName: "B", provider: .claudeCode)
+        let ready = Account(email: "c@mail.example", displayName: "C", provider: .claudeCode)
+        let other = Account(email: "d@mail.example", displayName: "D", provider: .codex)
+        let all = [leaving, other, signedOut, ready]
+        XCTAssertEqual(AppState.successor(of: leaving, among: all) { $0.id == signedOut.id }?.id, ready.id)
+        XCTAssertNil(AppState.successor(of: leaving, among: [leaving, other, signedOut]) { $0.id == signedOut.id },
+                     "an account of another provider, or one needing sign-in, does not take over")
+    }
+
+    func testAModelsOwnLimitIsReadAgainOnceTheLongWindowHasMoved() throws {
+        let scoped = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(scopedResponse.utf8))
+        XCTAssertFalse(scoped.modelWeeklyLimits.isEmpty)
+        let long = try XCTUnwrap(scoped.sevenDay?.utilization)
+        func whole(_ secondsAgo: TimeInterval, _ utilization: Double?) -> AppState.WholeReading {
+            AppState.WholeReading(at: now.addingTimeInterval(-secondsAgo), longUtilization: utilization)
+        }
+        XCTAssertTrue(AppState.wholeReadingIsDue(scoped, whole: nil, now: now), "the model's limit was never read whole")
+        XCTAssertFalse(AppState.wholeReadingIsDue(scoped, whole: whole(600, long), now: now),
+                       "nothing was used since, however long ago")
+        XCTAssertTrue(AppState.wholeReadingIsDue(scoped, whole: whole(120, long - 1), now: now),
+                      "a point of the window was used since the model's limit was read")
+        XCTAssertTrue(AppState.wholeReadingIsDue(scoped, whole: whole(120, long + 30), now: now), "the window reset since")
+        XCTAssertFalse(AppState.wholeReadingIsDue(scoped, whole: whole(20, long - 5), now: now),
+                       "readings are spaced")
+        XCTAssertFalse(AppState.wholeReadingIsDue(scoped, whole: whole(120, long - 0.4), now: now))
+
+        // A reading with no limit of a model's own is kept current by
+        // passive readings alone.
+        let plain = UsageAPIResponse(
+            fiveHour: nil, sevenDay: scoped.sevenDay, sevenDayOauthApps: nil, sevenDayOpus: nil, sevenDaySonnet: nil,
+            sevenDayCowork: nil, iguanaNecktie: nil, extraUsage: nil
+        )
+        XCTAssertTrue(plain.modelWeeklyLimits.isEmpty)
+        XCTAssertFalse(AppState.wholeReadingIsDue(plain, whole: nil, now: now))
+        XCTAssertFalse(AppState.wholeReadingIsDue(nil, whole: nil, now: now))
+    }
+
     func testThreeSwitchesAwayInTheWindowAreALoop() {
         let at = { (minutes: Double) in self.now.addingTimeInterval(-minutes * 60) }
         XCTAssertFalse(FailoverPlanner.isSwitchLoop([at(1), at(3)], now: now))
