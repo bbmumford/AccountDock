@@ -719,7 +719,7 @@ final class AppState: ObservableObject {
                 accounts[index].isActive = false
             }
         }
-        accounts.append(Account(
+        let added = Account(
             email: identity.identifier,
             displayName: identity.displayName,
             provider: adapter.provider,
@@ -727,8 +727,9 @@ final class AppState: ObservableObject {
             subscriptionType: identity.planType,
             isActive: makeActive,
             credentialLocation: identity.credentialLocation
-        ))
-        saveAccounts(refreshWidget: true)
+        )
+        accounts.append(added)
+        if makeActive { makeAddedAccountActive(added.id) } else { saveAccounts(refreshWidget: true) }
         log.info("[provider-auth] Imported \(adapter.provider.rawValue) account; total=\(accounts.count)")
     }
 
@@ -809,6 +810,25 @@ final class AppState: ObservableObject {
         log.info("[login] User cancelled browser login")
     }
 
+    /// Makes an account just added the active one of its provider, the
+    /// account its CLI is now signed in to: sessions on the provider's
+    /// shared sign-in are told to read it again (`moveRunningSessions`), and
+    /// automatic failover holds off for `userSwitchHold`, as after a switch
+    /// the user asked for, so the new account is not switched away from at
+    /// once.
+    func makeAddedAccountActive(_ id: UUID) {
+        guard let account = accounts.first(where: { $0.id == id }) else { return }
+        let previous = activeAccount(for: account.provider)
+        accounts.makeActive(id)
+        saveAccounts(refreshWidget: true)
+        noteLiveCredentialOwner(account.provider, account: id)
+        userSwitchedAt[account.provider] = Date()
+        guard previous?.id != id else { return }
+        if let previous { lastSwitchedAway[previous.id] = Date() }
+        moveRunningSessions(account.provider, from: previous?.id)
+        failoverEvents.record(account.provider, "Added \(messageName(account)) and made it the active account; sessions on the shared sign-in move to it at their next request.")
+    }
+
     /// The provider's active account, read from the accounts' own flags.
     func activeAccount(for provider: AIProviderType) -> Account? {
         accounts.active(for: provider)
@@ -837,13 +857,12 @@ final class AppState: ObservableObject {
                 return
             }
 
-            var account = Account(
+            let account = Account(
                 email: email,
                 displayName: status.orgName ?? email,
                 provider: .claudeCode,
                 orgName: status.orgName,
-                subscriptionType: status.subscriptionType,
-                isActive: !accounts.contains { $0.provider == .claudeCode }
+                subscriptionType: status.subscriptionType
             )
             log.info("[addAccount] Created account model, id=\(account.id)")
 
@@ -859,13 +878,10 @@ final class AppState: ObservableObject {
             }
             log.info("[addAccount] Token captured successfully")
 
-            if !accounts.contains(where: { $0.provider == .claudeCode }) {
-                account.isActive = true
-                log.info("[addAccount] First account, setting as active")
-            }
-
             accounts.append(account)
-            saveAccounts()
+            // The CLI is signed in to the account just added, so it is the
+            // active one.
+            makeAddedAccountActive(account.id)
             log.info("[addAccount] Account saved. Total accounts: \(self.accounts.count)")
         } catch {
             errorMessage = error.localizedDescription
@@ -919,6 +935,9 @@ final class AppState: ObservableObject {
                     forAccountId: accounts[existing].id.uuidString,
                     expectedEmail: accounts[existing].email
                 )
+                // The login left the CLI signed in to it, so it is the active
+                // account now.
+                makeAddedAccountActive(accounts[existing].id)
                 errorMessage = String(localized: "Account already exists - credentials refreshed", bundle: L10n.bundle)
                 return
             }
@@ -946,8 +965,7 @@ final class AppState: ObservableObject {
 
             // 6. Mark new account as active
             accounts.append(account)
-            accounts.makeActive(account.id)
-            saveAccounts()
+            makeAddedAccountActive(account.id)
             log.info("[loginNewAccount] Step 6: New account active. Total: \(self.accounts.count)")
 
             finishLoginAttempt(loginID)
