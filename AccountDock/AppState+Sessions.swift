@@ -38,11 +38,13 @@ extension AppState {
             let running = Set(live.values.flatMap { $0.map(\.sessionID) })
             sessionNames = sessionNames.filter { running.contains($0.key) }
         }
-        // A refusal is kept while its session runs.
-        if !sessionRefusals.isEmpty {
+        // A refusal and a credential flag are kept while their session runs.
+        if !sessionRefusals.isEmpty || !flaggedCredentialProcesses.isEmpty {
             let running = Set(live.values.flatMap { $0.map(\.sessionID) })
             let kept = sessionRefusals.filter { running.contains($0.key) }
             if kept.count != sessionRefusals.count { sessionRefusals = kept }
+            let flagged = Self.flagsOfRunningSessions(flaggedCredentialProcesses, live: running)
+            if flagged.count != flaggedCredentialProcesses.count { flaggedCredentialProcesses = flagged }
         }
     }
 

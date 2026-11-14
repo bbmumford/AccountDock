@@ -230,6 +230,8 @@ extension AppState {
         let observations = await Task.detached(priority: .utility) {
             PassiveUsageTelemetry.shared.collect(codexHomes: codexHomes, now: Date())
         }.value
+        let running = observations.isEmpty
+            ? nil : await ProcessTable.currentInBackground(maxAge: Self.runningProcessTableAge)
         let now = Date()
         let servedCutoff = now.addingTimeInterval(-SessionAttribution.servedLifetime)
         sessionServedBy = sessionServedBy.filter { $0.value.at > servedCutoff }
@@ -273,8 +275,9 @@ extension AppState {
             // which the audit compares with its slot's account.
             if let session = observation.processKey, observation.observedAt > servedCutoff,
                let evidence = slot == nil ? attributed : attribute(observation), evidence.byResets {
-                noteProcessCredential(provider, session: session, process: processes[session], observed: evidence.account,
-                                      source: "statusLineResets", observedAt: observation.observedAt)
+                noteProcessCredential(provider, session: session, process: processes[session], running: running,
+                                      observed: evidence.account, source: "statusLineResets",
+                                      observedAt: observation.observedAt)
             }
             guard let accountID = slot ?? attributed?.account else { continue }
             if let updatedAt = accountUsageUpdatedAt[accountID], observation.observedAt <= updatedAt { continue }

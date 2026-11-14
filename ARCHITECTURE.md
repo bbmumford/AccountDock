@@ -256,7 +256,11 @@ it refused the request. A process holding another account's token than its
 slot's or the live one is flagged with an event, whether it reads a slot, the
 shared sign-in or runs in the CLI's background service, and flagged again by
 every later piece of such evidence; Settings → General → Audit, or the request
-`{"action":"signalSessions"}`, tells it to read its sign-in again.
+`{"action":"signalSessions"}`, tells it to read its sign-in again. Only a
+session whose process runs now (a live lifecycle record whose process the
+process table lists) is recorded and flagged: a status-line file or a
+transcript outlives its session, and a session that ended has no token to
+read again, so its flag is dropped.
 
 
 Query it with the request `{"action":"audit","since":"<ISO time>","account":"<id, label or email>"}`;

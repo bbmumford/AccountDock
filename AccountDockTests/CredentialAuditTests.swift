@@ -401,6 +401,27 @@ final class CredentialAuditTests: XCTestCase {
         XCTAssertEqual(audit.entries().filter { $0.action == .processCredential }.count, 2)
     }
 
+    /// A status-line file or transcript of a session that no longer runs
+    /// is no process evidence: only a session whose process the process
+    /// table lists is flagged, and the flags of sessions that ended go.
+    func testOnlyASessionWhoseProcessRunsIsFlagged() {
+        let table = ProcessTable(entries: [ProcessTable.Entry(pid: 4242, command: "claude")])
+        XCTAssertTrue(AppState.processRuns(4242, in: table))
+        XCTAssertFalse(AppState.processRuns(4343, in: table), "a process the table does not list has ended")
+        XCTAssertFalse(AppState.processRuns(nil, in: table), "a session without a live record has no process")
+        XCTAssertFalse(AppState.processRuns(nil, in: nil))
+        XCTAssertTrue(AppState.processRuns(4242, in: nil), "without a table the live record's own check stands")
+
+        let alpha = UUID(), beta = UUID()
+        func flag(_ session: String) -> AppState.FlaggedCredentialProcess {
+            AppState.FlaggedCredentialProcess(provider: .claudeCode, session: session, process: 4242, slot: nil,
+                                              observed: alpha, believed: beta, at: Date())
+        }
+        let flagged = ["running": flag("running"), "99efa56a": flag("99efa56a")]
+        XCTAssertEqual(Array(AppState.flagsOfRunningSessions(flagged, live: ["running", "other"]).keys), ["running"])
+        XCTAssertTrue(AppState.flagsOfRunningSessions(flagged, live: []).isEmpty)
+    }
+
     func testARefusalsResetTimeNamesTheOneAccountResettingThen() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
