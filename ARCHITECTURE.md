@@ -367,9 +367,18 @@ same plan (default 8).
 A destination must stay below its thresholds for the minimum dwell. Its margin
 is the expected burn over the dwell, plus the session percent the move itself
 costs (the moved sessions re-read their context into the new account's cache,
-estimated by `TurnCostModel.switchCost`). Burn rates are taken at their mean
+estimated by `TurnCostModel.switchCost`). Burn rates are taken at their median
 plus one standard deviation, so a noisy account is treated as faster than its
 average.
+
+A burn rate is the median of the account's last five measured intervals
+(`QuotaTrend`), each running until its window has risen a whole point or for
+15 minutes, and its spread is estimated from the median absolute deviation,
+so one burst sets neither the rate nor its uncertainty. Readings in the five
+minutes after a window starts (its reset moves, or an unstarted window gets
+one) or after paused sessions resume (`AppState.endPause`, an admission, or
+a reading taken while the pause holds them) teach no rate: each session's
+first request then re-sends its whole context.
 
 ### Rules, in order
 
@@ -445,7 +454,7 @@ provider, with or without a forecast.
 
 | Model | Learns | Used for |
 | --- | --- | --- |
-| `QuotaTrend` | burn rate per window and its variance, per account | projection while throttled, trigger timing, uncertainty |
+| `QuotaTrend` | burn rate per window (median of recent intervals) and its spread, per account | projection while throttled, trigger timing, uncertainty |
 | `TurnCostModel` | session percent per million weighted tokens, from router token counts and the readings that follow | expected request cost, switch cost |
 | `DemandForecast` | weekly percent consumed per hour of the week | the simulator's demand |
 
