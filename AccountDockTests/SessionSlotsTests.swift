@@ -233,6 +233,72 @@ final class SessionSlotsTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: slots.profileURL, encoding: .utf8), "")
     }
 
+    func testALauncherFindingAStalePoolAsksForAFreshOneBeforeStartingTheCLIUnchanged() throws {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let home = temp.appendingPathComponent("home", isDirectory: true)
+        let realBin = temp.appendingPathComponent("real", isDirectory: true)
+        try FileManager.default.createDirectory(at: realBin, withIntermediateDirectories: true)
+        let real = realBin.appendingPathComponent("claude")
+        try "#!/bin/sh\nprintf '%s|%s' \"${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}\" \"$*\"\n"
+            .write(to: real, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: real.path)
+        let slots = try XCTUnwrap(SessionSlots(.claudeCode, home: home))
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try slots.installLauncher()
+        let slot = slots.directory(for: UUID())
+        try FileManager.default.createDirectory(at: slot, withIntermediateDirectories: true)
+
+        func launch(wait: Int) throws -> String {
+            let process = Process()
+            let pipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = ["-c", "exec claude \"$@\"", "sh", "-p"]
+            process.environment = ["PATH": slots.binDirectory.path + ":" + realBin.path + ":/usr/bin:/bin",
+                                   SessionSlots.spareWaitVariable: String(wait)]
+            process.standardOutput = pipe
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return String(decoding: data, as: UTF8.self)
+        }
+        func makeStale() throws {
+            slots.writePool([(slot.path, 1)])
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date().addingTimeInterval(-Double(SessionSlots.poolLifetimeMinutes + 60) * 60)],
+                ofItemAtPath: slots.poolFile.path)
+        }
+
+        // Before AccountDock has made its slot directory, nothing can answer.
+        try makeStale()
+        XCTAssertEqual(try launch(wait: 5), "|-p")
+
+        // AccountDock running: it sees the request and writes the pool again.
+        try FileManager.default.createDirectory(at: slots.sessionRoot, withIntermediateDirectories: true)
+        try makeStale()
+        let asked = expectation(description: "the launcher asked for a fresh pool")
+        DispatchQueue.global().async {
+            for _ in 0..<100 {
+                if slots.takeSpareRequests() {
+                    slots.writePool([(slot.path, 1)])
+                    asked.fulfill()
+                    return
+                }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        XCTAssertEqual(try launch(wait: 5), slot.path + "|-p")
+        wait(for: [asked], timeout: 6)
+        XCTAssertFalse(slots.takeSpareRequests(), "the launcher removes its request")
+
+        // AccountDock not running: no new pool within the wait.
+        try makeStale()
+        let started = Date()
+        XCTAssertEqual(try launch(wait: 1), "|-p")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 4)
+        XCTAssertFalse(slots.takeSpareRequests())
+    }
+
     func testShellQuotingSurvivesSingleQuotes() {
         XCTAssertEqual(SessionSlots.shellQuoted("a'b"), #"'a'\''b'"#)
     }

@@ -81,6 +81,10 @@ struct SessionSlots: Sendable {
     /// Names the file a launcher leaves in `sessionRoot` when it finds no
     /// spare, for `takeSpareRequests`.
     static let requestPrefix = ".wanted."
+    /// Follows `requestPrefix` in the request a launcher leaves when the
+    /// pool file is stale: `takeSpareRequests` takes it like a spare's, and
+    /// `AppState.maintainSessionSlots` then writes the pool again.
+    static let poolRequestMarker = "pool"
     /// How long a launcher waits for a spare before it starts its session
     /// on a credential shared with other sessions; `spareWaitVariable` in
     /// the launch's environment gives another number of seconds.
@@ -462,7 +466,8 @@ struct SessionSlots: Sendable {
     /// The launcher: starts the first other `executable` on `PATH`, on an
     /// account picked from the pool file at random by weight. It starts the
     /// CLI unchanged when the launch already decides its credential, signs
-    /// in or out, or the pool file is missing or stale.
+    /// in or out, or the pool file is missing, or stale and not written
+    /// again within `spareWaitSeconds` of asking (`poolRequestMarker`).
     func launcherScript() -> String {
         let passThrough = support.credentialVariables
             .map { "[ -n \"${\($0):-}\" ] && exec \"$real\" \"$@\"" }
@@ -494,7 +499,24 @@ struct SessionSlots: Sendable {
         case "${1:-}" in
           \#(support.accountCommands.joined(separator: "|"))) exec "$real" "$@" ;;
         esac
-        [ -n "$(find "$pool" -mmin -\#(Self.poolLifetimeMinutes) 2>/dev/null)" ] || exec "$real" "$@"
+        # A stale pool, as after a restart before AccountDock has written a
+        # new one, is asked for again the way a spare is, and given
+        # \#(Self.spareWaitSeconds) seconds; without AccountDock running the CLI starts unchanged.
+        fresh_pool() { [ -n "$(find "$pool" -mmin -\#(Self.poolLifetimeMinutes) 2>/dev/null)" ]; }
+        if ! fresh_pool; then
+          [ -d "$sessions" ] || exec "$real" "$@"
+          request="$sessions/\#(Self.requestPrefix)\#(Self.poolRequestMarker).$$"
+          wait=${\#(Self.spareWaitVariable):-\#(Self.spareWaitSeconds)}
+          case "$wait" in ''|*[!0-9]*) wait=\#(Self.spareWaitSeconds) ;; esac
+          tries=0
+          while ! fresh_pool && [ "$tries" -lt $((wait * 5)) ]; do
+            : > "$request" 2>/dev/null || break
+            tries=$((tries + 1))
+            sleep 0.2
+          done
+          rm -f "$request"
+          fresh_pool || exec "$real" "$@"
+        fi
         resumes=\#(Self.shellQuoted(resumeFile.path))
         resumed=
         previous=
