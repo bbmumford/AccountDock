@@ -53,6 +53,10 @@ struct PassiveUsageObservation: Sendable {
     /// The name the reporting session shows for itself, when the source
     /// says; `AppState.sessionNames` keeps it for the account cards.
     var sessionName: String? = nil
+    /// The one-session slot directory the reporting session reads, when the
+    /// source says; `AppState.slotSessionsByDirectory` names the session of
+    /// a slot whose process left no session record by it.
+    var slotDirectory: String? = nil
 
     var accountKey: AccountKey? {
         claudeAccountUUID.map(AccountKey.providerAccountID) ?? codexHome.map(AccountKey.credentialLocation)
@@ -62,7 +66,8 @@ struct PassiveUsageObservation: Sendable {
         PassiveUsageObservation(
             source: source, usage: usage, observedAt: observedAt,
             claudeAccountUUID: claudeAccountUUID, codexHome: codexHome,
-            processKey: processKey, limitReached: limitReached, model: model, sessionName: sessionName
+            processKey: processKey, limitReached: limitReached, model: model, sessionName: sessionName,
+            slotDirectory: slotDirectory
         )
     }
 }
@@ -135,17 +140,20 @@ final class PassiveUsageTelemetry: @unchecked Sendable {
             guard let modified = modificationDate(file) else { continue }
             // Sessions that ended leave their last payload behind; it no longer
             // describes live consumption and is removed once it is a day old.
+            let slotFile = file.deletingPathExtension().appendingPathExtension("slot")
             if now.timeIntervalSince(modified) > 24 * 60 * 60 {
                 try? fileManager.removeItem(at: file)
+                try? fileManager.removeItem(at: slotFile)
                 continue
             }
             guard markSeen(file.path, modified),
                   let data = try? Data(contentsOf: file),
-                  let observation = Self.statusLineObservation(
+                  var observation = Self.statusLineObservation(
                     from: data,
                     observedAt: modified,
                     processKey: String(file.deletingPathExtension().lastPathComponent.dropFirst("claude-".count))
                   ) else { continue }
+            observation.slotDirectory = (try? String(contentsOf: slotFile, encoding: .utf8)).flatMap { $0.isEmpty ? nil : $0 }
             result.append(observation)
         }
         return result

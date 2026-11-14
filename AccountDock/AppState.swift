@@ -205,6 +205,11 @@ final class AppState: ObservableObject {
     @Published var unisolatedTerminals: [String: String] = [:]
     /// Unisolated sessions already recorded as an event.
     var unisolatedNoted: Set<String> = []
+    /// The session each slot directory serves, as its status line reported
+    /// it (`PassiveUsageObservation.slotDirectory`): `serveSessionSlots`
+    /// finds a slot's model by it when the slot's process left no session
+    /// record.
+    var slotSessionsByDirectory: [String: String] = [:]
     /// A locally elapsed reset is useful for clearing a stale 100% display,
     /// but it is not proof that the provider has opened a new quota window.
     /// Never fail over to one of these accounts until a fresh API response

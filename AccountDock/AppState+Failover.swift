@@ -239,6 +239,9 @@ extension AppState {
                 workloadModels[provider] = (model, observation.observedAt)
                 if let session = observation.processKey { noteSessionModel(session, model: model, at: observation.observedAt) }
             }
+            if let directory = observation.slotDirectory, let session = observation.processKey {
+                slotSessionsByDirectory[directory] = session
+            }
             // A session in a slot reports its slot's account; others are
             // matched by their reset times.
             if sessionSlotIsSettling(observation.processKey, provider: provider,
@@ -592,6 +595,41 @@ extension AppState {
         guard !wholeAllowance, !usage.modelWeeklyLimits.isEmpty else { return usage }
         let models = model.map { [$0] } ?? sharedSessionModels(account.provider, now: now)
         return usage.replacingSevenDay(usage.weeklyWindow(forModels: models))
+    }
+
+    /// The model whose own weekly allowance is what has `account` at its
+    /// limit for sessions on `models`: the account is measured at its limit
+    /// for them (`plannedUsage` narrowed to their tightest model) but not by
+    /// its whole allowance. Nil when the whole allowance is spent too, or
+    /// when none of the models has an allowance of its own. Names the limit
+    /// in failover and session-move events.
+    func limitingModel(_ account: Account, models: [String], now: Date = Date()) -> String? {
+        guard !models.isEmpty, let usage = accountUsage[account.id] else { return nil }
+        let planner = FailoverPlanner(settings: plannerSettings(account.provider))
+        let reserve = planner.settings.inFlightReservePercent
+        let whole = planner.isMeasuredAtLimit(quotaState(for: account, now: now, wholeAllowance: true), now: now, reserve: reserve)
+        let narrowed = planner.isMeasuredAtLimit(
+            quotaState(for: account, now: now, model: models.count == 1 ? models[0] : nil), now: now, reserve: reserve)
+        return Self.limitingModel(usage: usage, models: models, wholeAtLimit: whole, narrowedAtLimit: narrowed)
+    }
+
+    /// `limitingModel`'s rule: with the narrowed allowance at its limit and
+    /// the whole one not, the tightest own allowance among `models`.
+    nonisolated static func limitingModel(usage: UsageAPIResponse, models: [String], wholeAtLimit: Bool,
+                                          narrowedAtLimit: Bool) -> String? {
+        guard narrowedAtLimit, !wholeAtLimit else { return nil }
+        let names = models.map { $0.lowercased() }
+        return usage.modelWeeklyLimits
+            .filter { limit in names.contains { $0.contains(limit.model.lowercased()) } }
+            .max { $0.percent < $1.percent }?.model
+    }
+
+    /// The event for an exhausted switch away from `source`; `modelLimit`
+    /// names the model whose own allowance ran out for the sessions on the
+    /// shared sign-in, when that is the limit (`limitingModel`).
+    nonisolated static func exhaustedSwitchEvent(source: String, target: String, modelLimit: String?) -> String {
+        guard let modelLimit else { return "\(source) is at its limit; switching to \(target)." }
+        return "\(source) has no \(modelLimit) allowance left for the sessions on the shared sign-in; switching to \(target)."
     }
 
     /// How long a session's last reported model is taken as the one it uses.
@@ -1530,6 +1568,8 @@ extension AppState {
             running = prepared
         }
 
+        let modelLimit = reason == .exhausted
+            ? limitingModel(current, models: sharedSessionModels(provider, now: now), now: now) : nil
         switch reason {
         case .balance(let hours) where hours < 1:
             // The forecast decided: staying would leave more allowance unused.
@@ -1539,7 +1579,7 @@ extension AppState {
         case .threshold:
             failoverEvents.record(provider, "Threshold reached; switching \(sourceName) → \(targetName).")
         case .exhausted:
-            failoverEvents.record(provider, "\(sourceName) is at its limit; switching to \(targetName).")
+            failoverEvents.record(provider, Self.exhaustedSwitchEvent(source: sourceName, target: targetName, modelLimit: modelLimit))
         case .workloadUnavailable:
             failoverEvents.record(provider, "\(sourceName) no longer includes this workload; switching to \(targetName).")
         }
@@ -1574,7 +1614,8 @@ extension AppState {
         exhaustedFailoverAccounts[provider, default: []].insert(current.id)
         exhaustedFailoverAccounts[provider, default: []].remove(target.id)
         saveFailoverRuntime()
-        updateStatus(provider, "Switched to \(targetName).")
+        updateStatus(provider, "Switched to \(targetName)."
+            + (modelLimit.map { " \(sourceName) has no \($0) allowance left for the sessions on the shared sign-in." } ?? ""))
 
         // A fresh reading of the new account confirms it before paused
         // agents continue.

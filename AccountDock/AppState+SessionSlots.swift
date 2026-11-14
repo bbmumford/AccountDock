@@ -172,11 +172,15 @@ extension AppState {
     /// pool does not count, so a session never moves for a stale reading.
     /// With `model`, the question is asked for one session using that model,
     /// whose own weekly limit may be spent while the account has room for
-    /// the rest (`plannedUsage`).
+    /// the rest (`plannedUsage`). `wholeAllowance` judges by the whole
+    /// allowance alone, as for a slot session whose model is unknown: it is
+    /// no part of the sessions sharing the sign-in, whose models narrow the
+    /// question without `model`.
     func accountCannotServe(_ id: UUID, provider: AIProviderType, planner: FailoverPlanner, now: Date,
-                            model: String? = nil) -> Bool {
+                            model: String? = nil, wholeAllowance: Bool = false) -> Bool {
         guard let account = accounts.first(where: { $0.id == id && $0.provider == provider }) else { return true }
-        switch planner.servingVerdict(quotaState(for: account, now: now, model: model), now: now, lead: 0) {
+        let state = quotaState(for: account, now: now, model: model, wholeAllowance: wholeAllowance && model == nil)
+        switch planner.servingVerdict(state, now: now, lead: 0) {
         case .atLimit, .ineligible: return true
         case .canServe, .nearLimit: return false
         }
@@ -355,13 +359,16 @@ extension AppState {
             // own limit is spent moves to an account with room for that
             // model, and the account's other sessions stay. With no such
             // account it stays where it is.
+            // A slot whose process left no session record is named by its
+            // status line; one whose model is still unknown is judged by
+            // the whole allowance, never by the shared sessions' models.
             let session = sessionsByDirectory[path]
-            let model = sessionModel(session?.sessionID, now: now)
+            let model = sessionModel(session?.sessionID ?? slotSessionsByDirectory[path], now: now)
             func cannotServe(_ id: UUID) -> Bool {
-                accountCannotServe(id, provider: provider, planner: planner, now: now, model: model)
+                accountCannotServe(id, provider: provider, planner: planner, now: now, model: model, wholeAllowance: true)
             }
             let modelSpent = model != nil && slot.account.map {
-                cannotServe($0) && !accountCannotServe($0, provider: provider, planner: planner, now: now)
+                cannotServe($0) && !accountCannotServe($0, provider: provider, planner: planner, now: now, wholeAllowance: true)
             } == true
             var target = slot.account.flatMap { cannotServe($0) ? nil : $0 }
                 ?? (modelSpent ? byWeight.first { !cannotServe($0) } : fallback)
@@ -400,8 +407,8 @@ extension AppState {
             // The model's own limit is named when it is what the account
             // has run out of, whether or not the account's other sessions
             // can stay.
-            let spent = slot.account.flatMap { id in
-                model.flatMap { accountUsage[id]?.spentModelLimit(for: $0, within: FailoverPlanner.minimumUsableHeadroom) }
+            let spent = slot.account.flatMap { id in accounts.first { $0.id == id } }.flatMap { account in
+                model.flatMap { limitingModel(account, models: [$0], now: now) }
             }
             let why = requested ? "a request asked for it"
                 : spent.map { "\(from) has no \($0) allowance left" + (modelSpent ? "; its other sessions stay" : "") }
@@ -422,6 +429,7 @@ extension AppState {
             for directory in remove {
                 slotDirectoryServing[directory.path] = nil
                 slotDirectoryMovedAt[directory.path] = nil
+                slotSessionsByDirectory[directory.path] = nil
             }
             for directory in remove + removeSpares { slotCredentialWritten[directory.path] = nil }
             await Task.detached(priority: .utility) {
