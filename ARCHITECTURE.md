@@ -845,8 +845,12 @@ the pool weights and which sessions move, each time the pool is rebuilt
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when
   every other account has under `lowWeeklyRoom` (20%) of its week left, and
   pacing moves none of its sessions off it. The runway rule still applies,
-  so it takes no new session that could not last `newSessionRunway` there.
-  The drain ends when a reading or a refusal shows its limit, when it is
+  so it takes no new session that could not last `newSessionRunway` there:
+  in the pacer's weights, and before pacing in `buildPool`, where any
+  account that could not carry one more session of the running sessions'
+  typical rate for that hour beside its own rate
+  (`AppState.carriesNewSession`) has weight 0 while another could, a
+  draining one at `drainingPreferred` included. The drain ends when a reading or a refusal shows its limit, when it is
   active again, or a session window after the switch.
 - A session that starts a turn after its cache has expired is placed again
   like a new session (`RouterState.cacheAwareSessions`), since moving it

@@ -243,6 +243,32 @@ final class BalancingTests: XCTestCase {
                        "it lasts 15 of the 100 hours")
     }
 
+    func testADrainingAccountTakesNoNewSessionItCannotCarryForTheRunway() {
+        // Unpaced: the drain's weight, even preferred, gives way to the runway.
+        XCTAssertEqual(AppState.poolWeight(tier: .usable, urgent: false, anyBelow: false, forecastAtLimit: false,
+                                           anyOpen: true, draining: true, othersLowOnWeeklyRoom: true),
+                       AppState.drainingPreferred)
+        XCTAssertEqual(AppState.poolWeight(tier: .usable, urgent: false, anyBelow: false, forecastAtLimit: false,
+                                           anyOpen: true, draining: true, othersLowOnWeeklyRoom: true, shortOfRunway: true), 0)
+        XCTAssertEqual(AppState.poolWeight(tier: .belowTrigger, urgent: true, anyBelow: true, forecastAtLimit: false,
+                                           anyOpen: true, draining: false, othersLowOnWeeklyRoom: false, shortOfRunway: true), 0,
+                       "a few percent below a trigger is no room either")
+        // Backup's 2% of the week is 16 session percent: beside its own
+        // session's 5 an hour it carries another for the hour, not beside 12.
+        XCTAssertTrue(AppState.carriesNewSession(headroom: 16, burn: 5, newSessionBurn: 5))
+        XCTAssertFalse(AppState.carriesNewSession(headroom: 16, burn: 12, newSessionBurn: 5))
+
+        // Paced: a draining account at its preferred weight, with room for
+        // its own rate until its reset in two hours but not for one more
+        // session for an hour, takes none while another account can.
+        let draining = UUID(), other = UUID()
+        let accounts = [pacerAccount(draining, left: 4, resetIn: 2, weight: AppState.drainingPreferred, ratio: 0.25),
+                        pacerAccount(other, left: 500, resetIn: 150, burn: 2, ratio: 0.25)]
+        let plan = SessionPacer().plan(accounts: accounts, sessions: [], now: now)
+        XCTAssertEqual(plan.weights[draining] ?? -1, 0, accuracy: 0.0001)
+        XCTAssertGreaterThan(plan.weights[other] ?? 0, 0)
+    }
+
     func testOnlyAnAccountRunningOutBeforeThePoolGivesSessionsUp() {
         let early = UUID(), late = UUID()
         // Both reach their limits days before their weekly resets; the
