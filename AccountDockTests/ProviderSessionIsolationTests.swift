@@ -164,7 +164,7 @@ final class ProviderSessionIsolationTests: XCTestCase {
           124   1 fakecli chat HOME=/x
           125   1 fakecli resume s-1 FAKECLI_HOME=\(otherSpare.path)
         """
-        XCTAssertEqual(slots.directoriesByProcess(inProcessList: list), [123: spare.path, 125: otherSpare.path])
+        XCTAssertEqual(slots.directoriesByProcess(in: ProcessTable(listing: list, columns: .pidPPID)), [123: spare.path, 125: otherSpare.path])
 
         slots.remove(spare, reason: "test")
         XCTAssertFalse(FileManager.default.fileExists(atPath: spare.path))

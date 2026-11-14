@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Types into the terminal a CLI session runs in, as its user would. Used by
@@ -41,18 +42,24 @@ struct AgtermTerminalInput: SessionTerminalInput {
     static let sessionVariable = "AGTERM_SESSION_ID"
     static let timeout: TimeInterval = 15
 
+    /// From the quota cycle's `ProcessTable` while it is at most a few
+    /// seconds old, else from a fresh reading of the process.
     func terminalSession(ofProcess pid: Int32) async -> String? {
-        guard let result = try? await BoundedProcess.run(
-            executable: URL(fileURLWithPath: "/bin/ps"),
-            arguments: ["-Eww", "-o", "command=", "-p", String(pid)],
-            timeout: Self.timeout
-        ), result.status == 0 else { return nil }
-        return Self.sessionID(inProcessList: String(decoding: result.output, as: UTF8.self))
+        if Darwin.kill(pid, 0) == 0,
+           let entry = await ProcessTable.currentInBackground(maxAge: Self.processTableAge)?.entry(pid) {
+
+            return Self.sessionID(of: entry)
+        }
+        let fresh = await Task.detached(priority: .userInitiated) { ProcessTable.read(pid: pid) }.value
+        return fresh?.entry(pid).flatMap(Self.sessionID(of:))
     }
+
+    /// How old a `ProcessTable` may be for `terminalSession(ofProcess:)`.
+    static let processTableAge: TimeInterval = 5
 
     func type(_ text: String, into terminalSession: String) async -> Bool {
         guard FileManager.default.isExecutableFile(atPath: Self.control.path),
-              let result = try? await BoundedProcess.run(
+              let result = try? await CommandRunner.run(
                 executable: Self.control,
                 arguments: ["session", "type", "--stdin", "--target", terminalSession],
                 input: Data(text.utf8),
@@ -63,7 +70,7 @@ struct AgtermTerminalInput: SessionTerminalInput {
 
     func screenText(target: String) async -> String? {
         guard FileManager.default.isExecutableFile(atPath: Self.control.path),
-              let result = try? await BoundedProcess.run(
+              let result = try? await CommandRunner.run(
                 executable: Self.control,
                 arguments: ["session", "text", "--target", target],
                 timeout: Self.timeout
@@ -71,16 +78,12 @@ struct AgtermTerminalInput: SessionTerminalInput {
         return String(decoding: result.output, as: UTF8.self)
     }
 
-    /// The value of `sessionVariable` in `ps -E` output for one process
-    /// (`terminalSession(ofProcess:)`).
-    static func sessionID(inProcessList text: String) -> String? {
-        let prefix = sessionVariable + "="
-        for word in text.split(whereSeparator: { $0 == " " || $0 == "\n" }) where word.hasPrefix(prefix) {
-            let value = word.dropFirst(prefix.count)
-            if !value.isEmpty { return String(value) }
-        }
-        return nil
+    /// The value of `sessionVariable` in a process's environment
+    /// (`terminalSession(ofProcess:)`); nil when it is absent or empty.
+    static func sessionID(of entry: ProcessTable.Entry) -> String? {
+        entry.environmentValue(sessionVariable).flatMap { $0.isEmpty ? nil : $0 }
     }
+
 }
 
 /// What AccountDock types into a session's terminal, and when it may. A

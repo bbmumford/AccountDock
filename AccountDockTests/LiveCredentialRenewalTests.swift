@@ -188,9 +188,9 @@ final class LiveCredentialRenewalTests: XCTestCase {
           202 /Users/me/.local/bin/codex resume 0199
           303 /Users/me/.kimi-code/bin/kimi
         """
-        XCTAssertTrue(CLIProcessScan.isRunning(.codex, inListing: listing, excluding: 1))
-        XCTAssertTrue(CLIProcessScan.isRunning(.kimi, inListing: listing, excluding: 1))
-        XCTAssertFalse(CLIProcessScan.isRunning(.codex, inListing: listing, excluding: 202))
-        XCTAssertFalse(CLIProcessScan.isRunning(.claudeCode, inListing: listing, excluding: 1))
+        XCTAssertTrue(CLIProcessScan.isRunning(.codex, in: ProcessTable(listing: listing, columns: .pid), excluding: 1))
+        XCTAssertTrue(CLIProcessScan.isRunning(.kimi, in: ProcessTable(listing: listing, columns: .pid), excluding: 1))
+        XCTAssertFalse(CLIProcessScan.isRunning(.codex, in: ProcessTable(listing: listing, columns: .pid), excluding: 202))
+        XCTAssertFalse(CLIProcessScan.isRunning(.claudeCode, in: ProcessTable(listing: listing, columns: .pid), excluding: 1))
     }
 }

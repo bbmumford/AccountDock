@@ -62,14 +62,10 @@ enum UpdateInstaller {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
         let backup = directory.appendingPathComponent("previous/AccountDock.app", isDirectory: true)
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = [helper.path, String(pid), newApp.path, installed.path, backup.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
         do {
-            try process.run()
+            try CommandRunner.start(CommandRunner.Command("/bin/sh", [helper.path, String(pid), newApp.path, installed.path, backup.path]))
         } catch {
+
             throw UpdateError.cannotReplace(error.localizedDescription)
         }
     }

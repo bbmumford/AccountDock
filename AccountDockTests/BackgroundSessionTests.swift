@@ -48,7 +48,7 @@ final class BackgroundSessionTests: XCTestCase {
     }
 
     func testWorkersAttachClientsAndShellsAreRecognised() {
-        let processes = BackgroundSessionProcesses(processList: processList, executable: "claude", support: support)
+        let processes = BackgroundSessionProcesses(table: ProcessTable(listing: processList, columns: .pidPPID), executable: "claude", support: support)
         XCTAssertEqual(processes.workers, [10740, 10878])
         XCTAssertEqual(processes.nonSessions, [9965, 62154, 62200], "the supervisor, the attach client and a --bg launch")
         XCTAssertEqual(processes.attachClient(of: "4822c359-040f-403c-a651-ae45b46cfd8b"), 62154)
@@ -61,8 +61,8 @@ final class BackgroundSessionTests: XCTestCase {
     }
 
     @MainActor func testAnAttachClientHoldsNoSlotAndIsNoSession() throws {
-        let processes = BackgroundSessionProcesses(processList: processList, executable: "claude", support: support)
-        let directories = SessionSlots.directoriesByProcess(inProcessList: processList,
+        let processes = BackgroundSessionProcesses(table: ProcessTable(listing: processList, columns: .pidPPID), executable: "claude", support: support)
+        let directories = SessionSlots.directoriesByProcess(in: ProcessTable(listing: processList, columns: .pidPPID),
                                                             variable: "CLAUDE_SECURESTORAGE_CONFIG_DIR",
                                                             root: "/h/.accountdock/claude-slots")
         XCTAssertEqual(Set(directories.keys), [62154, 62200, 70000])

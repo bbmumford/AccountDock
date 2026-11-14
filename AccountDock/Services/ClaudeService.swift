@@ -200,35 +200,24 @@ final class ClaudeService: @unchecked Sendable {
     /// pnpm/yarn/bun/Volta with non-default prefixes, custom npm prefixes, etc.).
     /// Bounded by a short timeout so a slow .zshrc can't block app launch.
     private static func shellPathLookup() -> String? {
-        let process = Process()
-        let stdout = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-ilc", "command -v claude"]
-        process.standardOutput = stdout
-        process.standardError = Pipe()
-        process.environment = ProcessInfo.processInfo.environment
-
+        // Hard timeout — don't let a heavy shell rc file block forever.
+        let result: CommandRunner.Result
         do {
-            try process.run()
+            result = try CommandRunner.runSynchronously(
+                CommandRunner.Command("/bin/zsh", ["-ilc", "command -v claude"],
+                                      environment: ProcessInfo.processInfo.environment),
+                timeout: 3
+            )
+        } catch CommandRunner.Failure.timedOut {
+            log.warning("[shellPathLookup] zsh exceeded 3s timeout; aborting")
+            return nil
         } catch {
             log.warning("[shellPathLookup] Failed to launch /bin/zsh: \(error.localizedDescription)")
             return nil
         }
 
-        // Hard timeout — don't let a heavy shell rc file block forever.
-        let deadline = Date().addingTimeInterval(3.0)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        if process.isRunning {
-            process.terminate()
-            log.warning("[shellPathLookup] zsh exceeded 3s timeout; aborting")
-            return nil
-        }
-
-        guard process.terminationStatus == 0 else { return nil }
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        let raw = String(data: data, encoding: .utf8) ?? ""
+        guard result.status == 0 else { return nil }
+        let raw = String(data: result.output, encoding: .utf8) ?? ""
         // `command -v` may emit multiple lines if claude is shadowed; take the first.
         let candidate = raw
             .split(whereSeparator: \.isNewline)
@@ -524,33 +513,27 @@ final class ClaudeService: @unchecked Sendable {
         let probeID = UUID().uuidString.lowercased()
         try await Task.detached(priority: .utility) {
             defer { Self.removeWarmupProbeResidue(sessionID: probeID) }
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = Self.warmupArguments(sessionID: probeID)
             var environment = ProcessInfo.processInfo.environment
             environment["CLAUDE_CODE_OAUTH_TOKEN"] = accessToken
             environment.removeValue(forKey: "ANTHROPIC_API_KEY")
             environment.removeValue(forKey: "ANTHROPIC_AUTH_TOKEN")
-            process.environment = environment
             // The reply's last lines say why a probe failed, such as a usage
             // limit the account has already reached.
-            let output = Pipe()
-            process.standardOutput = output
-            process.standardError = output
-            try process.run()
-            let deadline = Date().addingTimeInterval(90)
-            while process.isRunning && Date() < deadline {
-                Darwin.usleep(100_000)
-            }
-            if process.isRunning {
-                process.terminate()
+            let result: CommandRunner.Result
+            do {
+                result = try CommandRunner.runSynchronously(
+                    CommandRunner.Command(executable, Self.warmupArguments(sessionID: probeID),
+                                          environment: environment, errorOutput: .merged),
+                    timeout: 90
+                )
+            } catch CommandRunner.Failure.timedOut {
                 throw UsageError.network("warm-up request timed out")
             }
-            guard process.terminationStatus == 0 else {
-                let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile().suffix(300), as: UTF8.self)
+            guard result.status == 0 else {
+                let text = String(decoding: result.output.suffix(300), as: UTF8.self)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .replacingOccurrences(of: "\n", with: " ")
-                throw UsageError.network("warm-up request exited \(process.terminationStatus)\(text.isEmpty ? "" : ": \(text)")")
+                throw UsageError.network("warm-up request exited \(result.status)\(text.isEmpty ? "" : ": \(text)")")
             }
         }.value
     }
@@ -603,50 +586,23 @@ final class ClaudeService: @unchecked Sendable {
     /// Matching the executable column avoids false positives from editors,
     /// AccountDock itself, or shell commands that merely mention Claude.
     func runningProcesses() -> [RunningClaudeProcess] {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axo", "pid=,comm=,args="]
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-        } catch {
-            log.warning("[runningProcesses] ps failed: \(error.localizedDescription)")
+        guard let table = ProcessTable.read() else {
+            log.warning("[runningProcesses] The process list could not be read")
             return []
         }
-
-        // Drain before waiting. `ps -axo ... args` can exceed a pipe's buffer
-        // on machines with many long-lived agent processes. Waiting first
-        // deadlocks: ps blocks trying to write while AccountDock blocks waiting
-        // for ps to exit, freezing the main actor during failover.
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return [] }
-        let text = String(data: data, encoding: .utf8) ?? ""
-        return Self.parseRunningProcesses(
-            text,
-            excludingPID: Int32(ProcessInfo.processInfo.processIdentifier)
-        )
+        return Self.parseRunningProcesses(table, excludingPID: Int32(ProcessInfo.processInfo.processIdentifier))
     }
 
+    /// The processes in `table` whose executable, the command's first word,
+    /// is named `claude`.
     static func parseRunningProcesses(
-        _ text: String,
+        _ table: ProcessTable,
         excludingPID: Int32
     ) -> [RunningClaudeProcess] {
-        return text.split(whereSeparator: \.isNewline).compactMap { line in
-            let fields = line.split(
-                maxSplits: 2,
-                omittingEmptySubsequences: true,
-                whereSeparator: \.isWhitespace
-            )
-            guard fields.count == 3,
-                  let pid = Int32(fields[0]),
-                  pid != excludingPID else { return nil }
-            let executable = URL(fileURLWithPath: String(fields[1])).lastPathComponent
-            guard executable == "claude" else { return nil }
-            let command = String(fields[2])
+        return table.entries.compactMap { entry in
+            guard entry.pid != excludingPID, entry.executableName == "claude" else { return nil }
+            let pid = entry.pid
+            let command = entry.command
             let sessionID = extractResumeSessionID(from: command)
             return RunningClaudeProcess(
                 id: pid,
@@ -928,61 +884,37 @@ final class ClaudeService: @unchecked Sendable {
     /// Returns nil on launch failure, non-zero exit, or no version found.
     static func readVersion(at path: String) async -> String? {
         guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                let stdout = Pipe()
-                process.executableURL = URL(fileURLWithPath: path)
-                process.arguments = ["--version"]
-                process.standardOutput = stdout
-                process.standardError = Pipe()
+        // Inject same PATH augmentation as runClaude so NVM-installed
+        // claude can find `node` when invoked here.
+        var env = ProcessInfo.processInfo.environment
+        let homeDir = NSHomeDirectory()
+        var extraPaths = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "\(homeDir)/.local/bin",
+            "\(homeDir)/.npm-global/bin"
+        ]
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        let resolvedBinDir = URL(fileURLWithPath: resolved).deletingLastPathComponent().path
+        extraPaths.insert(resolvedBinDir, at: 0)
+        let existingPath = env["PATH"] ?? "/usr/bin:/bin"
+        env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
+        env["HOME"] = homeDir
 
-                // Inject same PATH augmentation as runClaude so NVM-installed
-                // claude can find `node` when invoked here.
-                var env = ProcessInfo.processInfo.environment
-                let homeDir = NSHomeDirectory()
-                var extraPaths = [
-                    "/opt/homebrew/bin",
-                    "/usr/local/bin",
-                    "\(homeDir)/.local/bin",
-                    "\(homeDir)/.npm-global/bin"
-                ]
-                let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-                let resolvedBinDir = URL(fileURLWithPath: resolved).deletingLastPathComponent().path
-                extraPaths.insert(resolvedBinDir, at: 0)
-                let existingPath = env["PATH"] ?? "/usr/bin:/bin"
-                env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
-                env["HOME"] = homeDir
-                process.environment = env
-
-                do {
-                    try process.run()
-                } catch {
-                    log.warning("[readVersion] launch failed for \(path): \(error.localizedDescription)")
-                    continuation.resume(returning: nil)
-                    return
-                }
-
-                let deadline = Date().addingTimeInterval(5.0)
-                while process.isRunning && Date() < deadline {
-                    Thread.sleep(forTimeInterval: 0.05)
-                }
-                if process.isRunning {
-                    process.terminate()
-                    log.warning("[readVersion] timed out for \(path)")
-                    continuation.resume(returning: nil)
-                    return
-                }
-
-                guard process.terminationStatus == 0 else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                let data = stdout.fileHandleForReading.readDataToEndOfFile()
-                let raw = String(data: data, encoding: .utf8) ?? ""
-                continuation.resume(returning: Self.extractSemver(from: raw))
-            }
+        let result: CommandRunner.Result
+        do {
+            result = try await CommandRunner.run(CommandRunner.Command(path, ["--version"], environment: env), timeout: 5)
+        } catch CommandRunner.Failure.timedOut {
+            log.warning("[readVersion] timed out for \(path)")
+            return nil
+        } catch {
+            log.warning("[readVersion] launch failed for \(path): \(error.localizedDescription)")
+            return nil
         }
+        guard result.status == 0 else { return nil }
+        let raw = String(data: result.output, encoding: .utf8) ?? ""
+        return Self.extractSemver(from: raw)
+
     }
 
     /// Fetch the latest published claude-code version. Returns nil on any failure.
@@ -1056,13 +988,13 @@ final class ClaudeService: @unchecked Sendable {
     static func runClaude(
         executable: String, args: [String], environment: [String: String]?, timeout: TimeInterval
     ) async throws -> String {
-        let result: BoundedProcess.Result
+        let result: CommandRunner.Result
         do {
-            result = try await BoundedProcess.run(
+            result = try await CommandRunner.run(
                 executable: URL(fileURLWithPath: executable), arguments: args,
                 environment: environment, timeout: timeout
             )
-        } catch BoundedProcess.Failure.timedOut(let seconds) {
+        } catch CommandRunner.Failure.timedOut(let seconds) {
             log.error("[runClaude] `\(args.joined(separator: " "))` did not finish within \(Int(seconds)) s; stopped")
             throw ClaudeServiceError.cliTimedOut(seconds: seconds)
         } catch {

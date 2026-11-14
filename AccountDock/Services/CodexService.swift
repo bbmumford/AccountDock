@@ -251,28 +251,13 @@ final class CodexService: @unchecked Sendable {
         let terminalTTY: String?
     }
 
+    /// The restartable Codex processes in a fresh `ProcessTable`, the
+    /// highest of each tree only.
     private func runningCodexProcesses() -> [CodexProcess] {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axo", "pid=,ppid=,tty=,command="]
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return [] }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return [] }
-        let text = String(data: data, encoding: .utf8) ?? ""
-        let lines = text.split(whereSeparator: \.isNewline)
-        let parsed: [(Int32, Int32, String, String)] = lines.compactMap { line in
-            let fields = line.split(maxSplits: 3, whereSeparator: \.isWhitespace)
-            guard fields.count == 4,
-                  let pid = Int32(fields[0]),
-                  let ppid = Int32(fields[1]) else { return nil }
-            return (pid, ppid, String(fields[2]), String(fields[3]))
-        }
-        let commandByPID = Dictionary(uniqueKeysWithValues: parsed.map { ($0.0, $0.3) })
-        let parentByPID = Dictionary(uniqueKeysWithValues: parsed.map { ($0.0, $0.1) })
+        guard let table = ProcessTable.read() else { return [] }
+        let parsed: [(Int32, Int32, String, String)] = table.entries.map { ($0.pid, $0.ppid, $0.tty, $0.command) }
+        let commandByPID = Dictionary(parsed.map { ($0.0, $0.3) }, uniquingKeysWith: { first, _ in first })
+        let parentByPID = Dictionary(parsed.map { ($0.0, $0.1) }, uniquingKeysWith: { first, _ in first })
         let candidates = parsed.filter { _, _, _, command in
             Self.isRestartableCodexCommand(command)
         }
@@ -349,14 +334,10 @@ final class CodexService: @unchecked Sendable {
             end repeat
         end tell
         """
-        let closer = Process()
-        closer.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        closer.arguments = ["-e", script]
-        closer.standardOutput = FileHandle.nullDevice
-        closer.standardError = FileHandle.nullDevice
         do {
-            try closer.run()
-            closer.waitUntilExit()
+            _ = try CommandRunner.runSynchronously(
+                CommandRunner.Command("/usr/bin/osascript", ["-e", script], errorOutput: .discarded), timeout: .infinity
+            )
         } catch {
             codexLog.warning("[forceRestart] Could not close Terminal tabs: \(error.localizedDescription)")
         }
@@ -512,34 +493,28 @@ final class CodexService: @unchecked Sendable {
     /// request. Codex is instructed not to persist a rollout/session file.
     func warmQuotaWindow(codexHome: String?) async throws {
         guard let binaryPath else { throw CodexServiceError.binaryNotFound }
-        try await Task.detached(priority: .utility) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: binaryPath)
-            process.arguments = [
-                "exec", "--ephemeral", "--skip-git-repo-check",
-                "--sandbox", "read-only", "--ignore-rules",
-                "--ignore-user-config",
-                "--config", "cli_auth_credentials_store=\"file\"",
-                "Reply with exactly: OK"
-            ]
-            var environment = ProcessInfo.processInfo.environment
-            if let codexHome { environment["CODEX_HOME"] = codexHome }
-            process.environment = environment
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            try process.run()
-            let deadline = Date().addingTimeInterval(60)
-            while process.isRunning && Date() < deadline {
-                Darwin.usleep(100_000)
-            }
-            if process.isRunning {
-                process.terminate()
-                throw CodexServiceError.loginFailed("Warm-up request timed out.")
-            }
-            guard process.terminationStatus == 0 else {
-                throw CodexServiceError.loginFailed("Warm-up request exited \(process.terminationStatus).")
-            }
-        }.value
+        let arguments = [
+            "exec", "--ephemeral", "--skip-git-repo-check",
+            "--sandbox", "read-only", "--ignore-rules",
+            "--ignore-user-config",
+            "--config", "cli_auth_credentials_store=\"file\"",
+            "Reply with exactly: OK"
+        ]
+        var environment = ProcessInfo.processInfo.environment
+        if let codexHome { environment["CODEX_HOME"] = codexHome }
+        let result: CommandRunner.Result
+        do {
+            result = try await CommandRunner.run(
+                CommandRunner.Command(binaryPath, arguments, environment: environment, errorOutput: .discarded,
+                                      outputLimit: 0),
+                timeout: 60
+            )
+        } catch CommandRunner.Failure.timedOut {
+            throw CodexServiceError.loginFailed("Warm-up request timed out.")
+        }
+        guard result.status == 0 else {
+            throw CodexServiceError.loginFailed("Warm-up request exited \(result.status).")
+        }
     }
 
     /// With `resetDetails`, an account whose reply counts reset credits is
@@ -1154,34 +1129,25 @@ final class CodexService: @unchecked Sendable {
     }
 
     private func run(binary: String, arguments: [String], codexHome: String?) async throws -> String {
-        try await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            let pipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: binary)
-            process.arguments = arguments
-            process.standardOutput = pipe
-            process.standardError = pipe
-            var environment = ProcessInfo.processInfo.environment
-            if let codexHome {
-                environment["CODEX_HOME"] = codexHome
-            }
-            process.environment = environment
-            do {
-                try process.run()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                let output = String(decoding: data, as: UTF8.self)
-                guard process.terminationStatus == 0 else {
-                    throw CodexServiceError.loginFailed(output.trimmingCharacters(in: .whitespacesAndNewlines))
-                }
-                return output
-            } catch let error as CodexServiceError {
-                throw error
-            } catch {
-                throw CodexServiceError.loginFailed(error.localizedDescription)
-            }
-        }.value
+        var environment = ProcessInfo.processInfo.environment
+        if let codexHome {
+            environment["CODEX_HOME"] = codexHome
+        }
+        let result: CommandRunner.Result
+        do {
+            result = try await CommandRunner.run(
+                CommandRunner.Command(binary, arguments, environment: environment, errorOutput: .merged), timeout: .infinity
+            )
+        } catch {
+            throw CodexServiceError.loginFailed(error.localizedDescription)
+        }
+        let output = result.text
+        guard result.status == 0 else {
+            throw CodexServiceError.loginFailed(output.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return output
     }
+
 }
 
 private struct CodexUsagePayload: Decodable {

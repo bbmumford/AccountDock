@@ -106,19 +106,15 @@ struct SecurityToolKeychain: Sendable {
 
     // MARK: - Process
 
+    private static let tool = "/usr/bin/security"
+
     private static func run(_ args: [String]) -> String? {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = args
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
         do {
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let result = try CommandRunner.runSynchronously(
+                CommandRunner.Command(tool, args, errorOutput: .discarded), timeout: .infinity
+            )
+            guard result.status == 0 else { return nil }
+            let output = String(data: result.output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
             return output?.isEmpty == false ? output : nil
         } catch {
             log.error("[run] Launch failed: \(error.localizedDescription)")
@@ -126,23 +122,19 @@ struct SecurityToolKeychain: Sendable {
         }
     }
 
+    /// Runs `security -i` with `commands` on standard input, so a secret
+    /// they carry stays off the command line.
     private static func runInteractive(_ commands: String) -> Bool {
-        let process = Process()
-        let input = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["-i"]
-        process.standardInput = input
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
         do {
-            try process.run()
-            input.fileHandleForWriting.write(Data(commands.utf8))
-            try input.fileHandleForWriting.close()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
+            let result = try CommandRunner.runSynchronously(
+                CommandRunner.Command(tool, ["-i"], input: Data(commands.utf8), errorOutput: .discarded, outputLimit: 0),
+                timeout: .infinity
+            )
+            return result.status == 0
         } catch {
             log.error("[runInteractive] Launch failed: \(error.localizedDescription)")
             return false
         }
     }
+
 }

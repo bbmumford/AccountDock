@@ -1,13 +1,6 @@
 import Foundation
 import Darwin
 
-private final class ProcessListOutput: @unchecked Sendable {
-    private let lock = NSLock()
-    private var data = Data()
-    func append(_ value: Data) { lock.lock(); data.append(value); lock.unlock() }
-    func snapshot() -> Data { lock.lock(); defer { lock.unlock() }; return data }
-}
-
 /// Pauses provider CLI processes with SIGSTOP and resumes exactly those PIDs with
 /// SIGCONT. Records are persisted so quitting AccountDock cannot strand an agent.
 final class AgentSuspensionService: @unchecked Sendable {
@@ -100,42 +93,17 @@ final class AgentSuspensionService: @unchecked Sendable {
         for provider in AIProviderType.implementedProviders { _ = resumeSynchronously(provider: provider) }
     }
 
+    /// The provider's processes in a fresh `ProcessTable`, outside the
+    /// app's own process tree, each with whether a shell attached to a
+    /// terminal owns it.
     private func runningProcesses(provider: AIProviderType) -> [(pid: Int32, command: String, ownedByInteractiveShell: Bool)] {
-        let process = Process()
-        let pipe = Pipe()
-        let outputBuffer = ProcessListOutput()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axo", "pid=,ppid=,tty=,command="]
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty { outputBuffer.append(data) }
-        }
-        guard (try? process.run()) != nil else { return [] }
-        let deadline = Date().addingTimeInterval(2)
-        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
-        if process.isRunning {
-            process.terminate()
-            Thread.sleep(forTimeInterval: 0.05)
-            if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) }
-        }
-        process.waitUntilExit()
-        pipe.fileHandleForReading.readabilityHandler = nil
-        outputBuffer.append(pipe.fileHandleForReading.readDataToEndOfFile())
-        let output = String(decoding: outputBuffer.snapshot(), as: UTF8.self)
-        let rows: [(pid: Int32, ppid: Int32, tty: String, command: String)] = output.split(separator: "\n").compactMap { line in
-            let parts = line.split(maxSplits: 3, whereSeparator: \.isWhitespace)
-            guard parts.count == 4, let pid = Int32(parts[0]), let ppid = Int32(parts[1]) else { return nil }
-            return (pid, ppid, String(parts[2]), String(parts[3]))
-        }
-        let parents = Dictionary(rows.map { ($0.pid, $0.ppid) }, uniquingKeysWith: { first, _ in first })
-        let commands = Dictionary(rows.map { ($0.pid, $0.command) }, uniquingKeysWith: { first, _ in first })
-        return rows.compactMap { row in
-            guard !Self.descends(row.pid, from: getpid(), parents: parents),
-                  Self.matchesCommand(row.command, provider: provider) else { return nil }
-            let interactive = Self.isInteractiveShellJob(tty: row.tty, parentCommand: commands[row.ppid])
-            return (row.pid, row.command, interactive)
+        guard let table = ProcessTable.read() else { return [] }
+        let parents = table.parents
+        return table.entries.compactMap { entry in
+            guard !Self.descends(entry.pid, from: getpid(), parents: parents),
+                  Self.matchesCommand(entry.command, provider: provider) else { return nil }
+            let interactive = Self.isInteractiveShellJob(tty: entry.tty, parentCommand: table.entry(entry.ppid)?.command)
+            return (entry.pid, entry.command, interactive)
         }
     }
 
@@ -163,17 +131,7 @@ final class AgentSuspensionService: @unchecked Sendable {
     }
 
     private func currentCommand(pid: Int32) -> String? {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-p", String(pid), "-o", "command="]
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return nil }
-        process.waitUntilExit()
-        let value = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? nil : value
+        ProcessTable.read(pid: pid)?.entry(pid).map(\.command).flatMap { $0.isEmpty ? nil : $0 }
     }
 
     static func matchesCommand(_ command: String, provider: AIProviderType) -> Bool {
@@ -202,11 +160,10 @@ final class AgentSuspensionService: @unchecked Sendable {
         // If AccountDock crashes or is force-killed, this tiny independent
         // watchdog continues every process it stopped. Normal resumption
         // terminates the watchdog first.
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "while kill -0 \(parent) 2>/dev/null; do sleep 5; done; kill -CONT \(pids.joined(separator: " ")) 2>/dev/null"]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        if (try? process.run()) != nil { watchdogs[provider] = process }
+        let script = "while kill -0 \(parent) 2>/dev/null; do sleep 5; done; kill -CONT \(pids.joined(separator: " ")) 2>/dev/null"
+        if let process = try? CommandRunner.start(CommandRunner.Command("/bin/sh", ["-c", script])) {
+            watchdogs[provider] = process
+        }
+
     }
 }

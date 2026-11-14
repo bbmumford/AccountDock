@@ -415,63 +415,31 @@ struct SessionSlots: Sendable {
     }
 
     /// The slot directory each of the user's running processes reads, by
-    /// process ID; `AppState.slotAccount(forSession:)` credits a session's
-    /// usage readings to the account serving its slot.
+    /// process ID, from a fresh `ProcessTable`; empty when it cannot be
+    /// read. `AppState.slotAccount(forSession:)` credits a session's usage
+    /// readings to the account serving its slot.
     func directoriesByProcess() -> [Int32: String] {
-        directoriesByProcess(inProcessList: Self.processList() ?? "")
-    }
-
-    func directoriesByProcess(inProcessList text: String) -> [Int32: String] {
-        Self.directoriesByProcess(inProcessList: text, variable: isolation.directoryVariable, root: root.path)
-    }
-
-    /// The user's processes as `ps -Eww -o pid=,ppid=,command=` lists
-    /// them, arguments then environment; read once a quota cycle by
-    /// `AppState.refreshSlotProcesses` for the slots processes read and for
-    /// `BackgroundSessionProcesses`. Nil when `ps` cannot run.
-    static func processList() -> String? {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-Eww", "-o", "pid=,ppid=,command=", "-U", String(getuid())]
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            log.error("[processList] ps failed: \(error.localizedDescription)")
-            return nil
+        guard let table = ProcessTable.read() else {
+            log.error("[directoriesByProcess] The process list could not be read")
+            return [:]
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return String(decoding: data, as: UTF8.self)
+        return directoriesByProcess(in: table)
     }
 
-    /// Values of `variable` under `root` in `ps -E -o pid=,command=` output,
-    /// or `pid=,ppid=,command=`, by the process ID that starts each line.
-    static func directoriesByProcess(inProcessList text: String, variable: String, root: String) -> [Int32: String] {
-        var found: [Int32: String] = [:]
-        for line in text.split(separator: "\n") {
-            let fields = line.split(separator: " ", maxSplits: 1)
-            guard fields.count == 2, let pid = Int32(fields[0]),
-                  let directory = directories(inProcessList: String(fields[1]), variable: variable, root: root).first
-            else { continue }
-            found[pid] = directory
-        }
-        return found
+    func directoriesByProcess(in table: ProcessTable) -> [Int32: String] {
+        Self.directoriesByProcess(in: table, variable: isolation.directoryVariable, root: root.path)
     }
 
-    /// Values of `variable` under `root` in `ps -E` output.
-    static func directories(inProcessList text: String, variable: String, root: String) -> Set<String> {
-        let prefix = variable + "=" + root + "/"
-        var found = Set<String>()
-        for line in text.split(separator: "\n") {
-            for word in line.split(separator: " ") where word.hasPrefix(prefix) {
-                found.insert(String(word.dropFirst(variable.count + 1)))
+    /// The value of `variable` in each process's environment that names a
+    /// directory under `root`, by process ID.
+    static func directoriesByProcess(in table: ProcessTable, variable: String, root: String) -> [Int32: String] {
+        table.entries.reduce(into: [:]) { found, entry in
+            if let directory = entry.environmentValue(variable), directory.hasPrefix(root + "/") {
+                found[entry.pid] = directory
             }
         }
-        return found
     }
+
 
     // MARK: - Launcher
 

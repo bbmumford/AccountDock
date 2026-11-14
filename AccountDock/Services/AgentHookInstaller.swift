@@ -320,24 +320,21 @@ enum AgentHookInstaller {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: configuratorURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data(configurator.utf8).write(to: configuratorURL, options: .atomic)
-        let process = Process()
-        let errors = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = [
-            "-l", "JavaScript", configuratorURL.path, action, url.path,
-            events.joined(separator: ","), command, String(timeout), marker,
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = errors
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let detail = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let result = try CommandRunner.runSynchronously(
+            CommandRunner.Command("/usr/bin/osascript", [
+                "-l", "JavaScript", configuratorURL.path, action, url.path,
+                events.joined(separator: ","), command, String(timeout), marker,
+            ], outputLimit: 0),
+            timeout: .infinity
+        )
+        guard result.status == 0 else {
+            let detail = String(decoding: result.errorOutput, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw NSError(domain: "AgentHookInstaller", code: Int(process.terminationStatus), userInfo: [
-                NSLocalizedDescriptionKey: "\(url.lastPathComponent): \(detail.isEmpty ? "configurator exited \(process.terminationStatus)" : detail)"
+            throw NSError(domain: "AgentHookInstaller", code: Int(result.status), userInfo: [
+                NSLocalizedDescriptionKey: "\(url.lastPathComponent): \(detail.isEmpty ? "configurator exited \(result.status)" : detail)"
             ])
         }
+
     }
 
     /// Edits a hooks file in place: other settings and their order are kept,

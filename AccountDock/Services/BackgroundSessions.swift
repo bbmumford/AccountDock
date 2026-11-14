@@ -1,8 +1,8 @@
 import Foundation
 
 /// The processes of a CLI's background-session service
-/// (`BackgroundSessionSupport`) among the user's processes, read from the
-/// process list `SessionSlots.processList` gives once a quota cycle.
+/// (`BackgroundSessionSupport`) among the running processes, read from the
+/// `ProcessTable` `AppState.refreshSlotProcesses` reads once a quota cycle.
 ///
 /// A worker runs a background session: its lifecycle record names it, it
 /// reads no slot, so the session runs on the CLI's shared sign-in
@@ -31,21 +31,22 @@ struct BackgroundSessionProcesses: Equatable, Sendable {
 
     init() {}
 
-    /// Parses `ps -Eww -o pid=,ppid=,command=` output. A process is the
-    /// CLI's when its first word, the executable, is named `executable`;
-    /// the words after it are its arguments, and its environment follows.
-    init(processList text: String, executable: String, support: BackgroundSessionSupport) {
-        for line in text.split(separator: "\n") {
-            let words = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
-            guard words.count >= 3, let pid = Int32(words[0]), let parent = Int32(words[1]) else { continue }
-            parents[pid] = parent
-            let name = (String(words[2]) as NSString).lastPathComponent
+    /// Reads the processes in `table`. A process is the CLI's when its
+    /// first word, the executable, is named `executable`; the words after
+    /// it are its arguments.
+    init(table: ProcessTable, executable: String, support: BackgroundSessionSupport) {
+        for entry in table.entries {
+            let pid = entry.pid
+            let words = entry.command.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            guard let first = words.first else { continue }
+            parents[pid] = entry.ppid
+            let name = (String(first) as NSString).lastPathComponent
             if Self.shellNames.contains(name.hasPrefix("-") ? String(name.dropFirst()) : name) {
                 shells.insert(pid)
                 continue
             }
             guard name == executable else { continue }
-            let arguments = words.dropFirst(3).map(String.init)
+            let arguments = words.dropFirst().map(String.init)
             guard let first = arguments.first else { continue }
             if support.workerCommands.contains(first) {
                 workers.insert(pid)
@@ -162,7 +163,8 @@ struct CLIBackgroundSessionControl: BackgroundSessionControl {
     static let timeout: TimeInterval = 30
 
     func stop(_ sessionID: String, executable: String, support: BackgroundSessionSupport) async -> Bool {
-        guard let result = try? await BoundedProcess.run(
+        guard let result = try? await CommandRunner.run(
+
             executable: URL(fileURLWithPath: executable),
             arguments: [support.stopCommand, sessionID],
             timeout: Self.timeout

@@ -157,13 +157,13 @@ final class SessionTerminalTests: XCTestCase {
     }
 
     func testTheAgtermSessionIsReadFromTheProcessEnvironment() {
-        XCTAssertEqual(AgtermTerminalInput.sessionID(inProcessList: "claude --resume x PATH=/bin AGTERM_SESSION_ID=ab12 TERM=xterm"), "ab12")
-        XCTAssertNil(AgtermTerminalInput.sessionID(inProcessList: "claude PATH=/bin AGTERM_SESSION_ID= TERM=xterm"))
-        XCTAssertNil(AgtermTerminalInput.sessionID(inProcessList: "claude PATH=/bin"))
+        XCTAssertEqual(AgtermTerminalInput.sessionID(of: .init(pid: 1, command: "claude --resume x", environment: "PATH=/bin AGTERM_SESSION_ID=ab12 TERM=xterm")), "ab12")
+        XCTAssertNil(AgtermTerminalInput.sessionID(of: .init(pid: 1, command: "claude", environment: "PATH=/bin AGTERM_SESSION_ID= TERM=xterm")))
+        XCTAssertNil(AgtermTerminalInput.sessionID(of: .init(pid: 1, command: "claude", environment: "PATH=/bin")))
     }
 
-    func testABoundedProcessReadsItsInputFromStandardInput() async throws {
-        let result = try await BoundedProcess.run(executable: URL(fileURLWithPath: "/bin/cat"), arguments: [],
+    func testACommandReadsItsInputFromStandardInput() async throws {
+        let result = try await CommandRunner.run(executable: URL(fileURLWithPath: "/bin/cat"), arguments: [],
                                                   input: Data("typed text".utf8), timeout: 5)
         XCTAssertEqual(String(decoding: result.output, as: UTF8.self), "typed text")
     }

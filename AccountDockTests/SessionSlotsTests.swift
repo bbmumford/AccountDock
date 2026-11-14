@@ -49,19 +49,22 @@ final class SessionSlotsTests: XCTestCase {
           102 /opt/homebrew/bin/claude HOME=/Users/u
         30896 /opt/homebrew/bin/claude --resume x CLAUDE_SECURESTORAGE_CONFIG_DIR=\(root)/B2
         """
-        XCTAssertEqual(SessionSlots.directoriesByProcess(inProcessList: list, variable: "CLAUDE_SECURESTORAGE_CONFIG_DIR", root: root),
+        XCTAssertEqual(SessionSlots.directoriesByProcess(in: ProcessTable(listing: list, columns: .pid),
+                                                         variable: "CLAUDE_SECURESTORAGE_CONFIG_DIR", root: root),
                        [101: "\(root)/A1", 30896: "\(root)/B2"])
     }
 
     func testDirectoriesInUseAreReadFromProcessEnvironments() {
         let root = "/Users/someone/.accountdock/claude-slots"
         let list = """
-        claude --resume HOME=/Users/someone CLAUDE_SECURESTORAGE_CONFIG_DIR=\(root)/A TERM=xterm
-        node app.js CLAUDE_SECURESTORAGE_CONFIG_DIR=/elsewhere/B
-        claude XCLAUDE_SECURESTORAGE_CONFIG_DIR=\(root)/C
+        1 claude --resume HOME=/Users/someone CLAUDE_SECURESTORAGE_CONFIG_DIR=\(root)/A TERM=xterm
+        2 node app.js CLAUDE_SECURESTORAGE_CONFIG_DIR=/elsewhere/B
+        3 claude XCLAUDE_SECURESTORAGE_CONFIG_DIR=\(root)/C
         """
-        XCTAssertEqual(SessionSlots.directories(inProcessList: list, variable: "CLAUDE_SECURESTORAGE_CONFIG_DIR", root: root),
-                       ["\(root)/A"])
+        XCTAssertEqual(SessionSlots.directoriesByProcess(in: ProcessTable(listing: list, columns: .pid),
+                                                         variable: "CLAUDE_SECURESTORAGE_CONFIG_DIR", root: root),
+                       [1: "\(root)/A"])
+
     }
 
     func testAccountForDirectoryAcceptsOnlySlotsUnderTheRoot() throws {

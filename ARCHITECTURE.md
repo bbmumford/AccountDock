@@ -49,6 +49,19 @@ releasing are in [BUILD_GUIDE.md](BUILD_GUIDE.md).
 command-line tool target embedded in the app bundle under `Contents/MacOS`, so
 one installed app always carries a matching router build.
 
+The app runs every other program through `CommandRunner`: output is read
+while the program runs, a time limit or a cancel stops it with `SIGTERM` then
+`SIGKILL`, secrets go on standard input, and standard error is kept apart,
+merged or discarded; `start` launches the few programs that outlive the call
+(the pause watchdog, the update helper). Every question about running
+processes is asked of a `ProcessTable`: pid, parent, terminal, the exact
+command (`ps -axww`) and the environment (what `ps -axEww` adds after it).
+The quota cycle reads one fresh (`refreshSlotProcesses`) and terminal lookups
+reuse it while it is a few seconds old; readers that act on a process at once
+read their own. `CommandRunnerCoverageTests` fails for a launch outside the
+runner or a `ps` outside the table.
+
+
 ## Providers
 
 `AccountDock/Models/ProviderCapabilities.swift` declares each provider once.
