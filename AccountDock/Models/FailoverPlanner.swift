@@ -34,6 +34,13 @@ struct QuotaAccountState: Equatable {
     /// the router or in a session's transcript, since its last reading;
     /// nothing more is sent to it until a reading shows room.
     var refusedAtLimit = false
+    /// Session percent per hour spent by the work that stays on this account
+    /// whichever account is active: sessions in one-session slots of its
+    /// own. A switch moves only the rest, the sessions on the shared
+    /// sign-in, so `FailoverPlanner.plan` charges a destination the moving
+    /// work beside its own slot sessions, and leaves the active account's
+    /// slot sessions out of what moves.
+    var stayingSessionBurnPerHour: Double = 0
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id && lhs.observedAt == rhs.observedAt }
 }
@@ -521,10 +528,9 @@ struct FailoverPlanner {
         now: Date = Date()
     ) -> FailoverPlan {
         let others = rotation(ladder: ladder, currentID: current.id)
-        let burnS = expectedSessionBurn(of: current)
-        let burnW = current.weeklyBurnPerHour
         func tierOf(_ state: QuotaAccountState) -> QuotaTier {
-            tier(state, now: now, expectedSessionBurn: burnS, expectedWeeklyBurn: burnW)
+            let burn = expectedBurn(movingFrom: current, to: state)
+            return tier(state, now: now, expectedSessionBurn: burn.session, expectedWeeklyBurn: burn.weekly)
         }
 
         if current.workloadAvailable, projection(current, now: now) == nil {
@@ -614,10 +620,9 @@ struct FailoverPlanner {
         if let lastSwitch, now.timeIntervalSince(lastSwitch) < settings.minimumDwell {
             return .stay(.dwell)
         }
-        let burnS = expectedSessionBurn(of: current)
-        let burnW = current.weeklyBurnPerHour
         let candidates = others.filter {
-            tier($0, now: now, expectedSessionBurn: burnS, expectedWeeklyBurn: burnW) == .belowTrigger
+            let burn = expectedBurn(movingFrom: current, to: $0)
+            return tier($0, now: now, expectedSessionBurn: burn.session, expectedWeeklyBurn: burn.weekly) == .belowTrigger
         }.sorted { latestStart($0, now: now) < latestStart($1, now: now) }
         guard let best = candidates.first else { return .stay(.healthy) }
         let advantage = latestStart(current, now: now).timeIntervalSince(latestStart(best, now: now)) / 3600
@@ -723,11 +728,8 @@ struct FailoverPlanner {
     /// reading, following the same rotation and tiers as `plan`.
     func hasFallback(current: QuotaAccountState, ladder: [QuotaAccountState], now: Date) -> Bool {
         rotation(ladder: ladder, currentID: current.id).contains { state in
-            let tier = tier(
-                state, now: now,
-                expectedSessionBurn: current.sessionBurnPerHour,
-                expectedWeeklyBurn: current.weeklyBurnPerHour
-            )
+            let burn = expectedBurn(movingFrom: current, to: state)
+            let tier = tier(state, now: now, expectedSessionBurn: burn.session, expectedWeeklyBurn: burn.weekly)
             guard tier <= .usable, settings.canVerify || canSwitchWithoutReading(state, now: now) else { return false }
             if tier == .belowTrigger { return true }
             guard let projection = projection(state, now: now) else { return false }
@@ -735,15 +737,76 @@ struct FailoverPlanner {
         }
     }
 
+    /// What a destination is expected to carry per hour once `current`'s
+    /// work moves to it, in session and long-window percent: the work that
+    /// moves, the active account's burn less its slot sessions
+    /// (`QuotaAccountState.stayingSessionBurnPerHour`), beside the
+    /// destination's own slot sessions, which stay. `tier` takes the larger
+    /// of this and the destination's measured burn, which already holds its
+    /// slot sessions once its readings show them.
+    func expectedBurn(movingFrom current: QuotaAccountState,
+                      to destination: QuotaAccountState) -> (session: Double, weekly: Double) {
+        let k = current.sessionPerWeekly ?? Self.defaultSessionPerWeekly
+        let session = max(0, expectedSessionBurn(of: current) - current.stayingSessionBurnPerHour)
+            + destination.stayingSessionBurnPerHour
+        let weekly = max(0, current.weeklyBurnPerHour - current.stayingSessionBurnPerHour / k)
+            + destination.stayingSessionBurnPerHour / (destination.sessionPerWeekly ?? Self.defaultSessionPerWeekly)
+        return (session, weekly)
+    }
+
+    /// The account `plan` would make active next, and when.
+    struct NextSwitch: Equatable {
+        var account: UUID
+        var at: Date
+    }
+
+    /// When the active account is projected to be switched away from, and
+    /// to which account, by `plan` itself: asked as of the moment its
+    /// burn carries it across a trigger, and failing a switch then, as of
+    /// the moment it reaches its limit, when a reading or a refusal will
+    /// show the limit. A destination `plan` would read first
+    /// (`FailoverPlan.verify`) is taken as the one it switches to. Nil when
+    /// the active account is not projected to reach either, or `plan`
+    /// would keep it or wait for a reset then. Read by `SessionPacer`'s
+    /// shared group, which moves with the active account.
+    func nextSwitch(current: QuotaAccountState, ladder: [QuotaAccountState],
+                    recoveredIDs: Set<UUID> = [], now: Date) -> NextSwitch? {
+        func destination(_ plan: FailoverPlan) -> UUID? {
+            switch plan {
+            case .switchTo(let id, _): id == current.id ? nil : id
+            case .verify(let ids): ids.first { $0 != current.id }
+            case .stay, .waitForReset, .noCapacity: nil
+            }
+        }
+        let others = ladder.filter { $0.id != current.id }
+        let withCurrent = ladder.contains { $0.id == current.id } ? ladder : [current] + ladder
+        if let toTrigger = secondsUntilTrigger(current, now: now) {
+            let at = now.addingTimeInterval(toTrigger)
+            let plan = plan(current: current, ladder: withCurrent, recoveredIDs: recoveredIDs, lastSwitch: nil, now: at)
+            if let id = destination(plan), others.contains(where: { $0.id == id }) { return NextSwitch(account: id, at: at) }
+        }
+        guard let toLimit = secondsUntilExhaustion(current, now: now) else { return nil }
+        let at = now.addingTimeInterval(toLimit)
+        var limited = current
+        limited.refusedAtLimit = true
+        let ladderAtLimit = withCurrent.map { $0.id == current.id ? limited : $0 }
+        let plan = plan(current: limited, ladder: ladderAtLimit, recoveredIDs: recoveredIDs, lastSwitch: nil, now: at)
+        guard let id = destination(plan), others.contains(where: { $0.id == id }) else { return nil }
+        return NextSwitch(account: id, at: at)
+    }
+
     /// Headroom a usable account needs to take work from an account at its
     /// limit: the in-flight reserve, the cost of the move, and
     /// `minimumDestinationMinutes` of burn on the upper estimate. The burn is
-    /// the larger of the account being left and the destination's own, since
+    /// the larger of the work that moves there beside the destination's own
+    /// slot sessions and the destination's own measured burn, since
     /// the current account's rate falls to nothing while its sessions are
     /// paused, and a sliver that looked enough then was used up as soon as
     /// they resumed on it, which switched straight back.
     func destinationMinimum(current: QuotaAccountState, destination: QuotaAccountState) -> Double {
-        let burn = max(current.sessionBurnPerHour + current.sessionBurnStdDev,
+        let moving = max(0, current.sessionBurnPerHour - current.stayingSessionBurnPerHour)
+            + destination.stayingSessionBurnPerHour
+        let burn = max(moving + current.sessionBurnStdDev,
                        destination.sessionBurnPerHour + destination.sessionBurnStdDev)
         return max(
             Self.minimumUsableHeadroom,

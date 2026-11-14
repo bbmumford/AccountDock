@@ -579,8 +579,15 @@ extension AppState {
             guard let id = UUID(uuidString: member.accountID), let state = states[id] else { return nil }
             return pacerAccount(id, state: state, weight: member.weight, planner: planner, now: now)
         }
-        let sessions = pacerSessions(provider, now: now)
-        let plan = SessionPacer().plan(accounts: paced, sessions: sessions, now: now)
+        // Without the router, the sessions on the shared sign-in move only
+        // with the active account: the pacer takes them as one group, which
+        // it places on the active account and, from the projected switch,
+        // on the next one, and never moves.
+        var sessions = pacerSessions(provider, now: now)
+        let shared = movesSessions ? nil : sharedGroup(provider, sessions: sessions, now: now)
+        if let shared { sessions.removeAll { shared.members.contains($0.id) } }
+        noteSharedGroup(shared?.group, provider: provider)
+        let plan = SessionPacer().plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group)
         let onDraining = Set(sessions.filter { draining.contains($0.account) }.map(\.id))
         // A session is never moved to an account without allowance for the
         // model it uses, nor off a draining account before its limit.

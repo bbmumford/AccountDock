@@ -439,6 +439,14 @@ refusal shows the limit.
    instead of an account whose weekly window resets days later being
    prepared, which had switched between the two every minute.
 
+A switch moves only the work on the shared sign-in: sessions in one-session
+slots stay on their accounts. Each account's slot sessions' rate is its
+`QuotaAccountState.stayingSessionBurnPerHour` (`AppState.withStayingBurns`),
+so a destination is judged for the work that moves (the active account's
+burn less its own slot sessions) beside the slot sessions already on it
+(`FailoverPlanner.expectedBurn`), and the shared sign-in is not switched
+onto an account its slot sessions are about to exhaust.
+
 A destination whose reading may be out of date is read again before the switch
 (`verify`) rather than skipped, so the user's order is honoured with current
 data. Readings expire after 10 minutes for an account that sessions may be
@@ -715,6 +723,25 @@ the pool weights and which sessions move, each time the pool is rebuilt
 - A session that starts a turn after its cache has expired is placed again
   like a new session (`RouterState.cacheAwareSessions`), since moving it
   loses nothing.
+- With one-session slots, the sessions on the shared sign-in (outside a
+  slot, background workers included) all run on the active account and move
+  together whenever it changes, so the pacer takes them as one group
+  (`SessionPacer.SharedGroup`, built by `AppState.sharedGroup`) and never
+  moves them: their rate over their last hour, context and models. The
+  group counts on the active account until the switch failover projects
+  (`FailoverPlanner.nextSwitch`, which asks `plan` itself as of the moment
+  the active account's burn crosses a threshold, or failing a switch then,
+  reaches its limit), and on the account it would switch to from then until
+  that account's resets, with the cache rewrite of the group's context on
+  arrival (`SessionPacer.shares`). Pool weights, model weights, the runway
+  rule, moves and **Rebalance sessions now** all see that load, so no slot
+  session is placed or moved onto room the group will need. With failover
+  off for the provider or the active account locked, the group stays on the
+  active account for the whole horizon. The active account's readings
+  already include the group's rate, which its share counts instead. When the
+  group is projected to move, an event and the rebalance preview say so
+  ("AccountDock keeps room on B for the 4 sessions on the shared sign-in,
+  which move there at about 3:40 pm.").
 
 A session whose model's own allowance is spent on every account stays where
 it is and is refused. With the policy's `noRoomModelFallback` (off by
