@@ -20,6 +20,38 @@ private struct StatWithTooltip<Content: View>: View {
     }
 }
 
+/// An account card's session count, with how many of the sessions were
+/// refused at a usage limit. Resting the pointer on it lists the sessions
+/// (`AppState.sessionSummary`) in a popover, which opens at once inside the
+/// status-item panel.
+private struct SessionCountLabel: View {
+    let count: Int
+    let refused: Int
+    let summary: String
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(count == 1 ? "1 session" : "\(count) sessions")
+                .font(.caption2)
+                .foregroundStyle(.textSecondary)
+            if refused > 0 {
+                Text("\(refused) refused at a limit")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.red)
+            }
+        }
+        .onHover { isHovering = $0 }
+        .popover(isPresented: $isHovering, arrowEdge: .bottom) {
+            Text(verbatim: summary)
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(8)
+                .frame(minWidth: 180, maxWidth: 440, alignment: .leading)
+        }
+    }
+}
+
 /// Shows enabled providers in the same grouped order configured in Accounts.
 struct UsageDashboardView: View {
     @EnvironmentObject private var appState: AppState
@@ -369,17 +401,9 @@ struct UsageDashboardView: View {
                         Badge(text: String(localized: "Active", bundle: L10n.bundle), color: .brand)
                     }
                     if let sessions = appState.accountSessions[account.id], !sessions.isEmpty {
-                        Text(sessions.count == 1 ? "1 session" : "\(sessions.count) sessions")
-                            .font(.caption2)
-                            .foregroundStyle(.textSecondary)
-                            .help(appState.sessionSummary(sessions))
-                        let refused = sessions.filter { appState.sessionRefusals[$0] != nil }.count
-                        if refused > 0 {
-                            Text("\(refused) refused at a limit")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.red)
-                                .help(appState.sessionSummary(sessions))
-                        }
+                        SessionCountLabel(count: sessions.count,
+                                          refused: sessions.filter { appState.sessionRefusals[$0] != nil }.count,
+                                          summary: appState.sessionSummary(sessions))
                     }
                 }
                 AccountEmailLabel(email: account.email, alwaysVisible: showFullEmail)
@@ -547,15 +571,24 @@ struct UsageDashboardView: View {
     /// has used, and `percent` how much of its own limit that is.
     /// The colour of a model's part of the weekly bar, by the bar's own
     /// colour, so the part always reads apart from it: the orange the Extra
-    /// usage row uses in a bar at rest, red in an orange bar, and a deep
-    /// blood red in a red one.
+    /// usage row uses in a bar at rest, red in an orange bar, and `deepRed`
+    /// in a red one.
     static func modelShareColor(in severity: UsageLevel.Severity) -> Color {
         switch severity {
-        case .critical: Color(red: 0.42, green: 0.0, blue: 0.04)
+        case .critical: deepRed
         case .high: .red
         case .normal, .unknown: .orange
         }
     }
+
+    /// The red a bar at its limit is drawn in, taken part of the way to
+    /// black: the same hue at a greater depth, in light and dark appearance
+    /// alike, so a model's part of a red bar matches the bar.
+    static let deepRed = Color(nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+        var red = NSColor.systemRed
+        appearance.performAsCurrentDrawingAppearance { red = NSColor.systemRed.usingColorSpace(.sRGB) ?? .systemRed }
+        return red.blended(withFraction: 0.38, of: .black) ?? red
+    }))
 
     struct ModelShare {
         let name: String
