@@ -20,6 +20,9 @@ struct AgentSession: Decodable, Equatable, Sendable {
 
     /// Whether a turn is under way: the last event was a prompt.
     var isWorking: Bool { event == "UserPromptSubmit" }
+    /// Whether it is between turns: its last turn ended (`Stop`), so its
+    /// prompt waits for the user (`SessionTerminalActions`).
+    var isIdle: Bool { event == "Stop" }
 }
 
 enum AgentSessions {
