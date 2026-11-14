@@ -21,6 +21,12 @@ struct PassiveUsageObservation: Sendable {
         /// Whether every reading names its account, so one that does not
         /// cannot be attributed.
         var alwaysNamesAccount: Bool { self == .claudeUsageCache }
+
+        /// Whether a running session writes the source's reading with each
+        /// response, so a new one arrives every few seconds while it works:
+        /// `AppState.liveReadingAt` lets such a reading stand over the
+        /// forecast (`FailoverPlanner.liveReadingShowsRoom`).
+        var reportsWithEachResponse: Bool { self != .claudeUsageCache }
     }
 
     /// How a reading names the account it belongs to.

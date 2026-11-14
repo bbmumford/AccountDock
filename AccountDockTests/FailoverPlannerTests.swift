@@ -106,6 +106,46 @@ final class FailoverPlannerTests: XCTestCase {
         }
     }
 
+    func testAFreshStatusLineReadingWithRoomStandsOverTheForecast() {
+        let p = planner(policy())
+        // A burst-learned burn grows a reading 90 seconds old from 40% to 100%.
+        var current = account(session: 40, weekly: 40, age: 90, active: true, burn: 2400)
+        XCTAssertTrue(p.isForecastAtLimit(current, now: now))
+        XCTAssertTrue(p.isTriggered(current, now: now))
+        XCTAssertEqual(p.servingVerdict(current, now: now, lead: 150), .nearLimit)
+
+        current.liveReadingAt = current.observedAt
+        XCTAssertTrue(p.liveReadingShowsRoom(current, now: now))
+        XCTAssertFalse(p.isForecastAtLimit(current, now: now))
+        XCTAssertFalse(p.isTriggered(current, now: now))
+        XCTAssertEqual(p.servingVerdict(current, now: now, lead: 150), .canServe)
+        let other = account(session: 5, weekly: 5)
+        XCTAssertEqual(p.plan(current: current, ladder: [current, other], lastSwitch: nil, now: now), .stay(.healthy))
+
+        // Too old, over a trigger, or refused since: the forecast stands.
+        XCTAssertFalse(p.liveReadingShowsRoom(current, now: now.addingTimeInterval(FailoverPlanner.liveReadingLifetime)))
+        var over = account(session: 92, weekly: 40, age: 10, active: true, burn: 50)
+        over.liveReadingAt = over.observedAt
+        XCTAssertFalse(p.liveReadingShowsRoom(over, now: now))
+        XCTAssertTrue(p.isTriggered(over, now: now))
+        var refused = current
+        refused.refusedAtLimit = true
+        XCTAssertFalse(p.liveReadingShowsRoom(refused, now: now))
+        var older = current
+        older.liveReadingAt = current.observedAt?.addingTimeInterval(-30)
+        XCTAssertFalse(p.liveReadingShowsRoom(older, now: now), "only while it is the newest reading")
+    }
+
+    func testAStatusLineNeverOverridesAModelLimitFromTheLastWholeReading() {
+        let p = planner(policy())
+        // `plannedUsage` narrows the long window to the session model's own
+        // allowance from the last whole reading: spent here.
+        var spentModel = account(session: 40, weekly: 100, age: 10, active: true, burn: 10)
+        spentModel.liveReadingAt = spentModel.observedAt
+        XCTAssertFalse(p.liveReadingShowsRoom(spentModel, now: now))
+        XCTAssertEqual(p.servingVerdict(spentModel, now: now, lead: 0), .atLimit)
+    }
+
     func testARecordedRefusalStandsUntilAReadingAnswersIt() {
         let refused = now.addingTimeInterval(-60)
         let before = now.addingTimeInterval(-600)

@@ -326,6 +326,18 @@ Throttling backs off for every account of that provider, from one minute up to
 fifteen. While a provider throttles, `QuotaTrend` projects the active account's
 usage forward from its learned burn rate so failover still acts on time.
 
+A reading a running session reports with a response (the status line, a
+Codex rollout: `PassiveUsageObservation.Source.reportsWithEachResponse`)
+arrives every few seconds while it works, whatever the budget or a cool-down
+allows. While such a reading is the account's newest, under two minutes old,
+below every trigger and not followed by a refusal, it stands over the
+forecast (`FailoverPlanner.liveReadingShowsRoom`): the account is neither
+triggered nor near or forecast at its limit, and a router refusal recorded
+before it is dropped. It carries no model's own weekly limit; that verdict
+stays with the last whole reading, which narrows the long window the planner
+sees, and an account with such limits keeps a router refusal until a whole
+reading after it.
+
 Claude's response includes every limit it applies, including weekly limits
 scoped to one model (`limits[]` with `kind: weekly_scoped`) and the share of the
 weekly allowance each may use. The planner uses the model-scoped window that

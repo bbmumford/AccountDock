@@ -915,6 +915,7 @@ extension AppState {
                 let until = event.detail.flatMap { ISO8601DateFormatter().date(from: $0) } ?? now.addingTimeInterval(10 * 60)
                 if let accountID {
                     routerRefusedUntil[accountID] = until
+                    routerRefusedAt[accountID] = event.at
                 } else if let backend = event.backend, backend != RouterBackend.anthropic.id {
                     routeTargetRefusedUntil[backend] = until
                 }

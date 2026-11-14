@@ -5,6 +5,10 @@ struct QuotaAccountState: Equatable {
     let id: UUID
     var usage: UsageAPIResponse?
     var observedAt: Date?
+    /// Set to `observedAt` when the newest reading is one a running session
+    /// reported with a response, as a status line does every few seconds;
+    /// `FailoverPlanner.liveReadingShowsRoom` lets it stand over the forecast.
+    var liveReadingAt: Date? = nil
     /// Session percentage consumed per hour while this account carries the workload.
     var sessionBurnPerHour: Double = 0
     /// Long-window percentage consumed per hour while this account carries the workload.
@@ -258,10 +262,33 @@ struct FailoverPlanner {
     }
 
     /// Whether the forecast, the reading grown by the burn over its age,
-    /// has the account at a limit its reading does not show.
+    /// has the account at a limit its reading does not show. A live reading
+    /// with room (`liveReadingShowsRoom`) leaves no such forecast.
     func isForecastAtLimit(_ state: QuotaAccountState, now: Date) -> Bool {
-        guard let projection = projection(state, now: now) else { return false }
+        guard let projection = projection(state, now: now), !liveReadingShowsRoom(state, now: now) else { return false }
         return reachesLimit(state, projection) && !isMeasuredAtLimit(state, now: now)
+    }
+
+    /// How long a reading a session reported with a response stands over
+    /// the forecast; a working session reports one every few seconds.
+    static let liveReadingLifetime: TimeInterval = 2 * 60
+
+    /// Whether the account's newest reading is one a running session
+    /// reported with a response (`QuotaAccountState.liveReadingAt`), within
+    /// `liveReadingLifetime`, with every window below its trigger and no
+    /// refusal since. It then wins over the forecast: the account is not
+    /// triggered, not near its limit and not forecast at it, however fast
+    /// the learned burn would have grown the reading. Such a reading
+    /// carries the session and long windows only; a model's own weekly
+    /// limit reaches the state through `AppState.plannedUsage` from the
+    /// last whole reading, so a spent one still keeps the long window over
+    /// its trigger here.
+    func liveReadingShowsRoom(_ state: QuotaAccountState, now: Date) -> Bool {
+        guard !state.refusedAtLimit, let live = state.liveReadingAt, live == state.observedAt,
+              now.timeIntervalSince(live) <= Self.liveReadingLifetime,
+              let measured = measuredProjection(state, now: now), let weekly = measured.weekly else { return false }
+        if let session = measured.session, session >= settings.sessionTrigger { return false }
+        return weekly < settings.weeklyTrigger && !reachesLimit(state, measured)
     }
 
     func isFresh(_ state: QuotaAccountState, now: Date) -> Bool {
@@ -341,6 +368,7 @@ struct FailoverPlanner {
         case .exhausted: return .atLimit
         case .ineligible: return .ineligible
         case .belowTrigger, .usable:
+            if liveReadingShowsRoom(state, now: now) { return .canServe }
             if isForecastAtLimit(state, now: now) { return .nearLimit }
             return (secondsUntilExhaustion(state, now: now) ?? .infinity) < lead ? .nearLimit : .canServe
         }
@@ -360,8 +388,11 @@ struct FailoverPlanner {
     }
 
     /// Whether the active account has crossed, or will cross before the next
-    /// decision, a trigger or the hard limit.
+    /// decision, a trigger or the hard limit. A live reading with room
+    /// (`liveReadingShowsRoom`) says it has not; the next one follows
+    /// within seconds.
     func isTriggered(_ state: QuotaAccountState, now: Date) -> Bool {
+        guard !liveReadingShowsRoom(state, now: now) else { return false }
         guard let projection = projection(state, now: now), let upper = upperProjection(state, now: now) else { return false }
         if let session = upper.session, session >= settings.sessionTrigger { return true }
         if let weekly = upper.weekly, weekly >= settings.weeklyTrigger { return true }
