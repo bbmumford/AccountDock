@@ -729,7 +729,7 @@ final class AppState: ObservableObject {
             credentialLocation: identity.credentialLocation
         )
         accounts.append(added)
-        if makeActive { makeAddedAccountActive(added.id) } else { saveAccounts(refreshWidget: true) }
+        saveAccounts(refreshWidget: true)
         log.info("[provider-auth] Imported \(adapter.provider.rawValue) account; total=\(accounts.count)")
     }
 
@@ -744,7 +744,10 @@ final class AppState: ObservableObject {
         do {
             log.info("[provider-auth] Starting isolated \(provider.rawValue) login")
             let identity = try await adapter.login()
-            try registerManagedAccount(identity, using: adapter, makeActive: true)
+            // The login is isolated from the live credential, so the account
+            // active before stays active; the first of a provider becomes it.
+            let first = activeAccount(for: provider) == nil
+            try registerManagedAccount(identity, using: adapter, makeActive: first)
         } catch {
             guard loginAttemptID == loginID else { return }
             errorMessage = error.localizedDescription
@@ -755,7 +758,12 @@ final class AppState: ObservableObject {
     private func captureCurrentManagedAccount(provider: AIProviderType) async {
         guard let adapter = managedProviderAdapter(for: provider) else { return }
         do {
-            try registerManagedAccount(try await adapter.captureCurrent(), using: adapter, makeActive: true)
+            // The live credential is the captured account's. The account active
+            // before is put back live and stays active; the first of a
+            // provider becomes it.
+            let previous = activeAccount(for: provider)
+            try registerManagedAccount(try await adapter.captureCurrent(), using: adapter, makeActive: previous == nil)
+            if let location = previous?.credentialLocation { try adapter.activate(location) }
         } catch {
             errorMessage = error.localizedDescription
             log.error("[provider-auth] \(provider.rawValue) capture failed: \(error.localizedDescription)")
@@ -810,23 +818,27 @@ final class AppState: ObservableObject {
         log.info("[login] User cancelled browser login")
     }
 
-    /// Makes an account just added the active one of its provider, the
-    /// account its CLI is now signed in to: sessions on the provider's
-    /// shared sign-in are told to read it again (`moveRunningSessions`), and
-    /// automatic failover holds off for `userSwitchHold`, as after a switch
-    /// the user asked for, so the new account is not switched away from at
-    /// once.
-    func makeAddedAccountActive(_ id: UUID) {
-        guard let account = accounts.first(where: { $0.id == id }) else { return }
-        let previous = activeAccount(for: account.provider)
-        accounts.makeActive(id)
+    /// Keeps `previous` the active account after a sign-in left the CLI
+    /// signed in to `added`, an account just added: the sign-in is captured
+    /// for `added`, then `previous` is switched back, so adding an account
+    /// moves no session. The first account of a provider has no `previous`
+    /// and becomes the active one. When `previous` cannot be put back,
+    /// `added` stays active and an event says so.
+    func keepActiveAfterAdding(_ added: UUID, previous: Account?) async {
+        guard let account = accounts.first(where: { $0.id == added }) else { return }
+        // `performSwitch` starts from the account the CLI is signed in to.
+        accounts.makeActive(added)
         saveAccounts(refreshWidget: true)
-        noteLiveCredentialOwner(account.provider, account: id)
-        userSwitchedAt[account.provider] = Date()
-        guard previous?.id != id else { return }
-        if let previous { lastSwitchedAway[previous.id] = Date() }
-        moveRunningSessions(account.provider, from: previous?.id)
-        failoverEvents.record(account.provider, "Added \(messageName(account)) and made it the active account; sessions on the shared sign-in move to it at their next request.")
+        noteLiveCredentialOwner(account.provider, account: added)
+        guard let previous, previous.id != added else { return }
+        await performSwitch(to: previous, refreshAfter: false)
+        if activeAccount(for: account.provider)?.id == previous.id {
+            // Sessions that read the sign-in while it was `added`'s read it again.
+            moveRunningSessions(account.provider, from: added)
+            log.info("[addAccount] Kept the account that was active")
+        } else {
+            failoverEvents.record(account.provider, "\(messageName(account)) was added and is now the active account, because \(messageName(previous)) could not be put back; sessions on the shared sign-in follow it.")
+        }
     }
 
     /// The provider's active account, read from the accounts' own flags.
@@ -878,10 +890,9 @@ final class AppState: ObservableObject {
             }
             log.info("[addAccount] Token captured successfully")
 
+            let previous = activeAccount(for: .claudeCode)
             accounts.append(account)
-            // The CLI is signed in to the account just added, so it is the
-            // active one.
-            makeAddedAccountActive(account.id)
+            await keepActiveAfterAdding(account.id, previous: previous)
             log.info("[addAccount] Account saved. Total accounts: \(self.accounts.count)")
         } catch {
             errorMessage = error.localizedDescription
@@ -900,6 +911,9 @@ final class AppState: ObservableObject {
         guard let loginID = beginLoginAttempt() else { return }
         defer { finishLoginAttempt(loginID) }
 
+        // The account to put back once the new one has signed in, when its
+        // live sign-in could be saved first.
+        var displacedByLogin: Account?
         do {
             // 1. Back up current account (token + oauthAccount) before login overwrites them
             if let current = activeAccount(for: .claudeCode) {
@@ -908,6 +922,7 @@ final class AppState: ObservableObject {
                     forAccountId: current.id.uuidString,
                     expectedEmail: current.email
                 )
+                if backed { displacedByLogin = current }
                 log.info("[loginNewAccount] Step 1: Backup result: \(backed)")
             } else {
                 log.info("[loginNewAccount] Step 1: No active account, skipping backup")
@@ -935,9 +950,7 @@ final class AppState: ObservableObject {
                     forAccountId: accounts[existing].id.uuidString,
                     expectedEmail: accounts[existing].email
                 )
-                // The login left the CLI signed in to it, so it is the active
-                // account now.
-                makeAddedAccountActive(accounts[existing].id)
+                await keepActiveAfterAdding(accounts[existing].id, previous: displacedByLogin)
                 errorMessage = String(localized: "Account already exists - credentials refreshed", bundle: L10n.bundle)
                 return
             }
@@ -965,7 +978,7 @@ final class AppState: ObservableObject {
 
             // 6. Mark new account as active
             accounts.append(account)
-            makeAddedAccountActive(account.id)
+            await keepActiveAfterAdding(account.id, previous: displacedByLogin)
             log.info("[loginNewAccount] Step 6: New account active. Total: \(self.accounts.count)")
 
             finishLoginAttempt(loginID)
