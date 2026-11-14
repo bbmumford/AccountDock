@@ -624,6 +624,55 @@ every included account is used up, which is when sessions are paused. It is
 shown whenever the active account is in use and no pause is under way, for any
 provider, with or without a forecast.
 
+### Plans of different sizes
+
+A provider's accounts can be on plans of different sizes: one percent of a
+Claude Pro week is about a twentieth of the work of one percent of a Max 20x
+week. Each account's percent is therefore converted through its own token
+cost, `AppState.accountRatio` (session percent per million weighted tokens),
+carried as `QuotaAccountState.percentPerMillion` and
+`SessionPacer.Account.percentPerMillion`, whenever a rate or room moves to
+or is compared with another account:
+
+- `FailoverPlanner.expectedBurn` and `carriedBurn` convert the moving work
+  and its deviation into the destination's percent (`converted`), so
+  `carries`, `destinationMinimum` and `tier`'s margins judge a destination
+  by what the work costs there; 5% of a Max 20x week an hour is 100% of a
+  Pro week. That covers the 5-hour window too: a session spending 10% of a
+  session an hour on a Max 20x account spends 200% of a Pro account's
+  5-hour window, which it would exhaust in half an hour. `carries`' burst
+  allowance (a rate no window could carry for the hour needs room for
+  `burstCarryShare` of one) is judged at the size of the account the work
+  comes from, so a rate is no burst merely because the destination's plan
+  is small.
+- The switch's cost and the in-flight reserve are counted at the plan-wide
+  cost (`Settings.referenceRatio`) and converted into the account they land
+  on (`onAccount`).
+- Destinations ordered by room (`plan`'s exhausted switch, most capacity
+  first, `nextSwitch`'s preference for the account it projected) compare
+  `tokenRoom`, headroom in tokens.
+- Demand (`DemandForecast`) is recorded at the plan-wide size, and
+  `QuotaSimulator` serves it at each account's own (`Account.scale`), so the
+  week simulation behind balancing, the week outlook and the pace line adds
+  like with like.
+- `SessionPacer` compares accounts in tokens (`millions`): new-session
+  weights, the destination a shed or stranded session takes, resumed
+  sessions' placement, and whether a rebalancing move gains more than its
+  rewrite. `poolRunOut` and the shared group's share were already counted
+  in tokens; `sustainedShare` and the run-outs `rebalance` and `place`
+  compare are times, which need no conversion.
+
+An account with no measured cost is seeded from its plan size
+(`ProviderCapabilities.planSizes`, keyed `<plan>:<tier>` or `<plan>`, read
+by `Account.planSize` from the stored plan and the credential's rate-limit
+tier; Claude: Max 20x 20, Max 5x 5, Pro 1) by `TurnCostModel.ratio(for:sizes:)`:
+a measured account's cost times its size over this one's (the geometric mean
+over every such account), or, with none measured, the plan-wide cost scaled
+from the median known size. A provider whose plan sizes are not listed, or an
+account whose size is unknown (a Max plan without its tier), keeps the
+plan-wide cost. The first measurement on the account replaces the seed, and
+the Learning log records each change in where an account's cost comes from.
+
 ### Learning
 
 | Model | Learns | Used for |
@@ -825,7 +874,8 @@ the pool weights and which sessions move, each time the pool is rebuilt
   only at a session's next turn. A session moves only to an account that,
   with the session's rate and the cost of writing its context into that
   account's cache, reaches no limit before its reset, or none until within
-  an hour of the pool's run-out. The router moves it at its next turn
+  an hour of the pool's run-out, and in either case none within the hour,
+  by whichever of its windows binds first. The router moves it at its next turn
   (`RouterState.moves`). The event names the reason ("… while the other
   accounts still have room (together they last until …)").
 - An account that would reach its limit only shortly before its reset keeps

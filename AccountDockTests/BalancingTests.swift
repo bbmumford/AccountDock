@@ -711,4 +711,153 @@ final class BalancingTests: XCTestCase {
                                        sharedGroup: remainderGroup(evening), fixed: ["pinned"], remainders: spending)
         XCTAssertEqual(plan.moves, ["light": evening.backup, "light2": evening.backup])
     }
+
+    // MARK: - Plans of different sizes
+
+    /// Weekly-only states with an explicit token cost: Max 20x at 0.25% of
+    /// a session per million tokens, Pro, a twentieth the size, at 5.
+    private func sizedState(used: Double, ratio: Double, active: Bool = false, burn: Double = 0) -> QuotaAccountState {
+        var state = weeklyState(UUID(), used: used, resetIn: 100, active: active, burn: burn)
+        state.percentPerMillion = ratio
+        return state
+    }
+
+    func testTheGroupMovingFromAMax20xAccountOntoAProAccountCountsAtProsSize() {
+        let planner = FailoverPlanner(settings: .init(policy: policy(), provider: .claudeCode))
+        let current = sizedState(used: 50, ratio: 0.25, active: true, burn: 5)
+        let pro = sizedState(used: 60, ratio: 5)
+        XCTAssertEqual(planner.expectedBurn(movingFrom: current, to: pro).weekly, 100, accuracy: 0.001,
+                       "5% of a Max 20x week an hour is 100% of a Pro week")
+        XCTAssertFalse(planner.carries(pro, from: current, at: now))
+        let max20x = sizedState(used: 60, ratio: 0.25)
+        XCTAssertEqual(planner.expectedBurn(movingFrom: current, to: max20x).weekly, 5, accuracy: 0.001)
+        XCTAssertTrue(planner.carries(max20x, from: current, at: now), "the same 40% of a Max 20x week carries it")
+    }
+
+    func testAProAccountWithHalfItsWeekHasLessRoomThanAMax20xAccountWithATenth() throws {
+        let planner = FailoverPlanner(settings: .init(policy: policy(preferMostCapacity: true, balancing: false),
+                                                      provider: .claudeCode))
+        let pro = sizedState(used: 50, ratio: 5)
+        let max20x = sizedState(used: 90, ratio: 0.25)
+        let proRoom = planner.tokenRoom(pro, try XCTUnwrap(planner.projection(pro, now: now)))
+        let maxRoom = planner.tokenRoom(max20x, try XCTUnwrap(planner.projection(max20x, now: now)))
+        XCTAssertEqual(proRoom, 80, accuracy: 0.001, "400 session percent at 5 per million")
+        XCTAssertEqual(maxRoom, 320, accuracy: 0.001, "80 session percent at 0.25 per million")
+        // The account with the most room is the one with the most tokens.
+        let spent = sizedState(used: 99.5, ratio: 0.25, active: true, burn: 0.5)
+        XCTAssertEqual(planner.plan(current: spent, ladder: [spent, pro, max20x], lastSwitch: nil, now: now),
+                       .switchTo(max20x.id, .exhausted))
+    }
+
+    func testNewSessionsAndRebalancingPlaceByTokenRoom() {
+        let pro = UUID(), max20x = UUID()
+        // Pro has half its week, 400 session percent, at 5 per million:
+        // 80 million tokens. Max 20x has a tenth, 80 percent at 0.25: 320.
+        let accounts = [pacerAccount(pro, left: 400, resetIn: 100, ratio: 5),
+                        pacerAccount(max20x, left: 80, resetIn: 100, ratio: 0.25)]
+        let plan = SessionPacer().plan(accounts: accounts, sessions: [], now: now)
+        XCTAssertEqual((plan.weights[max20x] ?? 0) / (plan.weights[pro] ?? 1), 4, accuracy: 0.001,
+                       "four times the tokens left take four times the new sessions")
+
+        let session = SessionPacer.RebalanceSession(id: "s", account: pro, tokensPerHour: 20_000_000, contextTokens: 100_000,
+                                                    model: nil, movable: true)
+        let rebalanced = SessionPacer().rebalance(accounts: accounts, sessions: [session], destinations: [pro, max20x], now: now)
+        XCTAssertEqual(rebalanced.moves["s"], max20x, "100% of Pro an hour lasts 4 hours, 5% of Max 20x 16")
+        var stranded = session
+        stranded.account = UUID()
+        XCTAssertEqual(SessionPacer().place([stranded], accounts: accounts, running: [], destinations: [pro, max20x], now: now),
+                       ["s": max20x])
+    }
+
+    func testAnAccountWithNoLearnedCostIsSeededFromItsPlanSize() {
+        let max20x = UUID(), max5x = UUID(), pro = UUID(), unknown = UUID()
+        var model = TurnCostModel()
+        model.accountPercentPerMillion = [max20x: 0.25]
+        let sizes: [UUID: Double] = [max20x: 20, max5x: 5, pro: 1]
+        let proSeed = model.ratio(for: pro, sizes: sizes)
+        XCTAssertEqual(proSeed.ratio, 5, accuracy: 0.0001, "twenty times the Max 20x account's cost")
+        XCTAssertEqual(proSeed.source, .seededFromLearned)
+        XCTAssertEqual(model.ratio(for: max5x, sizes: sizes).ratio, 1, accuracy: 0.0001)
+        XCTAssertEqual(model.ratio(for: max20x, sizes: sizes).source, .learned)
+        XCTAssertEqual(model.ratio(for: unknown, sizes: sizes).source, .planWide)
+        // With nothing learned, the plan-wide cost is spread by size.
+        let fresh = TurnCostModel()
+        let small = fresh.ratio(for: pro, sizes: [max20x: 20, pro: 1])
+        let large = fresh.ratio(for: max20x, sizes: [max20x: 20, pro: 1])
+        XCTAssertEqual(small.ratio / large.ratio, 20, accuracy: 0.0001)
+        XCTAssertEqual(small.source, .seededFromPlanWide)
+
+        // The plan size comes from the credential's rate-limit tier.
+        var ultra = Account(email: "u@mail.example", displayName: "U", provider: .claudeCode, subscriptionType: "max")
+        ultra.rateLimitTier = "default_claude_max_20x"
+        XCTAssertEqual(ultra.planSize, 20)
+        ultra.rateLimitTier = "default_claude_max_5x"
+        XCTAssertEqual(ultra.planSize, 5)
+        ultra.rateLimitTier = nil
+        XCTAssertNil(ultra.planSize, "a Max plan without its tier could be either size")
+        XCTAssertEqual(Account(email: "p@mail.example", displayName: "P", provider: .claudeCode, subscriptionType: "pro").planSize, 1)
+        XCTAssertNil(Account(email: "c@mail.example", displayName: "C", provider: .codex, subscriptionType: "plus").planSize)
+    }
+
+    func testTheWeekSimulatorServesDemandAtEachAccountsSize() {
+        // Demand of 1% an hour at the plan-wide size spends 20% an hour of
+        // a plan a twentieth that size: its 100% lasts five hours, and its
+        // week resets after the simulated one.
+        let small = QuotaSimulator.Account(id: UUID(), session: 0, sessionReset: nil, weekly: 0,
+                                           weeklyReset: now.addingTimeInterval(200 * 3600), sessionPerWeekly: 8,
+                                           hasSessionWindow: false, scale: 20)
+        let outcome = QuotaSimulator().run(accounts: [small], strategy: .earliestDeadline, demand: { _ in 1 }, start: now)
+        XCTAssertEqual(outcome.served, 5, accuracy: 0.01)
+        XCTAssertEqual(outcome.firstShortfall?.timeIntervalSince(now) ?? 0, 5 * 3600, accuracy: 15 * 60)
+    }
+
+    /// A heavy Opus session on a Max 20x account that reports no 5-hour
+    /// window, and new Pro accounts with none of their 5-hour window used:
+    /// at Max 20x's token cost the Pro window looks able to carry the
+    /// session for hours; at Pro's own it lasts half an hour.
+    func testAHeavySessionIsNeverPlacedOnAProAccountWhoseFiveHourWindowItWouldExhaust() {
+        let personal = UUID(), bytrix = UUID(), hexorda = UUID()
+        let opus = SessionPacer.Session(id: "platform-execution", account: personal, tokensPerHour: 40_000_000,
+                                        contextTokens: 150_000, lastSeen: now.addingTimeInterval(-5 * 60),
+                                        cacheLifetime: 3600, model: "claude-opus-4", recentTokensPerHour: 40_000_000)
+        func pro(_ id: UUID, ratio: Double) -> SessionPacer.Account {
+            var account = SessionPacer.Account(id: id, utilization: 0, resetsAt: nil, burnPerHour: 0, baseWeight: 1,
+                                               percentPerMillion: ratio)
+            account.weeklyRemaining = 99 * 8
+            account.weeklyResetsAt = now.addingTimeInterval(140 * 3600)
+            return account
+        }
+        // Personal's 5% of its week lasts 4 hours at 10% an hour.
+        let max20x = pacerAccount(personal, left: 40, resetIn: 100, burn: 10, ratio: 0.25)
+        let unsized = SessionPacer().plan(accounts: [max20x, pro(bytrix, ratio: 0.25), pro(hexorda, ratio: 0.25)],
+                                          sessions: [opus], now: now)
+        XCTAssertEqual(unsized.moves["platform-execution"].map { $0 == bytrix || $0 == hexorda }, true,
+                       "counted at Max 20x's cost, a Pro window takes the session")
+        // At Pro's own cost the session spends 200% of its 5-hour window an
+        // hour: the window would be out within the runway, so no Pro account
+        // takes it or a new session like it.
+        let sized = SessionPacer().plan(accounts: [max20x, pro(bytrix, ratio: 5), pro(hexorda, ratio: 5)],
+                                        sessions: [opus], now: now)
+        XCTAssertNil(sized.moves["platform-execution"])
+        XCTAssertEqual(sized.weights[bytrix] ?? -1, 0, accuracy: 0.0001)
+        XCTAssertEqual(sized.weights[hexorda] ?? -1, 0, accuracy: 0.0001)
+        XCTAssertGreaterThan(sized.weights[personal] ?? 0, 0)
+
+        // Failover's view: a switch would not take the work to Pro either.
+        let planner = FailoverPlanner(settings: .init(policy: policy(), provider: .claudeCode))
+        let current = sizedState(used: 50, ratio: 0.25, active: true, burn: 1.25)
+        var proState = QuotaAccountState(
+            id: bytrix,
+            usage: UsageAPIResponse(fiveHour: UsageWindow(utilization: 0, resetsAt: nil),
+                                    sevenDay: UsageWindow(utilization: 1, resetsAt: iso(now.addingTimeInterval(140 * 3600))),
+                                    sevenDayOauthApps: nil, sevenDayOpus: nil, sevenDaySonnet: nil,
+                                    sevenDayCowork: nil, iguanaNecktie: nil, extraUsage: nil),
+            observedAt: now.addingTimeInterval(-60), sessionPerWeekly: 8)
+        proState.percentPerMillion = 5
+        XCTAssertEqual(planner.expectedBurn(movingFrom: current, to: proState).session, 200, accuracy: 0.001,
+                       "10 session percent an hour on Max 20x is 200 on Pro")
+        XCTAssertFalse(planner.carries(proState, from: current, at: now), "its 5-hour window lasts half an hour")
+        proState.percentPerMillion = 0.25
+        XCTAssertTrue(planner.carries(proState, from: current, at: now))
+    }
 }

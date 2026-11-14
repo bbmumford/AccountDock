@@ -41,6 +41,11 @@ struct QuotaAccountState: Equatable {
     /// work beside its own slot sessions, and leaves the active account's
     /// slot sessions out of what moves.
     var stayingSessionBurnPerHour: Double = 0
+    /// Session percent per million weighted tokens on this account
+    /// (`AppState.accountRatio`): how much work one of its percent is. Plans
+    /// differ in size, so a rate or room moved to or compared with another
+    /// account goes through it (`FailoverPlanner.converted`, `tokenRoom`).
+    var percentPerMillion = TurnCostModel.defaultPercentPerMillion
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id && lhs.observedAt == rhs.observedAt }
 }
@@ -155,6 +160,11 @@ struct FailoverPlanner {
         /// Session percent a switch costs the destination, for re-reading
         /// the moved sessions' context into its cache.
         var switchCostPercent: Double = 0
+        /// The plan-wide token cost, in session percent per million
+        /// weighted tokens, that `switchCostPercent`,
+        /// `inFlightReservePercent` and `demand` are counted at;
+        /// `onAccount` converts them into one account's percent.
+        var referenceRatio = TurnCostModel.defaultPercentPerMillion
         var allowExtraUsage = false
         /// Session percent the requests already under way may still use
         /// after a decision. The active account counts as at its limit once
@@ -379,7 +389,8 @@ struct FailoverPlanner {
             return .exhausted
         }
         let dwellHours = settings.minimumDwell / 3600
-        let sessionMargin = max(1, max(expectedSessionBurn, state.sessionBurnPerHour) * dwellHours) + settings.switchCostPercent
+        let sessionMargin = max(1, max(expectedSessionBurn, state.sessionBurnPerHour) * dwellHours)
+            + onAccount(settings.switchCostPercent, state)
         let weeklyMargin = max(0.5, max(expectedWeeklyBurn, state.weeklyBurnPerHour) * dwellHours)
         let sessionLimit = projection.session == nil ? 100 : settings.sessionTrigger
         if session < sessionLimit - sessionMargin && weekly < settings.weeklyTrigger - weeklyMargin {
@@ -534,7 +545,7 @@ struct FailoverPlanner {
     /// resetting days later would be waited on instead.
     func heldAvailableAt(_ state: QuotaAccountState, now: Date) -> Date? {
         guard let measured = measuredProjection(state, now: now) else { return nil }
-        let margin = settings.inFlightReservePercent + Self.minimumUsableHeadroom
+        let margin = onAccount(settings.inFlightReservePercent, state) + Self.minimumUsableHeadroom
         var limiting: [Date?] = []
         if let session = measured.session, session >= 100 - margin { limiting.append(measured.sessionReset) }
         if let weekly = measured.weekly, weekly >= 100 - margin { limiting.append(measured.weeklyReset) }
@@ -570,7 +581,7 @@ struct FailoverPlanner {
         // moves work only to an account below its thresholds and never
         // starts an exhausted move or a wait for a reset.
         let atLimit = currentTier == .exhausted || current.refusedAtLimit
-            || isMeasuredAtLimit(serving, now: now, reserve: settings.inFlightReservePercent)
+            || isMeasuredAtLimit(serving, now: now, reserve: onAccount(settings.inFlightReservePercent, serving))
         let forced = !current.workloadAvailable || atLimit || isTriggered(current, now: now)
         guard forced else {
             return balancePlan(current: current, others: others, lastSwitch: lastSwitch, now: now)
@@ -596,7 +607,7 @@ struct FailoverPlanner {
 
         let usable = others.filter { tierOf($0) == .usable && carries($0, from: current, at: now) }.sorted { lhs, rhs in
             guard let l = projection(lhs, now: now), let r = projection(rhs, now: now) else { return false }
-            return headroom(lhs, l) > headroom(rhs, r)
+            return tokenRoom(lhs, l) > tokenRoom(rhs, r)
         }
         switch readiness(of: usable, now: now) {
         case .ready(let id): return .switchTo(id, reason)
@@ -678,7 +689,9 @@ struct FailoverPlanner {
         return .switchTo(best.id, .balance(advantageHours: advantage))
     }
 
-    /// The account as the simulator models it, from its projected usage.
+    /// The account as the simulator models it, from its projected usage,
+    /// with demand, which is counted at `Settings.referenceRatio`, scaled to
+    /// its own size (`QuotaSimulator.Account.scale`).
     func simulatorAccount(_ state: QuotaAccountState, now: Date) -> QuotaSimulator.Account? {
         guard let projection = projection(state, now: now), let weekly = projection.weekly else { return nil }
         return QuotaSimulator.Account(
@@ -689,7 +702,8 @@ struct FailoverPlanner {
             weeklyReset: projection.weeklyReset,
             sessionPerWeekly: state.sessionPerWeekly ?? Self.defaultSessionPerWeekly,
             usable: state.credentialsUsable && state.workloadAvailable,
-            hasSessionWindow: state.usage?.fiveHour != nil
+            hasSessionWindow: state.usage?.fiveHour != nil,
+            scale: onAccount(1, state)
         )
     }
 
@@ -735,7 +749,7 @@ struct FailoverPlanner {
         if settings.preferMostCapacity {
             return states.sorted { lhs, rhs in
                 guard let l = projection(lhs, now: now), let r = projection(rhs, now: now) else { return false }
-                return headroom(lhs, l) > headroom(rhs, r)
+                return tokenRoom(lhs, l) > tokenRoom(rhs, r)
             }
         }
         guard settings.resetAware, !recovered.isEmpty else { return states }
@@ -777,11 +791,43 @@ struct FailoverPlanner {
     func expectedBurn(movingFrom current: QuotaAccountState,
                       to destination: QuotaAccountState) -> (session: Double, weekly: Double) {
         let k = current.sessionPerWeekly ?? Self.defaultSessionPerWeekly
-        let session = max(0, expectedSessionBurn(of: current) - current.stayingSessionBurnPerHour)
+        let destinationK = destination.sessionPerWeekly ?? Self.defaultSessionPerWeekly
+        // The moving work is `current`'s percent; the destination counts
+        // the same tokens at its own size.
+        let session = converted(max(0, expectedSessionBurn(of: current) - current.stayingSessionBurnPerHour),
+                                from: current, to: destination)
             + destination.stayingSessionBurnPerHour
-        let weekly = max(0, current.weeklyBurnPerHour - current.stayingSessionBurnPerHour / k)
-            + destination.stayingSessionBurnPerHour / (destination.sessionPerWeekly ?? Self.defaultSessionPerWeekly)
+        let weekly = converted(max(0, current.weeklyBurnPerHour - current.stayingSessionBurnPerHour / k) * k,
+                               from: current, to: destination) / destinationK
+            + destination.stayingSessionBurnPerHour / destinationK
         return (session, weekly)
+    }
+
+    /// `percent` of `from`'s session window as the same work in `to`'s:
+    /// through tokens, by each account's own token cost
+    /// (`QuotaAccountState.percentPerMillion`). A percent of a plan a
+    /// twentieth the size is a twentieth of the work. Read by
+    /// `expectedBurn` and `carriedBurn`.
+    func converted(_ percent: Double, from: QuotaAccountState, to: QuotaAccountState) -> Double {
+        guard from.percentPerMillion > 0, to.percentPerMillion > 0 else { return percent }
+        return percent / from.percentPerMillion * to.percentPerMillion
+    }
+
+    /// `percent`, counted at `Settings.referenceRatio`, as `state`'s session
+    /// percent: the switch's cost and the in-flight reserve where they land.
+    func onAccount(_ percent: Double, _ state: QuotaAccountState) -> Double {
+        guard settings.referenceRatio > 0, state.percentPerMillion > 0 else { return percent }
+        return percent / settings.referenceRatio * state.percentPerMillion
+    }
+
+    /// Million weighted tokens the account can still serve now: its
+    /// `headroom` through its own token cost. Room is compared across
+    /// accounts by this, since 50% of a small plan can be less work than
+    /// 10% of a large one. Read by `plan`'s ordering of destinations and by
+    /// `nextSwitch`'s preference for the account it projected.
+    func tokenRoom(_ state: QuotaAccountState, _ projection: QuotaProjection) -> Double {
+        let room = headroom(state, projection)
+        return state.percentPerMillion > 0 ? room / state.percentPerMillion : room
     }
 
     /// The account `plan` would make active next, and when.
@@ -828,8 +874,8 @@ struct FailoverPlanner {
             if let previous, previous != chosen.id, previous != current.id,
                let kept = ladder.first(where: { $0.id == previous }),
                carrier(current, among: ladder.filter { $0.id == current.id || $0.id == previous }, at: at)?.id == previous,
-               let keptRoom = projection(kept, now: at).map({ headroom(kept, $0) }),
-               let chosenRoom = projection(chosen, now: at).map({ headroom(chosen, $0) }),
+               let keptRoom = projection(kept, now: at).map({ tokenRoom(kept, $0) }),
+               let chosenRoom = projection(chosen, now: at).map({ tokenRoom(chosen, $0) }),
                chosenRoom < keptRoom * Self.projectionPreference {
                 return NextSwitch(account: previous, at: at)
             }
@@ -867,7 +913,9 @@ struct FailoverPlanner {
     /// deviation of `current`'s rate, or the destination's own measured
     /// rate plus its deviation when that is larger. A rate is converted
     /// from the long window, by the plan's ratio, for an account without a
-    /// session window, whose session rate is never learned.
+    /// session window, whose session rate is never learned. `current`'s
+    /// rate and deviation are converted to the destination's size
+    /// (`converted`).
     func carriedBurn(from current: QuotaAccountState, to destination: QuotaAccountState) -> (session: Double, weekly: Double) {
         func sessionDeviation(_ state: QuotaAccountState) -> Double {
             state.usage?.fiveHour != nil
@@ -875,9 +923,13 @@ struct FailoverPlanner {
                 : state.weeklyBurnStdDev * (state.sessionPerWeekly ?? Self.defaultSessionPerWeekly)
         }
         let moving = expectedBurn(movingFrom: current, to: destination)
+        let k = current.sessionPerWeekly ?? Self.defaultSessionPerWeekly
+        let destinationK = destination.sessionPerWeekly ?? Self.defaultSessionPerWeekly
+        let weeklyDeviation = converted(current.weeklyBurnStdDev * k, from: current, to: destination) / destinationK
         return (
-            max(moving.session + sessionDeviation(current), expectedSessionBurn(of: destination) + sessionDeviation(destination)),
-            max(moving.weekly + current.weeklyBurnStdDev, destination.weeklyBurnPerHour + destination.weeklyBurnStdDev)
+            max(moving.session + converted(sessionDeviation(current), from: current, to: destination),
+                expectedSessionBurn(of: destination) + sessionDeviation(destination)),
+            max(moving.weekly + weeklyDeviation, destination.weeklyBurnPerHour + destination.weeklyBurnStdDev)
         )
     }
 
@@ -897,19 +949,26 @@ struct FailoverPlanner {
         let burn = carriedBurn(from: current, to: destination)
         // A window that resets within the horizon needs room only until
         // then, and one no account could carry the rate for that long only
-        // for as long as `burstCarryShare` of an unused window would.
-        func hours(until reset: Date?, rate: Double) -> Double {
+        // for as long as `burstCarryShare` of an unused window would. The
+        // burst is judged at the size of the account the work comes from
+        // (`sourceRate`): a rate that would spend a whole window only
+        // because the destination's plan is small is no burst, and a
+        // larger account carries it.
+        func hours(until reset: Date?, sourceRate: Double) -> Double {
             let untilReset = reset.map { max(0, $0.timeIntervalSince(date)) } ?? Self.projectedCarry
-            let burst = rate > 0 ? Self.burstCarryShare * 100 / rate * 3600 : Self.projectedCarry
+            let burst = sourceRate > 0 ? Self.burstCarryShare * 100 / sourceRate * 3600 : Self.projectedCarry
             return min(Self.projectedCarry, untilReset, burst) / 3600
         }
-        let fixed = settings.inFlightReservePercent + settings.switchCostPercent
+        let fixed = onAccount(settings.inFlightReservePercent + settings.switchCostPercent, destination)
         let k = destination.sessionPerWeekly ?? Self.defaultSessionPerWeekly
+        let currentK = current.sessionPerWeekly ?? Self.defaultSessionPerWeekly
         if let session = projection.session,
-           100 - session < fixed + burn.session * hours(until: projection.sessionReset, rate: burn.session) {
+           100 - session < fixed + burn.session * hours(until: projection.sessionReset,
+                                                       sourceRate: converted(burn.session, from: destination, to: current)) {
             return false
         }
-        let weeklyNeed = burn.weekly * hours(until: projection.weeklyReset, rate: burn.weekly)
+        let weeklyNeed = burn.weekly * hours(until: projection.weeklyReset,
+                                             sourceRate: converted(burn.weekly * k, from: destination, to: current) / currentK)
         guard (100 - weekly) * k >= fixed + weeklyNeed * k else { return false }
         return headroom(destination, projection) >= destinationMinimum(current: current, destination: destination)
     }
@@ -926,7 +985,8 @@ struct FailoverPlanner {
         let burn = carriedBurn(from: current, to: destination).session
         return max(
             Self.minimumUsableHeadroom,
-            settings.inFlightReservePercent + settings.switchCostPercent + burn * settings.minimumDestinationMinutes / 60
+            onAccount(settings.inFlightReservePercent + settings.switchCostPercent, destination)
+                + burn * settings.minimumDestinationMinutes / 60
         )
     }
 

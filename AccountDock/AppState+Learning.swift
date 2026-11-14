@@ -1,5 +1,7 @@
 import Foundation
 
+private let learningLog = FileLog("Learning")
+
 /// Learned models that sharpen failover decisions: the quota cost of a
 /// request and of a switch, and forecast demand by hour of the week.
 extension AppState {
@@ -88,7 +90,36 @@ extension AppState {
             (previous?.sevenDay?.resetsAtDate).map { abs($0.timeIntervalSince(new)) < 10 * 60 }
         } ?? true
         guard sameWindow, weekly > before else { return }
-        demandForecasts[account.provider, default: DemandForecast()].record(weeklyRise: weekly - before, at: date)
+        // Demand is counted at the plan-wide size
+        // (`FailoverPlanner.Settings.referenceRatio`), so a rise on a small
+        // plan counts as the smaller amount of work it is.
+        let ratio = accountRatio(account.id)
+        let rise = (weekly - before) * (ratio > 0 ? turnCostModel.ratio / ratio : 1)
+        demandForecasts[account.provider, default: DemandForecast()].record(weeklyRise: rise, at: date)
+    }
+
+    /// The account's token cost, in session percent per million weighted
+    /// tokens (`TurnCostModel.ratio(for:sizes:)`): its own once measured,
+    /// otherwise seeded from its plan size (`Account.planSize`) relative to
+    /// the provider's other accounts. Every rate or room `SessionPacer` and
+    /// `FailoverPlanner` move or compare between accounts goes through it.
+    /// Each change in where it comes from is logged once.
+    func accountRatio(_ id: UUID) -> Double {
+        guard let account = accounts.first(where: { $0.id == id }) else { return turnCostModel.ratio(for: id) }
+        let sizes = accounts.filter { $0.provider == account.provider }
+            .reduce(into: [UUID: Double]()) { result, other in result[other.id] = other.planSize }
+        let (ratio, source) = turnCostModel.ratio(for: id, sizes: sizes)
+        if ratioSources[id] != source {
+            ratioSources[id] = source
+            let origin = switch source {
+            case .learned: "learned from its readings"
+            case .seededFromLearned: "seeded from its plan size and the accounts with a learned cost"
+            case .seededFromPlanWide: "seeded from its plan size and the plan-wide cost"
+            case .planWide: "the plan-wide cost, its plan size unknown"
+            }
+            learningLog.info("\(messageName(account)): \(String(format: "%.3f", ratio))% of a session per million weighted tokens, \(origin)")
+        }
+        return ratio
     }
 
     /// Whether the provider's per-request cost is learned: the router reports
@@ -178,7 +209,9 @@ extension AppState {
         guard pace >= Self.minimumOutlookPace, let activeAccount = planner.simulatorAccount(current, now: now) else { return nil }
         var simulator = QuotaSimulator()
         simulator.step = 5 * 60
-        let demand: (Date) -> Double = { _ in pace }
+        // The active account's pace at the plan-wide size, which each
+        // account then serves at its own (`QuotaSimulator.Account.scale`).
+        let demand: (Date) -> Double = { _ in pace / max(activeAccount.scale, 1e-9) }
         let alone = simulator.run(accounts: [activeAccount], strategy: .earliestDeadline, demand: demand, start: now)
         let included = accounts.filter { $0.provider == provider && !policy.excludedAccountIDs.contains($0.id) }
             .map { quotaState(for: $0, now: now) }

@@ -505,6 +505,15 @@ struct SessionPacer {
         tokensPerHour / 1_000_000 * account.percentPerMillion
     }
 
+    /// Million weighted tokens `windowPercent` of the account's window
+    /// holds. Room and rates are compared across accounts by this, since a
+    /// percent of a small plan is less work than a percent of a large one:
+    /// new-session weights, the destination a shed or stranded session
+    /// takes, and whether a rebalancing move pays for its rewrite.
+    func millions(_ windowPercent: Double, on account: Account) -> Double {
+        account.percentPerMillion > 0 ? windowPercent / account.percentPerMillion : windowPercent
+    }
+
     /// Window percent a session spends writing `contextTokens` into the
     /// cache of the account it moves to.
     func moveCost(_ contextTokens: Int, to account: Account) -> Double {
@@ -608,8 +617,12 @@ struct SessionPacer {
         // before its reset, or none until within `newSessionRunway` of the
         // pool's run-out: that run-out is an estimate at the present rates,
         // and the account the work ends on reaches its limit about then.
+        // Either way it must carry the session for `newSessionRunway`, by
+        // whichever of its windows binds first, or the session would write
+        // its cache there and move on again within the hour.
         func lastsEnough(_ outlook: Outlook) -> Bool {
             guard let limitAt = outlook.limitAt else { return true }
+            guard limitAt >= now.addingTimeInterval(Self.newSessionRunway) else { return false }
             return poolEnd.map { limitAt >= $0.addingTimeInterval(-Self.newSessionRunway) } ?? false
         }
         var plan = Plan()
@@ -662,7 +675,8 @@ struct SessionPacer {
                     // model's own allowance too.
                     let scoped = keys.compactMap { currentScoped(destination, $0, spending: cost, burning: rate) }
                     guard scoped.allSatisfy(lastsEnough) else { continue }
-                    let spare = ([after] + scoped).map { $0.allowedPerHour - $0.burnPerHour }.min() ?? 0
+                    let spare = millions(([after] + scoped).map { $0.allowedPerHour - $0.burnPerHour }.min() ?? 0,
+                                         on: destination)
                     if best.map({ spare > $0.spare }) ?? true { best = (destination.id, spare) }
                 }
                 guard let best, let target = accounts.first(where: { $0.id == best.id }) else { continue }
@@ -789,7 +803,7 @@ struct SessionPacer {
             }
         }
         // With the shared group projected to move, new sessions go where
-        // room is left once the group has had what it needs (`spare`), up
+        // room is left, in tokens, once the group has had what it needs (`spare`), up
         // to when the accounts would all have run out (`poolRunOut`): the
         // group spends the active account's room until the switch and the
         // next account's after it, but no account's room after everything
@@ -805,19 +819,20 @@ struct SessionPacer {
             spare(account, until: runOut, spent: spent[account.id] ?? 0, burn: burn[account.id] ?? 0,
                   shared: shares[account.id], now: now)
         }
-        // Otherwise new sessions go by unused rate to accounts that stay
-        // within their windows. When every account would reach a limit
+        // Otherwise new sessions go by unused rate, in tokens (`millions`),
+        // to accounts that stay within their windows. When every account would reach a limit
         // before its reset, they go by how much of its present rate each
         // account's allowance sustains until then, so the accounts run out
         // as late as they can: one running short soonest for its reset
         // takes the fewest.
         plan.weights = weighted { account in
             if let runOut {
-                return account.baseWeight > 0 ? account.baseWeight * max(0, spareRoom(account, runOut)) / runOutHours : 0
+                return account.baseWeight > 0
+                    ? account.baseWeight * max(0, millions(spareRoom(account, runOut), on: account)) / runOutHours : 0
             }
             let outlook = current(account)
             let open = account.baseWeight > 0 && plan.shedding[account.id] == nil && outlook.limitAt == nil
-            return open ? account.baseWeight * max(0, outlook.allowedPerHour - outlook.burnPerHour) : 0
+            return open ? account.baseWeight * max(0, millions(outlook.allowedPerHour - outlook.burnPerHour, on: account)) : 0
         }
         if !plan.weights.values.contains(where: { $0 > 0 }) {
             let candidates = accounts.filter { $0.baseWeight > 0 }
@@ -836,20 +851,20 @@ struct SessionPacer {
                     guard account.baseWeight > 0 else { return 0 }
                     let whole = spareRoom(account, runOut)
                     guard let allowance = account.scoped[key], allowance.resetsAt > now else {
-                        return account.baseWeight * max(0, whole) / runOutHours
+                        return account.baseWeight * max(0, millions(whole, on: account)) / runOutHours
                     }
                     let fraction = shares[account.id]?.scopedFractions[key] ?? 0
                     let end = min(runOut, allowance.resetsAt)
                     let own = allowance.remaining - (scopedSpent[account.id]?[key] ?? 0)
                         - (scopedBurn[account.id]?[key] ?? 0) * max(0, end.timeIntervalSince(now)) / 3600
                         - (shares[account.id]?.percent(from: now, until: end, fraction: fraction) ?? 0)
-                    return account.baseWeight * max(0, min(whole, own)) / runOutHours
+                    return account.baseWeight * max(0, millions(min(whole, own), on: account)) / runOutHours
                 }
                 let outlooks = [current(account)] + [currentScoped(account, key)].compactMap { $0 }
                 let open = account.baseWeight > 0 && plan.shedding[account.id] == nil
                     && plan.scopedShedding[account.id]?[key] == nil && !outlooks.contains { $0.limitAt != nil }
                 let unused = outlooks.map { $0.allowedPerHour - $0.burnPerHour }.min() ?? 0
-                return open ? account.baseWeight * max(0, unused) : 0
+                return open ? account.baseWeight * max(0, millions(unused, on: account)) : 0
             }
             if !weights.values.contains(where: { $0 > 0 }) {
                 let candidates = accounts.filter { $0.baseWeight > 0 }
@@ -987,7 +1002,7 @@ struct SessionPacer {
         for candidate in ordered {
             let fits = options(candidate).compactMap { account -> (Account, Double)? in
                 let outlook = after(candidate, on: account)
-                return outlook.limitAt == nil ? (account, outlook.allowedPerHour - outlook.burnPerHour) : nil
+                return outlook.limitAt == nil ? (account, millions(outlook.allowedPerHour - outlook.burnPerHour, on: account)) : nil
             }
             if let best = fits.max(by: { $0.1 < $1.1 })?.0 { place(candidate, on: best, surplus: false, into: &admitted) }
         }
@@ -1140,8 +1155,11 @@ extension SessionPacer {
                                     shared: shares[account.id], unseen: unseen[account.id] ?? 0, now: now)
                     }.min() ?? .infinity
                     guard after > bottleneck.runway else { continue }
-                    let gained = after.isFinite ? (after - bottleneck.runway) / 3600 * burn : .infinity
-                    guard gained > cost else { continue }
+                    // The hours gained at the bottleneck's burn against the
+                    // rewrite on the destination, both in tokens.
+                    let gained = after.isFinite
+                        ? millions((after - bottleneck.runway) / 3600 * burn, on: bottleneck.account) : .infinity
+                    guard gained > millions(cost, on: destination) else { continue }
                     if best.map({ after > $0.runway || (after == $0.runway && cost < $0.cost) }) ?? true {
                         best = (index, destination, after, cost)
                     }
@@ -1231,7 +1249,7 @@ extension SessionPacer {
                     .reduce(0) { $0 + percent($1.tokensPerHour, on: destination) } + (unseen[destination.id] ?? 0)
                 let after = outlook(destination, spent: (spent[destination.id] ?? 0) + cost, burn: burn, now: now,
                                     shared: shares[destination.id])
-                let spare = after.allowedPerHour - after.burnPerHour
+                let spare = millions(after.allowedPerHour - after.burnPerHour, on: destination)
                 let better = best.map { current in
                     earliest != current.earliest ? earliest > current.earliest
                         : own != current.own ? own > current.own : spare > current.spare

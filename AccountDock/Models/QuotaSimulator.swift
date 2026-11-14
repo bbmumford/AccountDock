@@ -5,7 +5,8 @@ import Foundation
 /// by how much work they serve and how much allowance they leave to expire.
 ///
 /// Model, per step of `step` seconds:
-/// - demand is long-window percent of work, from `DemandForecast`;
+/// - demand is long-window percent of work at one plan-wide size, from
+///   `DemandForecast`, which each account serves at its own size (`scale`);
 /// - an account serves at most what its session window and long window
 ///   still hold, where one long-window percent costs `sessionPerWeekly`
 ///   session percent;
@@ -26,6 +27,11 @@ struct QuotaSimulator {
         var usable = true
         /// False for an account limited only by its long window.
         var hasSessionWindow = true
+        /// The account's long-window percent per percent of demand. Demand
+        /// is counted at one plan-wide size
+        /// (`FailoverPlanner.Settings.referenceRatio`); a plan a twentieth
+        /// that size spends twenty of its own percent on it.
+        var scale = 1.0
     }
 
     enum Strategy: Equatable {
@@ -39,10 +45,10 @@ struct QuotaSimulator {
     }
 
     struct Outcome: Equatable {
-        /// Long-window percent of demand served and not served.
+        /// Demand served and not served, in its own unit.
         var served = 0.0
         var unmet = 0.0
-        /// Long-window percent left unused when windows reset.
+        /// Allowance left unused when windows reset, in demand's unit.
         var expired = 0.0
         /// When demand first went unmet.
         var firstShortfall: Date?
@@ -105,28 +111,31 @@ struct QuotaSimulator {
             account.sessionReset = nil
         }
         while let reset = account.weeklyReset, reset <= time {
-            if countExpiry, account.usable { outcome.expired += max(0, 100 - account.weekly) }
+            if countExpiry, account.usable { outcome.expired += max(0, 100 - account.weekly) / max(account.scale, 1e-9) }
             account.weekly = 0
             account.weeklyReset = reset.addingTimeInterval(account.weeklyPeriod)
         }
     }
 
-    /// Serves up to `amount` long-window percent; returns what it served.
+    /// Serves up to `amount` percent of demand, which costs the account
+    /// `scale` times as much of its own long window; returns the demand it
+    /// served.
     private func serve(_ account: inout Account, amount: Double, at time: Date) -> Double {
-        guard account.usable, amount > 0 else { return 0 }
+        guard account.usable, amount > 0, account.scale > 0 else { return 0 }
+        let wanted = amount * account.scale
         let k = max(1, account.sessionPerWeekly)
         guard account.hasSessionWindow else {
-            let taken = min(amount, max(0, 100 - account.weekly))
+            let taken = min(wanted, max(0, 100 - account.weekly))
             account.weekly += taken
-            return taken
+            return taken / account.scale
         }
         let room = min(max(0, 100 - account.weekly), max(0, 100 - account.session) / k)
-        let taken = min(amount, room)
+        let taken = min(wanted, room)
         guard taken > 0 else { return 0 }
         if account.sessionReset == nil { account.sessionReset = time.addingTimeInterval(Self.sessionWindow) }
         account.weekly += taken
         account.session += taken * k
-        return taken
+        return taken / account.scale
     }
 
     private func latestStart(_ account: Account) -> Date {

@@ -533,6 +533,7 @@ extension AppState {
             canVerify: canVerify
         )
         settings.switchCostPercent = switchCostPercent(provider)
+        settings.referenceRatio = turnCostModel.ratio
         settings.inFlightReservePercent = inFlightReservePercent(provider)
         settings.allowExtraUsage = policy.extraUsageMonthlyLimit != nil
         settings.demand = demandFunction(provider)
@@ -573,7 +574,8 @@ extension AppState {
             weeklyBurnStdDev: uncertainty.weekly,
             extraUsageAvailable: extraUsageAvailable(account),
             refusedAtLimit: (routerRefusedUntil[account.id].map { $0 > now } ?? false)
-                || recordedLimitRefusal(account, model: model, now: now)
+                || recordedLimitRefusal(account, model: model, now: now),
+            percentPerMillion: accountRatio(account.id)
         )
     }
 
@@ -646,8 +648,9 @@ extension AppState {
     func limitingModel(_ account: Account, models: [String], now: Date = Date()) -> String? {
         guard !models.isEmpty, let usage = accountUsage[account.id] else { return nil }
         let planner = FailoverPlanner(settings: plannerSettings(account.provider))
-        let reserve = planner.settings.inFlightReservePercent
-        let whole = planner.isMeasuredAtLimit(quotaState(for: account, now: now, wholeAllowance: true), now: now, reserve: reserve)
+        let wholeState = quotaState(for: account, now: now, wholeAllowance: true)
+        let reserve = planner.onAccount(planner.settings.inFlightReservePercent, wholeState)
+        let whole = planner.isMeasuredAtLimit(wholeState, now: now, reserve: reserve)
         let narrowed = planner.isMeasuredAtLimit(
             quotaState(for: account, now: now, model: models.count == 1 ? models[0] : nil), now: now, reserve: reserve)
         return Self.limitingModel(usage: usage, models: models, wholeAtLimit: whole, narrowedAtLimit: narrowed)

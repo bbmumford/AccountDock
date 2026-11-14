@@ -495,7 +495,7 @@ extension AppState {
             guard let state = states[id], let projection = planner.projection(state, now: now) else { return nil }
             return Self.carriesNewSession(headroom: planner.headroom(state, projection),
                                           burn: planner.expectedSessionBurn(of: state),
-                                          newSessionBurn: typical / 1_000_000 * turnCostModel.ratio(for: id)) ? id : nil
+                                          newSessionBurn: typical / 1_000_000 * accountRatio(id)) ? id : nil
         })
         var members: [RouterPoolMember] = []
         for (account, tier, latestStart) in candidates {
@@ -791,7 +791,7 @@ extension AppState {
     func pacerAccount(_ id: UUID, state: QuotaAccountState, weight: Double, planner: FailoverPlanner, now: Date) -> SessionPacer.Account {
         let projection = planner.projection(state, now: now)
         let perWeekly = state.sessionPerWeekly ?? FailoverPlanner.defaultSessionPerWeekly
-        let ratio = turnCostModel.ratio(for: id)
+        let ratio = accountRatio(id)
         let limit = SessionPacer().limit
         // Each model's own weekly allowance, in the unit of
         // `weeklyRemaining`, up to the same share of it as `limit`.

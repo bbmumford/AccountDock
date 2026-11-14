@@ -209,6 +209,9 @@ final class AppState: ObservableObject {
     /// `remainderSpending` offers that account again only
     /// `balanceMoveInterval` later.
     var remainderMovedAt: [UUID: Date] = [:]
+    /// Where each account's token cost last came from (`accountRatio`),
+    /// so the log records each change of seed once.
+    var ratioSources: [UUID: TurnCostModel.RatioSource] = [:]
     /// Sessions pinned to one subscription, kept across launches
     /// (`SessionPins`); read by every path that moves a slot session.
     @Published var sessionPins = SessionPins.load()
