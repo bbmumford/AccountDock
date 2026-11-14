@@ -1456,6 +1456,10 @@ extension AppState {
         } else if credentialModule(for: provider)?.liveCredential != nil {
             sessionsLeftOn[provider, default: []].insert(current.id)
         }
+        // A threshold, or a forecast crossing one, leaves room on the
+        // account; `buildPool` drains it until a reading shows the limit.
+        if reason == .threshold { drainingAccounts[current.id] = Date() }
+        drainingAccounts[target.id] = nil
         if provider == AIProviderType.routedProvider { await routerFollowActiveAccount() }
         lastAutomaticFailover[provider] = Date()
         exhaustedFailoverAccounts[provider, default: []].insert(current.id)
