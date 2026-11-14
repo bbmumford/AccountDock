@@ -65,6 +65,27 @@ final class BalancingTests: XCTestCase {
                              "five minutes leave the later arrivals in the rate")
     }
 
+    func testASessionTheRouterMovesSettlesTheAccountItArrivesOn() {
+        let from = UUID(), to = UUID()
+        let seen: [String: (account: UUID, at: Date)] = ["s": (from, now.addingTimeInterval(-120))]
+        XCTAssertTrue(AppState.routedArrival("s", on: to, seen: seen))
+        XCTAssertFalse(AppState.routedArrival("s", on: from, seen: seen), "a session staying where it was arrives nowhere")
+        XCTAssertFalse(AppState.routedArrival("new", on: to, seen: seen), "nor does one seen for the first time")
+        // Settled as a slot move is: the rewrite of the arriving session's
+        // context teaches no rate; the work's own rate does.
+        var trend = QuotaTrend()
+        func read(_ used: Double, at seconds: TimeInterval) {
+            trend.record(weeklyReading(used, resetIn: 100), at: now.addingTimeInterval(seconds))
+        }
+        for (step, used) in [20.0, 22, 24, 26].enumerated() { read(used, at: Double(step) * 360) }
+        if AppState.routedArrival("s", on: to, seen: seen) { trend.settle(at: now.addingTimeInterval(1080)) }
+        read(30, at: 1150)
+        read(33, at: 1300)
+        read(35, at: 1660)
+        read(37, at: 2020)
+        XCTAssertEqual(trend.weeklyBurnPerHour, 20, accuracy: 0.01)
+    }
+
     // MARK: - Pool readings
 
     func testAnAccountInUseKeepsAShareOfItsWeightOnAnOldReading() {
@@ -222,6 +243,49 @@ final class BalancingTests: XCTestCase {
                        "it lasts 15 of the 100 hours")
     }
 
+    func testADrainingAccountTakesNoNewSessionItCannotCarryForTheRunway() {
+        // Unpaced: the drain's weight, even preferred, gives way to the runway.
+        XCTAssertEqual(AppState.poolWeight(tier: .usable, urgent: false, anyBelow: false, forecastAtLimit: false,
+                                           anyOpen: true, draining: true, othersLowOnWeeklyRoom: true),
+                       AppState.drainingPreferred)
+        XCTAssertEqual(AppState.poolWeight(tier: .usable, urgent: false, anyBelow: false, forecastAtLimit: false,
+                                           anyOpen: true, draining: true, othersLowOnWeeklyRoom: true, shortOfRunway: true), 0)
+        XCTAssertEqual(AppState.poolWeight(tier: .belowTrigger, urgent: true, anyBelow: true, forecastAtLimit: false,
+                                           anyOpen: true, draining: false, othersLowOnWeeklyRoom: false, shortOfRunway: true), 0,
+                       "a few percent below a trigger is no room either")
+        // Backup's 2% of the week is 16 session percent: beside its own
+        // session's 5 an hour it carries another for the hour, not beside 12.
+        XCTAssertTrue(AppState.carriesNewSession(headroom: 16, burn: 5, newSessionBurn: 5))
+        XCTAssertFalse(AppState.carriesNewSession(headroom: 16, burn: 12, newSessionBurn: 5))
+
+        // Paced: a draining account at its preferred weight, with room for
+        // its own rate until its reset in two hours but not for one more
+        // session for an hour, takes none while another account can.
+        let draining = UUID(), other = UUID()
+        let accounts = [pacerAccount(draining, left: 4, resetIn: 2, weight: AppState.drainingPreferred, ratio: 0.25),
+                        pacerAccount(other, left: 500, resetIn: 150, burn: 2, ratio: 0.25)]
+        let plan = SessionPacer().plan(accounts: accounts, sessions: [], now: now)
+        XCTAssertEqual(plan.weights[draining] ?? -1, 0, accuracy: 0.0001)
+        XCTAssertGreaterThan(plan.weights[other] ?? 0, 0)
+    }
+
+    func testOnlyAnAccountRunningOutBeforeThePoolGivesSessionsUp() {
+        let early = UUID(), late = UUID()
+        // Both reach their limits days before their weekly resets; the
+        // two together last 55 hours at 4%/h, `early` alone 50.
+        let accounts = [pacerAccount(early, left: 100, resetIn: 150, burn: 2),
+                        pacerAccount(late, left: 120, resetIn: 150, burn: 2)]
+        let plan = SessionPacer().plan(accounts: accounts, sessions: [], now: now)
+        XCTAssertEqual(Set(plan.shedding.keys), [early])
+        XCTAssertEqual(plan.shedReasons[early], .poolRunsOut(now.addingTimeInterval(55 * 3600)))
+
+        // Running out half an hour before the pool is not worth a session's
+        // cache rewrite.
+        let even = [pacerAccount(early, left: 100, resetIn: 150, burn: 2),
+                    pacerAccount(late, left: 102, resetIn: 150, burn: 2)]
+        XCTAssertTrue(SessionPacer().plan(accounts: even, sessions: [], now: now).shedding.isEmpty)
+    }
+
     func testStrandedSessionsSpreadOverTheAccountsWithRoom() {
         let a = UUID(), b = UUID()
         let accounts = [pacerAccount(a, left: 100, resetIn: 150), pacerAccount(b, left: 100, resetIn: 150)]
@@ -360,12 +424,35 @@ final class BalancingTests: XCTestCase {
         let shared = SessionPacer.SharedGroup(account: hstlesBrandon, tokensPerHour: groupTokens, contextTokens: 600_000,
                                               models: [], nextAccount: projected, switchAt: switchAt, sessionCount: 4)
         let pacer = SessionPacer()
-        let plan = pacer.plan(accounts: accounts, sessions: [slot("p1", on: personal), slot("b1", on: backup)], now: now,
-                              sharedGroup: shared)
+        // Backup's readings show its slot session's rate; the session
+        // itself is not among those the pacer may move.
+        let plan = pacer.plan(accounts: accounts, sessions: [slot("p1", on: personal)], now: now, sharedGroup: shared)
         XCTAssertGreaterThan(plan.weights[personal] ?? 0, 0, "the account the group moves to keeps the room it does not need")
         XCTAssertEqual(plan.weights[hstlesBrandon] ?? -1, 0, accuracy: 0.0001,
                        "the group alone spends the active account by the switch")
         XCTAssertEqual(plan.weights[backup] ?? -1, 0, accuracy: 0.0001)
+
+        // Shedding: every account here reaches its limit days before its
+        // weekly reset, but only Backup does so while the others still
+        // have room. Personal, which the group moves to, lasts past the
+        // accounts' run-out; HSTLES (brandon) reaches its limit only as the
+        // group's switch does.
+        XCTAssertEqual(Set(plan.shedding.keys), [backup])
+        guard case .poolRunsOut(let end)? = plan.shedReasons[backup] else {
+            return XCTFail("Backup sheds because it runs out before the pool does")
+        }
+        XCTAssertEqual(end.timeIntervalSince(now) / 3600, 47.5, accuracy: 0.1,
+                       "1424% left in tokens at the group's 80M and two sessions' 20M an hour each")
+        XCTAssertTrue(AppState.sheddingEvent(account: "Backup", allowance: nil, limitAt: now.addingTimeInterval(1.6 * 3600),
+                                             reason: .poolRunsOut(end), outcome: "1 session(s) move to other accounts at their next turn.",
+                                             now: now)
+            .contains("while the other accounts still have room"))
+        // Its slot session moves to Personal, which then still lasts about
+        // as long as the accounts together; HSTLES (brandon) would run out
+        // a day sooner with it.
+        let shedding = pacer.plan(accounts: accounts, sessions: [slot("p1", on: personal), slot("b1", on: backup)], now: now,
+                                  sharedGroup: shared)
+        XCTAssertEqual(shedding.moves, ["b1": personal])
 
         // ORBTR (brandon) reaches its limit: its three slot sessions leave.
         let running = [SessionPacer.RebalanceSession(id: "p1", account: personal, tokensPerHour: sessionTokens,
@@ -393,5 +480,47 @@ final class BalancingTests: XCTestCase {
         }, running: running, destinations: [personal, hstlesBrandon], now: now, sharedGroup: light)
         XCTAssertGreaterThan(both.values.filter { $0 == hstlesBrandon }.count, 0)
         XCTAssertGreaterThan(both.values.filter { $0 == personal }.count, 0)
+    }
+
+    /// The rebalance preview later that evening: eight sessions on
+    /// HSTLES (brandon), the four on the shared sign-in and four slot
+    /// sessions; Personal with 94% of its week left and one slot session;
+    /// Backup's slot session deep in a turn; ORBTR (brandon) at its limit,
+    /// its readings still rising with its three slot sessions.
+    func testTheEveningRebalanceMovesSlotSessionsToPersonal() throws {
+        let personal = UUID(), backup = UUID(), orbtrBrandon = UUID(), hstlesBrandon = UUID()
+        let ratio = 0.25
+        let sessionTokens = 20_000_000.0
+        let sessionUnits = sessionTokens / 1_000_000 * ratio
+        let groupTokens = 80_000_000.0
+        let accounts = [
+            pacerAccount(hstlesBrandon, left: (99 - 15) * 8, resetIn: 135.5,
+                         burn: groupTokens / 1_000_000 * ratio + 4 * sessionUnits, ratio: ratio),
+            pacerAccount(personal, left: (99 - 6) * 8, resetIn: 147.5, burn: sessionUnits, ratio: ratio),
+            pacerAccount(backup, left: (99 - 98) * 8, resetIn: 35.5, burn: sessionUnits, ratio: ratio),
+            pacerAccount(orbtrBrandon, left: 0, resetIn: 110.5, burn: 3 * sessionUnits, ratio: ratio)
+        ]
+        func session(_ id: String, on account: UUID, movable: Bool = true) -> SessionPacer.RebalanceSession {
+            SessionPacer.RebalanceSession(id: id, account: account, tokensPerHour: sessionTokens, contextTokens: 150_000,
+                                          model: nil, movable: movable)
+        }
+        let sessions = (1...4).map { session("h\($0)", on: hstlesBrandon) } + [session("p1", on: personal)]
+            + [session("b1", on: backup, movable: false)] + (1...3).map { session("o\($0)", on: orbtrBrandon) }
+        // The group leaves HSTLES (brandon) for Personal when the week runs
+        // out there, at 5% of the week an hour in 17 hours.
+        let shared = SessionPacer.SharedGroup(account: hstlesBrandon, tokensPerHour: groupTokens, contextTokens: 600_000,
+                                              models: [], nextAccount: personal,
+                                              switchAt: now.addingTimeInterval(17 * 3600), sessionCount: 4)
+        let plan = SessionPacer().rebalance(accounts: accounts, sessions: sessions,
+                                            destinations: [hstlesBrandon, personal, backup], now: now, sharedGroup: shared)
+        let toPersonal = plan.moves.filter { $0.value == personal }.keys
+        XCTAssertFalse(toPersonal.isEmpty, "ORBTR (brandon) at its limit and Backup's held session no longer end the search")
+        XCTAssertTrue(toPersonal.allSatisfy { $0.hasPrefix("h") }, "slot sessions leave HSTLES (brandon) for Personal")
+        XCTAssertNil(plan.moves["b1"])
+        let before = try XCTUnwrap(plan.earliestRunOutBefore)
+        let after = try XCTUnwrap(plan.earliestRunOutAfter)
+        XCTAssertEqual(before.timeIntervalSince(now) / 3600, 16.8, accuracy: 0.05,
+                       "HSTLES (brandon) at 40% an hour with the group runs out first")
+        XCTAssertGreaterThan(after, before.addingTimeInterval(3 * 3600))
     }
 }

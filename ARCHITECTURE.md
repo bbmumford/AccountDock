@@ -478,7 +478,9 @@ so one burst sets neither the rate nor its uncertainty. Readings in the five
 minutes after a window starts (its reset moves, or an unstarted window gets
 one), after a window's use falls within the same window (a reset granted
 early, which can leave the reset time as it was), after a slot session moves
-to the account, or after paused sessions resume (`AppState.endPause`, an
+to the account, after the router moves a session to it (a routed session's
+request seen on another account than its last, `AppState.routedArrival`), or
+after paused sessions resume (`AppState.endPause`, an
 admission, or a reading taken while the pause holds them) teach no rate:
 each session's first request then re-sends its whole context. A failover
 switch holds the new account's rate for ten minutes
@@ -782,14 +784,23 @@ the pool weights and which sessions move, each time the pool is rebuilt
   soon takes more new sessions before its allowance is lost.
 - An account that would reach its limit and then wait there longer than its
   sessions' prompt cache lasts (the longest `cache_control` lifetime they
-  sent, an hour when unknown) gives sessions up: those relieving the most
-  rate per cache rewrite first, until it no longer would. Sessions whose
-  next turn comes soon go before one deep in a turn that began more than 15
-  minutes ago and is still sending (`SessionPacer.movable`), since a move
-  applies only at a session's next turn. A session moves
-  only to an account that, with the session's rate and the cost of writing
-  its context into that account's cache, stays within its own window. The
-  router moves it at its next turn (`RouterState.moves`).
+  sent, an hour when unknown) gives sessions up when moving them keeps the
+  work running longer (`SessionPacer.ShedReason`): it reaches that limit
+  more than a cache lifetime before the accounts together would have spent
+  what they have (`poolRunOut`), or, for the account carrying the shared
+  group while a switch is projected, before the group alone would take it
+  to its limit or the switch. Over the days to a weekly reset any rate
+  reaches a limit, so the wait alone would have every busy weekly-only
+  account give sessions up. It gives up those relieving the most rate per
+  cache rewrite first, until it no longer would. Sessions whose next turn
+  comes soon go before one deep in a turn that began more than 15 minutes
+  ago and is still sending (`SessionPacer.movable`), since a move applies
+  only at a session's next turn. A session moves only to an account that,
+  with the session's rate and the cost of writing its context into that
+  account's cache, reaches no limit before its reset, or none until within
+  an hour of the pool's run-out. The router moves it at its next turn
+  (`RouterState.moves`). The event names the reason ("… while the other
+  accounts still have room (together they last until …)").
 - An account that would reach its limit only shortly before its reset keeps
   its sessions. When one of them is refused at the limit and the reset the
   refusal names comes within five minutes and at least a minute before the
@@ -834,8 +845,12 @@ the pool weights and which sessions move, each time the pool is rebuilt
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when
   every other account has under `lowWeeklyRoom` (20%) of its week left, and
   pacing moves none of its sessions off it. The runway rule still applies,
-  so it takes no new session that could not last `newSessionRunway` there.
-  The drain ends when a reading or a refusal shows its limit, when it is
+  so it takes no new session that could not last `newSessionRunway` there:
+  in the pacer's weights, and before pacing in `buildPool`, where any
+  account that could not carry one more session of the running sessions'
+  typical rate for that hour beside its own rate
+  (`AppState.carriesNewSession`) has weight 0 while another could, a
+  draining one at `drainingPreferred` included. The drain ends when a reading or a refusal shows its limit, when it is
   active again, or a session window after the switch.
 - A session that starts a turn after its cache has expired is placed again
   like a new session (`RouterState.cacheAwareSessions`), since moving it
@@ -943,8 +958,14 @@ session off the account that runs out first to the destination that leaves
 the latest earliest run-out, charging the destination the session's cache
 rewrite; a move is made only when the hours it gains at that account's burn
 are worth more than the rewrite, a session moves at most once, and a session
-mid-turn never. The result never runs out earlier than before and every move
-pays for itself; it is a local optimum, not always the best assignment.
+mid-turn never. An account that runs out first but no single move helps (one
+at its limit whose readings still rise with the sessions on it, or one whose
+only sessions are mid-turn) is settled: it stays as it is, takes no session,
+and the search goes on with the account that runs out next, so such an
+account does not end the search before the accounts the sessions crowd. The
+run-outs reported then leave out the accounts settled before the first move.
+The result never runs out earlier than before and every move pays for itself;
+it is a local optimum, not always the best assignment.
 Excluded accounts, those needing sign-in and those at their limit are no
 destination. The moves go through `requestedSlotMoves`, so each is recorded.
 With **Rebalance automatically** (off by default) the quota cycle makes the

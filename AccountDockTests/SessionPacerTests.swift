@@ -219,7 +219,9 @@ final class SessionPacerTests: XCTestCase {
         let plan = SessionPacer().plan(
             accounts: [account(a, used: 60, resetIn: 4), account(b, used: 95, resetIn: 4)],
             sessions: [session("s", on: a, burn: 30)], now: now)
-        XCTAssertNotNil(plan.shedding[a])
+        // a runs out in 1.3 hours, the two together only five minutes later:
+        // no move keeps the work running longer, so a gives nothing up.
+        XCTAssertNil(plan.shedding[a])
         XCTAssertTrue(plan.moves.isEmpty, "b would reach its own limit, and the cache would be rewritten for nothing")
     }
 
