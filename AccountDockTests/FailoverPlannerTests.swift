@@ -463,6 +463,83 @@ final class FailoverPlannerTests: XCTestCase {
         XCTAssertEqual(trend.currentRates(now: now.addingTimeInterval(1800 + 1800)).session, 16, accuracy: 0.01)
     }
 
+    private func sessionReading(_ s: Double, resetIn: TimeInterval?) -> UsageAPIResponse {
+        UsageAPIResponse(
+            fiveHour: UsageWindow(utilization: s, resetsAt: resetIn.map { iso(now.addingTimeInterval($0)) }),
+            sevenDay: UsageWindow(utilization: 40, resetsAt: iso(now.addingTimeInterval(4 * 86_400))),
+            sevenDayOauthApps: nil, sevenDayOpus: nil, sevenDaySonnet: nil,
+            sevenDayCowork: nil, iguanaNecktie: nil, extraUsage: nil
+        )
+    }
+
+    func testAResumeBurstAfterAWindowResetDoesNotSetTheBurnRate() {
+        var trend = QuotaTrend()
+        // The old window, read at a steady 12% per hour.
+        trend.record(sessionReading(80, resetIn: 600), at: now)
+        trend.record(sessionReading(81, resetIn: 600), at: now.addingTimeInterval(300))
+        // It resets; paused sessions resume and re-send their contexts.
+        let newReset: TimeInterval = 600 + 5 * 3600
+        trend.record(sessionReading(2, resetIn: newReset), at: now.addingTimeInterval(700))
+        trend.record(sessionReading(20, resetIn: newReset), at: now.addingTimeInterval(760))
+        trend.record(sessionReading(33, resetIn: newReset), at: now.addingTimeInterval(820))
+        // Then the steady rate again.
+        for step in 1...4 {
+            trend.record(sessionReading(33 + Double(step), resetIn: newReset), at: now.addingTimeInterval(820 + Double(step) * 300))
+        }
+        XCTAssertEqual(trend.sessionBurnPerHour, 12, accuracy: 0.01)
+        XCTAssertEqual(trend.currentUncertainty(now: now.addingTimeInterval(2020)).session, 0, accuracy: 0.01)
+    }
+
+    func testABurstWhenAnUnstartedWindowStartsIsNotLearned() {
+        var trend = QuotaTrend()
+        trend.record(sessionReading(0, resetIn: nil), at: now)
+        trend.record(sessionReading(33, resetIn: 5 * 3600), at: now.addingTimeInterval(120))
+        trend.record(sessionReading(34, resetIn: 5 * 3600), at: now.addingTimeInterval(240))
+        trend.record(sessionReading(35, resetIn: 5 * 3600), at: now.addingTimeInterval(540))
+        trend.record(sessionReading(36, resetIn: 5 * 3600), at: now.addingTimeInterval(840))
+        XCTAssertEqual(trend.sessionBurnPerHour, 12, accuracy: 0.01)
+    }
+
+    func testReadingsJustAfterPausedSessionsResumeTeachNoRate() {
+        var trend = QuotaTrend()
+        trend.record(sessionReading(10, resetIn: 3 * 3600), at: now)
+        trend.settle(at: now)
+        trend.record(sessionReading(25, resetIn: 3 * 3600), at: now.addingTimeInterval(60))
+        trend.record(sessionReading(33, resetIn: 3 * 3600), at: now.addingTimeInterval(120))
+        trend.record(sessionReading(34, resetIn: 3 * 3600), at: now.addingTimeInterval(420))
+        trend.record(sessionReading(35, resetIn: 3 * 3600), at: now.addingTimeInterval(720))
+        XCTAssertEqual(trend.sessionBurnPerHour, 12, accuracy: 0.01)
+    }
+
+    func testOneBurstInASteadySeriesCannotSetTheForecast() {
+        var trend = QuotaTrend()
+        var t: TimeInterval = 0
+        var used = 10.0
+        func read(_ rise: Double, after: TimeInterval) {
+            t += after
+            used += rise
+            trend.record(sessionReading(used, resetIn: 4 * 3600), at: now.addingTimeInterval(t))
+        }
+        read(0, after: 0)
+        read(1, after: 300)
+        read(1, after: 300)
+        read(1, after: 300)
+        read(20, after: 60)
+        read(1, after: 300)
+        XCTAssertEqual(trend.sessionBurnPerHour, 12, accuracy: 0.01)
+        XCTAssertLessThan(trend.currentUncertainty(now: now.addingTimeInterval(t)).session, 1)
+    }
+
+    func testWholePercentReadingsGiveTheAverageRateNotAlternatingZeros() {
+        var trend = QuotaTrend()
+        // 12% per hour read in whole percent every 40 seconds.
+        for step in 0...60 {
+            let at = Double(step) * 40
+            trend.record(sessionReading((10 + at / 300).rounded(.down), resetIn: 4 * 3600), at: now.addingTimeInterval(at))
+        }
+        XCTAssertEqual(trend.sessionBurnPerHour, 12, accuracy: 1)
+    }
+
     func testWindowMergeIsMonotonicWithinAWindowAndAdvancesToANewOne() {
         let reset = now.addingTimeInterval(3600)
         let stored = UsageWindow(utilization: 70, resetsAt: iso(reset))

@@ -886,6 +886,12 @@ extension AppState {
         agentPauseStatus[provider] = nil
         sessionAdmissions[provider] = nil
         userResumes[provider] = nil
+        // Each resumed session's first request re-sends its whole context;
+        // that burst is not the accounts' burn rate.
+        let now = Date()
+        for account in accounts where account.provider == provider {
+            quotaTrends[account.id]?.settle(at: now)
+        }
         return held
     }
 
@@ -1091,6 +1097,7 @@ extension AppState {
             sessionRates.resume(id, tokensPerHour: demands[id] ?? typical, at: now)
             sessionAdmissions[provider, default: [:]][id] = SessionAdmission(
                 session: id, account: placement.account, at: now, surplus: placement.surplus)
+            quotaTrends[placement.account]?.settle(at: now)
         }
         refreshPauseStatus(provider)
         if provider == AIProviderType.routedProvider, routerInUse {
