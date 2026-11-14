@@ -116,7 +116,7 @@ final class ProviderSessionIsolationTests: XCTestCase {
         let account = UUID()
         let credential = try XCTUnwrap(isolation.slotCredential(from: #"{"access":"a1","refresh":"secret"}"#))
         XCTAssertFalse(credential.contents.contains("secret"))
-        let spare = try XCTUnwrap(slots.makeSlot(for: account, credential: credential))
+        let spare = try XCTUnwrap(slots.makeSlot(for: account, credential: credential, reason: "test"))
         XCTAssertEqual(isolation.readCredential(in: spare), credential)
         XCTAssertTrue(FileManager.default.fileExists(atPath: spare.appendingPathComponent("config.toml").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: spare.appendingPathComponent("reread").path))
@@ -150,12 +150,12 @@ final class ProviderSessionIsolationTests: XCTestCase {
         // isolation's own resume lines.
         let other = UUID()
         let otherCredential = try XCTUnwrap(isolation.slotCredential(from: #"{"access":"b2"}"#))
-        let otherSpare = try XCTUnwrap(slots.makeSlot(for: other, credential: otherCredential))
+        let otherSpare = try XCTUnwrap(slots.makeSlot(for: other, credential: otherCredential, reason: "test"))
         slots.writeResumes([(session: "s-1", path: slots.directory(for: other).path)])
         XCTAssertEqual(try launch(["resume", "s-1"]), otherSpare.path + "|" + otherCredential.contents + "|resume s-1")
 
         // Moving a session rewrites its slot through the isolation.
-        XCTAssertTrue(slots.serve(spare, credential: otherCredential))
+        XCTAssertTrue(slots.serve(spare, credential: otherCredential, account: nil, reason: "test"))
         XCTAssertEqual(isolation.readCredential(in: spare), otherCredential)
 
         // Each process is mapped to the slot its environment names.
@@ -166,7 +166,7 @@ final class ProviderSessionIsolationTests: XCTestCase {
         """
         XCTAssertEqual(slots.directoriesByProcess(inProcessList: list), [123: spare.path, 125: otherSpare.path])
 
-        slots.remove(spare)
+        slots.remove(spare, reason: "test")
         XCTAssertFalse(FileManager.default.fileExists(atPath: spare.path))
         slots.removeLauncher()
         XCTAssertFalse(slots.launcherInstalled)

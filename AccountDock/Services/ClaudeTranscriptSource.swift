@@ -31,8 +31,7 @@ struct ClaudeTranscriptSource: ProviderTranscriptSource {
         for project in projects {
             for entry in list(project) {
                 if entry.pathExtension == "jsonl" {
-                    found.append(TranscriptFile(url: entry, session: entry.deletingPathExtension().lastPathComponent,
-                                                subagent: false))
+                    found.append(TranscriptFile(url: entry, session: entry.deletingPathExtension().lastPathComponent))
                     continue
                 }
                 let subagents = entry.appendingPathComponent("subagents", isDirectory: true)
@@ -49,7 +48,10 @@ struct ClaudeTranscriptSource: ProviderTranscriptSource {
                     var quiet = true
                     for item in list(directory) {
                         if item.pathExtension == "jsonl" {
-                            found.append(TranscriptFile(url: item, session: entry.lastPathComponent, subagent: true))
+                            // The agent is named by its transcript's path under `subagents`.
+                            let relative = String(item.deletingPathExtension().path.dropFirst(subagents.path.count + 1))
+                            let agent = relative.isEmpty ? item.deletingPathExtension().lastPathComponent : relative
+                            found.append(TranscriptFile(url: item, session: entry.lastPathComponent, agent: agent))
                             let itemModified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?
                                 .contentModificationDate ?? .distantFuture
                             if itemModified > cutoff { quiet = false }
@@ -71,11 +73,13 @@ struct ClaudeTranscriptSource: ProviderTranscriptSource {
         case "user":
             return !file.subagent && Self.isPrompt(row) ? .prompt : .none
         case "assistant":
-            if let refusal = Self.limitRefusal(row, session: file.session, subagent: file.subagent) {
+            if var refusal = Self.limitRefusal(row, session: file.session, subagent: file.subagent) {
+                refusal.agent = file.agent
                 return .refusal(refusal)
             }
-            guard let request = Self.request(row, session: file.session, startsTurn: false, subagent: file.subagent)
+            guard var request = Self.request(row, session: file.session, startsTurn: false, subagent: file.subagent)
             else { return .none }
+            request.agent = file.agent
             return .request(request, key: Self.messageKey(row))
         default:
             return .none
@@ -127,7 +131,8 @@ struct ClaudeTranscriptSource: ProviderTranscriptSource {
             session: subagent ? session : (row["sessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? session,
             at: at, contextTokens: input + write + read, cacheWriteTokens: write, cacheWriteLongTokens: long,
             outputTokens: int(usage["output_tokens"]), cacheLifetime: lifetime, startsTurn: startsTurn,
-            model: subagent ? nil : message["model"] as? String, cacheReadTokens: read, subagent: subagent
+            model: subagent ? nil : message["model"] as? String, cacheReadTokens: read,
+            agent: subagent ? "" : nil, agentModel: subagent ? message["model"] as? String : nil
         )
     }
 
@@ -144,7 +149,7 @@ struct ClaudeTranscriptSource: ProviderTranscriptSource {
         return TranscriptRequest(
             session: subagent ? session : (row["sessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? session,
             at: at, contextTokens: 0, cacheWriteTokens: 0, cacheWriteLongTokens: 0, outputTokens: 0,
-            cacheLifetime: nil, startsTurn: false, limitRefusal: words, subagent: subagent
+            cacheLifetime: nil, startsTurn: false, limitRefusal: words, agent: subagent ? "" : nil
         )
     }
 }

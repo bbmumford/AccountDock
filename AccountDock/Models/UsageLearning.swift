@@ -40,6 +40,44 @@ struct TurnCostModel: Codable, Equatable {
     /// The account's own ratio once measured, otherwise the plan-wide one.
     func ratio(for account: UUID) -> Double { accountPercentPerMillion?[account] ?? ratio }
 
+    /// Where an account's ratio came from (`ratio(for:sizes:)`).
+    enum RatioSource: Equatable {
+        /// Measured on the account itself.
+        case learned
+        /// From the accounts with a measured ratio and a known plan size,
+        /// scaled by the account's plan size.
+        case seededFromLearned
+        /// From the plan-wide ratio, taken as the ratio of the median plan
+        /// size among `sizes`, scaled by the account's plan size.
+        case seededFromPlanWide
+        /// The plan-wide ratio: the account's plan size is unknown.
+        case planWide
+    }
+
+    /// The account's ratio, seeded from its plan size until it is measured.
+    /// `sizes` holds the relative plan size (`Account.planSize`) of each of
+    /// the provider's accounts whose size is known. A plan `s` times
+    /// another's size spends a percent on `s` times the tokens, so the seed
+    /// is a measured account's ratio times its size over this account's
+    /// (the geometric mean over every such account), or, with none
+    /// measured, the plan-wide ratio scaled from the median known size.
+    /// Learning replaces the seed with the first measurement
+    /// (`recordReading`). Read by `AppState.accountRatio`.
+    func ratio(for account: UUID, sizes: [UUID: Double]) -> (ratio: Double, source: RatioSource) {
+        if let learned = accountPercentPerMillion?[account] { return (learned, .learned) }
+        guard let size = sizes[account], size > 0 else { return (ratio, .planWide) }
+        let references = sizes.compactMap { id, referenceSize -> Double? in
+            guard referenceSize > 0, let learned = accountPercentPerMillion?[id], learned > 0 else { return nil }
+            return log(learned * referenceSize / size)
+        }
+        if !references.isEmpty {
+            return (exp(references.reduce(0, +) / Double(references.count)), .seededFromLearned)
+        }
+        let known = sizes.values.filter { $0 > 0 }.sorted()
+        let median = known.count % 2 == 1 ? known[known.count / 2] : (known[known.count / 2 - 1] + known[known.count / 2]) / 2
+        return (ratio * median / size, .seededFromPlanWide)
+    }
+
     mutating func recordRequest(session: String?, account: UUID, context: Int, cacheWrite: Int, output: Int,
                                 cacheWriteLong: Int = 0, at date: Date) {
         let weight = Self.weighted(context: context, cacheWrite: cacheWrite, output: output, cacheWriteLong: cacheWriteLong)

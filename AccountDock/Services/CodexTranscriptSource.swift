@@ -30,7 +30,7 @@ struct CodexTranscriptSource: ProviderTranscriptSource {
     func files(under root: URL, cutoff: Date, now: Date, listing: inout TranscriptListing) -> [TranscriptFile] {
         recentFiles(under: root, cutoff: cutoff) { url in
             guard let session = Self.sessionID(ofRollout: url) else { return nil }
-            return TranscriptFile(url: url, session: session, subagent: false)
+            return TranscriptFile(url: url, session: session)
         }
     }
 
@@ -48,7 +48,7 @@ struct CodexTranscriptSource: ProviderTranscriptSource {
         case "session_meta":
             if let parent = (payload["parent_thread_id"] as? String).flatMap({ $0.isEmpty ? nil : $0 }) {
                 state.session = parent
-                state.subagent = true
+                state.agent = (payload["id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? file.session
             } else if let id = (payload["id"] as? String).flatMap({ $0.isEmpty ? nil : $0 }) {
                 state.session = id
             }
@@ -65,7 +65,7 @@ struct CodexTranscriptSource: ProviderTranscriptSource {
         let session = state.session ?? file.session
         switch payload["type"] as? String {
         case "user_message":
-            return state.subagent ? .none : .prompt
+            return state.agent != nil ? .none : .prompt
         case "token_count":
             guard let info = payload["info"] as? [String: Any],
                   let last = info["last_token_usage"] as? [String: Any] else { return .none }
@@ -79,8 +79,8 @@ struct CodexTranscriptSource: ProviderTranscriptSource {
             return .request(TranscriptRequest(
                 session: session, at: at, contextTokens: input, cacheWriteTokens: write, cacheWriteLongTokens: 0,
                 outputTokens: Self.int(last["output_tokens"]), cacheLifetime: write > 0 ? Self.cacheLifetime : nil,
-                startsTurn: false, model: state.subagent ? nil : state.model, cacheReadTokens: read,
-                subagent: state.subagent
+                startsTurn: false, model: state.agent != nil ? nil : state.model, cacheReadTokens: read,
+                agent: state.agent, agentModel: state.agent != nil ? state.model : nil
             ), key: nil)
         case "task_complete", "error":
             let error = payload["type"] as? String == "error" ? payload : payload["error"] as? [String: Any]
@@ -94,7 +94,7 @@ struct CodexTranscriptSource: ProviderTranscriptSource {
             state.lastRefusalAt = at
             return .refusal(TranscriptRequest(
                 session: session, at: at, contextTokens: 0, cacheWriteTokens: 0, cacheWriteLongTokens: 0,
-                outputTokens: 0, cacheLifetime: nil, startsTurn: false, limitRefusal: words, subagent: state.subagent
+                outputTokens: 0, cacheLifetime: nil, startsTurn: false, limitRefusal: words, agent: state.agent
             ))
         default:
             return .none

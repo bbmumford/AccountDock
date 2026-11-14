@@ -50,18 +50,58 @@ extension AppState {
     /// is known only from such a reading, and `maintainSessionSlots` and
     /// `evaluateFailover`, which run next, move the sessions the account
     /// can no longer serve. Called from `runQuotaCycle` after
-    /// `refreshSessions`.
+    /// `refreshSessions`. The transcripts are read whether or not request
+    /// cost is learned, since every request, its agent's included, is
+    /// handed to the credential audit (`recordTranscriptRequest`), and a
+    /// refusal whose words name a reset is compared with the account the
+    /// session is believed to read (`noteProcessCredential`). A request of
+    /// a session in a slot that moved is attributed to the account the slot
+    /// served at the request's own time, and a refusal whose stated reset
+    /// matches another account's window and not the attributed one's is
+    /// that other account's: a session refused just after its slot moved
+    /// was still on the account it left, and the account it moved to must
+    /// not be taken to have refused it.
     func ingestTranscriptRequests(now: Date = Date()) async {
         for provider in AIProviderType.implementedProviders where provider.capabilities.transcriptSource != nil {
             let requests = await TranscriptRequestFeed.shared.newRequests(provider, now: now)
             guard !requests.isEmpty else { continue }
+            let learns = learnsRequestCost(provider)
             let attribution = sessionAttribution(provider, now: now)
             let processes = sessionProcesses(provider)
             var refusedAt: [UUID: Date] = [:]
             for request in requests {
                 if let name = request.sessionName, sessionNames[request.session] != name { sessionNames[request.session] = name }
                 if let model = request.model { noteSessionModel(request.session, model: model, at: request.at) }
-                guard let decision = attribution.decide(session: request.session, process: processes[request.session]) else { continue }
+                let process = processes[request.session]
+                var decision = attribution.decide(session: request.session, process: process)
+                // A slot that moved serves the request with the account it
+                // held at the request's own time (`servingSlotAccount`).
+                if let current = decision, current.source == .slot,
+                   let then = slotAccount(forSession: request.session, process: process, at: request.at),
+                   then != current.account {
+                    decision = SessionAttribution.Decision(account: then, source: .slot, observedAt: request.at)
+                }
+                recordTranscriptRequest(provider, request, decision: decision)
+                // A refusal is the account's whose window its stated reset
+                // matches, when that is not the attributed account's.
+                if let words = request.limitRefusal, let attributed = decision?.account {
+                    let refusing = Self.refusingAccount(words: words, at: request.at, attributed: attributed,
+                                                        windows: resetWindows(provider))
+                    if refusing.byReset {
+                        decision = SessionAttribution.Decision(account: refusing.account, source: decision?.source ?? .slot,
+                                                               observedAt: request.at)
+                        credentialAudit.record(.served, provider, account: attributed, outcome: "reattributed",
+                                               reason: "ingestTranscriptRequests.refusal", session: request.session,
+                                               process: process, source: "refusalReset", observedAt: request.at,
+                                               detail: "Refused with a reset matching \(refusing.account.uuidString)'s window, not the attributed account's.")
+                    }
+                }
+                if let words = request.limitRefusal, request.agent == nil,
+                   let named = account(namedByRefusal: words, at: request.at, provider: provider) {
+                    noteProcessCredential(provider, session: request.session, process: process,
+                                          observed: named, source: "refusalReset", observedAt: request.at)
+                }
+                guard learns, let decision else { continue }
                 if let words = request.limitRefusal {
                     refusedAt[decision.account] = max(refusedAt[decision.account] ?? .distantPast, request.at)
                     noteRefusal(of: request.session, by: decision.account, words: words, at: request.at,

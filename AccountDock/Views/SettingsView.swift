@@ -98,6 +98,35 @@ struct SettingsView: View {
         )
     }
 
+    // MARK: - Audit
+
+    /// Where the credential audit trail is (`CredentialAudit`), and the
+    /// sessions it flagged as holding another account's sign-in than the
+    /// one AccountDock believes they read, with the action that tells them
+    /// to read it again.
+    private var auditSection: some View {
+        Section("Audit") {
+            Text("Every credential AccountDock reads, writes, renews or serves to a session is recorded, with whose token it was, in \(appState.credentialAudit.fileURL.path). Query it with the request {\"action\":\"audit\",\"since\":\"<ISO time>\",\"account\":\"<id or label>\"}.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Open in Console") { appState.openCredentialAudit() }
+                Button("Show in Finder") { appState.revealCredentialAudit() }
+            }
+            let flagged = appState.flaggedCredentialProcesses.values.sorted { $0.at < $1.at }
+            if !flagged.isEmpty {
+                ForEach(flagged, id: \.session) { item in
+                    let observed = appState.accounts.first { $0.id == item.observed }.map { appState.messageName($0) } ?? "another account"
+                    let believed = item.believed.flatMap { id in appState.accounts.first { $0.id == id } }
+                        .map { appState.messageName($0) } ?? "no account"
+                    Text("Session \(item.session.prefix(8))\(item.process.map { " (process \($0))" } ?? "") uses \(observed)'s sign-in; AccountDock believed \(believed)'s.")
+                        .font(.caption)
+                }
+                Button("Tell flagged sessions to read their sign-in again") { appState.signalFlaggedProcesses() }
+            }
+        }
+    }
+
     // MARK: - General Tab
 
     private var generalTab: some View {
@@ -160,6 +189,8 @@ struct SettingsView: View {
 
             AgentHooksSettingsSection()
                 .environmentObject(appState)
+
+            auditSection
         }
         .formStyle(.grouped)
         .padding()

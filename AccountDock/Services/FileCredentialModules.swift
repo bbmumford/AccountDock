@@ -14,9 +14,9 @@ struct CodexCredentialModule: ProviderCredentialModule {
         account.credentialLocation != nil
     }
 
-    func renewSavedCopy(_ account: Account) async -> CredentialRenewal {
+    func renewSavedCopy(_ account: Account, reason: String) async -> CredentialRenewal {
         guard let home = account.credentialLocation else { return .rejected }
-        return await service.renewCredential(codexHome: home)
+        return await service.renewCredential(codexHome: home, reason: reason)
     }
 
     func savedCopyLasts(_ account: Account, for interval: TimeInterval) -> Bool {
@@ -38,9 +38,9 @@ struct KimiCredentialModule: ProviderCredentialModule {
         account.credentialLocation != nil
     }
 
-    func renewSavedCopy(_ account: Account) async -> CredentialRenewal {
+    func renewSavedCopy(_ account: Account, reason: String) async -> CredentialRenewal {
         guard let location = account.credentialLocation else { return .rejected }
-        return await service.renewCredential(location: location)
+        return await service.renewCredential(location: location, reason: reason)
     }
 
     func savedCopyLasts(_ account: Account, for interval: TimeInterval) -> Bool {

@@ -68,7 +68,7 @@ extension AppState {
         let to = restart.to
         let sessionID = restart.session
         let ready = await Task.detached(priority: .userInitiated) { () -> Bool in
-            guard slots.makeSpare(for: to, credential: credential) else { return false }
+            guard slots.makeSpare(for: to, credential: credential, reason: "applySlotRestarts") else { return false }
             slots.addResume(session: sessionID, path: slots.directory(for: to).path)
             return true
         }.value

@@ -102,7 +102,8 @@ final class ProviderTranscriptSourceTests: XCTestCase {
         XCTAssertEqual(refusals.first?.session, parent)
         let subagent = try XCTUnwrap(requests.first { $0.limitRefusal == nil })
         XCTAssertEqual(subagent.session, parent, "a subagent's requests are its session's")
-        XCTAssertTrue(subagent.subagent)
+        XCTAssertEqual(subagent.agent, child)
+        XCTAssertEqual(subagent.agentModel, "gpt-5.6-mini")
         XCTAssertFalse(subagent.startsTurn)
         XCTAssertNil(subagent.model)
         XCTAssertTrue(CodexTranscriptSource.isUsageLimit(["usage_limit_exceeded": ["resets_at": 1]]))
@@ -155,6 +156,8 @@ final class ProviderTranscriptSourceTests: XCTestCase {
         XCTAssertEqual(mainRequests.first?.outputTokens, 40)
         XCTAssertEqual(mainRequests.first?.model, "kimi-for-coding")
         let subagent = try XCTUnwrap(requests.first { $0.subagent })
+        XCTAssertEqual(subagent.agent, "agent-2")
+        XCTAssertEqual(subagent.agentModel, "kimi-k3")
         XCTAssertFalse(subagent.startsTurn)
         XCTAssertNil(subagent.model)
         XCTAssertEqual(requests.compactMap(\.limitRefusal), ["You exceeded your current quota"],
@@ -162,7 +165,7 @@ final class ProviderTranscriptSourceTests: XCTestCase {
     }
 
     func testKimiRateLimitRefusalsAndUntitledSessions() {
-        let file = TranscriptFile(url: URL(fileURLWithPath: "/x/sessions/w/s1/agents/main/wire.jsonl"), session: "s1", subagent: false)
+        let file = TranscriptFile(url: URL(fileURLWithPath: "/x/sessions/w/s1/agents/main/wire.jsonl"), session: "s1")
         var state = TranscriptReadState()
         let row: [String: Any] = ["type": "turn.ended", "reason": "failed", "time": 1_794_668_397_000,
                                   "error": ["code": "provider.rate_limit", "message": "429 Too Many Requests"]]
@@ -173,7 +176,7 @@ final class ProviderTranscriptSourceTests: XCTestCase {
         XCTAssertEqual(refusal.at, Date(timeIntervalSince1970: 1_794_668_397))
         XCTAssertNil(KimiTranscriptSource.title(inState: Data(#"{"title":"New Session"}"#.utf8)))
         XCTAssertEqual(KimiTranscriptSource.transcriptFile(URL(fileURLWithPath: "/x/sessions/w/s1/agents/agent-9/wire.jsonl")),
-                       TranscriptFile(url: URL(fileURLWithPath: "/x/sessions/w/s1/agents/agent-9/wire.jsonl"), session: "s1", subagent: true))
+                       TranscriptFile(url: URL(fileURLWithPath: "/x/sessions/w/s1/agents/agent-9/wire.jsonl"), session: "s1", agent: "agent-9"))
         XCTAssertNil(KimiTranscriptSource.transcriptFile(URL(fileURLWithPath: "/x/sessions/w/s1/wire.jsonl")))
     }
 

@@ -24,22 +24,31 @@ struct TranscriptRequest: Equatable, Sendable {
     /// Such a request used nothing, and `AppState.ingestTranscriptRequests`
     /// reads the refusing account whole instead of recording it.
     var limitRefusal: String? = nil
-    /// The part of `contextTokens` read from the prompt cache.
+    /// Cache read tokens, part of `contextTokens`; with `cacheWriteTokens`
+    /// they show `CredentialAudit.noteRequest` a cache rebuilt whole.
     var cacheReadTokens: Int = 0
-    /// Made by one of the session's subagents, which consume its account
-    /// and never start its turns.
-    var subagent: Bool = false
+    /// For a subagent's request, the agent that made it, as its source
+    /// names it (`TranscriptFile.agent`); nil for the session's own.
+    var agent: String? = nil
+    /// The model a subagent's request used, which `model` leaves out.
+    var agentModel: String? = nil
     /// The name the session was given in the CLI, when its records keep
     /// one; `AppState.sessionNames` shows it.
     var sessionName: String? = nil
+
+    /// Made by one of the session's subagents, which consume its account
+    /// and never start its turns.
+    var subagent: Bool { agent != nil }
 }
 
 /// A transcript file a source lists: the session its requests belong to,
-/// and whether a subagent of that session writes it.
+/// and the subagent of that session that writes it, if one does.
 struct TranscriptFile: Equatable, Sendable {
     let url: URL
     let session: String
-    let subagent: Bool
+    var agent: String? = nil
+
+    var subagent: Bool { agent != nil }
 }
 
 /// What a source keeps between two listings of its transcripts, held by
@@ -66,8 +75,8 @@ struct TranscriptReadState: Sendable {
     /// The session the file's own records name, replacing the one its
     /// listing gave.
     var session: String?
-    /// The file's own records say a subagent writes it.
-    var subagent = false
+    /// The subagent the file's own records say writes it.
+    var agent: String?
     /// The model the session's latest records name.
     var model: String?
     /// The running total of tokens the file last reported, for a CLI that

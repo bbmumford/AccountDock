@@ -90,7 +90,7 @@ final class CodexSessionIsolationTests: XCTestCase {
         let slots = SessionSlots(isolation: isolation, home: home)
         let account = UUID()
         let credential = try XCTUnwrap(isolation.slotCredential(from: Self.auth(account: "acct-1", expires: Date().addingTimeInterval(3600))))
-        XCTAssertTrue(slots.serve(slots.directory(for: account), credential: credential))
+        XCTAssertTrue(slots.serve(slots.directory(for: account), credential: credential, account: account, reason: "test"))
         slots.writePool([(slots.directory(for: account).path, 1)])
 
         let output = try runLauncher(home: home, arguments: ["exec", "say ok"])
@@ -104,7 +104,7 @@ final class CodexSessionIsolationTests: XCTestCase {
         let slots = SessionSlots(isolation: isolation, home: home)
         let account = UUID()
         let credential = try XCTUnwrap(isolation.slotCredential(from: Self.auth(account: "acct-1", expires: Date().addingTimeInterval(3600))))
-        XCTAssertTrue(slots.serve(slots.directory(for: account), credential: credential))
+        XCTAssertTrue(slots.serve(slots.directory(for: account), credential: credential, account: account, reason: "test"))
         slots.writePool([(slots.directory(for: account).path, 1)])
         for command in ["login", "logout", "mcp", "app"] {
             let output = try runLauncher(home: home, arguments: [command, "--help"])
@@ -118,8 +118,8 @@ final class CodexSessionIsolationTests: XCTestCase {
         let (pooled, resumedOn) = (UUID(), UUID())
         let credential = try XCTUnwrap(isolation.slotCredential(from: Self.auth(account: "acct-1", expires: Date().addingTimeInterval(3600))))
         let other = try XCTUnwrap(isolation.slotCredential(from: Self.auth(account: "acct-2", expires: Date().addingTimeInterval(3600))))
-        XCTAssertTrue(slots.serve(slots.directory(for: pooled), credential: credential))
-        XCTAssertTrue(slots.serve(slots.directory(for: resumedOn), credential: other))
+        XCTAssertTrue(slots.serve(slots.directory(for: pooled), credential: credential, account: pooled, reason: "test"))
+        XCTAssertTrue(slots.serve(slots.directory(for: resumedOn), credential: other, account: resumedOn, reason: "test"))
         slots.writePool([(slots.directory(for: pooled).path, 1)])
         slots.writeResumes([("019a-session", slots.directory(for: resumedOn).path)])
 
@@ -185,11 +185,14 @@ final class CodexSessionIsolationTests: XCTestCase {
         let newer = Self.auth(account: "acct-1", expires: Date().addingTimeInterval(7200))
         try older.write(to: managed.appendingPathComponent("auth.json"), atomically: true, encoding: .utf8)
         try newer.write(to: live.appendingPathComponent("auth.json"), atomically: true, encoding: .utf8)
-        XCTAssertEqual(service.slotSourceCredential(codexHome: managed.path, isActive: true), newer)
-        XCTAssertEqual(service.slotSourceCredential(codexHome: managed.path, isActive: false), older)
+        func token(_ text: String?) -> String? { text.flatMap(CodexService.accessToken(inAuth:)) }
+        XCTAssertEqual(token(service.slotSourceCredential(codexHome: managed.path, isActive: false, reason: "test")), token(older))
+        XCTAssertEqual(token(service.slotSourceCredential(codexHome: managed.path, isActive: true, reason: "test")), token(newer))
+        XCTAssertEqual(token(try String(contentsOf: managed.appendingPathComponent("auth.json"), encoding: .utf8)), token(newer),
+                       "the live copy Codex renewed becomes the managed copy, refresh token and all")
         try Self.auth(account: "acct-9", expires: Date().addingTimeInterval(9000))
             .write(to: live.appendingPathComponent("auth.json"), atomically: true, encoding: .utf8)
-        XCTAssertEqual(service.slotSourceCredential(codexHome: managed.path, isActive: true), older,
+        XCTAssertEqual(token(service.slotSourceCredential(codexHome: managed.path, isActive: true, reason: "test")), token(newer),
                        "a live sign-in of another account is never served")
         XCTAssertTrue(CodexSessionIsolation.lasts(newer, for: 3600))
         XCTAssertFalse(CodexSessionIsolation.lasts(older, for: 3600))

@@ -33,9 +33,9 @@ extension AppState {
     /// provider's running sessions use. A rejection marks the account as
     /// needing sign-in; network and server failures do not.
     @discardableResult
-    func renewSavedCredential(_ account: Account) async -> CredentialRenewal {
+    func renewSavedCredential(_ account: Account, reason: String) async -> CredentialRenewal {
         guard let module = credentialModule(for: account.provider) else { return .unavailable }
-        let outcome = await module.renewSavedCopy(account)
+        let outcome = await module.renewSavedCopy(account, reason: reason)
         switch outcome {
         case .renewed:
             clearNeedsSignIn(account)
@@ -75,7 +75,7 @@ extension AppState {
             credentialVerifiedAt[account.id] = Date()
             return true
         }
-        switch await renewSavedCredential(account) {
+        switch await renewSavedCredential(account, reason: "credentialIsUsable") {
         case .renewed:
             credentialVerifiedAt[account.id] = Date()
             return true
@@ -141,7 +141,7 @@ extension AppState {
     /// the credential changed since its owner was last read.
     func liveCredentialOwner(_ provider: AIProviderType) -> UUID? {
         guard let known = liveCredentialOwners[provider],
-              let credential = credentialModule(for: provider)?.liveCredential?.read(),
+              let credential = credentialModule(for: provider)?.liveCredential?.read(reason: "liveCredentialOwner"),
               Self.credentialDigest(credential) == known.digest else { return nil }
         return known.account
     }
@@ -167,7 +167,7 @@ extension AppState {
     /// Records that the live credential now in place belongs to `account`,
     /// after AccountDock installed or captured it.
     func noteLiveCredentialOwner(_ provider: AIProviderType, account: UUID) {
-        guard let credential = credentialModule(for: provider)?.liveCredential?.read() else { return }
+        guard let credential = credentialModule(for: provider)?.liveCredential?.read(reason: "noteLiveCredentialOwner") else { return }
         liveCredentialOwners[provider] = (Self.credentialDigest(credential), account)
     }
 
@@ -177,9 +177,10 @@ extension AppState {
     /// their next request, and stops counting `previous` as consumed by
     /// them. Each session then rebuilds its prompt cache on the new account.
     /// Nothing happens for a provider whose sessions share no live credential.
-    func moveRunningSessions(_ provider: AIProviderType, from previous: UUID? = nil) {
+    func moveRunningSessions(_ provider: AIProviderType, from previous: UUID? = nil,
+                             reason: String = "moveRunningSessions") {
         guard let live = credentialModule(for: provider)?.liveCredential else { return }
-        live.signalRunningSessions()
+        live.signalRunningSessions(reason: reason)
         sessionsSignalledAt[provider] = Date()
         if let previous { lastSwitchedAway[previous] = nil }
         sessionsLeftOn[provider] = nil
@@ -215,7 +216,7 @@ extension AppState {
                 if state.refusedAtLimit
                     || planner.servingVerdict(planner.servingView(state), now: now, lead: 0) == .atLimit {
                     failoverEvents.record(provider, "\(messageName(account)) reached its limit; the sessions still on it move to the active account at their next request.")
-                    moveRunningSessions(provider, from: id)
+                    moveRunningSessions(provider, from: id, reason: "moveSessionsOffLimitedAccounts")
                     break
                 }
             }
@@ -253,12 +254,12 @@ extension AppState {
     }
 
     private func adoptLiveCredential(_ live: LiveCredentialModule, provider: AIProviderType, active: Account) async {
-        guard let credential = live.read() else { return }
+        guard let credential = live.read(reason: "adoptRenewedCredentials") else { return }
         let digest = Self.credentialDigest(credential)
         guard digest != liveCredentialDigests[provider] else { return }
         let owner: CredentialOwner
         do {
-            owner = try await live.owner(of: credential)
+            owner = try await live.owner(of: credential, reason: "adoptRenewedCredentials")
         } catch LiveCredentialError.rejected {
             // A rejected credential names no account; the active account's
             // usage read renews it through the CLI.
@@ -269,7 +270,7 @@ extension AppState {
         }
         // Read again, so a credential renewed during the request is not
         // overwritten by the older one.
-        guard live.read() == credential else { return }
+        guard live.read(reason: "adoptRenewedCredentials.recheck") == credential else { return }
         liveCredentialDigests[provider] = digest
         guard let account = Self.owningAccount(
             owner,
@@ -286,33 +287,36 @@ extension AppState {
             ownerID: account.id,
             activeID: active.id,
             signedInAsActive: live.signedInEmail()?.caseInsensitiveCompare(active.email) == .orderedSame,
-            activeCopyIsCurrent: live.savedCopy(active) == credential,
+            activeCopyIsCurrent: live.savedCopy(active, reason: "adoptRenewedCredentials.compare") == credential,
             liveWasActives: liveWasActives
         )
         switch action {
         case .none:
             return
         case .saveActiveCopy:
-            _ = live.save(credential, asCopyOf: active)
+            _ = live.save(credential, asCopyOf: active, reason: "adoptRenewedCredentials.saveActiveCopy")
         case .makeOwnerActive:
-            if live.savedCopy(account) != credential { _ = live.save(credential, asCopyOf: account) }
+            if live.savedCopy(account, reason: "adoptRenewedCredentials.compare") != credential {
+                _ = live.save(credential, asCopyOf: account, reason: "adoptRenewedCredentials.makeOwnerActive")
+            }
             accounts.makeActive(account.id)
             saveAccounts(refreshWidget: true)
             let restored = live.restoreSignedInIdentity(of: account)
             failoverEvents.record(provider, "\(messageName(account))'s sign-in is the one in use, so it is the active account; a session on \(messageName(active)) had rewritten the signed-in identity\(restored ? ", which is restored" : "").")
         case .adopt(let restoreActive):
-            guard live.save(credential, asCopyOf: account) else { return }
+            guard live.save(credential, asCopyOf: account, reason: "adoptRenewedCredentials.adopt") else { return }
             clearNeedsSignIn(account)
             credentialQuarantine[account.id] = nil
             failoverEvents.record(provider, "Saved \(messageName(account))'s renewed sign-in, written by one of its running sessions.")
             guard restoreActive else { return }
-            guard live.install(savedCopyOf: active), let installed = live.read() else {
+            guard live.install(savedCopyOf: active, reason: "adoptRenewedCredentials.restoreActive"),
+                  let installed = live.read(reason: "adoptRenewedCredentials.restoreActive") else {
                 failoverEvents.record(provider, "New sessions start on \(messageName(account)): \(messageName(active))'s saved sign-in could not be restored.")
                 return
             }
             liveCredentialDigests[provider] = Self.credentialDigest(installed)
             liveCredentialOwners[provider] = (Self.credentialDigest(installed), active.id)
-            live.signalRunningSessions()
+            live.signalRunningSessions(reason: "adoptRenewedCredentials.restoreActive")
             sessionsSignalledAt[provider] = Date()
             failoverEvents.record(provider, "Restored \(messageName(active))'s sign-in for new sessions.")
         }

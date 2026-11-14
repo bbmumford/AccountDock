@@ -195,22 +195,25 @@ struct CodexSessionIsolation: ProviderSessionIsolation {
         guard let home = account.credentialLocation else { return nil }
         let service = state.codexService
         let isActive = state.readsLiveCredential(account)
-        guard let stored = service.slotSourceCredential(codexHome: home, isActive: isActive) else { return nil }
+        guard let stored = service.slotSourceCredential(codexHome: home, isActive: isActive,
+                                                        reason: "currentSlotCredential") else { return nil }
         let required = isActive ? max(minimumLifetime, Self.liveRenewalLifetime) : minimumLifetime
         var current = stored
         if !Self.lasts(stored, for: required) {
             await state.credentialGate.run {
                 if isActive {
-                    switch await service.renewLiveCredentialForSlots(codexHome: home, lasting: required) {
+                    switch await service.renewLiveCredentialForSlots(codexHome: home, lasting: required,
+                                                                       reason: "currentSlotCredential.live") {
                     case .renewed: state.clearNeedsSignIn(account)
                     case .rejected: state.noteCredentialRejected(account)
                     case .unavailable: break
                     }
                 } else {
-                    _ = await state.renewSavedCredential(account)
+                    _ = await state.renewSavedCredential(account, reason: "currentSlotCredential.saved")
                 }
             }
-            guard let renewed = service.slotSourceCredential(codexHome: home, isActive: isActive) else { return nil }
+            guard let renewed = service.slotSourceCredential(codexHome: home, isActive: isActive,
+                                                             reason: "currentSlotCredential.renewed") else { return nil }
             current = renewed
         }
         guard Self.lasts(current, for: Self.minimumServedLifetime) else {

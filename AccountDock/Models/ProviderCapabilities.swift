@@ -106,6 +106,14 @@ struct ProviderCapabilities: Sendable {
     /// tier don't say them, keyed `<plan>:<tier>`; read by
     /// `Account.displaySubscriptionType`.
     var planNames: [String: String] = [:]
+    /// How large each plan's usage allowance is relative to the others',
+    /// keyed `<plan>:<tier>` or, for a plan whose tier does not change its
+    /// size, `<plan>`. `TurnCostModel.ratio(for:sizes:)` seeds an account
+    /// with no learned token cost from it (a plan a twentieth the size
+    /// spends a percent on a twentieth of the tokens); empty when the
+    /// provider's plan sizes are not known, which leaves the learned or
+    /// default cost. Read through `Account.planSize`.
+    var planSizes: [String: Double] = [:]
 
     var supportsSessionQuota: Bool { sessionQuotaMode != .unsupported }
     /// How the CLI runs sessions in the background under a supervisor of
@@ -342,7 +350,9 @@ extension AIProviderType {
                 storageKey: "claude",
                 shortBadge: "C",
                 activityMetrics: [.turns, .activeTime, .linesChanged, .cost],
-                planNames: ["max:default_claude_max_20x": "Ultra", "max:default_claude_max_5x": "Max"]
+                planNames: ["max:default_claude_max_20x": "Ultra", "max:default_claude_max_5x": "Max"],
+                // Max 20x holds twenty times Pro's usage, Max 5x five times.
+                planSizes: ["max:default_claude_max_20x": 20, "max:default_claude_max_5x": 5, "pro": 1]
             )
         case .codex:
             ProviderCapabilities(

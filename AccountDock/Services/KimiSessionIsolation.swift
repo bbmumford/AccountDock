@@ -178,13 +178,14 @@ struct KimiSessionIsolation: ProviderSessionIsolation {
         if !Self.lasts(stored, for: required) {
             await state.credentialGate.run {
                 if isActive {
-                    switch await service.renewLiveCredentialForSlots(location: location, lasting: required) {
+                    switch await service.renewLiveCredentialForSlots(location: location, lasting: required,
+                                                                       reason: "currentSlotCredential.live") {
                     case .renewed: state.clearNeedsSignIn(account)
                     case .rejected: state.noteCredentialRejected(account)
                     case .unavailable: break
                     }
                 } else {
-                    _ = await state.renewSavedCredential(account)
+                    _ = await state.renewSavedCredential(account, reason: "currentSlotCredential.saved")
                 }
             }
             guard let renewed = service.slotSourceCredential(location: location, isActive: isActive) else { return nil }

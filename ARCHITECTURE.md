@@ -109,6 +109,17 @@ Some data is the same for every provider by construction:
   else the live credential's owner, else the active account. A session on
   the shared sign-in keeps the token it read until it is signalled, so it
   stays on the earlier account after a switch.
+- **Transcripts.** `TranscriptRequestFeed` reads each provider's session
+  transcripts through its `ProviderCapabilities.transcriptSource`, which
+  lists the files and says what each row records: per request the session,
+  time, model, input, cache and output tokens, whether it started a turn,
+  the subagent that made it, the session's name, and usage-limit refusals in
+  the provider's words. `ClaudeTranscriptSource` reads `projects/`,
+  `CodexTranscriptSource` the rollouts under `sessions/` (and names from
+  `session_index.jsonl`), `KimiTranscriptSource` each agent's `wire.jsonl`
+  (and titles from `state.json`). `AppState.ingestTranscriptRequests` learns
+  request cost, models, names and refusals for every provider with a
+  source, whether or not the router serves it.
 - **Cost and activity.** `CostParser.ProviderCostHistory` holds each
   provider's daily cost and today's turns, models, lines, tokens, sessions and
   active time. Claude Code's is built from its per-request cost summary; the
@@ -200,6 +211,39 @@ saved with its copy. A saved copy whose ownership the provider has not yet
 confirmed (no request allowance, or no answer) reads no usage for its account
 (`AppState.recordsReading`); the check is made again at the next reading, and a
 reading the user asks for always makes it.
+
+### Credential audit
+
+Every read of a credential for use, every write, removal, renewal,
+ownership answer, switch, session signal, warm-up and slot change, for every
+provider, appends one JSON line to `~/Library/Logs/AccountDock-credentials.jsonl`
+(`CredentialAudit`). An entry names the action, the account AccountDock
+attributes it to, the code path (`reason`), the slot, session and process
+for slot actions, and the token only as a fingerprint: the first 12
+hexadecimal digits of the SHA-256 of its access token. No token text and
+nothing of a refresh token is written; plan fields (`subscriptionType`,
+`rateLimitTier`) are.
+
+The audit learns whose each fingerprint is from the provider's answers
+(profile checks before saving or switching, isolated sign-ins, the saved-copy
+check before a reading, a Codex token's own signed identity) and keeps the
+map beside the file. A later entry with a known fingerprint names the real
+owner; one attributed to another account is marked `mismatch` and raises an
+event once per token and account.
+
+The trail also records which account served each session and agent
+(`served`, once per change), a session's or agent's prompt cache rebuilt
+whole right after a warm read (`servedChange`, the change of account the
+transcript itself shows), and what a running process's status line or
+refusal reset times say about the token it holds (`processCredential`).
+A process holding another account's token than its slot's or the live one
+is flagged with an event; Settings → General → Audit, or the request
+`{"action":"signalSessions"}`, tells it to read its sign-in again.
+
+Query it with the request `{"action":"audit","since":"<ISO time>","account":"<id, label or email>"}`;
+Settings → General → Audit opens the file. `CredentialAuditCoverageTests`
+reads the sources and fails for any credential operation called without a
+`reason:` outside a function that records an entry.
 
 ### Token JSON format
 
@@ -501,7 +545,9 @@ so one burst sets neither the rate nor its uncertainty. Readings in the five
 minutes after a window starts (its reset moves, or an unstarted window gets
 one), after a window's use falls within the same window (a reset granted
 early, which can leave the reset time as it was), after a slot session moves
-to the account, or after paused sessions resume (`AppState.endPause`, an
+to the account, after the router moves a session to it (a routed session's
+request seen on another account than its last, `AppState.routedArrival`), or
+after paused sessions resume (`AppState.endPause`, an
 admission, or a reading taken while the pause holds them) teach no rate:
 each session's first request then re-sends its whole context. A failover
 switch holds the new account's rate for ten minutes
@@ -595,6 +641,33 @@ destination must carry the moving work as any switch destination must
 (`FailoverPlanner.carries`); a remainder too small for that is spent by slot
 sessions and new sessions the pool sizes to it, never by the group.
 
+With pacing on, `SessionPacer.plan` spends such a remainder
+(`SessionPacer.RemainderSpending`, built by `AppState.remainderSpending`):
+an account in the pool, other than the active one, that fails `carries`
+and whose weekly allowance the accounts' present rates would leave unused
+at its reset takes the lightest slot session (by `SessionPacer.lightRate`,
+the larger of its current rate and its last hour's) that is between turns
+(quiet for `betweenTurns`, and not working by its record), not pinned, not
+on a draining account and not on another such account, whose use until the
+reset plus its cache rewrite (`moveCost`) fits in what is left, keeping the
+account within every window and its model's own allowance, and whose use
+is at least `remainderWorth` (2) times the rewrite. A second session
+follows only while more than half of the remainder would still go unused.
+Accounts that reset first are served first; the account carrying the
+group's share, now or from the projected switch, spends nothing this way,
+and an account giving sessions up takes none. The move goes through the
+pacer's moves and `serveSessionSlots`, which records "Moved session X
+(light use) to Backup to use its last 2% before it resets on Mon 7:59 am;
+it rebuilds its cache there." (`AppState.remainderMoveEvent`) and offers
+that account again only `balanceMoveInterval` later
+(`AppState.remainderMovedAt`). A session placed so reaches no limit there
+before the reset, so shedding leaves it; if the account reaches its limit
+after all, the session moves on as any stranded slot session does. For new
+sessions, `carriesNewSession` and the pacer's runway rule let such an
+account take one while it can carry a typical session for an hour, and the
+pacer weighs it by the room it has left, a small share beside an account
+with most of its week.
+
 Whether an account has a session window is read from each reading, account by
 account, because a plan can drop it while others keep it (Claude's Ultra plan
 for verified accounts; Max keeps it). A reading with the long window and no
@@ -617,6 +690,55 @@ instead of the forecast, gives the pace line under each provider heading
 every included account is used up, which is when sessions are paused. It is
 shown whenever the active account is in use and no pause is under way, for any
 provider, with or without a forecast.
+
+### Plans of different sizes
+
+A provider's accounts can be on plans of different sizes: one percent of a
+Claude Pro week is about a twentieth of the work of one percent of a Max 20x
+week. Each account's percent is therefore converted through its own token
+cost, `AppState.accountRatio` (session percent per million weighted tokens),
+carried as `QuotaAccountState.percentPerMillion` and
+`SessionPacer.Account.percentPerMillion`, whenever a rate or room moves to
+or is compared with another account:
+
+- `FailoverPlanner.expectedBurn` and `carriedBurn` convert the moving work
+  and its deviation into the destination's percent (`converted`), so
+  `carries`, `destinationMinimum` and `tier`'s margins judge a destination
+  by what the work costs there; 5% of a Max 20x week an hour is 100% of a
+  Pro week. That covers the 5-hour window too: a session spending 10% of a
+  session an hour on a Max 20x account spends 200% of a Pro account's
+  5-hour window, which it would exhaust in half an hour. `carries`' burst
+  allowance (a rate no window could carry for the hour needs room for
+  `burstCarryShare` of one) is judged at the size of the account the work
+  comes from, so a rate is no burst merely because the destination's plan
+  is small.
+- The switch's cost and the in-flight reserve are counted at the plan-wide
+  cost (`Settings.referenceRatio`) and converted into the account they land
+  on (`onAccount`).
+- Destinations ordered by room (`plan`'s exhausted switch, most capacity
+  first, `nextSwitch`'s preference for the account it projected) compare
+  `tokenRoom`, headroom in tokens.
+- Demand (`DemandForecast`) is recorded at the plan-wide size, and
+  `QuotaSimulator` serves it at each account's own (`Account.scale`), so the
+  week simulation behind balancing, the week outlook and the pace line adds
+  like with like.
+- `SessionPacer` compares accounts in tokens (`millions`): new-session
+  weights, the destination a shed or stranded session takes, resumed
+  sessions' placement, and whether a rebalancing move gains more than its
+  rewrite. `poolRunOut` and the shared group's share were already counted
+  in tokens; `sustainedShare` and the run-outs `rebalance` and `place`
+  compare are times, which need no conversion.
+
+An account with no measured cost is seeded from its plan size
+(`ProviderCapabilities.planSizes`, keyed `<plan>:<tier>` or `<plan>`, read
+by `Account.planSize` from the stored plan and the credential's rate-limit
+tier; Claude: Max 20x 20, Max 5x 5, Pro 1) by `TurnCostModel.ratio(for:sizes:)`:
+a measured account's cost times its size over this one's (the geometric mean
+over every such account), or, with none measured, the plan-wide cost scaled
+from the median known size. A provider whose plan sizes are not listed, or an
+account whose size is unknown (a Max plan without its tier), keeps the
+plan-wide cost. The first measurement on the account replaces the seed, and
+the Learning log records each change in where an account's cost comes from.
 
 ### Learning
 
@@ -805,14 +927,24 @@ the pool weights and which sessions move, each time the pool is rebuilt
   soon takes more new sessions before its allowance is lost.
 - An account that would reach its limit and then wait there longer than its
   sessions' prompt cache lasts (the longest `cache_control` lifetime they
-  sent, an hour when unknown) gives sessions up: those relieving the most
-  rate per cache rewrite first, until it no longer would. Sessions whose
-  next turn comes soon go before one deep in a turn that began more than 15
-  minutes ago and is still sending (`SessionPacer.movable`), since a move
-  applies only at a session's next turn. A session moves
-  only to an account that, with the session's rate and the cost of writing
-  its context into that account's cache, stays within its own window. The
-  router moves it at its next turn (`RouterState.moves`).
+  sent, an hour when unknown) gives sessions up when moving them keeps the
+  work running longer (`SessionPacer.ShedReason`): it reaches that limit
+  more than a cache lifetime before the accounts together would have spent
+  what they have (`poolRunOut`), or, for the account carrying the shared
+  group while a switch is projected, before the group alone would take it
+  to its limit or the switch. Over the days to a weekly reset any rate
+  reaches a limit, so the wait alone would have every busy weekly-only
+  account give sessions up. It gives up those relieving the most rate per
+  cache rewrite first, until it no longer would. Sessions whose next turn
+  comes soon go before one deep in a turn that began more than 15 minutes
+  ago and is still sending (`SessionPacer.movable`), since a move applies
+  only at a session's next turn. A session moves only to an account that,
+  with the session's rate and the cost of writing its context into that
+  account's cache, reaches no limit before its reset, or none until within
+  an hour of the pool's run-out, and in either case none within the hour,
+  by whichever of its windows binds first. The router moves it at its next turn
+  (`RouterState.moves`). The event names the reason ("… while the other
+  accounts still have room (together they last until …)").
 - An account that would reach its limit only shortly before its reset keeps
   its sessions. When one of them is refused at the limit and the reset the
   refusal names comes within five minutes and at least a minute before the
@@ -857,8 +989,12 @@ the pool weights and which sessions move, each time the pool is rebuilt
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when
   every other account has under `lowWeeklyRoom` (20%) of its week left, and
   pacing moves none of its sessions off it. The runway rule still applies,
-  so it takes no new session that could not last `newSessionRunway` there.
-  The drain ends when a reading or a refusal shows its limit, when it is
+  so it takes no new session that could not last `newSessionRunway` there:
+  in the pacer's weights, and before pacing in `buildPool`, where any
+  account that could not carry one more session of the running sessions'
+  typical rate for that hour beside its own rate
+  (`AppState.carriesNewSession`) has weight 0 while another could, a
+  draining one at `drainingPreferred` included. The drain ends when a reading or a refusal shows its limit, when it is
   active again, or a session window after the switch.
 - A session that starts a turn after its cache has expired is placed again
   like a new session (`RouterState.cacheAwareSessions`), since moving it
@@ -966,8 +1102,14 @@ session off the account that runs out first to the destination that leaves
 the latest earliest run-out, charging the destination the session's cache
 rewrite; a move is made only when the hours it gains at that account's burn
 are worth more than the rewrite, a session moves at most once, and a session
-mid-turn never. The result never runs out earlier than before and every move
-pays for itself; it is a local optimum, not always the best assignment.
+mid-turn never. An account that runs out first but no single move helps (one
+at its limit whose readings still rise with the sessions on it, or one whose
+only sessions are mid-turn) is settled: it stays as it is, takes no session,
+and the search goes on with the account that runs out next, so such an
+account does not end the search before the accounts the sessions crowd. The
+run-outs reported then leave out the accounts settled before the first move.
+The result never runs out earlier than before and every move pays for itself;
+it is a local optimum, not always the best assignment.
 Excluded accounts, those needing sign-in and those at their limit are no
 destination. The moves go through `requestedSlotMoves`, so each is recorded.
 With **Rebalance automatically** (off by default) the quota cycle makes the
@@ -1272,6 +1414,8 @@ Session records contain no prompt or transcript content.
 | `~/Library/Logs/AccountDock-app.log` | App log |
 | `~/Library/Logs/AccountDock-router.log` | Router log |
 | `~/Library/Logs/AccountDock-failover.json` | Failover activity log (account identity obfuscated, capped at 500) |
+| `~/Library/Logs/AccountDock-credentials.jsonl` | Credential audit trail, JSON Lines, owner-only, rotated at 20 MB keeping `.1`–`.3` |
+| `~/Library/Logs/AccountDock-credentials-owners.json` | Token fingerprint → owner map the audit learned (obfuscated email, account ID) |
 | `UserDefaults` `app.accountdock.mac` | Accounts, usage snapshots, failover settings and runtime, learning |
 
 ## Costs

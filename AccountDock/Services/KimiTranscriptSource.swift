@@ -55,7 +55,8 @@ struct KimiTranscriptSource: ProviderTranscriptSource {
         guard agents.lastPathComponent == "agents" else { return nil }
         let session = agents.deletingLastPathComponent().lastPathComponent
         guard !session.isEmpty else { return nil }
-        return TranscriptFile(url: url, session: session, subagent: agent.lastPathComponent != mainAgent)
+        let name = agent.lastPathComponent
+        return TranscriptFile(url: url, session: session, agent: name == mainAgent ? nil : name)
     }
 
     func row(_ row: [String: Any], file: TranscriptFile, state: inout TranscriptReadState) -> TranscriptRow {
@@ -76,7 +77,8 @@ struct KimiTranscriptSource: ProviderTranscriptSource {
             return .request(TranscriptRequest(
                 session: file.session, at: at, contextTokens: other + read + write, cacheWriteTokens: write,
                 cacheWriteLongTokens: 0, outputTokens: output, cacheLifetime: nil, startsTurn: false,
-                model: file.subagent ? nil : model, cacheReadTokens: read, subagent: file.subagent
+                model: file.subagent ? nil : model, cacheReadTokens: read,
+                agent: file.agent, agentModel: file.subagent ? model : nil
             ), key: nil)
         case "turn.ended":
             guard row["reason"] as? String == "failed", let error = row["error"] as? [String: Any],
@@ -85,7 +87,7 @@ struct KimiTranscriptSource: ProviderTranscriptSource {
             return .refusal(TranscriptRequest(
                 session: file.session, at: at, contextTokens: 0, cacheWriteTokens: 0, cacheWriteLongTokens: 0,
                 outputTokens: 0, cacheLifetime: nil, startsTurn: false,
-                limitRefusal: error["message"] as? String ?? "", subagent: file.subagent
+                limitRefusal: error["message"] as? String ?? "", agent: file.agent
             ))
         default:
             return .none

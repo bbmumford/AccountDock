@@ -261,6 +261,13 @@ extension AppState {
                sessionServedBy[session].map({ $0.at < observation.observedAt }) ?? true {
                 sessionServedBy[session] = SessionAttribution.Observation(account: attributed.account, at: observation.observedAt)
             }
+            // The same reset times name the token a slot's session holds,
+            // which the audit compares with its slot's account.
+            if let session = observation.processKey, observation.observedAt > servedCutoff,
+               let evidence = slot == nil ? attributed : attribute(observation), evidence.byResets {
+                noteProcessCredential(provider, session: session, process: processes[session], observed: evidence.account,
+                                      source: "statusLineResets", observedAt: observation.observedAt)
+            }
             guard let accountID = slot ?? attributed?.account else { continue }
             if let updatedAt = accountUsageUpdatedAt[accountID], observation.observedAt <= updatedAt { continue }
             if Self.describesSupersededWindow(observation.usage, stored: accountUsage[accountID]) { continue }
@@ -538,6 +545,7 @@ extension AppState {
             canVerify: canVerify
         )
         settings.switchCostPercent = switchCostPercent(provider)
+        settings.referenceRatio = turnCostModel.ratio
         settings.inFlightReservePercent = inFlightReservePercent(provider)
         settings.allowExtraUsage = policy.extraUsageMonthlyLimit != nil
         settings.demand = demandFunction(provider)
@@ -578,7 +586,8 @@ extension AppState {
             weeklyBurnStdDev: uncertainty.weekly,
             extraUsageAvailable: extraUsageAvailable(account),
             refusedAtLimit: (routerRefusedUntil[account.id].map { $0 > now } ?? false)
-                || recordedLimitRefusal(account, model: model, now: now)
+                || recordedLimitRefusal(account, model: model, now: now),
+            percentPerMillion: accountRatio(account.id)
         )
     }
 
@@ -651,8 +660,9 @@ extension AppState {
     func limitingModel(_ account: Account, models: [String], now: Date = Date()) -> String? {
         guard !models.isEmpty, let usage = accountUsage[account.id] else { return nil }
         let planner = FailoverPlanner(settings: plannerSettings(account.provider))
-        let reserve = planner.settings.inFlightReservePercent
-        let whole = planner.isMeasuredAtLimit(quotaState(for: account, now: now, wholeAllowance: true), now: now, reserve: reserve)
+        let wholeState = quotaState(for: account, now: now, wholeAllowance: true)
+        let reserve = planner.onAccount(planner.settings.inFlightReservePercent, wholeState)
+        let whole = planner.isMeasuredAtLimit(wholeState, now: now, reserve: reserve)
         let narrowed = planner.isMeasuredAtLimit(
             quotaState(for: account, now: now, model: models.count == 1 ? models[0] : nil), now: now, reserve: reserve)
         return Self.limitingModel(usage: usage, models: models, wholeAtLimit: whole, narrowedAtLimit: narrowed)
@@ -1662,7 +1672,7 @@ extension AppState {
         // place.
         if reachesSessions, hadSuspendedAgents { await releasePausedAgents(provider) }
         if Self.switchMovesRunningSessions(reason) {
-            moveRunningSessions(provider, from: current.id)
+            moveRunningSessions(provider, from: current.id, reason: "failover.switch")
         } else if credentialModule(for: provider)?.liveCredential != nil {
             sessionsLeftOn[provider, default: []].insert(current.id)
         }
