@@ -100,7 +100,10 @@ Some data is the same for every provider by construction:
   `SessionAttribution` decides the account serving each session, for the
   account cards' counts, transcript learning, pacing, holds and moves alike:
   the slot it reads, else the router's account within ten minutes, else the
-  account its own status line matched by reset times, else the account its
+  account its own status line matched by reset times (never one of two
+  accounts sharing their weekly reset, as two sign-ins of one subscription do,
+  unless a session reset matches one alone: `AppState.matchByResets`), else
+  the account its
   last recorded request was on (both only when seen after its sessions were
   last signalled to read the sign-in again, and within a session window),
   else the live credential's owner, else the active account. A session on
@@ -163,9 +166,40 @@ macOS Keychain
   refused as a backup. Each backup keeps the previous complete token, and a
   restore whose stored token is incomplete uses that earlier copy.
 
-The token JSON carries no identity. AccountDock therefore only backs up the
-live token under an account after `oauthAccount` in `~/.claude.json` names that
-same account.
+The token JSON carries no identity, and running sessions on the shared sign-in
+renew the live token and write their own account into `~/.claude.json` at any
+moment, so neither the moment of a read nor the identity file says whose a live
+token is.
+
+Signing in a new Claude account and re-authenticating one never touch the live
+sign-in (`ClaudeIsolatedLogin`): `claude auth login` runs with
+`CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` both set to a new
+temporary directory. The CLI (read from its 2.1.311 build) then keeps the
+credential in the Keychain item `Claude Code-credentials-` plus the first eight
+hex digits of the SHA-256 of that path, the item the session slots use
+(`ClaudeSessionIsolation.keychainService`), or in `.credentials.json` there, and
+the identity in `.claude.json` inside `CLAUDE_CONFIG_DIR`. AccountDock reads
+both, asks the profile endpoint whose the credential is, saves it as that
+account's copy (a new account, a refreshed existing one, or the account being
+re-authenticated; another account's for a re-authentication saves nothing),
+and removes the directory and its Keychain item. No session can race the
+sign-in and no account has to be switched back afterwards; only the first
+account of the provider, or a re-authenticated active one, is installed as the
+live sign-in.
+
+Every capture of the live token itself (adding the account the CLI is signed
+in to, the backup of the outgoing account before a switch, the copy kept after
+one, a renewal of the live credential) goes through
+`AppState.captureOwnCredential`: the profile endpoint is asked whose the token
+is, and it is saved only as that account's copy. A token that is another saved
+account's is saved for that account instead when newer than its copy, and the
+slot is read again a second later, up to `captureAttempts` times; when it never
+is the account's, nothing is saved and adding the account says why.
+The identity saved is the live one when it names the account, else the one
+saved with its copy. A saved copy whose ownership the provider has not yet
+confirmed (no request allowance, or no answer) reads no usage for its account
+(`AppState.recordsReading`); the check is made again at the next reading, and a
+reading the user asks for always makes it.
 
 ### Token JSON format
 
@@ -196,7 +230,7 @@ The token stored in keychain is a single JSON object (captured from real keychai
 - `expiresAt` is a Unix timestamp in **milliseconds** (not seconds)
 - `scopes` is an **array of strings** (not a single string)
 - The token JSON does **NOT** contain email or account identity — the only way to determine which account a token belongs to is by calling `claude auth status` while that token is active
-- This lack of embedded identity is why AccountDock checks `oauthAccount` before it backs up a live token.
+- This lack of embedded identity is why AccountDock asks the profile endpoint whose a live token is before it saves it under an account.
 
 ### Codex and Kimi
 
@@ -249,11 +283,12 @@ refresh token (see [provider-cli-facts.md](docs/provider-cli-facts.md)).
 `ClaudeService.switchAccount(from:to:)` is transactional: it snapshots the live
 token and identity first and restores them if any later step fails.
 
-1. **Back up the source.** If `oauthAccount` names the source account, the live
-   token and identity are saved as its backup. When the source and target are
-   the same account (restoring the active profile), nothing is backed up: the
-   live credential is the one being replaced and must not overwrite the copy
-   being restored.
+1. **Back up the source.** Before the switch, `AppState.switchTo` saves the
+   live token as the source's copy only when the provider says it is the
+   source's (`captureOwnCredential`). When the source and target are the same
+   account (restoring the active profile), nothing is backed up: the live
+   credential is the one being replaced and must not overwrite the copy being
+   restored.
 2. **Read the target backup.** An incomplete stored token falls back to the
    backup's previous token; with neither, the switch stops.
 3. **Write.** The target token goes into `Claude Code-credentials` and the

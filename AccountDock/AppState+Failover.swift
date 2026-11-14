@@ -335,32 +335,56 @@ extension AppState {
     /// while that account has no established window of its own; `byResets`
     /// is then false.
     private func matchByResets(_ usage: UsageAPIResponse, provider: AIProviderType) -> (account: UUID, byResets: Bool)? {
+        let candidates = accounts.filter { $0.provider == provider }.map { account in
+            ResetsCandidate(id: account.id, weeklyReset: accountUsage[account.id]?.sevenDay?.resetsAtDate,
+                            sessionReset: accountUsage[account.id]?.fiveHour?.resetsAtDate)
+        }
+        let active = activeAccount(for: provider)
+        return Self.matchByResets(weeklyReset: usage.sevenDay?.resetsAtDate, sessionReset: usage.fiveHour?.resetsAtDate,
+                                  candidates: candidates, active: active?.id,
+                                  activeHasWeekly: active.map { accountUsage[$0.id]?.sevenDay?.resetsAtDate != nil } ?? false)
+    }
+
+    /// An account's stored reset times, as `matchByResets` compares them.
+    struct ResetsCandidate: Equatable {
+        var id: UUID
+        var weeklyReset: Date?
+        var sessionReset: Date?
+    }
+
+    /// The account a reading with these reset times belongs to, among
+    /// `candidates`. Two resets within two minutes match. A unique weekly
+    /// match decides, unless the matched account's stored session reset
+    /// contradicts the reading's, which leaves a unique session match to
+    /// decide. Accounts whose weekly resets both match
+    /// share them, which two sign-ins of one subscription do, so only a
+    /// session reset that matches one of them alone decides between them,
+    /// never another's contradicting one: a copy of one account's
+    /// credential saved for another reads the same resets as the first.
+    /// Without a weekly match a unique session match decides; with neither,
+    /// `active` takes the reading while it has no weekly window of its own
+    /// (`byResets` false).
+    nonisolated static func matchByResets(weeklyReset: Date?, sessionReset: Date?, candidates: [ResetsCandidate],
+                                          active: UUID?, activeHasWeekly: Bool) -> (account: UUID, byResets: Bool)? {
         func close(_ a: Date?, _ b: Date?) -> Bool {
             guard let a, let b else { return false }
             return abs(a.timeIntervalSince(b)) <= 120
         }
-        let candidates = accounts.filter { $0.provider == provider }
-        // A stored session reset that disagrees with the reading's rules the
-        // account out even when its weekly reset happens to match.
-        func sessionContradicts(_ account: Account) -> Bool {
-            guard let stored = accountUsage[account.id]?.fiveHour?.resetsAtDate,
-                  let observed = usage.fiveHour?.resetsAtDate else { return false }
-            return abs(stored.timeIntervalSince(observed)) > 120
+        func contradicts(_ stored: Date?) -> Bool {
+            guard let stored, let sessionReset else { return false }
+            return abs(stored.timeIntervalSince(sessionReset)) > 120
         }
-        let weeklyMatches = candidates.filter {
-            close(accountUsage[$0.id]?.sevenDay?.resetsAtDate, usage.sevenDay?.resetsAtDate)
-                && !sessionContradicts($0)
+        let weeklyClose = candidates.filter { close($0.weeklyReset, weeklyReset) }
+        if weeklyClose.count > 1 {
+            let sessionMatches = weeklyClose.filter { close($0.sessionReset, sessionReset) }
+            return sessionMatches.count == 1 ? (sessionMatches[0].id, true) : nil
         }
+        let weeklyMatches = weeklyClose.filter { !contradicts($0.sessionReset) }
         if weeklyMatches.count == 1 { return (weeklyMatches[0].id, true) }
-        let pool = weeklyMatches.isEmpty ? candidates : weeklyMatches
-        let sessionMatches = pool.filter {
-            close(accountUsage[$0.id]?.fiveHour?.resetsAtDate, usage.fiveHour?.resetsAtDate)
-        }
+        let sessionMatches = candidates.filter { close($0.sessionReset, sessionReset) }
         if sessionMatches.count == 1 { return (sessionMatches[0].id, true) }
-        if weeklyMatches.isEmpty, sessionMatches.isEmpty,
-           let active = activeAccount(for: provider),
-           accountUsage[active.id]?.sevenDay?.resetsAtDate == nil {
-            return (active.id, false)
+        if weeklyMatches.isEmpty, sessionMatches.isEmpty, let active, !activeHasWeekly {
+            return (active, false)
         }
         return nil
     }

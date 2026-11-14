@@ -689,14 +689,6 @@ final class ClaudeService: @unchecked Sendable {
         return String(command[idRange])
     }
 
-    /// Whether the live credential is saved as `source`'s backup before a
-    /// switch to `target` replaces it: only when `liveEmail`, the address
-    /// `~/.claude.json` names, is the source's, and never when the switch
-    /// restores the same account, whose backup is the copy being restored.
-    static func backsUpLiveCredential(liveEmail: String?, from source: Account, to target: Account) -> Bool {
-        source.id != target.id && source.matches(email: liveEmail)
-    }
-
     /// Why `claude auth status` after writing `target`'s credential does not
     /// confirm the switch, or nil when it does; `switchAccount` rolls back on
     /// any failure.
@@ -728,24 +720,11 @@ final class ClaudeService: @unchecked Sendable {
 
         log.info("[switchAccount] Switching from \(currentAccount.id) to \(targetAccount.id)")
 
-        // 1. Back up current account (token + oauthAccount)
-        log.info("[switchAccount] Step 1: Backing up current account...")
-        if currentAccount.id == targetAccount.id {
-            // Restoring the active account: the live credential is the one
-            // being replaced, so it must not overwrite the backup restored.
-            log.info("[switchAccount] Step 1: Restoring the same account; live credential not backed up")
-        } else if let currentToken = keychain.readClaudeToken(),
-           let currentOAuth = keychain.readOAuthAccount() {
-            let email = (currentOAuth["emailAddress"]?.value as? String) ?? "?"
-            if Self.backsUpLiveCredential(liveEmail: email, from: currentAccount, to: targetAccount) {
-                let saved = keychain.saveAccountBackup(token: currentToken, oauthAccount: currentOAuth, forAccountId: currentAccount.id.uuidString)
-                log.info("[switchAccount] Step 1: Backup saved: \(saved)")
-            } else {
-                log.warning("[switchAccount] Step 1: oauthAccount email (\(email)) != source (\(currentAccount.email)), skipping backup")
-            }
-        } else {
-            log.warning("[switchAccount] Step 1: Could not read current token or oauthAccount")
-        }
+        // 1. The outgoing account's live credential is backed up by the
+        // caller (`AppState.captureOwnCredential`), which asks the provider
+        // whose it is; nothing here saves the live credential under an
+        // account, since the identity file beside it can be a running
+        // session's.
 
         // 2. Retrieve target account's backup
         log.info("[switchAccount] Step 2: Reading backup for target account...")
@@ -886,43 +865,18 @@ final class ClaudeService: @unchecked Sendable {
                    subscriptionType: target.subscriptionType)
     }
 
-    /// Capture the current Claude auth token + oauthAccount and associate with an account
-    func captureCurrentCredentials(forAccountId accountId: String, expectedEmail: String) -> Bool {
-        log.info("[capture] Capturing credentials for account \(accountId)...")
-        let keychain = KeychainService.shared
-        guard let token = keychain.readClaudeToken() else {
-            log.error("[capture] Failed: no token found in keychain")
-            return false
-        }
-        guard let oauthAccount = keychain.readOAuthAccount() else {
-            log.error("[capture] Failed: no oauthAccount found in ~/.claude.json")
-            return false
-        }
-        let email = (oauthAccount["emailAddress"]?.value as? String) ?? "?"
-        guard email.caseInsensitiveCompare(expectedEmail) == .orderedSame else {
-            log.error("[capture] Refusing credential write: live identity \(email) does not match destination \(expectedEmail)")
-            return false
-        }
-        log.info("[capture] Token + oauthAccount found (email=\(email)), saving backup...")
-        let result = keychain.saveAccountBackup(token: token, oauthAccount: oauthAccount, forAccountId: accountId)
-        log.info("[capture] Save result: \(result)")
-        return result
-    }
-
-    /// Run `claude auth login` which opens browser for OAuth.
-    func login() async throws {
-        log.info("[login] Starting `claude auth login`... (will open browser)")
+    /// Runs `claude auth login`, which opens the browser for OAuth, with its
+    /// credential and identity kept in `directory` (`ClaudeIsolatedLogin`),
+    /// never in the live sign-in.
+    func login(isolatedIn directory: URL) async throws {
+        log.info("[login] Starting isolated `claude auth login`... (will open browser)")
         let claudePath = self.claudePath
         _ = try await loginRunner.run(
             executable: claudePath,
             arguments: ["auth", "login"],
-            environment: environment(for: claudePath)
+            environment: ClaudeIsolatedLogin.environment(environment(for: claudePath), directory: directory)
         )
         log.info("[login] `claude auth login` process exited")
-
-        // Give keychain a moment to sync after CLI writes
-        try await Task.sleep(for: .seconds(1))
-        log.info("[login] Post-login delay complete, ready for token capture")
     }
 
     func cancelLogin() {

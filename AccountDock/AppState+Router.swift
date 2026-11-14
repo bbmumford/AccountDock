@@ -789,7 +789,7 @@ extension AppState {
         if let running = liveCredentialRenewal { return await running.value }
         let task = Task<String?, Never> { @MainActor [weak self] in
             guard let self, !self.isLoggingIn, let module = self.credentialModule(for: .claudeCode),
-                  self.claudeService.captureCurrentCredentials(forAccountId: account.id.uuidString, expectedEmail: account.email)
+                  await self.captureOwnCredential(of: account) == .saved
             else { return nil }
             let outcome = await module.renewSavedCopy(account)
             let unchanged = self.keychain.readClaudeToken() == current
