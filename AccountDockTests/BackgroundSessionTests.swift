@@ -87,7 +87,7 @@ final class BackgroundSessionTests: XCTestCase {
     func testTheLauncherRunsBackgroundCommandsUnchanged() throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let slots = try XCTUnwrap(SessionSlots(.claudeCode, home: home))
-        XCTAssertEqual(slots.passThroughCommands, support.managementCommands + slots.support.accountCommands)
+        XCTAssertEqual(slots.passThroughCommands, support.managementCommands + slots.isolation.passThroughCommands)
         let script = slots.launcherScript()
         XCTAssertTrue(script.contains(slots.passThroughCommands.joined(separator: "|") + ")"))
         XCTAssertTrue(script.contains("= '--bg' ] && exec"))
@@ -116,7 +116,7 @@ final class BackgroundSessionTests: XCTestCase {
         let ready = BackgroundSessionState(transcriptChangedAt: now.addingTimeInterval(-3 * 60), shellRunning: false,
                                            attachProcess: 62154)
         let outcome = await SessionTerminalActions.restartBackground(
-            idle, state: ready, executable: "claude", stopper: "/opt/homebrew/bin/claude", support: support,
+            idle, state: ready, isolation: ClaudeSessionIsolation(), stopper: "/opt/homebrew/bin/claude", support: support,
             control: control, terminal: terminal, pause: 0, now: now)
         XCTAssertEqual(outcome, .typed)
         XCTAssertEqual(control.log, [idle.sessionID])
@@ -139,7 +139,7 @@ final class BackgroundSessionTests: XCTestCase {
         ]
         for (session, state, expected) in cases {
             let outcome = await SessionTerminalActions.restartBackground(
-                session, state: state, executable: "claude", stopper: "claude", support: support,
+                session, state: state, isolation: ClaudeSessionIsolation(), stopper: "claude", support: support,
                 control: control, terminal: terminal, pause: 0, now: now)
             XCTAssertEqual(outcome, expected)
         }
@@ -148,7 +148,7 @@ final class BackgroundSessionTests: XCTestCase {
 
         let failing = FakeBackgroundControl(succeeds: false)
         let outcome = await SessionTerminalActions.restartBackground(
-            idle, state: BackgroundSessionState(transcriptChangedAt: quiet, attachProcess: 62154), executable: "claude",
+            idle, state: BackgroundSessionState(transcriptChangedAt: quiet, attachProcess: 62154), isolation: ClaudeSessionIsolation(),
             stopper: "claude", support: support, control: failing, terminal: terminal, pause: 0, now: now)
         XCTAssertEqual(outcome, .notStopped)
         XCTAssertTrue(terminal.log.isEmpty, "nothing is typed when the session was not stopped")

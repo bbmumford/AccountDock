@@ -11,29 +11,29 @@ final class SessionSlotsTests: XCTestCase {
     }
 
     func testKeychainServiceIsTheDefaultServiceAndEightHexDigitsOfThePathDigest() {
-        let service = SessionSlots.keychainService(base: "Claude Code-credentials", directory: "/tmp/slot")
+        let service = ClaudeSessionIsolation.keychainService(base: "Claude Code-credentials", directory: "/tmp/slot")
         XCTAssertTrue(service.hasPrefix("Claude Code-credentials-"))
         let suffix = service.dropFirst("Claude Code-credentials-".count)
         XCTAssertEqual(suffix.count, 8)
         XCTAssertTrue(suffix.allSatisfy { $0.isHexDigit && !$0.isUppercase })
-        XCTAssertEqual(service, SessionSlots.keychainService(base: "Claude Code-credentials", directory: "/tmp/slot"))
-        XCTAssertNotEqual(service, SessionSlots.keychainService(base: "Claude Code-credentials", directory: "/tmp/slot2"))
+        XCTAssertEqual(service, ClaudeSessionIsolation.keychainService(base: "Claude Code-credentials", directory: "/tmp/slot"))
+        XCTAssertNotEqual(service, ClaudeSessionIsolation.keychainService(base: "Claude Code-credentials", directory: "/tmp/slot2"))
     }
 
     func testKeychainServiceHashesThePathInNormalizationFormC() {
         let decomposed = "/tmp/cafe\u{0301}"
         let composed = "/tmp/caf\u{00E9}"
-        XCTAssertEqual(SessionSlots.keychainService(base: "s", directory: decomposed),
-                       SessionSlots.keychainService(base: "s", directory: composed))
+        XCTAssertEqual(ClaudeSessionIsolation.keychainService(base: "s", directory: decomposed),
+                       ClaudeSessionIsolation.keychainService(base: "s", directory: composed))
     }
 
     func testAccessOnlyDropsEveryRefreshToken() throws {
         let json = #"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":1},"refreshToken":"top"}"#
-        let stripped = try XCTUnwrap(SessionSlots.accessOnly(json))
+        let stripped = try XCTUnwrap(ClaudeSessionIsolation.accessOnly(json))
         XCTAssertFalse(stripped.contains("refreshToken"))
         XCTAssertTrue(stripped.contains(#""accessToken":"a""#))
         XCTAssertTrue(stripped.contains(#""expiresAt":1"#))
-        XCTAssertNil(SessionSlots.accessOnly("not json"))
+        XCTAssertNil(ClaudeSessionIsolation.accessOnly("not json"))
     }
 
     func testPoolTextListsOnlyPositiveWeights() {
@@ -75,11 +75,11 @@ final class SessionSlotsTests: XCTestCase {
         let slots = try XCTUnwrap(SessionSlots(.claudeCode, home: home))
         let script = slots.launcherScript()
         XCTAssertTrue(script.hasPrefix("#!/bin/sh\n"))
-        for variable in slots.support.credentialVariables {
+        for variable in slots.isolation.passThroughVariables {
             XCTAssertTrue(script.contains("${\(variable):-}"), variable)
         }
-        XCTAssertTrue(script.contains(slots.support.accountCommands.joined(separator: "|") + ")"))
-        XCTAssertTrue(script.contains("export \(slots.support.directoryVariable)"))
+        XCTAssertTrue(script.contains(slots.isolation.passThroughCommands.joined(separator: "|") + ")"))
+        XCTAssertTrue(script.contains("export \(slots.isolation.directoryVariable)"))
         XCTAssertTrue(script.contains("-mmin -\(SessionSlots.poolLifetimeMinutes)"))
         XCTAssertTrue(script.contains(SessionSlots.shellQuoted(slots.poolFile.path)))
     }

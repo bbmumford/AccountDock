@@ -55,14 +55,10 @@ struct ProviderCapabilities: Sendable {
     /// How AccountDock's request router serves the CLI's requests; nil when
     /// its requests cannot pass through the router.
     var requestRouter: RequestRouterSupport?
-    /// How each launch of the CLI can run on an account of its own, chosen
-    /// by `SessionSlots`' launcher; nil when the CLI has no per-launch
-    /// credential location.
-    var sessionSlots: SessionSlotSupport?
-    /// How the CLI runs sessions in the background under a supervisor of
-    /// its own, which `SessionSlots`' launcher never starts; nil when it
-    /// has no such service.
-    var backgroundSessions: BackgroundSessionSupport?
+    /// How each launch of the CLI runs in a slot of its own, on an account
+    /// chosen by `SessionSlots`' launcher; nil when the CLI has no
+    /// per-launch credential location.
+    var sessionIsolation: (any ProviderSessionIsolation)?
     /// The service this provider's accounts offer as a route target for
     /// another provider's routed requests.
     var routeTarget: RouteTarget?
@@ -108,6 +104,10 @@ struct ProviderCapabilities: Sendable {
     var planNames: [String: String] = [:]
 
     var supportsSessionQuota: Bool { sessionQuotaMode != .unsupported }
+    /// How the CLI runs sessions in the background under a supervisor of
+    /// its own, which `SessionSlots`' launcher never starts; nil when it
+    /// has no such service.
+    var backgroundSessions: BackgroundSessionSupport? { sessionIsolation?.background }
     /// Directory under the config directory holding the CLI's session
     /// transcripts, read by `TranscriptRequestFeed`.
     var transcriptDirectory: String? { requestRouter?.transcriptDirectory }
@@ -156,23 +156,6 @@ struct RequestRouterSupport: Sendable {
     /// one `<session>.jsonl` transcript per session, inside per-project
     /// directories; sessions without one are background requests.
     let transcriptDirectory: String
-}
-
-/// A per-launch credential location of a CLI whose credential is a Keychain
-/// item, used by `SessionSlots`.
-struct SessionSlotSupport: Sendable {
-    /// The environment variable naming a directory; the CLI then uses the
-    /// Keychain item `keychainService` followed by `-` and the first eight
-    /// hexadecimal digits of the SHA-256 of that directory's path.
-    let directoryVariable: String
-    /// The service of the CLI's default credential item.
-    let keychainService: String
-    /// Variables that already decide the CLI's credential; a launch that
-    /// sets any of them runs the CLI unchanged.
-    let credentialVariables: [String]
-    /// First arguments of the CLI's sign-in and sign-out commands, which run
-    /// unchanged so they act on the default credential.
-    let accountCommands: [String]
 }
 
 /// A CLI's background-session service: a supervisor process starts each
@@ -334,20 +317,7 @@ extension AIProviderType {
                     baseURLVariable: "ANTHROPIC_BASE_URL",
                     transcriptDirectory: "projects"
                 ),
-                sessionSlots: SessionSlotSupport(
-                    directoryVariable: "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-                    keychainService: "Claude Code-credentials",
-                    credentialVariables: ["CLAUDE_SECURESTORAGE_CONFIG_DIR", "CLAUDE_CONFIG_DIR",
-                                          "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
-                    accountCommands: ["auth", "login", "logout", "setup-token"]
-                ),
-                backgroundSessions: BackgroundSessionSupport(
-                    workerCommands: ["bg-pty-host", "bg-spare"],
-                    attachCommand: "attach",
-                    stopCommand: "stop",
-                    managementCommands: ["attach", "stop", "logs", "rm", "agents", "daemon"],
-                    backgroundFlag: "--bg"
-                ),
+                sessionIsolation: ClaudeSessionIsolation(),
                 supportsExtraUsage: true,
                 reportsLimitResets: true,
                 reportsModelWeeklyLimits: true,
@@ -500,6 +470,12 @@ extension AIProviderType {
     /// provider's CLI.
     static var routedProvider: AIProviderType? {
         implementedProviders.first { $0.capabilities.requestRouter != nil }
+    }
+
+    /// The providers whose CLI sessions can each run in a slot of their own
+    /// (`ProviderCapabilities.sessionIsolation`); the slot code serves each.
+    static var isolatedProviders: [AIProviderType] {
+        implementedProviders.filter { $0.capabilities.sessionIsolation != nil }
     }
 }
 

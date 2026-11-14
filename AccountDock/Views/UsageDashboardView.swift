@@ -528,7 +528,7 @@ struct UsageDashboardView: View {
     /// it stays until failover or balancing moves it.
     @ViewBuilder
     private func sessionButton(_ account: Account) -> some View {
-        if account.provider.capabilities.sessionSlots != nil {
+        if account.provider.capabilities.sessionIsolation != nil {
             let blocker = appState.sessionLaunchBlocker(account)
             Menu {
                 ForEach(SessionTerminal.available) { terminal in

@@ -11,10 +11,8 @@ extension AppState {
         var live: [AIProviderType: [AgentSession]] = [:]
         var byAccount: [UUID: Set<String>] = [:]
         for provider in AIProviderType.implementedProviders {
-            var sessions = AgentSessions.live(provider, now: now)
-            if provider == AIProviderType.routedProvider {
-                sessions = Self.excludingNonSessions(sessions, background: backgroundProcesses)
-            }
+            let sessions = Self.excludingNonSessions(AgentSessions.live(provider, now: now),
+                                                     background: backgroundProcesses(provider))
             live[provider] = sessions
             let attribution = sessionAttribution(provider, now: now)
             for session in sessions {

@@ -423,7 +423,7 @@ struct FailoverSettingsView: View {
         }
         Toggle("Serve sessions from several accounts at once", isOn: routerBinding(provider, \.distributeSessions))
             .disabled(routerBusy)
-            .help(provider.capabilities.sessionSlots != nil && policy.routeTarget == nil
+            .help(provider.capabilities.sessionIsolation != nil && policy.routeTarget == nil
                 ? "Each \(cli) session started from a terminal opened afterwards runs on an account picked from those below their thresholds, so several accounts' 5-hour windows are used at the same time instead of one after another. A session keeps its account until it exits. Sessions started from an IDE or the desktop app, and those started before this was turned on, use the active account. Usage is read by polling each account."
                 : "The router serves each \(cli) session from its own account, so several accounts' 5-hour windows are used at the same time instead of one after another. Each session keeps its account while it has room, which keeps its prompt cache; accounts below their thresholds take new sessions, those whose allowance must start being used soonest first. Usage is read from every response, so no extra requests are made.")
         if policy.distributeSessions {
@@ -435,7 +435,7 @@ struct FailoverSettingsView: View {
             .help(policy.usesRouter(for: provider)
                 ? "New sessions go to the accounts with the most unused rate for the rest of their 5-hour window. A session keeps its account while its prompt cache lasts. When an account's sessions would reach its limit and stay there for longer than their cache lasts, some of them move to accounts that can carry them, at their next turn. Otherwise they stay; a session that reaches the limit with the reset at most five minutes away, before its cache expires, waits for it on its account. A session idle past its cache's lifetime is placed again at its next turn, as nothing is lost by moving it."
                 : "New sessions go to the accounts with the most unused rate for the rest of their 5-hour window, in proportion to it. A session keeps its account until it exits.")
-            if provider.capabilities.sessionSlots != nil && !policy.usesRouter(for: provider) {
+            if provider.capabilities.sessionIsolation != nil && !policy.usesRouter(for: provider) {
                 HStack {
                     RebalanceButton(provider: provider)
                     Toggle("Rebalance automatically", isOn: Binding(

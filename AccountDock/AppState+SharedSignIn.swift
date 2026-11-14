@@ -38,7 +38,7 @@ extension AppState {
     /// with no session on the shared sign-in.
     func sharedGroup(_ provider: AIProviderType, sessions: [SessionPacer.Session],
                      now: Date) -> (group: SessionPacer.SharedGroup, members: Set<String>)? {
-        guard provider.capabilities.sessionSlots != nil, let active = activeAccount(for: provider)?.id else { return nil }
+        guard provider.capabilities.sessionIsolation != nil, let active = activeAccount(for: provider)?.id else { return nil }
         let own = Set(accounts.filter { $0.provider == provider }.map(\.id))
         let live = Set((liveSessions[provider] ?? []).map(\.sessionID))
         let recorded = Set(AgentSessions.records(provider).keys)

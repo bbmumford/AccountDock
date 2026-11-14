@@ -2,33 +2,112 @@ import Foundation
 
 private let slotsLog = FileLog("SessionSlots")
 
-/// Serves the routed provider's sessions from several accounts at once
-/// through `SessionSlots` when its CLI supports them, instead of the router.
+/// Serves the sessions of every provider whose CLI can run each session in
+/// a slot of its own (`AIProviderType.isolatedProviders`) from several
+/// accounts at once through `SessionSlots`, instead of the router. Only the
+/// provider's `ProviderSessionIsolation` knows its CLI; everything here is
+/// the same for every provider.
 extension AppState {
-    /// Whether the routed provider's settings distribute sessions and its CLI
+    /// One provider's slots as `maintainSessionSlots` and
+    /// `refreshSlotProcesses` last found them. Paths and account IDs are
+    /// unique across providers, since each provider's slots live under its
+    /// own root, so readers merge every provider's maps.
+    struct SessionSlotState {
+        /// The slot directory each running process reads; read by
+        /// `sessionAttribution` and `slotAccount(forSession:)`.
+        var directoryByProcess: [Int32: String] = [:]
+        /// The account serving each slot that has running sessions.
+        var directoryServing: [String: UUID] = [:]
+        /// Accounts whose slot a running session reads; they are read and
+        /// planned as in use.
+        var servedAccounts: Set<UUID> = []
+        /// Accounts whose access token a slot holds, for running or new
+        /// sessions; read by `credentialIsUsable` and
+        /// `renewSavedCredential`, because renewing such an account's saved
+        /// copy revokes the token those slots hold.
+        var credentialAccounts: Set<UUID> = []
+        /// Sessions `SessionPacer` moves to another account to balance
+        /// load, applied to one-session slots by `serveSessionSlots`.
+        var sessionMoves: [String: UUID] = [:]
+        /// The CLI's background-session processes, read with the slots: its
+        /// workers are sessions on the shared sign-in, its attach clients
+        /// and other commands no sessions.
+        var background = BackgroundSessionProcesses()
+        /// Watches the one-session slot directory for a launcher's request
+        /// for a spare; installed by `watchSpareRequests`.
+        var spareRequestWatcher: DispatchSourceFileSystemObject?
+
+        /// Drops a removed account.
+        mutating func forget(_ id: UUID) {
+            servedAccounts.remove(id)
+            credentialAccounts.remove(id)
+            directoryServing = directoryServing.filter { $0.value != id }
+            sessionMoves = sessionMoves.filter { $0.value != id }
+        }
+    }
+
+    /// The slot directory each running process reads, over every provider.
+    var slotDirectoryByProcess: [Int32: String] {
+        sessionSlotStates.values.reduce(into: [:]) { $0.merge($1.directoryByProcess) { kept, _ in kept } }
+    }
+
+    /// The account serving each slot that has running sessions, over every
+    /// provider.
+    var slotDirectoryServing: [String: UUID] {
+        sessionSlotStates.values.reduce(into: [:]) { $0.merge($1.directoryServing) { kept, _ in kept } }
+    }
+
+    /// `SessionSlotState.servedAccounts` over every provider.
+    var slotServedAccounts: Set<UUID> {
+        sessionSlotStates.values.reduce(into: []) { $0.formUnion($1.servedAccounts) }
+    }
+
+    /// `SessionSlotState.credentialAccounts` over every provider.
+    var slotCredentialAccounts: Set<UUID> {
+        sessionSlotStates.values.reduce(into: []) { $0.formUnion($1.credentialAccounts) }
+    }
+
+    /// The provider's background-session processes, as `refreshSlotProcesses`
+    /// last read them; none for a provider without slots.
+    func backgroundProcesses(_ provider: AIProviderType) -> BackgroundSessionProcesses {
+        sessionSlotStates[provider]?.background ?? BackgroundSessionProcesses()
+    }
+
+    /// Whether the provider's settings distribute sessions and its CLI
     /// starts each session on an account of its own; a route to another
     /// provider needs the router, which then serves the sessions.
-    var sessionSlotsWanted: Bool {
-        guard let provider = AIProviderType.routedProvider, provider.capabilities.sessionSlots != nil else { return false }
+    func sessionSlotsWanted(_ provider: AIProviderType) -> Bool {
+        guard provider.capabilities.sessionIsolation != nil else { return false }
         let policy = failoverConfig.policy(for: provider)
         return policy.distributeSessions && !policy.usesRouter(for: provider)
     }
 
-    /// Whether new terminal sessions of the routed provider start on
-    /// accounts picked from the pool.
-    var sessionSlotsInUse: Bool {
-        guard sessionSlotsWanted, let provider = AIProviderType.routedProvider,
-              let slots = SessionSlots(provider) else { return false }
+    /// Whether any provider's sessions are wanted in slots.
+    var sessionSlotsWanted: Bool {
+        AIProviderType.isolatedProviders.contains { sessionSlotsWanted($0) }
+    }
+
+    /// Whether new terminal sessions of the provider start on accounts
+    /// picked from the pool.
+    func sessionSlotsInUse(_ provider: AIProviderType) -> Bool {
+        guard sessionSlotsWanted(provider), let slots = SessionSlots(provider) else { return false }
         return slots.launcherInstalled
     }
 
-    /// Runs on every quota cycle: keeps the launcher, each account's slot and
-    /// the pool file current while sessions are distributed, and afterwards
-    /// removes them, keeping the slots running sessions still read.
-    /// `processesRead` says `refreshSlotProcesses` has just run, as the
-    /// quota cycle runs it before counting sessions. One call runs at a
-    /// time; a call made meanwhile, as when a launcher asks for a spare,
-    /// runs once more after it.
+    /// Whether any provider's new terminal sessions start on accounts
+    /// picked from the pool.
+    var sessionSlotsInUse: Bool {
+        AIProviderType.isolatedProviders.contains { sessionSlotsInUse($0) }
+    }
+
+    /// Runs on every quota cycle: keeps each isolated provider's launcher,
+    /// each account's slot and the pool file current while its sessions
+    /// are distributed, and afterwards removes them, keeping the slots
+    /// running sessions still read. `processesRead` says
+    /// `refreshSlotProcesses` has just run, as the quota cycle runs it
+    /// before counting sessions. One call runs at a time; a call made
+    /// meanwhile, as when a launcher asks for a spare, runs once more after
+    /// it.
     func maintainSessionSlots(now: Date = Date(), processesRead: Bool = false) async {
         if slotMaintenanceRunning {
             slotMaintenanceRequested = true
@@ -46,10 +125,10 @@ extension AppState {
     /// Fills spares at once when a launcher has asked for one
     /// (`SessionSlots.takeSpareRequests`), instead of at the next quota
     /// cycle: the launcher waits only a few seconds before it starts its
-    /// session on a shared credential. The watch is on the one-session slot
-    /// directory, where the launcher leaves its request.
-    func watchSpareRequests(_ slots: SessionSlots) {
-        guard spareRequestWatcher == nil else { return }
+    /// session on a shared credential. The watch is on the provider's
+    /// one-session slot directory, where the launcher leaves its request.
+    func watchSpareRequests(_ slots: SessionSlots, provider: AIProviderType) {
+        guard sessionSlotStates[provider]?.spareRequestWatcher == nil else { return }
         try? FileManager.default.createDirectory(at: slots.sessionRoot, withIntermediateDirectories: true,
                                                  attributes: [.posixPermissions: 0o700])
         let descriptor = open(slots.sessionRoot.path, O_EVTONLY)
@@ -63,24 +142,38 @@ extension AppState {
         }
         source.setCancelHandler { close(descriptor) }
         source.resume()
-        spareRequestWatcher = source
+        sessionSlotStates[provider, default: SessionSlotState()].spareRequestWatcher = source
     }
 
     private func maintainSessionSlotsOnce(now: Date, processesRead: Bool) async {
-        guard let provider = AIProviderType.routedProvider, let slots = SessionSlots(provider) else { return }
+        let isolated = AIProviderType.isolatedProviders.compactMap { provider in
+            SessionSlots(provider).map { (provider, $0) }
+        }
+        guard !isolated.isEmpty else { return }
         if !processesRead { await refreshSlotProcesses() }
-        let inUse = Set(slotDirectoryByProcess.values)
-        guard sessionSlotsWanted else {
+        for (provider, slots) in isolated {
+            await maintainSessionSlots(provider, slots: slots, now: now)
+        }
+    }
+
+    private func maintainSessionSlots(_ provider: AIProviderType, slots: SessionSlots, now: Date) async {
+        let inUse = Set((sessionSlotStates[provider]?.directoryByProcess ?? [:]).values)
+        // The router's pool mirrors the slot pool of the provider it would
+        // serve, so `applyRouterState` starts from it when the router is
+        // turned on.
+        let mirrorsRouterPool = provider.capabilities.requestRouter != nil
+        guard sessionSlotsWanted(provider) else {
             if slots.launcherInstalled || FileManager.default.fileExists(atPath: slots.launcher.path) {
                 slots.removeLauncher()
                 slotsLog.info("Launcher removed; sessions it started keep their accounts until they exit")
             }
-            if !routerInUse { routerPoolMembers = [] }
-            slotSessionMoves = [:]
+            if mirrorsRouterPool, !routerInUse { routerPoolMembers = [] }
+            sessionSlotStates[provider, default: SessionSlotState()].sessionMoves = [:]
             await serveRunning(slots, provider: provider, members: [], inUse: inUse)
             await serveSessionSlots(slots, provider: provider, members: [], inUse: inUse, now: now)
-            slotServedAccounts = Set(slotDirectoryServing.values)
-            slotCredentialAccounts = slotServedAccounts
+            let served = Set((sessionSlotStates[provider]?.directoryServing ?? [:]).values)
+            sessionSlotStates[provider, default: SessionSlotState()].servedAccounts = served
+            sessionSlotStates[provider, default: SessionSlotState()].credentialAccounts = served
             return
         }
         if !slots.launcherInstalled {
@@ -92,9 +185,9 @@ extension AppState {
                 return
             }
         }
-        watchSpareRequests(slots)
+        watchSpareRequests(slots, provider: provider)
         let members = await buildPool(provider, now: now, forRouter: false)
-        routerPoolMembers = members
+        if mirrorsRouterPool { routerPoolMembers = members }
         let open = Set(members.filter { $0.weight > 0 }.compactMap { UUID(uuidString: $0.accountID) })
         let served = await serveRunning(slots, provider: provider, members: members, inUse: inUse, newSessions: open)
         let resumes = resumeTargets(provider, now: now)
@@ -106,8 +199,9 @@ extension AppState {
             return account == activeForResume ? (session, SessionSlots.activeEntry) : nil
         }.sorted { $0.session < $1.session }
         await Task.detached(priority: .utility) { slots.writeResumes(resumeEntries) }.value
-        slotServedAccounts = Set(slotDirectoryServing.values)
-        slotCredentialAccounts = slotServedAccounts.union(served).union(spares)
+        let slotServed = Set((sessionSlotStates[provider]?.directoryServing ?? [:]).values)
+        sessionSlotStates[provider, default: SessionSlotState()].servedAccounts = slotServed
+        sessionSlotStates[provider, default: SessionSlotState()].credentialAccounts = slotServed.union(served).union(spares)
         let active = accounts.first { $0.provider == provider && $0.isActive }?.id
         // The launcher names an account by its slot's path. The active
         // account's slot holds no credential, so when no spare of it is left
@@ -121,29 +215,40 @@ extension AppState {
     }
 
     /// Reads which slot each running process reads, for `refreshSessions`
-    /// and `maintainSessionSlots`, and the CLI's background-session
-    /// processes; run first on every quota cycle.
+    /// and `maintainSessionSlots`, and each isolated CLI's background-session
+    /// processes, from one process list; run first on every quota cycle.
     func refreshSlotProcesses() async {
-        guard let provider = AIProviderType.routedProvider, let slots = SessionSlots(provider) else { return }
-        let read = await Task.detached(priority: .utility) { () -> ([Int32: String], BackgroundSessionProcesses) in
+        let isolated = AIProviderType.isolatedProviders.compactMap { provider in
+            SessionSlots(provider).map { (provider, $0) }
+        }
+        guard !isolated.isEmpty else { return }
+        let read = await Task.detached(priority: .utility) { () -> [([Int32: String], BackgroundSessionProcesses)] in
             let list = SessionSlots.processList() ?? ""
-            let background = slots.background.map {
-                BackgroundSessionProcesses(processList: list, executable: slots.executable, support: $0)
-            } ?? BackgroundSessionProcesses()
-            return (slots.directoriesByProcess(inProcessList: list), background)
+            return isolated.map { _, slots in
+                let background = slots.background.map {
+                    BackgroundSessionProcesses(processList: list, executable: slots.executable, support: $0)
+                } ?? BackgroundSessionProcesses()
+                return (slots.directoriesByProcess(inProcessList: list), background)
+            }
         }.value
-        backgroundProcesses = read.1
-        slotDirectoryByProcess = Self.sessionSlotDirectories(read.0, background: read.1)
-        // A slot in use that `serveSessionSlots` has not served yet, as on
-        // the first cycle after launch, serves the account the slot itself
-        // records; `refreshSessions` would otherwise count its session on
-        // the active account until the next cycle.
-        let unknown = Set(slotDirectoryByProcess.values).filter { slotDirectoryServing[$0] == nil }
-        guard !unknown.isEmpty else { return }
-        let recorded = await Task.detached(priority: .utility) {
-            unknown.reduce(into: [String: UUID]()) { $0[$1] = slots.recordedAccount(forSlotAt: $1) }
-        }.value
-        for (path, id) in recorded where slotDirectoryServing[path] == nil { slotDirectoryServing[path] = id }
+        for ((provider, slots), (directories, background)) in zip(isolated, read) {
+            sessionSlotStates[provider, default: SessionSlotState()].background = background
+            let byProcess = Self.sessionSlotDirectories(directories, background: background)
+            sessionSlotStates[provider, default: SessionSlotState()].directoryByProcess = byProcess
+            // A slot in use that `serveSessionSlots` has not served yet, as
+            // on the first cycle after launch, serves the account the slot
+            // itself records; `refreshSessions` would otherwise count its
+            // session on the active account until the next cycle.
+            let serving = sessionSlotStates[provider]?.directoryServing ?? [:]
+            let unknown = Set(byProcess.values).filter { serving[$0] == nil }
+            guard !unknown.isEmpty else { continue }
+            let recorded = await Task.detached(priority: .utility) {
+                unknown.reduce(into: [String: UUID]()) { $0[$1] = slots.recordedAccount(forSlotAt: $1) }
+            }.value
+            for (path, id) in recorded where sessionSlotStates[provider]?.directoryServing[path] == nil {
+                sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = id
+            }
+        }
     }
 
     /// The slots processes read, less those of processes that are no
@@ -207,7 +312,7 @@ extension AppState {
     }
 
     /// The account each recent session that is not running last ran on,
-    /// where that account can still serve it, so `claude --resume <id>`
+    /// where that account can still serve it, so resuming it by ID
     /// continues it there with its cache and thinking.
     func resumeTargets(_ provider: AIProviderType, now: Date) -> [String: UUID] {
         let planner = FailoverPlanner(settings: plannerSettings(provider))
@@ -292,11 +397,12 @@ extension AppState {
 
     /// Writes `credential` to a slot through `SessionSlots.serve`, unless
     /// the same credential was written or found there within `recheck`.
-    /// Every slot is served on every quota cycle and each `serve` starts a
-    /// `security` process to read the slot's item, so most cycles skip it.
-    func serveSlot(_ slots: SessionSlots, _ directory: URL, credential: String, recheck: TimeInterval,
+    /// Every slot is served on every quota cycle and each `serve` reads the
+    /// slot's credential back, which may start a process, so most cycles
+    /// skip it.
+    func serveSlot(_ slots: SessionSlots, _ directory: URL, credential: SlotCredential, recheck: TimeInterval,
                    now: Date = Date()) async -> Bool {
-        let digest = Self.credentialDigest(credential)
+        let digest = Self.credentialDigest(credential.contents)
         if let written = slotCredentialWritten[directory.path], written.digest == digest,
            now.timeIntervalSince(written.at) < recheck { return true }
         let served = await Task.detached(priority: .utility) { slots.serve(directory, credential: credential) }.value
@@ -319,8 +425,9 @@ extension AppState {
     /// two of the session's turns; a move rewrites the slot, which the CLI
     /// reads again before its next request. Spare slots are kept for each
     /// account in `members` with a positive weight, the active one
-    /// included, and the rest removed; `claudeCredential` keeps the active
-    /// account's token renewed while slots hold it. `resumeAccounts` keep
+    /// included, and the rest removed; the isolation's
+    /// `currentSlotCredential` keeps the active account's token renewed
+    /// while slots hold it. `resumeAccounts` keep
     /// spares too, for sessions resumed on them. Returns the accounts that
     /// have a spare slot.
     @discardableResult
@@ -336,18 +443,20 @@ extension AppState {
         }.flatMap { UUID(uuidString: $0.accountID) } ?? activeID
         // The pool's accounts, the one taking most new sessions first.
         let byWeight = members.sorted { $0.weight > $1.weight }.compactMap { UUID(uuidString: $0.accountID) }
+        let byProcess = sessionSlotStates[provider]?.directoryByProcess ?? [:]
         let sessionsByDirectory: [String: AgentSession] = (liveSessions[provider] ?? []).reduce(into: [:]) { result, session in
-            if let pid = session.processID, let directory = slotDirectoryByProcess[pid] { result[directory] = session }
+            if let pid = session.processID, let directory = byProcess[pid] { result[directory] = session }
         }
         maintainPins(provider, sessionsBySlot: sessionsByDirectory.mapValues(\.sessionID), now: now)
-        var credentials: [UUID: String] = [:]
-        func credential(_ id: UUID) async -> String? {
+        var credentials: [UUID: SlotCredential] = [:]
+        func credential(_ id: UUID) async -> SlotCredential? {
             if let known = credentials[id] { return known }
             guard let account = accounts.first(where: { $0.id == id }),
-                  let json = await claudeCredential(account, minimumLifetime: readsLiveCredential(account) ? 60 : 2 * 60 * 60),
-                  let accessOnly = SessionSlots.accessOnly(json) else { return nil }
-            credentials[id] = accessOnly
-            return accessOnly
+                  let current = await slots.isolation.currentSlotCredential(
+                      for: account, minimumLifetime: readsLiveCredential(account) ? 60 : 2 * 60 * 60, from: self
+                  ) else { return nil }
+            credentials[id] = current
+            return current
         }
         func serve(_ directory: URL, _ id: UUID, spare: Bool = false) async -> Bool {
             guard let value = await credential(id) else { return false }
@@ -377,7 +486,7 @@ extension AppState {
             guard inUse.contains(path) else {
                 let grace = slot.requested ? Self.requestedClaimGrace : Self.slotClaimGrace
                 if now.timeIntervalSince(claimedAt) > grace { remove.append(slot.directory) }
-                else if let id = slot.account { slotDirectoryServing[path] = id }
+                else if let id = slot.account { sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = id }
                 continue
             }
             // Each session is judged for the model it uses: one whose model's
@@ -397,7 +506,8 @@ extension AppState {
             } == true
             let pinned = sessionPins.account(of: session?.sessionID)
             let balance = session.flatMap { session -> UUID? in
-                guard let destination = slotSessionMoves[session.sessionID], pooled.contains(destination), !session.isWorking,
+                guard let destination = sessionSlotStates[provider]?.sessionMoves[session.sessionID],
+                      pooled.contains(destination), !session.isWorking,
                       model == nil || !cannotServe(destination),
                       slotDirectoryMovedAt[path].map({ now.timeIntervalSince($0) >= Self.balanceMoveInterval }) ?? true
                 else { return nil }
@@ -430,10 +540,10 @@ extension AppState {
                 pendingModelFallbacks[session.sessionID] = nil
             }
             guard let target, await serve(slot.directory, target) else {
-                if let id = slot.account { slotDirectoryServing[path] = id }
+                if let id = slot.account { sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = id }
                 continue
             }
-            slotDirectoryServing[path] = target
+            sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = target
             guard slot.account != target else { continue }
             slots.assign(slot.directory, to: target)
             let from = slot.account.flatMap { id in accounts.first { $0.id == id } }.map { messageName($0) } ?? "its account"
@@ -464,7 +574,7 @@ extension AppState {
         }
         if !remove.isEmpty || !removeSpares.isEmpty {
             for directory in remove {
-                slotDirectoryServing[directory.path] = nil
+                sessionSlotStates[provider]?.directoryServing[directory.path] = nil
                 slotDirectoryMovedAt[directory.path] = nil
                 slotSessionsByDirectory[directory.path] = nil
             }
@@ -536,30 +646,29 @@ extension AppState {
     /// With `pinned`, the session the command starts is pinned to the
     /// account (`SessionPins.pinSlot`), so nothing automatic moves it.
     func sessionLaunch(on account: Account, in directory: URL, pinned: Bool = true) async -> String? {
-        guard account.provider.capabilities.sessionSlots != nil, !needsSignIn(account),
-              let slots = SessionSlots(account.provider),
-              let cli = slots.realExecutable(preferred: ClaudeService.shared.claudePath) else { return nil }
+        guard !needsSignIn(account), let slots = SessionSlots(account.provider),
+              let cli = slots.realExecutable(preferred: slots.isolation.preferredExecutable) else { return nil }
         let start = "cd \(Self.shellQuoted(directory.path)) && "
         let lifetime: TimeInterval = readsLiveCredential(account) ? 60 : 2 * 60 * 60
         let id = account.id
-        let accessOnly = await claudeCredential(account, minimumLifetime: lifetime).flatMap(SessionSlots.accessOnly)
+        let credential = await slots.isolation.currentSlotCredential(for: account, minimumLifetime: lifetime, from: self)
         var slot: URL?
-        if let accessOnly {
+        if let credential {
             slot = await Task.detached(priority: .userInitiated, operation: {
-                slots.makeRequestedSlot(for: id, credential: accessOnly)
+                slots.makeRequestedSlot(for: id, credential: credential)
             }).value
         }
         // The sessions of the account the CLI's own credential belongs to
         // can still read it when no slot could be filled.
         guard let slot else { return readsLiveCredential(account) ? start + Self.shellQuoted(cli) : nil }
-        slotDirectoryServing[slot.path] = id
-        slotCredentialAccounts.insert(id)
+        sessionSlotStates[account.provider, default: SessionSlotState()].directoryServing[slot.path] = id
+        sessionSlotStates[account.provider, default: SessionSlotState()].credentialAccounts.insert(id)
         if pinned {
             sessionPins.pinSlot(slot.path, account: id, provider: account.provider, at: Date())
             sessionPins.save()
         }
         slotsLog.info("Slot claimed for a session started on \(messageName(account))\(pinned ? ", pinned there" : "")")
-        return start + "CLAUDE_SECURESTORAGE_CONFIG_DIR=\(Self.shellQuoted(slot.path)) \(Self.shellQuoted(cli))"
+        return start + "\(slots.isolation.directoryVariable)=\(Self.shellQuoted(slot.path)) \(Self.shellQuoted(cli))"
     }
 
     nonisolated static func shellQuoted(_ text: String) -> String {
@@ -567,18 +676,17 @@ extension AppState {
     }
 
     func reissueSlotCredential(for account: Account) async {
-        guard account.provider == AIProviderType.routedProvider,
-              let slots = SessionSlots(account.provider),
-              let json = credentialModule(for: account.provider)?.liveCredential?.savedCopy(account),
-              let accessOnly = SessionSlots.accessOnly(json) else { return }
+        guard let slots = SessionSlots(account.provider),
+              let saved = credentialModule(for: account.provider)?.liveCredential?.savedCopy(account),
+              let credential = slots.isolation.slotCredential(from: saved) else { return }
         let id = account.id
-        let serving = slotDirectoryServing
+        let serving = sessionSlotStates[account.provider]?.directoryServing ?? [:]
         let holding = await Task.detached(priority: .utility) { slots.directories(holding: id, serving: serving) }.value
         // The renewal revoked what these slots held, so each is written now
         // whatever `serveSlot` last found there.
         for path in holding { slotCredentialWritten[path] = nil }
         var written = 0
-        for path in holding where await serveSlot(slots, URL(fileURLWithPath: path), credential: accessOnly, recheck: 0) {
+        for path in holding where await serveSlot(slots, URL(fileURLWithPath: path), credential: credential, recheck: 0) {
             written += 1
         }
         slotsLog.info("Renewed credential of \(messageName(account)) written to \(written) slot(s)")
@@ -608,18 +716,18 @@ extension AppState {
             lhs.weight != rhs.weight ? lhs.weight < rhs.weight : rhs.accountID == activeID?.uuidString
         }.flatMap { UUID(uuidString: $0.accountID) } ?? activeID
         var ready = Set<UUID>()
-        var credentials: [UUID: String] = [:]
+        var credentials: [UUID: SlotCredential] = [:]
         for slot in newSessions.subtracting([activeID].compactMap { $0 }).union(running) {
             let servingID = pooled.contains(slot) ? slot : fallback
             guard let servingID, let account = accounts.first(where: { $0.id == servingID }) else { continue }
             if credentials[servingID] == nil {
                 let lifetime: TimeInterval = readsLiveCredential(account) ? 60 : 2 * 60 * 60
-                guard let json = await claudeCredential(account, minimumLifetime: lifetime),
-                      let accessOnly = SessionSlots.accessOnly(json) else {
+                guard let current = await slots.isolation.currentSlotCredential(for: account, minimumLifetime: lifetime,
+                                                                                 from: self) else {
                     slotsLog.warning("No current credential for \(messageName(account)); its slot is not updated")
                     continue
                 }
-                credentials[servingID] = accessOnly
+                credentials[servingID] = current
             }
             guard let credential = credentials[servingID] else { continue }
             let directory = slots.directory(for: slot)
@@ -631,10 +739,11 @@ extension AppState {
             }
         }
         for slot in running {
-            slotDirectoryServing[slots.directory(for: slot).path] = pooled.contains(slot) ? slot : fallback
+            sessionSlotStates[provider, default: SessionSlotState()].directoryServing[slots.directory(for: slot).path] = pooled.contains(slot) ? slot : fallback
         }
-        for path in slotDirectoryServing.keys where slots.account(forDirectory: path) != nil && !inUse.contains(path) {
-            slotDirectoryServing[path] = nil
+        for path in (sessionSlotStates[provider]?.directoryServing ?? [:]).keys
+        where slots.account(forDirectory: path) != nil && !inUse.contains(path) {
+            sessionSlotStates[provider]?.directoryServing[path] = nil
         }
         let keep = ready.union(running)
         let stale = slots.slotDirectories().filter { directory in

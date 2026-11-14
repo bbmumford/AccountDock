@@ -61,52 +61,54 @@ extension AppState {
         sessions.filter { session in session.processID.map { slotDirectoryByProcess[$0] == nil } ?? false }
     }
 
-    /// Finds the sessions running outside a slot while sessions are served
-    /// from slots, with the terminal each runs in, for the usage tab, and
-    /// records each once. A session in a background worker
-    /// (`BackgroundSessionProcesses.workers`) is listed as such, with its
-    /// `BackgroundSessionState`; its terminal is its attach client's. Runs
-    /// on every quota cycle after `maintainSessionSlots`, which reads the
-    /// slots processes use.
+    /// Finds the sessions running outside a slot of every provider whose
+    /// sessions are served from slots, with the terminal each runs in, for
+    /// the usage tab, and records each once. A session in a background
+    /// worker (`BackgroundSessionProcesses.workers`) is listed as such, with
+    /// its `BackgroundSessionState`; its terminal is its attach client's.
+    /// Runs on every quota cycle after `maintainSessionSlots`, which reads
+    /// the slots processes use.
     func noteUnisolatedSessions() async {
-        guard let provider = AIProviderType.routedProvider, provider.capabilities.sessionSlots != nil,
-              sessionSlotsInUse else {
-            if !unisolatedSessions.isEmpty { unisolatedSessions = [:] }
-            if !unisolatedTerminals.isEmpty { unisolatedTerminals = [:] }
-            if !backgroundSessionStates.isEmpty { backgroundSessionStates = [:] }
-            return
-        }
-        let found = Self.unisolated(liveSessions[provider] ?? [], slotDirectoryByProcess: slotDirectoryByProcess)
+        var byProvider: [AIProviderType: [AgentSession]] = [:]
         var terminals: [String: String] = [:]
         var background: [String: BackgroundSessionState] = [:]
-        for session in found {
-            if let state = await backgroundSessionState(session, provider: provider) {
-                background[session.sessionID] = state
-                if let client = state.attachProcess, let terminal = await sessionTerminal.terminalSession(ofProcess: client) {
+        var running = Set<String>()
+        var served = false
+        for provider in AIProviderType.isolatedProviders where sessionSlotsInUse(provider) {
+            served = true
+            let byProcess = sessionSlotStates[provider]?.directoryByProcess ?? [:]
+            let found = Self.unisolated(liveSessions[provider] ?? [], slotDirectoryByProcess: byProcess)
+            for session in found {
+                if let state = await backgroundSessionState(session, provider: provider) {
+                    background[session.sessionID] = state
+                    if let client = state.attachProcess, let terminal = await sessionTerminal.terminalSession(ofProcess: client) {
+                        terminals[session.sessionID] = terminal
+                    }
+                } else if let pid = session.processID, let terminal = await sessionTerminal.terminalSession(ofProcess: pid) {
                     terminals[session.sessionID] = terminal
                 }
-            } else if let pid = session.processID, let terminal = await sessionTerminal.terminalSession(ofProcess: pid) {
-                terminals[session.sessionID] = terminal
             }
+            if !found.isEmpty { byProvider[provider] = found }
+            for session in found where unisolatedNoted.insert(session.sessionID).inserted {
+                failoverEvents.record(provider, background[session.sessionID] != nil
+                    ? "\(Self.eventName(of: session)) runs in \(provider.capabilities.displayName)'s background service, whose workers read the shared sign-in, not a slot of its own: it cannot be moved on its own. Restart it in its own slot from the usage tab once it is idle."
+                    : "\(Self.eventName(of: session)) runs outside a slot of its own (started by full path, from an IDE or the desktop app, or before the pool was ready): it shares the sign-in and cannot be moved on its own. Restart it in its own slot from the usage tab, or quit it and resume it from a terminal.")
+            }
+            running.formUnion((liveSessions[provider] ?? []).map(\.sessionID))
         }
-        let byProvider = found.isEmpty ? [:] : [provider: found]
         if unisolatedSessions != byProvider { unisolatedSessions = byProvider }
         if unisolatedTerminals != terminals { unisolatedTerminals = terminals }
         if backgroundSessionStates != background { backgroundSessionStates = background }
-        for session in found where unisolatedNoted.insert(session.sessionID).inserted {
-            failoverEvents.record(provider, background[session.sessionID] != nil
-                ? "\(Self.eventName(of: session)) runs in \(provider.capabilities.displayName)'s background service, whose workers read the shared sign-in, not a slot of its own: it cannot be moved on its own. Restart it in its own slot from the usage tab once it is idle."
-                : "\(Self.eventName(of: session)) runs outside a slot of its own (started by full path, from an IDE or the desktop app, or before the pool was ready): it shares the sign-in and cannot be moved on its own. Restart it in its own slot from the usage tab, or quit it and resume it from a terminal.")
-        }
-        unisolatedNoted.formIntersection(Set((liveSessions[provider] ?? []).map(\.sessionID)))
+        if served { unisolatedNoted.formIntersection(running) }
     }
 
     /// What decides whether a session in a background worker can be
     /// restarted now; nil when its process is no worker or the provider has
     /// no background service. Its transcripts are read off the main thread.
     func backgroundSessionState(_ session: AgentSession, provider: AIProviderType) async -> BackgroundSessionState? {
+        let processes = backgroundProcesses(provider)
         guard provider.capabilities.backgroundSessions != nil, let pid = session.processID,
-              backgroundProcesses.isWorker(pid) else { return nil }
+              processes.isWorker(pid) else { return nil }
         let id = session.sessionID
         let root = provider.capabilities.transcriptDirectory.map {
             URL(fileURLWithPath: (provider.configDirectory as NSString).expandingTildeInPath)
@@ -115,8 +117,8 @@ extension AppState {
         let changed = await Task.detached(priority: .utility) {
             root.flatMap { BackgroundSessionState.transcriptChangedAt(session: id, root: $0) }
         }.value
-        return BackgroundSessionState(transcriptChangedAt: changed, shellRunning: backgroundProcesses.hasShell(under: pid),
-                                      attachProcess: backgroundProcesses.attachClient(of: id))
+        return BackgroundSessionState(transcriptChangedAt: changed, shellRunning: processes.hasShell(under: pid),
+                                      attachProcess: processes.attachClient(of: id))
     }
 
     /// Why `session` cannot be restarted in its own slot now; nil when it
@@ -167,19 +169,19 @@ extension AppState {
     /// the usage tab. Returns whether it was typed.
     @discardableResult
     func restartInOwnSlot(_ sessionID: String) async -> Bool {
-        guard let (provider, session) = liveSession(sessionID),
-              let executable = provider.capabilities.cliExecutableName else { return false }
+        guard let (provider, session) = liveSession(sessionID), let slots = SessionSlots(provider) else { return false }
         let outcome: SessionTerminalActions.Outcome
-        if let support = provider.capabilities.backgroundSessions, backgroundProcesses.isWorker(session.processID) {
+        if let support = slots.background, backgroundProcesses(provider).isWorker(session.processID) {
             await refreshSlotProcesses()
             guard let state = await backgroundSessionState(session, provider: provider) else { return false }
-            let stopper = SessionSlots(provider)?.realExecutable(preferred: ClaudeService.shared.claudePath) ?? executable
+            let stopper = slots.realExecutable(preferred: slots.isolation.preferredExecutable) ?? slots.executable
             outcome = await SessionTerminalActions.restartBackground(
-                session, state: state, executable: executable, stopper: stopper, support: support,
+                session, state: state, isolation: slots.isolation, stopper: stopper, support: support,
                 control: backgroundSessionControl, terminal: sessionTerminal
             )
         } else {
-            outcome = await SessionTerminalActions.restartInOwnSlot(session, executable: executable, terminal: sessionTerminal)
+            outcome = await SessionTerminalActions.restartInOwnSlot(session, isolation: slots.isolation,
+                                                                    terminal: sessionTerminal)
         }
         failoverEvents.record(provider, Self.restartEvent(outcome, session: Self.eventName(of: session)))
         return outcome == .typed

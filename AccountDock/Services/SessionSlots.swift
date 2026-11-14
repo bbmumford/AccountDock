@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 private let log = FileLog("SessionSlots")
@@ -9,12 +8,13 @@ private let log = FileLog("SessionSlots")
 /// own.
 ///
 /// A slot is a directory under `root`, one per saved account, named in the
-/// CLI's `SessionSlotSupport.directoryVariable`; the CLI then reads its
-/// credential from the slot's Keychain item instead of its default one.
-/// `AppState.maintainSessionSlots` writes each slot and the pool file the
-/// launcher reads. A slot holds the access token only: AccountDock renews
-/// every account it stores, and a CLI holding the refresh token would
-/// replace it under AccountDock. Every session the launcher starts gets a
+/// provider's `ProviderSessionIsolation.directoryVariable`; the CLI then
+/// reads the credential the isolation wrote for that directory instead of
+/// its default one. Everything here is the same for every provider; where
+/// a slot's credential lives and how the CLI is told which slot to read
+/// are the isolation's. `AppState.maintainSessionSlots` writes each slot
+/// and the pool file the launcher reads. A slot holds the access token only
+/// (`SlotCredential`). Every session the launcher starts gets a
 /// one-session slot of its own, the active account's included, so each can
 /// be moved alone; the pool names the active account `activeEntry` only
 /// while it has no spare slot, and its session then reads the CLI's default
@@ -23,13 +23,14 @@ private let log = FileLog("SessionSlots")
 /// Launches from IDEs and apps do not read the shell profile and keep the
 /// default credential.
 struct SessionSlots: Sendable {
-    let support: SessionSlotSupport
-    let executable: String
+    let isolation: any ProviderSessionIsolation
     let home: URL
+
+    var executable: String { isolation.executable }
     /// The CLI's background-session service, whose commands and launches
     /// the launcher runs unchanged: their sessions run in the supervisor's
     /// workers, which never read a slot.
-    let background: BackgroundSessionSupport?
+    var background: BackgroundSessionSupport? { isolation.background }
 
     /// Pool-file entry for the CLI's default credential.
     static let activeEntry = "-"
@@ -50,19 +51,20 @@ struct SessionSlots: Sendable {
     static let interactiveProfileFile = ".zshrc"
 
     init?(_ provider: AIProviderType, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
-        guard let support = provider.capabilities.sessionSlots,
-              let executable = provider.capabilities.cliExecutableName else { return nil }
-        self.support = support
-        self.executable = executable
+        guard let isolation = provider.capabilities.sessionIsolation else { return nil }
+        self.init(isolation: isolation, home: home)
+    }
+
+    init(isolation: any ProviderSessionIsolation, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+        self.isolation = isolation
         self.home = home.standardizedFileURL
-        background = provider.capabilities.backgroundSessions
     }
 
     /// First arguments the launcher runs the CLI unchanged for: the
     /// background service's commands, which start no session of their own,
     /// then the sign-in commands.
     var passThroughCommands: [String] {
-        (background?.managementCommands ?? []) + support.accountCommands
+        (background?.managementCommands ?? []) + isolation.passThroughCommands
     }
 
     var base: URL { home.appendingPathComponent(".accountdock", isDirectory: true) }
@@ -72,14 +74,16 @@ struct SessionSlots: Sendable {
 
     /// The CLI itself rather than `launcher`, which would pick an account of
     /// its own: `preferred` when it is the CLI, or else the first on the
-    /// usual install paths. Read by `AppState.sessionLaunch`.
+    /// usual install paths and the isolation's `installDirectories`. Read
+    /// by `AppState.sessionLaunch`.
     func realExecutable(preferred: String?) -> String? {
         let fm = FileManager.default
         let launcherPath = launcher.resolvingSymlinksInPath().path
-        let candidates = [preferred].compactMap { $0 } + [
+        let directories = [
             "/opt/homebrew/bin", "/usr/local/bin", home.appendingPathComponent(".local/bin").path,
-            home.appendingPathComponent(".claude/local").path,
-        ].map { ($0 as NSString).appendingPathComponent(executable) }
+        ] + isolation.installDirectories.map { home.appendingPathComponent($0).path }
+        let candidates = [preferred].compactMap { $0 }
+            + directories.map { ($0 as NSString).appendingPathComponent(executable) }
         return candidates.first { path in
             fm.isExecutableFile(atPath: path) && URL(fileURLWithPath: path).resolvingSymlinksInPath().path != launcherPath
         }
@@ -186,13 +190,13 @@ struct SessionSlots: Sendable {
     /// Fills a new spare slot for `account`. The account file is written
     /// last, so the launcher never claims a slot without its credential.
     @discardableResult
-    func makeSpare(for account: UUID, credential: String) -> Bool {
+    func makeSpare(for account: UUID, credential: SlotCredential) -> Bool {
         makeSlot(for: account, credential: credential) != nil
     }
 
     /// Fills a new one-session slot for `account`; nil when it could not be
     /// written.
-    func makeSlot(for account: UUID, credential: String) -> URL? {
+    func makeSlot(for account: UUID, credential: SlotCredential) -> URL? {
         let directory = sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         guard serve(directory, credential: credential), assign(directory, to: account) else { return nil }
         return directory
@@ -202,11 +206,10 @@ struct SessionSlots: Sendable {
     /// filled: an unclaimed slot is a spare, which a launcher may take and
     /// `AppState.maintainSessionSlots` may remove at any moment. Nil when it
     /// could not be written.
-    func makeRequestedSlot(for account: UUID, credential: String) -> URL? {
+    func makeRequestedSlot(for account: UUID, credential: SlotCredential) -> URL? {
         let directory = sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
-                                                    attributes: [.posixPermissions: 0o700])
+            try isolation.prepareSlot(directory)
         } catch {
             log.error("[makeRequestedSlot] Slot not created: \(error.localizedDescription)")
             return nil
@@ -244,50 +247,22 @@ struct SessionSlots: Sendable {
         }
     }
 
-    // MARK: - Keychain
+    // MARK: - Credential
 
-    /// The Keychain service the CLI reads for a slot directory: the default
-    /// service, `-`, and the first eight hexadecimal digits of the SHA-256
-    /// of the path in Unicode normalization form C.
-    static func keychainService(base: String, directory: String) -> String {
-        let digest = SHA256.hash(data: Data(directory.precomposedStringWithCanonicalMapping.utf8))
-        return base + "-" + digest.map { String(format: "%02x", $0) }.joined().prefix(8)
-    }
-
-    func store(for directory: URL) -> SecurityToolKeychain {
-        SecurityToolKeychain(service: Self.keychainService(base: support.keychainService, directory: directory.path))
-    }
-
-    /// The credential JSON without any `refreshToken`, or nil when it is not
-    /// a JSON object.
-    static func accessOnly(_ json: String) -> String? {
-        guard let data = json.data(using: .utf8),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        func strip(_ value: Any) -> Any {
-            if var object = value as? [String: Any] {
-                object.removeValue(forKey: "refreshToken")
-                return object.mapValues(strip)
-            }
-            if let array = value as? [Any] { return array.map(strip) }
-            return value
-        }
-        guard let stripped = try? JSONSerialization.data(withJSONObject: strip(root), options: [.sortedKeys]) else { return nil }
-        return String(data: stripped, encoding: .utf8)
-    }
-
-    /// Writes `credential` to the slot when it holds anything else. Returns
-    /// whether the slot holds it afterwards.
-    func serve(_ directory: URL, credential: String) -> Bool {
-        let store = store(for: directory)
-        if store.read(account: NSUserName()) == SecurityToolKeychain.asciiOnly(credential) { return true }
+    /// Writes `credential` to the slot through the isolation when the slot
+    /// holds anything else, then tells a CLI reading it. Returns whether
+    /// the slot holds it afterwards.
+    func serve(_ directory: URL, credential: SlotCredential) -> Bool {
+        if isolation.readCredential(in: directory) == credential { return true }
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
-                                                    attributes: [.posixPermissions: 0o700])
+            try isolation.prepareSlot(directory)
         } catch {
             log.error("[serve] Slot directory not created: \(error.localizedDescription)")
             return false
         }
-        return store.apply(writes: [(NSUserName(), credential)])
+        guard isolation.writeCredential(credential, to: directory) else { return false }
+        isolation.signalReread(directory)
+        return true
     }
 
     /// Deletes a spare slot, claiming it first: the launcher claims a spare
@@ -316,9 +291,9 @@ struct SessionSlots: Sendable {
         return !names.isEmpty
     }
 
-    /// Deletes the slot's Keychain item and directory.
+    /// Deletes what the isolation keeps for the slot, then its directory.
     func remove(_ directory: URL) {
-        _ = store(for: directory).apply(writes: [], deletes: [NSUserName()])
+        isolation.removeSlot(directory)
         try? FileManager.default.removeItem(at: directory)
     }
 
@@ -383,7 +358,7 @@ struct SessionSlots: Sendable {
     }
 
     func directoriesByProcess(inProcessList text: String) -> [Int32: String] {
-        Self.directoriesByProcess(inProcessList: text, variable: support.directoryVariable, root: root.path)
+        Self.directoriesByProcess(inProcessList: text, variable: isolation.directoryVariable, root: root.path)
     }
 
     /// The user's processes as `ps -Eww -o pid=,ppid=,command=` lists
@@ -507,7 +482,7 @@ struct SessionSlots: Sendable {
     /// or the pool file is missing, or stale and not written again within
     /// `spareWaitSeconds` of asking (`poolRequestMarker`).
     func launcherScript() -> String {
-        let passThrough = support.credentialVariables
+        let passThrough = isolation.passThroughVariables
             .map { "[ -n \"${\($0):-}\" ] && exec \"$real\" \"$@\"" }
             .joined(separator: "\n")
         let backgroundFlag = background.map { flag in
@@ -562,11 +537,7 @@ struct SessionSlots: Sendable {
         resumes=\#(Self.shellQuoted(resumeFile.path))
         resumed=
         previous=
-        for argument in "$@"; do
-          case "$previous" in --resume|-r) resumed=$argument ;; esac
-          case "$argument" in --resume=*) resumed=${argument#--resume=} ;; esac
-          previous=$argument
-        done
+        \#(isolation.resumeArgumentScript)
         slot=
         if [ -n "$resumed" ] && [ -n "$(find "$resumes" -mmin -\#(Self.poolLifetimeMinutes) 2>/dev/null)" ]; then
           slot=$(awk -F '\t' -v id="$resumed" '$1 == id { print $2; exit }' "$resumes" 2>/dev/null)
@@ -595,8 +566,8 @@ struct SessionSlots: Sendable {
               [ "$(cat "$spare/\#(Self.accountFile)" 2>/dev/null)" = "$account" ] || continue
               if mkdir "$spare/\#(Self.claimedMarker)" 2>/dev/null; then
                 [ "$tries" -eq 0 ] || rm -f "$request"
-                \#(support.directoryVariable)=$spare
-                export \#(support.directoryVariable)
+                \#(isolation.directoryVariable)=$spare
+                export \#(isolation.directoryVariable)
                 exec "$real" "$@"
               fi
             done
@@ -610,11 +581,27 @@ struct SessionSlots: Sendable {
         if [ -z "$slot" ] || [ "$slot" = "\#(Self.activeEntry)" ] || [ ! -d "$slot" ]; then
           exec "$real" "$@"
         fi
-        \#(support.directoryVariable)=$slot
-        export \#(support.directoryVariable)
+        \#(isolation.directoryVariable)=$slot
+        export \#(isolation.directoryVariable)
         exec "$real" "$@"
 
         """#
+    }
+
+    /// Launcher lines that set `resumed` from `"$@"` for a CLI whose
+    /// `options` take the session ID as the next argument and whose
+    /// `inlineOptions` also take it after `=`; used for
+    /// `ProviderSessionIsolation.resumeArgumentScript`.
+    static func resumeArgumentScript(options: [String], inlineOptions: [String]) -> String {
+        var lines = [#"for argument in "$@"; do"#]
+        if !options.isEmpty {
+            lines.append(#"  case "$previous" in "# + options.joined(separator: "|") + #") resumed=$argument ;; esac"#)
+        }
+        for option in inlineOptions {
+            lines.append(#"  case "$argument" in "# + option + #"=*) resumed=${argument#"# + option + #"=} ;; esac"#)
+        }
+        lines += ["  previous=$argument", "done"]
+        return lines.joined(separator: "\n")
     }
 
     static func shellQuoted(_ value: String) -> String {

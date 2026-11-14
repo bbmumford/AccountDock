@@ -99,17 +99,18 @@ enum SessionTerminalActions {
         return await SessionTerminalCommand.send(["/model \(model)"], into: target, through: terminal) ? .typed : .refused
     }
 
-    /// Ends the session and resumes it by ID from the same shell, so the
-    /// resumed run starts through the launcher and reads a slot of its own.
-    /// `pause` lets the shell take the terminal back between the two lines.
-    static func restartInOwnSlot(_ session: AgentSession, executable: String, terminal: SessionTerminalInput,
-                                 pause: TimeInterval = 2) async -> Outcome {
+    /// Ends the session and resumes it by ID from the same shell with the
+    /// isolation's `resumeCommand`, so the resumed run starts through the
+    /// launcher and reads a slot of its own. `pause` lets the shell take
+    /// the terminal back between the two lines.
+    static func restartInOwnSlot(_ session: AgentSession, isolation: any ProviderSessionIsolation,
+                                 terminal: SessionTerminalInput, pause: TimeInterval = 2) async -> Outcome {
         guard let target = await reachable(session, terminal: terminal) else {
             return session.isIdle ? .notInTerminal : .notIdle
         }
         guard await SessionTerminalCommand.send(["/exit"], into: target, through: terminal) else { return .refused }
         if pause > 0 { try? await Task.sleep(nanoseconds: UInt64(pause * 1_000_000_000)) }
-        let resume = "\(executable) --resume \(AppState.shellQuoted(session.sessionID))"
+        let resume = isolation.resumeCommand(sessionID: session.sessionID)
         return await SessionTerminalCommand.send([resume], into: target, through: terminal) ? .typed : .refused
     }
 
@@ -120,10 +121,11 @@ enum SessionTerminalActions {
     /// last turn stopped, its transcripts quiet, no shell under its worker,
     /// and an attach client in a terminal `terminal` reaches. `stopper` is
     /// the CLI's own executable, which `control` runs with the stop
-    /// command; `executable` is typed, so the launcher on the shell's
-    /// `PATH` starts the resumed run. `pause` lets the attach client exit
-    /// and the shell take the terminal back.
-    static func restartBackground(_ session: AgentSession, state: BackgroundSessionState, executable: String,
+    /// command; the isolation's `resumeCommand` is typed, so the launcher
+    /// on the shell's `PATH` starts the resumed run. `pause` lets the
+    /// attach client exit and the shell take the terminal back.
+    static func restartBackground(_ session: AgentSession, state: BackgroundSessionState,
+                                  isolation: any ProviderSessionIsolation,
                                   stopper: String, support: BackgroundSessionSupport,
                                   control: BackgroundSessionControl, terminal: SessionTerminalInput,
                                   pause: TimeInterval = 2, now: Date = Date()) async -> Outcome {
@@ -134,7 +136,7 @@ enum SessionTerminalActions {
         }
         guard await control.stop(session.sessionID, executable: stopper, support: support) else { return .notStopped }
         if pause > 0 { try? await Task.sleep(nanoseconds: UInt64(pause * 1_000_000_000)) }
-        let resume = "\(executable) --resume \(AppState.shellQuoted(session.sessionID))"
+        let resume = isolation.resumeCommand(sessionID: session.sessionID)
         return await SessionTerminalCommand.send([resume], into: target, through: terminal) ? .typed : .refused
     }
 

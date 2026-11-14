@@ -85,7 +85,7 @@ enum ClaudeStatusLineTelemetry {
     /// model, workspace, cost and rate-limit metadata; prompt and transcript
     /// content are not part of it. A session in a one-session slot also
     /// leaves the slot directory it reads (Claude Code's
-    /// `SessionSlotSupport.directoryVariable`) beside it, so
+    /// `ClaudeSessionIsolation.directoryVariable`) beside it, so
     /// `PassiveUsageTelemetry` can name the session of a slot whose process
     /// left no session record.
     private static let script = #"""

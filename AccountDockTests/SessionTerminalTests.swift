@@ -77,7 +77,7 @@ final class SessionTerminalTests: XCTestCase {
         let terminal = FakeTerminal(sessions: [42: "agt-1"])
         let idle = try session("abc-123", event: "Stop", pid: 42)
         XCTAssertNil(AppState.restartBlocker(idle, terminal: "agt-1"))
-        let outcome = await SessionTerminalActions.restartInOwnSlot(idle, executable: "claude", terminal: terminal, pause: 0)
+        let outcome = await SessionTerminalActions.restartInOwnSlot(idle, isolation: ClaudeSessionIsolation(), terminal: terminal, pause: 0)
         XCTAssertEqual(outcome, .typed)
         XCTAssertEqual(terminal.log.map(\.text),
                        ["/exit", SessionTerminalCommand.enter, "claude --resume 'abc-123'", SessionTerminalCommand.enter])
@@ -88,12 +88,12 @@ final class SessionTerminalTests: XCTestCase {
         let terminal = FakeTerminal(sessions: [42: "agt-1"])
         let working = try session("abc-123", event: "UserPromptSubmit", pid: 42)
         XCTAssertNotNil(AppState.restartBlocker(working, terminal: "agt-1"))
-        let outcomeWorking = await SessionTerminalActions.restartInOwnSlot(working, executable: "claude", terminal: terminal, pause: 0)
+        let outcomeWorking = await SessionTerminalActions.restartInOwnSlot(working, isolation: ClaudeSessionIsolation(), terminal: terminal, pause: 0)
         XCTAssertEqual(outcomeWorking, .notIdle)
 
         let elsewhere = try session("def-456", event: "Stop", pid: 7)
         XCTAssertNotNil(AppState.restartBlocker(elsewhere, terminal: nil))
-        let outcomeElsewhere = await SessionTerminalActions.restartInOwnSlot(elsewhere, executable: "claude", terminal: terminal, pause: 0)
+        let outcomeElsewhere = await SessionTerminalActions.restartInOwnSlot(elsewhere, isolation: ClaudeSessionIsolation(), terminal: terminal, pause: 0)
         XCTAssertEqual(outcomeElsewhere, .notInTerminal)
         XCTAssertTrue(terminal.log.isEmpty, "nothing is typed into either")
     }

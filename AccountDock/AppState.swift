@@ -140,22 +140,11 @@ final class AppState: ObservableObject {
     /// digest of the credential its owner was read for; read through
     /// `liveCredentialOwner`.
     var liveCredentialOwners: [AIProviderType: (digest: String, account: UUID)] = [:]
-    /// Accounts whose slot a running session reads, kept by
-    /// `maintainSessionSlots`; they are read and planned as in use.
-    var slotServedAccounts: Set<UUID> = []
-    /// Accounts whose access token a session slot holds, for running or new
-    /// sessions; kept by `maintainSessionSlots` and read by
-    /// `credentialIsUsable` and `renewSavedCredential`, because renewing
-    /// such an account's saved copy revokes the token those slots hold.
-    var slotCredentialAccounts: Set<UUID> = []
-    /// The slot directory each running process reads, and the account
-    /// serving each slot that has running sessions; read by
-    /// `sessionAttribution` and `slotAccount(forSession:)`.
-    var slotDirectoryByProcess: [Int32: String] = [:]
-    var slotDirectoryServing: [String: UUID] = [:]
-    /// Sessions `SessionPacer` moves to another account to balance load,
-    /// applied to one-session slots by `maintainSessionSlots`.
-    var slotSessionMoves: [String: UUID] = [:]
+    /// Each isolated provider's slot state (`SessionSlotState`), kept by
+    /// `maintainSessionSlots` and `refreshSlotProcesses`; read across
+    /// providers through `slotDirectoryByProcess`, `slotDirectoryServing`,
+    /// `slotServedAccounts` and `slotCredentialAccounts`.
+    var sessionSlotStates: [AIProviderType: SessionSlotState] = [:]
     /// Sessions `handleExternalRequests` was asked to move, by destination;
     /// `serveSessionSlots` moves each at once and forgets it.
     var requestedSlotMoves: [String: UUID] = [:]
@@ -167,9 +156,6 @@ final class AppState: ObservableObject {
     /// read the slot's item back, so a slot already holding the credential
     /// is not read from the Keychain again on every quota cycle.
     var slotCredentialWritten: [String: (digest: String, at: Date)] = [:]
-    /// Watches the one-session slot directory for a launcher's request for a
-    /// spare; installed by `watchSpareRequests`.
-    var spareRequestWatcher: DispatchSourceFileSystemObject?
     /// The renewal of the active account's live credential in progress, so
     /// concurrent callers of `claudeCredential` share one: a second renewal
     /// would present the refresh token the first has just replaced.
@@ -205,10 +191,6 @@ final class AppState: ObservableObject {
     @Published var unisolatedTerminals: [String: String] = [:]
     /// Unisolated sessions already recorded as an event.
     var unisolatedNoted: Set<String> = []
-    /// The routed provider's background-session processes, read with the
-    /// slots by `refreshSlotProcesses`: its workers are sessions on the
-    /// shared sign-in, its attach clients and other commands no sessions.
-    var backgroundProcesses = BackgroundSessionProcesses()
     /// The unisolated sessions that run in a background worker, with what
     /// decides whether each can be restarted in a slot of its own
     /// (`noteUnisolatedSessions`), for the usage tab.
@@ -1127,8 +1109,7 @@ final class AppState: ObservableObject {
         routedSessions[id] = nil
         accountSessions[id] = nil
         rejectedCredentialAccounts.remove(id)
-        slotServedAccounts.remove(id)
-        slotCredentialAccounts.remove(id)
+        for provider in Array(sessionSlotStates.keys) { sessionSlotStates[provider]?.forget(id) }
         accountsAwaitingPostResetVerification.remove(id)
         accountWarmupsInFlight.remove(id)
         pacingShedding.remove(id)
@@ -1144,8 +1125,6 @@ final class AppState: ObservableObject {
         suspensionContexts = suspensionContexts.filter { $0.value.accountID != id }
         userResumes = userResumes.mapValues { $0.filter { $0.value != id } }
         sessionAdmissions = sessionAdmissions.mapValues { $0.filter { $0.value.account != id } }
-        slotDirectoryServing = slotDirectoryServing.filter { $0.value != id }
-        slotSessionMoves = slotSessionMoves.filter { $0.value != id }
         requestedSlotMoves = requestedSlotMoves.filter { $0.value != id }
         routerSessionMoves = routerSessionMoves.filter { $0.value != id }
         routedSessionSeen = routedSessionSeen.filter { $0.value.account != id }

@@ -65,7 +65,7 @@ feature its capabilities declare, and its settings appear with it:
 | `supportsSelectableSwitchMode`, `switchReachesRunningSessions` | The switch method setting; whether a switch waits for a reset and restarts paused sessions to reach them |
 | `credentialSharedAcrossSessions`, `credentialStore` | Whether a switched-away account can still be consumed; the Keychain access notice |
 | `pauseGate`, `lifecycleHooks`, `cliExecutableName` | Pausing sessions, session records and finding the CLI's processes |
-| `sessionSlots`, `backgroundSessions` | One-session slots and their launcher; recognising the CLI's background-session workers and attach clients |
+| `sessionIsolation` (`ProviderSessionIsolation`), `backgroundSessions` | One-session slots and their launcher, through the provider's own credential location, slot variable and resume options; recognising the CLI's background-session workers and attach clients |
 | `liveUsageFeed` | The status-line usage feed and its setting |
 | `requestRouter` | Which provider's CLI the router serves (`AIProviderType.routedProvider`) and the routing settings |
 | `routeTarget` | The service the provider offers as a route target |
