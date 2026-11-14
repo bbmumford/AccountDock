@@ -69,22 +69,9 @@ struct SettingsView: View {
     }
 
     /// The provider's own settings tab: its CLI's options, or where its
-    /// accounts are managed when it has none.
-    @ViewBuilder
+    /// accounts are managed when it has none (`CLISettingsTabView`).
     private func providerTab(_ provider: AIProviderType) -> some View {
-        switch provider {
-        case .claudeCode:
-            ClaudeCLITabView()
-        case .codex:
-            CodexCLITabView()
-        case .kimi, .gemini:
-            VStack(spacing: 12) {
-                Image(systemName: provider.iconName)
-                    .font(.largeTitle)
-                Text("\(provider.capabilities.displayName) accounts are managed from the Accounts tab.")
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
+        CLISettingsTabView(provider: provider)
     }
 
     private func visibilityBinding(_ provider: AIProviderType) -> Binding<Bool> {

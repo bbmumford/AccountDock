@@ -54,4 +54,25 @@ final class ProviderCapabilitiesTests: XCTestCase {
         XCTAssertEqual(AIProviderType.codex.displayModelName("gpt-5.5-codex"), "GPT 5.5 Codex")
         XCTAssertEqual(AIProviderType.kimi.displayModelName("k3"), "Kimi k3")
     }
+
+    /// One CLI settings tab serves every provider from what its
+    /// capabilities declare.
+    func testTheCLISettingsTabIsDrivenByCapabilities() throws {
+        let claude = try XCTUnwrap(AIProviderType.claudeCode.capabilities.cliSettings)
+        XCTAssertEqual(claude.executable, AIProviderType.claudeCode.capabilities.cliExecutableName)
+        XCTAssertEqual(claude.preferenceKey, kClaudeBinaryPathPreferenceKey)
+        XCTAssertNotNil(claude.installedVersion)
+        XCTAssertNotNil(claude.latestVersion)
+        XCTAssertNil(claude.recovery)
+        XCTAssertNil(claude.isolationNote)
+
+        let codex = try XCTUnwrap(AIProviderType.codex.capabilities.cliSettings)
+        XCTAssertEqual(codex.executable, AIProviderType.codex.capabilities.cliExecutableName)
+        XCTAssertEqual(codex.preferenceKey, "codexBinaryPathPreference")
+        XCTAssertNil(codex.installedVersion, "Codex's version is not read")
+        XCTAssertNotNil(codex.isolationNote)
+        XCTAssertEqual(codex.recovery?.confirmButton, "Force Restart")
+
+        XCTAssertNil(AIProviderType.kimi.capabilities.cliSettings, "Kimi's tab says where its accounts are managed")
+    }
 }
