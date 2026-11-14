@@ -14,20 +14,34 @@ final class UsageRequestBudget {
         case critical = 0
         /// Candidate verification immediately before switching to it.
         case candidate = 1
+        /// The reading that confirms an account's passed reset, and the
+        /// warm-up that starts its next window
+        /// (`AppState.verifyPassedResets`, `performWindowWarmup`). Such an
+        /// account takes no work until it is read, so its reading may
+        /// spend the share background reads leave untouched.
+        case verification = 2
         /// Periodic refresh of an idle account.
-        case background = 2
+        case background = 3
 
         static func < (lhs: Priority, rhs: Priority) -> Bool { lhs.rawValue < rhs.rawValue }
 
         /// Tokens that must remain after spending, so lower priorities can
-        /// never consume the allowance reserved for higher ones.
+        /// never consume the allowance reserved for higher ones. Background
+        /// reads stop half a request above verification reads, which stop
+        /// half a request above candidate reads.
         var reserve: Double {
             switch self {
             case .critical: 0
             case .candidate: 0.5
+            case .verification: 1
             case .background: 1.5
             }
         }
+
+        /// What a second request of one reading already admitted at this
+        /// priority must leave (`spendFollowUp`): the reserve less the
+        /// request the reading was admitted with, never below nothing.
+        var followUpReserve: Double { max(0, reserve - 1) }
     }
 
     let capacity: Double
@@ -54,6 +68,24 @@ final class UsageRequestBudget {
     @discardableResult
     func spend(_ priority: Priority, now: Date = Date()) -> Bool {
         guard canSpend(priority, now: now) else { return false }
+        tokens -= 1
+        return true
+    }
+
+    /// Reserves the second request of a reading already admitted at
+    /// `priority`, such as the check that a saved sign-in is the account's
+    /// own (`AppState.savedCopyIsOwn`) before its usage is read. The
+    /// reading's own admission left at least `priority.reserve`; a bucket
+    /// of three cannot hold two requests above the background or
+    /// verification reserve, so a second admission at the same reserve
+    /// would drop those readings half made. It is held to
+    /// `followUpReserve` instead, which dips into the allowance kept for
+    /// higher priorities by that one request at most.
+    @discardableResult
+    func spendFollowUp(of priority: Priority, now: Date = Date()) -> Bool {
+        refill(now: now)
+        if let blockedUntil, blockedUntil > now { return false }
+        guard tokens - 1 >= priority.followUpReserve - 0.0001 else { return false }
         tokens -= 1
         return true
     }

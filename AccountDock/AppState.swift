@@ -248,15 +248,43 @@ final class AppState: ObservableObject {
     /// A locally elapsed reset is useful for clearing a stale 100% display,
     /// but it is not proof that the provider has opened a new quota window.
     /// Never fail over to one of these accounts until a fresh API response
-    /// confirms its post-reset capacity.
+    /// confirms its post-reset capacity. Kept in the usage snapshots, so a
+    /// cleared reading saved before a relaunch is not taken for a reading
+    /// of 0% after it; `verifyPassedResets` reads these accounts.
     var accountsAwaitingPostResetVerification: Set<UUID> = []
-    private struct PendingWindowWarmup {
+    /// When each account in `accountsAwaitingPostResetVerification` was
+    /// last cleared at a reset, so its reading waits `postResetSettle` for
+    /// the provider to open the new window.
+    var passedResetAt: [UUID: Date] = [:]
+    /// When `verifyPassedResets` last read each such account and the reading
+    /// confirmed nothing, so an account whose readings keep failing is read
+    /// again only after `postResetRetrySpacing`.
+    var postResetReadFailedAt: [UUID: Date] = [:]
+    /// Windows of one account to start (`performWindowWarmup`).
+    struct PendingWindowWarmup: Equatable {
         var session = false
         var weekly = false
+        /// When the provider said the window whose reset armed this would
+        /// reset; nil when a reading armed it.
+        var resetAt: Date? = nil
+
+        var isEmpty: Bool { !session && !weekly }
     }
+    /// The windows a passed reset left to start on each account, until a
+    /// reading of it settles them or the warm-up runs.
     private var pendingWindowWarmups: [UUID: PendingWindowWarmup] = [:]
-    private var warmupBootstrapsInFlight: Set<String> = []
+    /// Consecutive warm-ups of each account that failed for a reason other
+    /// than the request allowance or a cool-down (`warmupRetryDelay`).
     private var warmupRetryAttempts: [UUID: Int] = [:]
+    /// The retry waiting for each account; a reading arriving meanwhile
+    /// leaves the warm-up to it unless the probe can run at once.
+    private var warmupRetries: [UUID: Task<Void, Never>] = [:]
+    /// Accounts whose warm-up failed past `warmupFailureDelays`; tried
+    /// again only once another reset passes.
+    private var warmupGivenUp: Set<UUID> = []
+    /// When a probe last started a window on each account, so a provider
+    /// still reporting the window unstarted does not start a second probe.
+    private var lastWarmupProbeAt: [UUID: Date] = [:]
     private var accountWarmupsInFlight: Set<UUID> = []
     struct PendingResetRecovery {
         let accountID: UUID
@@ -1115,6 +1143,11 @@ final class AppState: ObservableObject {
         automaticSwitchesAway[id] = nil
         pendingWindowWarmups[id] = nil
         warmupRetryAttempts[id] = nil
+        warmupRetries.removeValue(forKey: id)?.cancel()
+        warmupGivenUp.remove(id)
+        lastWarmupProbeAt[id] = nil
+        passedResetAt[id] = nil
+        postResetReadFailedAt[id] = nil
         routedSessions[id] = nil
         accountSessions[id] = nil
         rejectedCredentialAccounts.remove(id)
@@ -1495,7 +1528,8 @@ final class AppState: ObservableObject {
                     }
                     continue
                 }
-                let outcome = await readUsage(account, forced: forceUnavailablePlanCheck, includeMetadata: true)
+                let outcome = await readUsage(account, forced: forceUnavailablePlanCheck, includeMetadata: true,
+                                              priority: priority)
                 applyUsageRead(outcome, for: account)
             }
         }
@@ -1506,11 +1540,13 @@ final class AppState: ObservableObject {
     /// the provider reports, which costs some providers another request.
     /// `resetDetails` asks a provider whose usage reply only counts the
     /// account's limit resets for their details too; Claude's reply always
-    /// holds them.
+    /// holds them. `priority` is the one the caller spent the reading's
+    /// request at, which a second request the reading needs is charged
+    /// against (`savedCopyIsOwn`).
     func readUsage(_ account: Account, forced: Bool, includeMetadata: Bool,
-                   resetDetails: Bool = false) async -> UsageReadOutcome {
+                   resetDetails: Bool = false, priority: UsageRequestBudget.Priority = .background) async -> UsageReadOutcome {
         switch account.provider {
-        case .claudeCode: await readClaudeUsage(account, forced: forced, includeMetadata: includeMetadata)
+        case .claudeCode: await readClaudeUsage(account, forced: forced, includeMetadata: includeMetadata, priority: priority)
         case .codex: await readCodexUsage(account, resetDetails: resetDetails)
         case .kimi: await readKimiUsage(account, includeMetadata: includeMetadata)
         case .gemini: .skipped
@@ -1527,7 +1563,9 @@ final class AppState: ObservableObject {
             usageBudgets[account.provider]?.recordSuccess()
             // Before `recordUsage`, which saves the snapshot this goes into.
             accountWholeReadings[account.id] = WholeReading(at: Date(), longUtilization: usage.sevenDay?.utilization)
-            recordUsage(usage, for: account.id)
+            // A reply still naming a reset that has passed describes the
+            // window before it, taken before the provider opened the next.
+            recordUsage(usage, for: account.id, confirmsReset: !usage.hasPassedReset(at: Date()), whole: true)
             accountUsageErrors[account.id] = nil
             usageRetryAfter[account.id] = nil
             if !account.isActive { credentialQuarantine[account.id] = nil }
@@ -1634,7 +1672,8 @@ final class AppState: ObservableObject {
     /// Claude Code renews itself, or another account's stored copy, renewed
     /// here without ever entering Claude's shared Keychain slot, so running
     /// sessions keep consuming their own subscription.
-    private func readClaudeUsage(_ account: Account, forced: Bool, includeMetadata: Bool) async -> UsageReadOutcome {
+    private func readClaudeUsage(_ account: Account, forced: Bool, includeMetadata: Bool,
+                                 priority: UsageRequestBudget.Priority) async -> UsageReadOutcome {
         var tokenJSON: String?
         var usesSavedCopy = false
         if readsLiveCredential(account) {
@@ -1654,7 +1693,8 @@ final class AppState: ObservableObject {
             return .skipped
         }
         if usesSavedCopy {
-            let check = await savedCopyIsOwn(account, tokenJSON: tokenJSON, accessToken: accessToken, forced: forced)
+            let check = await savedCopyIsOwn(account, tokenJSON: tokenJSON, accessToken: accessToken, forced: forced,
+                                             priority: priority)
             if check == .notOwn {
                 return .credentialRejected("This account's saved sign-in was another account's. Sign it in again.")
             }
@@ -1839,6 +1879,11 @@ final class AppState: ObservableObject {
         /// `accountWholeReadings`; absent in a snapshot saved without one.
         var wholeAt: Date?
         var wholeLongUtilization: Double?
+        /// Whether the reading was cleared at a reset no reading has
+        /// confirmed yet (`accountsAwaitingPostResetVerification`): its
+        /// cleared windows then read 0% with no countdown, which
+        /// `loadUsageSnapshots` must not take for a reading.
+        var resetUnverified: Bool?
     }
 
     private func loadFailoverRuntime() {
@@ -1895,11 +1940,18 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Stores a reading of `accountID`. `confirmsReset` says the reading
+    /// shows the account's windows as the provider holds them now, which
+    /// ends `accountsAwaitingPostResetVerification`; `whole` says it came
+    /// from the provider's own endpoint just now (`applyUsageRead`), so a
+    /// warm-up may start a window it shows unstarted without reading the
+    /// account again (`warmWindowsIfUnstarted`).
     func recordUsage(
         _ usage: UsageAPIResponse,
         for accountID: UUID,
         observedAt: Date = Date(),
-        confirmsReset: Bool = true
+        confirmsReset: Bool = true,
+        whole: Bool = false
     ) {
         let previousUsage = accountUsage[accountID]
         let reconciled = usage.preservingEstablishedCountdowns(from: accountUsage[accountID])
@@ -1911,49 +1963,145 @@ final class AppState: ObservableObject {
         } else {
             quotaTrends[accountID, default: QuotaTrend()].record(reconciled, at: observedAt)
         }
-        if confirmsReset { accountsAwaitingPostResetVerification.remove(accountID) }
+        if confirmsReset {
+            accountsAwaitingPostResetVerification.remove(accountID)
+            passedResetAt[accountID] = nil
+            postResetReadFailedAt[accountID] = nil
+        }
         if let account = accounts.first(where: { $0.id == accountID }) {
             learnFromReading(reconciled, previous: previousUsage, account: account, at: observedAt)
         }
-        var warmup = pendingWindowWarmups.removeValue(forKey: accountID)
-        if warmup == nil {
-            warmup = bootstrapWarmupIfNeeded(for: accountID, usage: accountUsage[accountID] ?? usage)
-        }
         saveUsageSnapshots()
         scheduleNextUsageReset()
-        if let warmup, warmup.session || warmup.weekly {
-            Task { await performWindowWarmup(accountID: accountID, windows: warmup) }
+        warmWindowsIfUnstarted(accountID, verified: whole && confirmsReset)
+    }
+
+    /// Starts a warm-up for the windows the account's newest reading shows
+    /// unused and unstarted (`windowsToWarm`): those a passed reset left
+    /// pending (`pendingWindowWarmups`), or any such window. A `verified`
+    /// reading settles the pending windows and lets the probe run at once
+    /// (`warmupStep`); any other reading leaves the warm-up to read the
+    /// account first, and to a retry already waiting. Called by
+    /// `recordUsage` for every reading; a warm-up under way records its
+    /// own readings and is not started again by them.
+    private func warmWindowsIfUnstarted(_ accountID: UUID, verified: Bool) {
+        guard !accountWarmupsInFlight.contains(accountID),
+              let account = accounts.first(where: { $0.id == accountID }),
+              failoverConfig.policy(for: account.provider).keepWindowsWarm else { return }
+        let pending = pendingWindowWarmups[accountID]
+        if verified { pendingWindowWarmups[accountID] = nil }
+        guard verified || warmupRetries[accountID] == nil,
+              pending != nil || !warmupGivenUp.contains(accountID) else { return }
+        let requested = pending ?? PendingWindowWarmup(session: true, weekly: true)
+        let step = Self.warmupStep(requested: requested, stored: accountUsage[accountID], verifiedAt: verified ? Date() : nil,
+                                   unusedSinceReset: false, sessionQuota: account.provider.capabilities.supportsSessionQuota,
+                                   lastProbeAt: lastWarmupProbeAt[accountID], now: Date())
+        guard step != .none else { return }
+        if pending == nil { log.info("[warmup] Scheduled one-time bootstrap for \(accountID.uuidString)") }
+        Task { await performWindowWarmup(accountID: accountID, windows: requested) }
+    }
+
+    /// The windows of `requested` a reading shows unused and unstarted
+    /// (`UsageWindow.isUnusedUnstartedWindow`), and so worth one probe. A
+    /// session window only on a provider that has one (`sessionQuota`), in
+    /// a reading that carries one (an account whose plan has none never
+    /// gets a session warm-up), and while the long window has room, since
+    /// a session window that cannot be used gains nothing from starting.
+    /// Consumed by `warmWindowsIfUnstarted`, `warmupStep` and
+    /// `warmSelectedAccountIfNeeded`.
+    nonisolated static func windowsToWarm(_ usage: UsageAPIResponse?, requested: PendingWindowWarmup,
+                                          sessionQuota: Bool) -> PendingWindowWarmup {
+        guard let usage else { return PendingWindowWarmup() }
+        let longRoom = usage.sevenDay?.utilization.map { $0 < 100 } == true
+        return PendingWindowWarmup(
+            session: requested.session && sessionQuota && longRoom && usage.fiveHour?.isUnusedUnstartedWindow == true,
+            weekly: requested.weekly && usage.sevenDay?.isUnusedUnstartedWindow == true
+        )
+    }
+
+    /// What a warm-up does next (`performWindowWarmup`).
+    enum WarmupStep: Equatable {
+        /// No requested window is unstarted, or one was just started.
+        case none
+        /// Start these windows now.
+        case probe(PendingWindowWarmup)
+        /// Read the account first and decide from that reading.
+        case readFirst
+    }
+
+    /// How long a whole reading shows an unstarted window well enough for
+    /// a probe to start it without another reading.
+    nonisolated static let warmupEvidenceLifetime: TimeInterval = 60
+    /// How long after the provider's reset time a warm-up may start the new
+    /// window from the reset alone, so the probe never lands in the window
+    /// that is ending.
+    nonisolated static let warmupResetMargin: TimeInterval = 60
+    /// How soon after a probe another one may start a window of the same
+    /// account, unless a reset has passed since: a provider can keep
+    /// reporting a started window as unstarted for a while.
+    nonisolated static let warmupRepeatSpacing: TimeInterval = 30 * 60
+
+    /// The warm-up's next step for `requested` on the stored reading
+    /// `stored`. The probe runs at once when a whole reading confirmed the
+    /// windows unstarted within `warmupEvidenceLifetime` (`verifiedAt`),
+    /// or when the provider's reset time (`requested.resetAt`) passed at
+    /// least `warmupResetMargin` ago on an account nothing has used since
+    /// (`unusedSinceReset`) whose credential is known to be its own: the
+    /// window then cannot have started. Otherwise the account is read
+    /// first. A window started by a probe within `warmupRepeatSpacing`
+    /// (`lastProbeAt`) is not probed again before another reset.
+    nonisolated static func warmupStep(requested: PendingWindowWarmup, stored: UsageAPIResponse?, verifiedAt: Date?,
+                                       unusedSinceReset: Bool, sessionQuota: Bool, lastProbeAt: Date?,
+                                       now: Date) -> WarmupStep {
+        let windows = windowsToWarm(stored, requested: requested, sessionQuota: sessionQuota)
+        guard !windows.isEmpty else { return .none }
+        if let probed = lastProbeAt, now.timeIntervalSince(probed) < warmupRepeatSpacing,
+           requested.resetAt.map({ $0 <= probed }) ?? true {
+            return .none
+        }
+        if let verifiedAt, now.timeIntervalSince(verifiedAt) < warmupEvidenceLifetime { return .probe(windows) }
+        if let reset = requested.resetAt, now.timeIntervalSince(reset) >= warmupResetMargin, unusedSinceReset {
+            return .probe(windows)
+        }
+        return .readFirst
+    }
+
+    /// Why a warm-up did not run, which sets when it is tried again
+    /// (`warmupRetryDelay`).
+    enum WarmupDeferral: Equatable {
+        /// The usage endpoint's cool-down or the request allowance holds
+        /// the warm-up's reading back until then.
+        case heldUntil(Date)
+        /// The reading or the probe failed for another reason.
+        case failed
+    }
+
+    /// The waits after one, two, three and four failed warm-ups in a row.
+    nonisolated static let warmupFailureDelays: [TimeInterval] = [2 * 60, 5 * 60, 15 * 60, 30 * 60]
+
+    /// Seconds until a deferred warm-up is tried again: just after the
+    /// cool-down or the allowance lets its reading through, or along
+    /// `warmupFailureDelays` after `failures` failures; nil once those are
+    /// spent, when it waits for the next reset.
+    nonisolated static func warmupRetryDelay(_ deferral: WarmupDeferral, failures: Int, now: Date) -> TimeInterval? {
+        switch deferral {
+        case .heldUntil(let until):
+            return max(1, until.timeIntervalSince(now) + 1)
+        case .failed:
+            guard failures >= 1, failures <= warmupFailureDelays.count else { return nil }
+            return warmupFailureDelays[failures - 1]
         }
     }
 
-    private func bootstrapWarmupIfNeeded(
-        for accountID: UUID,
-        usage: UsageAPIResponse
-    ) -> PendingWindowWarmup? {
-        guard let account = accounts.first(where: { $0.id == accountID }) else { return nil }
-        let policy = failoverConfig.policy(for: account.provider)
-        guard policy.keepWindowsWarm else { return nil }
-
-        var pending = PendingWindowWarmup()
-        let sessionKey = "\(accountID.uuidString).session"
-        if account.provider.capabilities.supportsSessionQuota,
-           usage.sevenDay?.utilization.map({ $0 < 100 }) == true,
-           usage.fiveHour?.isUnusedUnstartedWindow == true,
-           !warmupBootstrapsInFlight.contains(sessionKey) {
-            pending.session = true
-            warmupBootstrapsInFlight.insert(sessionKey)
+    /// The deferral a probe's error asks for: a provider's rate limit holds
+    /// it until the time it names, a minute when it names none.
+    nonisolated static func warmupDeferral(for error: Error, now: Date) -> WarmupDeferral {
+        switch error {
+        case ClaudeService.UsageError.rateLimited(let retryAt): .heldUntil(retryAt ?? now.addingTimeInterval(60))
+        case CodexServiceError.rateLimited(let retryAt): .heldUntil(retryAt ?? now.addingTimeInterval(60))
+        case KimiServiceError.rateLimited: .heldUntil(now.addingTimeInterval(60))
+        default: .failed
         }
-
-        let weeklyKey = "\(accountID.uuidString).weekly"
-        if usage.sevenDay?.isUnusedUnstartedWindow == true,
-           !warmupBootstrapsInFlight.contains(weeklyKey) {
-            pending.weekly = true
-            warmupBootstrapsInFlight.insert(weeklyKey)
-        }
-
-        guard pending.session || pending.weekly else { return nil }
-        log.info("[warmup] Scheduled one-time bootstrap for \(accountID.uuidString)")
-        return pending
     }
 
     private func loadUsageSnapshots() {
@@ -1973,188 +2121,368 @@ final class AppState: ObservableObject {
             if let wholeAt = snapshot.wholeAt {
                 accountWholeReadings[id] = WholeReading(at: wholeAt, longUtilization: snapshot.wholeLongUtilization)
             }
+            if Self.snapshotAwaitsVerification(snapshot.usage, resetUnverified: snapshot.resetUnverified) {
+                accountsAwaitingPostResetVerification.insert(id)
+            }
         }
         scheduleNextUsageReset()
     }
 
+    /// Whether a saved reading loads as awaiting a verifying reading
+    /// (`accountsAwaitingPostResetVerification`), and so counts as unknown
+    /// rather than as the 0% it shows: it was saved so
+    /// (`resetUnverified`), or it holds a window with no use and no
+    /// countdown. Such a window is as old as its reading, since anything
+    /// that used the account since started it unseen, and a snapshot saved
+    /// without `resetUnverified` cannot tell it from one cleared at a reset.
+    nonisolated static func snapshotAwaitsVerification(_ usage: UsageAPIResponse, resetUnverified: Bool?) -> Bool {
+        resetUnverified == true || usage.fiveHour?.isUnusedUnstartedWindow == true
+            || usage.sevenDay?.isUnusedUnstartedWindow == true
+    }
+
     /// Applies provider-confirmed reset timestamps locally. This is deliberately
-    /// independent of token validity and network availability.
+    /// independent of token validity and network availability. Each account
+    /// cleared here awaits a reading that confirms the reset
+    /// (`verifyPassedResets`, which the next quota cycle runs once
+    /// `postResetSettle` has passed), and the windows that reset are left
+    /// for a warm-up (`pendingWindowWarmups`).
     private func reconcilePassedUsageResets(now: Date = Date()) {
         var changed = false
-        var verifyNow: Set<UUID> = []
         for id in accountUsage.keys {
             guard let usage = accountUsage[id], usage.hasPassedReset(at: now) else { continue }
-            if let account = accounts.first(where: { $0.id == id }) {
-                let policy = failoverConfig.policy(for: account.provider)
-                if policy.keepWindowsWarm {
+            if let account = accounts.first(where: { $0.id == id }),
+               failoverConfig.policy(for: account.provider).keepWindowsWarm {
+                let passed = Self.passedResetWindows(usage, sessionQuota: account.provider.capabilities.supportsSessionQuota,
+                                                     now: now)
+                if !passed.isEmpty {
                     var pending = pendingWindowWarmups[id] ?? PendingWindowWarmup()
-                    if account.provider.capabilities.supportsSessionQuota,
-                       usage.fiveHour?.resetsAtDate.map({ $0 <= now }) == true {
-                        pending.session = true
-                    }
-                    if usage.sevenDay?.resetsAtDate.map({ $0 <= now }) == true {
-                        pending.weekly = true
-                    }
-                    if pending.session || pending.weekly {
-                        pendingWindowWarmups[id] = pending
-                        verifyNow.insert(id)
-                    }
+                    pending.session = pending.session || passed.session
+                    pending.weekly = pending.weekly || passed.weekly
+                    pending.resetAt = passed.resetAt
+                    pendingWindowWarmups[id] = pending
+                    warmupGivenUp.remove(id)
+                    warmupRetryAttempts[id] = nil
                 }
             }
             accountUsage[id] = usage.expiringPassedResets(at: now)
             accountsAwaitingPostResetVerification.insert(id)
+            passedResetAt[id] = now
             changed = true
             log.info("[usage-reset] Cleared cached utilization for \(id.uuidString); awaiting fresh post-reset verification")
         }
         if changed {
             saveUsageSnapshots()
             updateWidgetData()
+            bringQuotaCycleForward(to: now.addingTimeInterval(Self.postResetSettle + 1))
         }
         scheduleNextUsageReset(now: now)
-        if !verifyNow.isEmpty {
-            Task { await verifyPostResetAccounts(verifyNow) }
+    }
+
+    /// The windows of `usage` whose reset has passed by `now`, which a
+    /// warm-up may start: the session window only on a provider that has
+    /// one, and only when the reading carries one. `resetAt` is the latest
+    /// of those resets.
+    nonisolated static func passedResetWindows(_ usage: UsageAPIResponse, sessionQuota: Bool, now: Date) -> PendingWindowWarmup {
+        let session = sessionQuota ? usage.fiveHour?.resetsAtDate.flatMap { $0 <= now ? $0 : nil } : nil
+        let weekly = usage.sevenDay?.resetsAtDate.flatMap { $0 <= now ? $0 : nil }
+        return PendingWindowWarmup(session: session != nil, weekly: weekly != nil,
+                                   resetAt: [session, weekly].compactMap { $0 }.max())
+    }
+
+    /// How long after clearing an account at its reset `verifyPassedResets`
+    /// waits to read it, so the provider has opened the new window and the
+    /// reading does not describe the one that ended.
+    nonisolated static let postResetSettle: TimeInterval = 30
+    /// How soon after the provider's reset time the reset must have been
+    /// cleared for AccountDock to have watched the account since
+    /// (`unusedSinceReset`); a reset found at launch passed unwatched.
+    nonisolated static let postResetWatched: TimeInterval = 5 * 60
+
+    /// Moves the next quota cycle forward to `date` when it is due later,
+    /// so the work a reset leaves (`verifyPassedResets`) does not wait a
+    /// whole cycle. Does nothing before monitoring has started
+    /// (`startAutoRefresh` schedules the first cycle) or while a cycle
+    /// runs, whose next one `nextQuotaCycleInterval` times.
+    private func bringQuotaCycleForward(to date: Date) {
+        guard let timer = failoverMonitorTimer, timer.fireDate > date else { return }
+        scheduleQuotaCycle(after: max(1, date.timeIntervalSinceNow))
+    }
+
+    /// How long after a verification reading that confirmed nothing its
+    /// account is read again.
+    nonisolated static let postResetRetrySpacing: TimeInterval = 60
+
+    /// When an account awaiting verification may next be read for it:
+    /// `postResetSettle` after it was cleared at its reset (`clearedAt`; at
+    /// once for one loaded so), `postResetRetrySpacing` after a reading of
+    /// it that confirmed nothing (`failedAt`), and after its cool-down
+    /// (`retryAfter`).
+    nonisolated static func postResetReadAllowed(clearedAt: Date?, failedAt: Date?, retryAfter: Date?) -> Date {
+        [clearedAt?.addingTimeInterval(postResetSettle), failedAt?.addingTimeInterval(postResetRetrySpacing), retryAfter]
+            .compactMap { $0 }.max() ?? .distantPast
+    }
+
+    /// The accounts `verifyPassedResets` reads now, in order: each awaiting
+    /// verification (`awaiting`) whose `postResetReadAllowed` has come.
+    /// Accounts with a window left to warm (`warming`) come first, since
+    /// their next window starts only once they are read; then the oldest
+    /// reading first.
+    nonisolated static func postResetVerificationOrder(_ accounts: [Account], awaiting: Set<UUID>, warming: Set<UUID>,
+                                                       clearedAt: [UUID: Date], failedAt: [UUID: Date] = [:],
+                                                       retryAfter: [UUID: Date], updatedAt: [UUID: Date],
+                                                       now: Date) -> [Account] {
+        accounts
+            .filter { account in
+                awaiting.contains(account.id)
+                    && postResetReadAllowed(clearedAt: clearedAt[account.id], failedAt: failedAt[account.id],
+                                            retryAfter: retryAfter[account.id]) <= now
+            }
+            .sorted { a, b in
+                let (aWarms, bWarms) = (warming.contains(a.id), warming.contains(b.id))
+                if aWarms != bWarms { return aWarms }
+                return (updatedAt[a.id] ?? .distantPast) < (updatedAt[b.id] ?? .distantPast)
+            }
+    }
+
+    /// Confirms each passed reset with a reading of its account
+    /// (`accountsAwaitingPostResetVerification`), which takes no work until
+    /// then. The reading spends the verification allowance
+    /// (`UsageRequestBudget.Priority.verification`), which background
+    /// reads of idle accounts and accounts in use cannot spend, and an
+    /// account with a window to warm is handed to its warm-up, which reads
+    /// it the same way, or starts the window from the reset alone where
+    /// nothing can have used the account since (`warmupStep`), so the
+    /// probe does not wait behind the usage endpoint. A reading held back
+    /// is taken at the next cycle, which `nextQuotaCycleInterval` brings
+    /// forward to the moment it can be (`passedResetWorkDue`). Called by
+    /// `runQuotaCycle` after the passive readings, which confirm the reset
+    /// of an account sessions are using without a request.
+    func verifyPassedResets(now: Date = Date()) async {
+        guard !accountsAwaitingPostResetVerification.isEmpty else { return }
+        for provider in AIProviderType.implementedProviders {
+            let due = Self.postResetVerificationOrder(
+                accounts.filter { $0.provider == provider && !needsSignIn($0) },
+                awaiting: accountsAwaitingPostResetVerification, warming: Set(pendingWindowWarmups.keys),
+                clearedAt: passedResetAt, failedAt: postResetReadFailedAt, retryAfter: usageRetryAfter,
+                updatedAt: accountUsageUpdatedAt, now: now
+            )
+            for account in due where accountsAwaitingPostResetVerification.contains(account.id) {
+                if accountWarmupsInFlight.contains(account.id) || warmupRetries[account.id] != nil { continue }
+                if let pending = pendingWindowWarmups[account.id], !warmupGivenUp.contains(account.id),
+                   await performWindowWarmup(accountID: account.id, windows: pending) {
+                    continue
+                }
+                guard usageBudgets[provider]?.canSpend(.verification) ?? true else { break }
+                await fetchUsageNow(account, priority: .verification)
+                // A reading that confirmed nothing waits
+                // `postResetRetrySpacing` for the next; a throttled one waits
+                // for its cool-down instead.
+                if accountsAwaitingPostResetVerification.contains(account.id),
+                   usageRetryAfter[account.id].map({ $0 <= Date() }) ?? true {
+                    postResetReadFailedAt[account.id] = Date()
+                }
+            }
         }
     }
 
-    private func verifyPostResetAccounts(_ ids: Set<UUID>) async {
-        // A failed or deferred read keeps the pending warm-up marker; the
-        // ordinary refresh retries within the shared request budget.
-        for account in accounts where ids.contains(account.id) {
-            await fetchUsageNow(account, priority: .background)
-        }
+    /// When `verifyPassedResets` can next act: the earliest moment an
+    /// account awaiting verification, with no warm-up retry of its own
+    /// waiting, may be read (`postResetReadAllowed`) and its reading would
+    /// be let through (`usageRequestAvailable`). Nil when none awaits one.
+    /// Read by `nextQuotaCycleInterval`.
+    func passedResetWorkDue(now: Date = Date()) -> Date? {
+        accounts
+            .filter { accountsAwaitingPostResetVerification.contains($0.id) && !needsSignIn($0) && warmupRetries[$0.id] == nil }
+            .map { account in
+                let allowed = Self.postResetReadAllowed(clearedAt: passedResetAt[account.id],
+                                                        failedAt: postResetReadFailedAt[account.id], retryAfter: nil)
+                return max(allowed, usageRequestAvailable(account, .verification, now: now))
+            }
+            .min()
     }
 
-    private func performWindowWarmup(accountID: UUID, windows: PendingWindowWarmup) async {
-        guard let account = accounts.first(where: { $0.id == accountID }) else { return }
+    /// Starts the unstarted windows of `requested` on an account with one
+    /// non-persistent probe request (`QuotaWindowProbe.startWindow`), so
+    /// each resets as early as its provider allows. The probe acts on the
+    /// evidence `warmupStep` asks for: a whole reading just taken, the
+    /// reset itself on an account nothing has used since, or else a
+    /// reading taken now through the ordinary reader (`readUsage`, which
+    /// checks that a saved sign-in is the account's own and records the
+    /// read in the credential audit) from the verification allowance. A
+    /// reading or probe the allowance or a cool-down holds back is tried
+    /// again just after it ends (`scheduleWarmupRetry`). Returns whether
+    /// the warm-up took the account on; false when warming is off or the
+    /// provider has no probe, and `verifyPassedResets` then reads it.
+    @discardableResult
+    private func performWindowWarmup(accountID: UUID, windows requested: PendingWindowWarmup) async -> Bool {
+        guard let account = accounts.first(where: { $0.id == accountID }) else { return false }
         let policy = failoverConfig.policy(for: account.provider)
         guard policy.keepWindowsWarm,
-              let probe = quotaWindowProbe(for: account, readsLive: readsLiveCredential(account)) else { return }
+              let probe = quotaWindowProbe(for: account, readsLive: readsLiveCredential(account)) else { return false }
 
         guard accountWarmupsInFlight.insert(accountID).inserted else {
             log.info("[warmup] Skipped duplicate in-flight probe for \(accountID.uuidString)")
-            return
+            return true
         }
         defer { accountWarmupsInFlight.remove(accountID) }
-        let requestedLabels = [windows.session ? "session" : nil, windows.weekly ? "weekly" : nil]
+        warmupRetries.removeValue(forKey: accountID)?.cancel()
+        let sessionQuota = account.provider.capabilities.supportsSessionQuota
+        var now = Date()
+        var step = Self.warmupStep(requested: requested, stored: accountUsage[accountID], verifiedAt: verifiedReadingAt(accountID),
+                                   unusedSinceReset: unusedSinceReset(account, requested), sessionQuota: sessionQuota,
+                                   lastProbeAt: lastWarmupProbeAt[accountID], now: now)
+        if step == .readFirst {
+            let available = usageRequestAvailable(account, .verification, now: now)
+            guard available <= now, spendUsageRequest(account.provider, .verification) else {
+                scheduleWarmupRetry(accountID: accountID, windows: requested,
+                                    after: .heldUntil(warmupResumesAt(account, requested, held: max(available, now), now: now)))
+                return true
+            }
+            let outcome = await readUsage(account, forced: false, includeMetadata: false, priority: .verification)
+            applyUsageRead(outcome, for: account)
+            now = Date()
+            switch outcome {
+            case .reading:
+                break
+            case .throttled:
+                scheduleWarmupRetry(accountID: accountID, windows: requested,
+                                    after: .heldUntil(usageRequestAvailable(account, .verification, now: now)))
+                return true
+            default:
+                scheduleWarmupRetry(accountID: accountID, windows: requested, after: .failed)
+                return true
+            }
+            step = Self.warmupStep(requested: requested, stored: accountUsage[accountID], verifiedAt: verifiedReadingAt(accountID),
+                                   unusedSinceReset: false, sessionQuota: sessionQuota,
+                                   lastProbeAt: lastWarmupProbeAt[accountID], now: now)
+            if step == .readFirst {
+                // The reply still described the window before the reset,
+                // `postResetSettle` after it: the provider is lagging.
+                scheduleWarmupRetry(accountID: accountID, windows: requested, after: .failed)
+                return true
+            }
+        }
+        guard case .probe(let windows) = step else {
+            pendingWindowWarmups[accountID] = nil
+            warmupRetryAttempts[accountID] = nil
+            log.info("[warmup] Skipped probe for \(accountID.uuidString); requested window is already active or unavailable")
+            return true
+        }
+
+        let labels = [windows.session ? "session" : nil, windows.weekly ? "weekly" : nil]
             .compactMap { $0 }
             .joined(separator: " + ")
-
-        // A warm-up runs once per window and starts a countdown the account's
-        // whole window depends on, so it draws on the allowance kept for
-        // verifying candidates rather than waiting behind background reads,
-        // which can hold it back for half an hour when the budget is tight.
-        guard spendUsageRequest(account.provider, .candidate) else {
-            scheduleWarmupRetry(accountID: accountID, windows: windows)
-            return
-        }
         do {
-            let liveUsage = try await probe.liveUsage()
-
-            // A queued reset task may race with real user activity, a manual
-            // refresh, or another reset task. Only an explicit provider state
-            // of 0% with no running countdown authorizes a probe.
-            let needed = PendingWindowWarmup(
-                session: windows.session
-                    && liveUsage.sevenDay?.utilization.map({ $0 < 100 }) == true
-                    && liveUsage.fiveHour?.isUnusedUnstartedWindow == true,
-                weekly: windows.weekly && liveUsage.sevenDay?.isUnusedUnstartedWindow == true
-            )
-            guard needed.session || needed.weekly else {
-                recordUsage(liveUsage, for: account.id)
-                completeWarmupBootstrap(accountID: accountID, windows: windows)
-                warmupRetryAttempts[accountID] = nil
-                log.info("[warmup] Skipped probe for \(accountID.uuidString); requested window is already active or unavailable")
-                return
-            }
-
-            let labels = [needed.session ? "session" : nil, needed.weekly ? "weekly" : nil]
-                .compactMap { $0 }
-                .joined(separator: " + ")
             try await probe.startWindow()
-            try await forceRefreshWarmup(account: account, windows: needed, fetch: probe.liveUsage)
+            lastWarmupProbeAt[accountID] = Date()
+            pendingWindowWarmups[accountID] = nil
+            warmupRetryAttempts[accountID] = nil
+            warmupGivenUp.remove(accountID)
+            try await forceRefreshWarmup(account: account, windows: windows, fetch: probe.liveUsage)
             failoverEvents.record(
                 account.provider,
                 "Started the \(labels) reset countdown for \(messageName(account)); the probe session was non-persistent."
             )
-            completeWarmupBootstrap(accountID: accountID, windows: needed)
-            warmupRetryAttempts[accountID] = nil
             log.info("[warmup] \(account.provider.rawValue) \(labels) window started for \(account.id.uuidString)")
         } catch {
-            releaseWarmupBootstrap(accountID: accountID, windows: windows)
             failoverEvents.record(
                 account.provider,
-                "Could not start the \(requestedLabels) reset countdown for \(messageName(account)): \(error.localizedDescription)"
+                "Could not start the \(labels) reset countdown for \(messageName(account)): \(error.localizedDescription)"
             )
             log.warning("[warmup] Probe failed for \(account.id.uuidString): \(error.localizedDescription)")
-            scheduleWarmupRetry(accountID: accountID, windows: windows)
+            scheduleWarmupRetry(accountID: accountID, windows: requested, after: Self.warmupDeferral(for: error, now: Date()))
         }
+        return true
     }
 
+    /// When the account's newest whole reading was taken, while it shows
+    /// the account's windows as they are (no reset awaits verification):
+    /// the evidence `warmupStep` lets a probe act on without reading again.
+    private func verifiedReadingAt(_ accountID: UUID) -> Date? {
+        guard !accountsAwaitingPostResetVerification.contains(accountID) else { return nil }
+        return accountWholeReadings[accountID]?.at
+    }
+
+    /// Whether nothing can have started `account`'s windows since the
+    /// reset that armed `requested`, for `warmupStep`: the reset was
+    /// cleared while AccountDock ran (`postResetWatched`), the account is
+    /// not the active one or a slot's, no session runs on it and none of
+    /// its requests was seen since the reset, and its sign-in is known to
+    /// be its own (`savedCopyIsKnownOwn`), so the probe spends this
+    /// account's window and no other's.
+    private func unusedSinceReset(_ account: Account, _ requested: PendingWindowWarmup) -> Bool {
+        guard let reset = requested.resetAt, let cleared = passedResetAt[account.id],
+              cleared.timeIntervalSince(reset) < Self.postResetWatched,
+              !account.isActive, accountSessions[account.id]?.isEmpty != false,
+              !slotServedAccounts.contains(account.id) else { return false }
+        let lastRequest = sessionRates.entries.values.filter { $0.account == account.id }.map(\.lastSeen).max()
+        guard lastRequest.map({ $0 < reset }) ?? true else { return false }
+        return savedCopyIsKnownOwn(account)
+    }
+
+    /// Whether the credential a probe of `account` would spend is known to
+    /// be the account's: Claude's saved copy only once the provider
+    /// confirmed it (`savedCopyVerified`, set by `savedCopyIsOwn`); other
+    /// providers' probes run in the account's own credential location.
+    private func savedCopyIsKnownOwn(_ account: Account) -> Bool {
+        guard account.provider == .claudeCode, !readsLiveCredential(account) else { return true }
+        guard let verified = savedCopyVerified[account.id],
+              let token = keychain.getAccountBackup(forAccountId: account.id.uuidString,
+                                                    reason: "performWindowWarmup.owner")?.token else { return false }
+        return Self.credentialDigest(token) == verified
+    }
+
+    /// When a warm-up whose reading is held until `held` can go on: then,
+    /// or sooner when the reset alone will let it start the window
+    /// (`warmupResetMargin` after it, on an account `unusedSinceReset`).
+    private func warmupResumesAt(_ account: Account, _ requested: PendingWindowWarmup, held: Date, now: Date) -> Date {
+        guard let reset = requested.resetAt?.addingTimeInterval(Self.warmupResetMargin), reset > now, reset < held,
+              unusedSinceReset(account, requested) else { return held }
+        return reset
+    }
+
+    /// After a switch, starts the windows the newly active account's stored
+    /// reading shows unused and unstarted; an account whose reading shows
+    /// them started, or that has no session window, costs no request.
     private func warmSelectedAccountIfNeeded(_ accountID: UUID) async {
         guard let account = accounts.first(where: { $0.id == accountID }),
               failoverConfig.policy(for: account.provider).keepWindowsWarm else { return }
-        await performWindowWarmup(
-            accountID: accountID,
-            windows: PendingWindowWarmup(
-                session: account.provider.capabilities.supportsSessionQuota,
-                weekly: true
-            )
-        )
+        let requested = pendingWindowWarmups[accountID] ?? PendingWindowWarmup(session: true, weekly: true)
+        guard !Self.windowsToWarm(accountUsage[accountID], requested: requested,
+                                  sessionQuota: account.provider.capabilities.supportsSessionQuota).isEmpty else { return }
+        await performWindowWarmup(accountID: accountID, windows: requested)
     }
 
-    private func scheduleWarmupRetry(accountID: UUID, windows: PendingWindowWarmup) {
-        let attempt = warmupRetryAttempts[accountID, default: 0] + 1
-        warmupRetryAttempts[accountID] = attempt
-        let delays: [TimeInterval] = [2 * 60, 5 * 60, 15 * 60, 30 * 60]
-        guard attempt <= delays.count else {
-            log.warning("[warmup] Retry limit reached for \(accountID.uuidString); the next usage refresh/reset can arm it again")
+    /// Tries the warm-up of `windows` again after `deferral`
+    /// (`warmupRetryDelay`). One retry waits per account; when it wakes it
+    /// starts the warm-up only while the stored reading still shows a
+    /// requested window unstarted. Failures past `warmupFailureDelays`
+    /// give the account up until its next reset (`warmupGivenUp`).
+    private func scheduleWarmupRetry(accountID: UUID, windows: PendingWindowWarmup, after deferral: WarmupDeferral) {
+        if deferral == .failed { warmupRetryAttempts[accountID, default: 0] += 1 }
+        let failures = warmupRetryAttempts[accountID, default: 0]
+        guard let delay = Self.warmupRetryDelay(deferral, failures: failures, now: Date()) else {
+            warmupGivenUp.insert(accountID)
+            warmupRetryAttempts[accountID] = nil
+            log.warning("[warmup] Retry limit reached for \(accountID.uuidString); the next reset arms it again")
             return
         }
-        let delay = delays[attempt - 1]
-        log.info("[warmup] Retry \(attempt) for \(accountID.uuidString) scheduled in \(Int(delay))s")
-        Task { @MainActor [weak self] in
+        let why = deferral == .failed ? "after failure \(failures)" : "when the provider takes requests again"
+        log.info("[warmup] Retry for \(accountID.uuidString) scheduled in \(Int(delay))s, \(why)")
+        warmupRetries.removeValue(forKey: accountID)?.cancel()
+        warmupRetries[accountID] = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(delay))
-            guard let self,
-                  let account = self.accounts.first(where: { $0.id == accountID }) else { return }
-            let policy = self.failoverConfig.policy(for: account.provider)
-            guard policy.keepWindowsWarm else { return }
-            let usage = self.accountUsage[accountID]
-            let sessionStillNeedsWarmup = windows.session
-                && usage?.sevenDay?.utilization.map({ $0 < 100 }) == true
-                && (usage == nil || usage?.fiveHour?.isUnusedUnstartedWindow == true)
-            let weeklyStillNeedsWarmup = windows.weekly
-                && usage?.sevenDay?.isUnusedUnstartedWindow != false
-            guard sessionStillNeedsWarmup || weeklyStillNeedsWarmup else {
+            guard !Task.isCancelled, let self else { return }
+            self.warmupRetries[accountID] = nil
+            guard let account = self.accounts.first(where: { $0.id == accountID }) else { return }
+            let requested = self.pendingWindowWarmups[accountID] ?? windows
+            guard !AppState.windowsToWarm(self.accountUsage[accountID], requested: requested,
+                                          sessionQuota: account.provider.capabilities.supportsSessionQuota).isEmpty else {
                 self.warmupRetryAttempts[accountID] = nil
                 return
             }
-            await self.performWindowWarmup(
-                accountID: accountID,
-                windows: PendingWindowWarmup(
-                    session: sessionStillNeedsWarmup,
-                    weekly: weeklyStillNeedsWarmup
-                )
-            )
+            await self.performWindowWarmup(accountID: accountID, windows: requested)
         }
-    }
-
-    private func completeWarmupBootstrap(accountID: UUID, windows: PendingWindowWarmup) {
-        for key in warmupBootstrapKeys(accountID: accountID, windows: windows) {
-            warmupBootstrapsInFlight.remove(key)
-        }
-    }
-
-    private func releaseWarmupBootstrap(accountID: UUID, windows: PendingWindowWarmup) {
-        for key in warmupBootstrapKeys(accountID: accountID, windows: windows) {
-            warmupBootstrapsInFlight.remove(key)
-        }
-    }
-
-    private func warmupBootstrapKeys(accountID: UUID, windows: PendingWindowWarmup) -> [String] {
-        [
-            windows.session ? "\(accountID.uuidString).session" : nil,
-            windows.weekly ? "\(accountID.uuidString).weekly" : nil,
-        ].compactMap { $0 }
     }
 
     /// Provider usage endpoints can lag behind a successful probe. Refresh the
@@ -2203,7 +2531,9 @@ final class AppState: ObservableObject {
             session: windows.session,
             weekly: windows.weekly
         )
-        recordUsage(pinned, for: account.id)
+        // The pin is no provider reading: it keeps the time of the last one
+        // and leaves a reset it has not confirmed to `verifyPassedResets`.
+        recordUsage(pinned, for: account.id, observedAt: accountUsageUpdatedAt[account.id] ?? Date(), confirmsReset: false)
         log.info("[warmup] Provider still reports a moving placeholder; pinned countdown from the successful probe for \(account.id.uuidString)")
     }
 
@@ -2232,7 +2562,8 @@ final class AppState: ObservableObject {
                 usage: item.value,
                 updatedAt: updatedAt,
                 wholeAt: accountWholeReadings[item.key]?.at,
-                wholeLongUtilization: accountWholeReadings[item.key]?.longUtilization
+                wholeLongUtilization: accountWholeReadings[item.key]?.longUtilization,
+                resetUnverified: accountsAwaitingPostResetVerification.contains(item.key) ? true : nil
             )
         }
         if let data = try? JSONEncoder().encode(snapshots) {

@@ -141,24 +141,32 @@ extension AppState {
     }
 
     /// When a refusal's words name the reset of the limit it met
-    /// ("resets 2am", "resets 2:30pm (Australia/Melbourne)"), that reset as
-    /// a date: the first such time at or after the refusal, in the named
-    /// time zone or else `calendar`'s.
+    /// ("resets 2am", "resets 2:30pm (Australia/Melbourne)", and a weekly
+    /// limit's "resets Nov 20 at 12pm"), that reset as a date: the first
+    /// such time, on the named day when there is one, at or after the
+    /// refusal, in the named time zone or else `calendar`'s.
     nonisolated static func refusalResetDate(_ words: String, at: Date, calendar: Calendar = .current) -> Date? {
-        let pattern = #"resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?"#
+        let pattern = #"resets\s+(?:([a-z]{3,9})\.?\s+(\d{1,2}),?\s+)?(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
               let match = regex.firstMatch(in: words, range: NSRange(words.startIndex..., in: words)),
-              let hourRange = Range(match.range(at: 1), in: words), var hour = Int(words[hourRange]),
-              let meridiemRange = Range(match.range(at: 3), in: words), (1...12).contains(hour) else { return nil }
-        let minute = Range(match.range(at: 2), in: words).flatMap { Int(words[$0]) } ?? 0
+              let hourRange = Range(match.range(at: 3), in: words), var hour = Int(words[hourRange]),
+              let meridiemRange = Range(match.range(at: 5), in: words), (1...12).contains(hour) else { return nil }
+        let minute = Range(match.range(at: 4), in: words).flatMap { Int(words[$0]) } ?? 0
         if words[meridiemRange].lowercased() == "pm" { hour = hour % 12 + 12 } else { hour %= 12 }
         var calendar = calendar
-        if let zoneRange = Range(match.range(at: 4), in: words),
+        if let zoneRange = Range(match.range(at: 6), in: words),
            let zone = TimeZone(identifier: words[zoneRange].trimmingCharacters(in: .whitespaces)) {
             calendar.timeZone = zone
         }
-        return calendar.nextDate(after: at.addingTimeInterval(-60), matching: DateComponents(hour: hour, minute: minute),
-                                 matchingPolicy: .nextTime)
+        var components = DateComponents(hour: hour, minute: minute)
+        if let monthRange = Range(match.range(at: 1), in: words) {
+            let months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+            guard let month = months.firstIndex(of: String(words[monthRange].prefix(3)).lowercased()),
+                  let dayRange = Range(match.range(at: 2), in: words), let day = Int(words[dayRange]) else { return nil }
+            components.month = month + 1
+            components.day = day
+        }
+        return calendar.nextDate(after: at.addingTimeInterval(-60), matching: components, matchingPolicy: .nextTime)
     }
 
     /// The one account whose five-hour or weekly window resets within ten

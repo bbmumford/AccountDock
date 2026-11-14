@@ -46,6 +46,11 @@ extension AppState {
                 interval = min(interval, max(20, pending.timeIntervalSince(now) + 5))
             }
         }
+        // A passed reset is confirmed, and its window warmed, as soon as
+        // the provider takes the reading (`verifyPassedResets`).
+        if let due = passedResetWorkDue(now: now) {
+            interval = min(interval, max(20, due.timeIntervalSince(now) + 1))
+        }
         return interval
     }
 
@@ -79,6 +84,7 @@ extension AppState {
                 if due { await fetchUsageNow(account, priority: account.isActive ? .critical : .candidate) }
             }
         }
+        await verifyPassedResets(now: now)
         await refreshLimitResetsIfDue(now: now)
         if let routed = AIProviderType.routedProvider, routedStatus[routed] != nil {
             await refreshRouteTargetReading(maximumAge: 60)
@@ -404,7 +410,7 @@ extension AppState {
     /// sessions holding its credential, so it is read more often.
     func usageReadPriority(_ account: Account, forced: Bool, now: Date = Date()) -> UsageRequestBudget.Priority? {
         if let until = usageRetryAfter[account.id], until > now { return nil }
-        if accountsAwaitingPostResetVerification.contains(account.id) { return .background }
+        if accountsAwaitingPostResetVerification.contains(account.id) { return .verification }
         guard accountUsage[account.id] != nil, let updatedAt = accountUsageUpdatedAt[account.id] else {
             return forced ? .candidate : .background
         }
@@ -441,6 +447,23 @@ extension AppState {
         usageBudgets[provider]?.spend(priority) ?? true
     }
 
+    /// The second request of a reading `spendUsageRequest` admitted at
+    /// `priority` (`UsageRequestBudget.spendFollowUp`).
+    func spendUsageFollowUp(_ provider: AIProviderType, of priority: UsageRequestBudget.Priority) -> Bool {
+        usageBudgets[provider]?.spendFollowUp(of: priority) ?? true
+    }
+
+    /// When a request of `priority` to the provider's usage endpoint can
+    /// next be sent for `account`: after its cool-down (`usageRetryAfter`)
+    /// and once the allowance holds it. Consumed by the warm-up retry and
+    /// the quota cycle's timing, so a deferred reading runs once the
+    /// provider can take it rather than on a fixed delay.
+    func usageRequestAvailable(_ account: Account, _ priority: UsageRequestBudget.Priority, now: Date = Date()) -> Date {
+        let cooled = usageRetryAfter[account.id].map { max($0, now) } ?? now
+        let allowed = usageBudgets[account.provider]?.nextAvailable(priority, now: now) ?? now
+        return max(cooled, allowed)
+    }
+
     func noteUsageThrottle(_ account: Account, retryAt: Date?) {
         guard let budget = usageBudgets[account.provider] else { return }
         budget.recordThrottle(retryAfter: retryAt)
@@ -473,7 +496,7 @@ extension AppState {
         }
         guard spendUsageRequest(account.provider, priority) else { return false }
         return applyUsageRead(await readUsage(account, forced: false, includeMetadata: false,
-                                              resetDetails: resetDetails), for: account)
+                                              resetDetails: resetDetails, priority: priority), for: account)
     }
 
     /// How long failover leaves an account the user switched to themselves.
@@ -603,7 +626,8 @@ extension AppState {
     /// counts only when `model` is that model, and stands until a whole
     /// reading (`accountWholeReadings`), the only kind that carries a
     /// model's own limit. Any other refusal counts for every model until any
-    /// newer reading.
+    /// newer reading. A refusal whose account `verifyRefusals` has not
+    /// settled counts only once `refusalCounts` lets it.
     func recordedLimitRefusal(_ account: Account, model: String?, now: Date) -> Bool {
         guard !sessionRefusals.isEmpty else { return false }
         let readAt = accountUsageUpdatedAt[account.id] ?? .distantPast
@@ -616,6 +640,7 @@ extension AppState {
         let asked = key(model)
         return sessionRefusals.contains { session, refusal in
             refusal.account == account.id
+                && Self.refusalCounts(verified: refusal.verified, at: refusal.at, now: now)
                 && Self.refusalStands(at: refusal.at, scopedKey: key(sessionModel(session, now: now)), askedKey: asked,
                                       readAt: readAt, wholeAt: wholeAt, now: now)
         }
