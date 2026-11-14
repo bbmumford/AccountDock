@@ -449,22 +449,29 @@ extension AppState {
     /// Accounts below their thresholds take new sessions, with more weight
     /// for allowances that must start being used soonest; accounts above a
     /// threshold keep only the sessions they already serve, unless nothing
-    /// is below its thresholds. `forRouter` as in `activePool`.
+    /// is below its thresholds. An account whose reading is older than
+    /// its sessions' latest request keeps a share of its weight for a while
+    /// (`FailoverPlanner.poolReadingConfidence`) rather than leaving the
+    /// pool. `forRouter` as in `activePool`.
     func buildPool(_ provider: AIProviderType, now: Date, forRouter: Bool = true) async -> [RouterPoolMember] {
         let policy = failoverConfig.policy(for: provider)
         let planner = FailoverPlanner(settings: plannerSettings(provider))
         var candidates: [(Account, QuotaTier, Date)] = []
         var states: [UUID: QuotaAccountState] = [:]
+        // How far each candidate's reading is trusted; its weight is scaled
+        // by it (`FailoverPlanner.poolReadingConfidence`).
+        var confidence: [UUID: Double] = [:]
         for account in accounts where account.provider == provider && !policy.excludedAccountIDs.contains(account.id) {
             let state = quotaState(for: account, now: now, wholeAllowance: true)
             let tier = planner.tier(state, now: now)
             guard tier <= .usable, let observedAt = state.observedAt else { continue }
             let lastRequest = sessionRates.entries.values.filter { $0.account == account.id }.map(\.lastSeen).max()
-            let maximumAge = FailoverPlanner.poolReadingLifetime(inUse: state.mayBeConsumedElsewhere,
-                                                                  observedAt: observedAt, lastRequest: lastRequest)
-            guard now.timeIntervalSince(observedAt) <= maximumAge else { continue }
+            let trust = FailoverPlanner.poolReadingConfidence(inUse: state.mayBeConsumedElsewhere, observedAt: observedAt,
+                                                              lastRequest: lastRequest, now: now)
+            guard trust > 0 else { continue }
             candidates.append((account, tier, planner.latestStart(state, now: now)))
             states[account.id] = state
+            confidence[account.id] = trust
         }
         let anyBelow = candidates.contains { $0.1 == .belowTrigger }
         // An account the forecast has at its limit, while its reading does
@@ -490,7 +497,7 @@ extension AppState {
                 tier: tier, urgent: latestStart.timeIntervalSince(now) < 24 * 60 * 60, anyBelow: anyBelow,
                 forecastAtLimit: forecastAtLimit.contains(account.id), anyOpen: anyOpen,
                 draining: draining.contains(account.id), othersLowOnWeeklyRoom: othersLowOnWeek
-            )
+            ) * (confidence[account.id] ?? 1)
             members.append(RouterPoolMember(accountID: account.id.uuidString, tokenFile: name, weight: weight))
         }
         // With every account at its limit, the active account serves every

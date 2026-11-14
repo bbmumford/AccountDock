@@ -61,7 +61,9 @@ extension AppState {
     }
 
     /// The account failover would make active next and when
-    /// (`FailoverPlanner.nextSwitch`), from the same states its plan reads;
+    /// (`FailoverPlanner.nextSwitch`), from the same states its plan reads,
+    /// keeping the account last projected (`sharedGroupDestination`, set by
+    /// `noteSharedGroup`) while it still qualifies;
     /// nil while it would make no switch: the provider is not monitored,
     /// neither threshold failover nor balancing is on, or the active
     /// account is locked.
@@ -76,7 +78,8 @@ extension AppState {
         let states = withStayingBurns(ordered.map { quotaState(for: $0, now: now) }, provider: provider, now: now)
         guard let currentState = states.first(where: { $0.id == current.id }) else { return nil }
         return planner.nextSwitch(current: currentState, ladder: states,
-                                  recoveredIDs: exhaustedFailoverAccounts[provider, default: []], now: now)
+                                  recoveredIDs: exhaustedFailoverAccounts[provider, default: []],
+                                  keeping: sharedGroupDestination[provider], now: now)
     }
 
     /// Whether failover would ever change the provider's active account:

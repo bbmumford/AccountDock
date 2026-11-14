@@ -1882,14 +1882,34 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// A provider's accounts in the order their usage is read: the active
-    /// account, then the oldest reading first. Every account of a provider
-    /// shares one request budget, so a fixed order would leave the accounts
-    /// at the end of the list unread whenever the budget runs short.
+    /// A provider's accounts in the order their usage is read
+    /// (`readUrgencyOrder`). Every account of a provider shares one request
+    /// budget, so a fixed order would leave the accounts at the end of the
+    /// list unread whenever the budget runs short.
     func accountsByReadUrgency(_ provider: AIProviderType) -> [Account] {
-        accounts.filter { $0.provider == provider }.sorted { a, b in
+        let serving = Set(accounts.filter { account in
+            account.provider == provider
+                && (slotServedAccounts.contains(account.id) || accountSessions[account.id]?.isEmpty == false)
+        }.map(\.id))
+        return Self.readUrgencyOrder(accounts.filter { $0.provider == provider }, serving: serving,
+                                     updatedAt: accountUsageUpdatedAt)
+    }
+
+    /// The active account, then the accounts sessions run on (`serving`),
+    /// then the idle ones, each oldest reading first. Sessions consume a
+    /// serving account unseen, and `buildPool` trusts its reading less as
+    /// it ages (`FailoverPlanner.poolReadingConfidence`); an idle account
+    /// changes only at its resets, so the idle accounts at their limits,
+    /// read every `idleAtLimitReadingInterval`, would otherwise spend the
+    /// budget first whenever a passive reading has made a serving
+    /// account's reading look newer.
+    nonisolated static func readUrgencyOrder(_ accounts: [Account], serving: Set<UUID>,
+                                             updatedAt: [UUID: Date]) -> [Account] {
+        accounts.sorted { a, b in
             if a.isActive != b.isActive { return a.isActive }
-            return (accountUsageUpdatedAt[a.id] ?? .distantPast) < (accountUsageUpdatedAt[b.id] ?? .distantPast)
+            let (aServes, bServes) = (serving.contains(a.id), serving.contains(b.id))
+            if aServes != bServes { return aServes }
+            return (updatedAt[a.id] ?? .distantPast) < (updatedAt[b.id] ?? .distantPast)
         }
     }
 
