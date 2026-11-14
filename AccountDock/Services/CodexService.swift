@@ -312,12 +312,16 @@ final class CodexService: @unchecked Sendable {
         }
     }
 
+    /// A Codex CLI process a switch of `auth.json` reaches. A session in an
+    /// AccountDock slot (`CodexSessionIsolation.slotArguments` on its
+    /// command line) reads its slot's credential and never `auth.json`, so a
+    /// switch leaves it running.
     static func isRestartableCodexCommand(_ command: String) -> Bool {
         let fields = command.split(whereSeparator: \.isWhitespace)
         guard let executable = fields.first.map(String.init) else { return false }
         let name = URL(fileURLWithPath: executable).lastPathComponent
         guard name == "codex" else { return false }
-        return !command.contains("app-server")
+        return !command.contains("app-server") && !command.contains(CodexSessionIsolation.providerArgument)
     }
 
     static func extractResumeSessionID(from command: String) -> String? {
@@ -679,6 +683,96 @@ final class CodexService: @unchecked Sendable {
             auth["tokens"] = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
             auth["last_refresh"] = ISO8601DateFormatter().string(from: Date())
             try Self.writePrivateAuth(auth, to: authURL)
+            return .renewed
+        } catch CodexServiceError.credentialRejected {
+            return .rejected
+        } catch {
+            return .unavailable
+        }
+    }
+
+    // MARK: - Session slots
+
+    /// The `auth.json` contents slots serving an account copy their access
+    /// token from (`CodexSessionIsolation.slotCredential`): the managed
+    /// home's, or for the account whose credential `systemHome` holds
+    /// (`isActive`) whichever of the two expires last, since a Codex
+    /// session outside a slot renews the live one in place. The live copy
+    /// counts only while it names the managed copy's account: a sign-in made
+    /// with Codex's own `login` replaces it with another. Nil when neither
+    /// holds an access token.
+    func slotSourceCredential(codexHome: String, isActive: Bool) -> String? {
+        func read(_ url: URL) -> (text: String, expiry: Date)? {
+            guard let data = try? Data(contentsOf: url), let text = String(data: data, encoding: .utf8),
+                  let expiry = Self.accessTokenExpiry(ofAuth: text) else { return nil }
+            return (text, expiry)
+        }
+        let managed = read(URL(fileURLWithPath: codexHome, isDirectory: true).appendingPathComponent("auth.json"))
+        guard isActive, let live = read(systemHome.appendingPathComponent("auth.json")),
+              let account = managed.flatMap({ Self.accountID(ofAuth: $0.text) }),
+              Self.accountID(ofAuth: live.text) == account else { return managed?.text }
+        return [managed, live].compactMap { $0 }.max { $0.expiry < $1.expiry }?.text
+    }
+
+    /// The account an `auth.json`'s text belongs to: `tokens.account_id`,
+    /// or the account its access token was issued for.
+    static func accountID(ofAuth text: String) -> String? {
+        guard let data = text.data(using: .utf8),
+              let auth = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = auth["tokens"] as? [String: Any] else { return nil }
+        if let id = (tokens["account_id"] as? String).flatMap({ $0.isEmpty ? nil : $0 }) { return id }
+        return (tokens["access_token"] as? String).flatMap(accountID(ofAccessToken:))
+    }
+
+    /// When the access token in an `auth.json`'s text expires, by its
+    /// signed `exp`; nil without one.
+    static func accessTokenExpiry(ofAuth text: String) -> Date? {
+        guard let data = text.data(using: .utf8),
+              let auth = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = auth["tokens"] as? [String: Any],
+              let accessToken = tokens["access_token"] as? String,
+              let expiry = decodeJWTPayload(accessToken)?["exp"] as? NSNumber else { return nil }
+        return Date(timeIntervalSince1970: expiry.doubleValue)
+    }
+
+    /// The ChatGPT account an access token was issued for, from its signed
+    /// claims; nil when it names none.
+    static func accountID(ofAccessToken token: String) -> String? {
+        let auth = decodeJWTPayload(token)?["https://api.openai.com/auth"] as? [String: Any]
+        return (auth?["chatgpt_account_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// Renews the credential of the account whose credential `systemHome`
+    /// holds, when slots need its access token to last `lifetime`, and
+    /// writes the result to its managed home and to `systemHome`. It starts
+    /// from whichever copy expires last and renews only when that one does
+    /// not last, so a renewal a Codex session made first is used as it
+    /// stands and its refresh token is never presented twice. Codex itself
+    /// renews only in an access token's last minutes, and reads
+    /// `auth.json` again before it does, adopting a token written there
+    /// meanwhile; slots ask for a renewal well before that. Called by
+    /// `CodexSessionIsolation.currentSlotCredential` inside
+    /// `AppState.credentialGate`.
+    func renewLiveCredentialForSlots(codexHome: String, lasting lifetime: TimeInterval) async -> CredentialRenewal {
+        let home = URL(fileURLWithPath: codexHome, isDirectory: true).standardizedFileURL
+        do {
+            try validateManagedHome(home)
+            guard let text = slotSourceCredential(codexHome: codexHome, isActive: true),
+                  let data = text.data(using: .utf8),
+                  var auth = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tokens = auth["tokens"] as? [String: Any] else { return .rejected }
+            if let expiry = Self.accessTokenExpiry(ofAuth: text), expiry > Date().addingTimeInterval(lifetime) {
+                return .renewed
+            }
+            guard let refreshToken = tokens["refresh_token"] as? String, !refreshToken.isEmpty else { return .rejected }
+            auth["tokens"] = try await refreshOAuthTokens(tokens, refreshToken: refreshToken)
+            auth["last_refresh"] = ISO8601DateFormatter().string(from: Date())
+            let liveURL = systemHome.appendingPathComponent("auth.json")
+            let liveAccount = (try? String(contentsOf: liveURL, encoding: .utf8)).flatMap(Self.accountID(ofAuth:))
+            try Self.writePrivateAuth(auth, to: home.appendingPathComponent("auth.json"))
+            if liveAccount != nil, liveAccount == Self.accountID(ofAuth: text) {
+                try Self.writePrivateAuth(auth, to: liveURL)
+            }
             return .renewed
         } catch CodexServiceError.credentialRejected {
             return .rejected

@@ -120,6 +120,7 @@ extension AppState {
             await maintainSessionSlotsOnce(now: Date(), processesRead: false)
         }
         slotMaintenanceRunning = false
+        await applySlotRestarts(now: now)
     }
 
     /// Fills spares at once when a launcher has asked for one
@@ -191,7 +192,10 @@ extension AppState {
         if mirrorsRouterPool { routerPoolMembers = members }
         let open = Set(members.filter { $0.weight > 0 }.compactMap { UUID(uuidString: $0.accountID) })
         let served = await serveRunning(slots, provider: provider, members: members, inUse: inUse, newSessions: open)
-        let resumes = resumeTargets(provider, now: now)
+        var resumes = resumeTargets(provider, now: now)
+        for (session, restart) in slotRestartResumes where restart.provider == provider {
+            resumes[session] = restart.account
+        }
         let spares = await serveSessionSlots(slots, provider: provider, members: members, inUse: inUse,
                                              resumeAccounts: Set(resumes.values), now: now)
         let activeForResume = accounts.first { $0.provider == provider && $0.isActive }?.id
@@ -544,6 +548,32 @@ extension AppState {
                 sessionsWithoutModelRoom.remove(session.sessionID)
                 pendingModelFallbacks[session.sessionID] = nil
             }
+            // A CLI that reads only the account it started on keeps its slot's
+            // account; the move becomes a restart in a slot of the new one,
+            // made once the session is idle and never for a pinned one.
+            let move = Self.slotMove(current: slot.account, target: target, needsRestart: slots.isolation.movesNeedRestart,
+                                     pinned: pinned != nil, idle: session?.isIdle ?? false, working: session?.isWorking ?? false)
+            if move == .restart || move == .wait, let current = slot.account, let target {
+                if await serve(slot.directory, current) {
+                    sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = current
+                }
+                guard let session else { continue }
+                if move == .restart {
+                    let from = accounts.first { $0.id == current }.map { messageName($0) } ?? "its account"
+                    let spent = accounts.first { $0.id == current }.flatMap { account in
+                        model.flatMap { limitingModel(account, models: [$0], now: now) }
+                    }
+                    let why = requested ? "a request asked for it"
+                        : balanced ? "to balance load; it rebuilds its prompt cache there"
+                        : spent.map { "\(from) has no \($0) allowance left" } ?? "\(from) can no longer serve it"
+                    pendingSlotRestarts[session.sessionID] = PendingSlotRestart(
+                        provider: provider, session: session.sessionID, from: current, to: target, why: why, requested: requested
+                    )
+                } else if requested {
+                    requestedSlotMoves[session.sessionID] = target
+                }
+                continue
+            }
             guard let target, await serve(slot.directory, target) else {
                 if let id = slot.account { sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = id }
                 continue
@@ -592,6 +622,31 @@ extension AppState {
             }.value
         }
         return Set(sparesOf.filter { $0.value > 0 }.keys)
+    }
+
+    /// How a claimed slot's session reaches the account `slotChoice` chose.
+    enum SlotMove: Equatable {
+        /// It stays where it is.
+        case none
+        /// The slot is rewritten for the new account under the running CLI.
+        case rewrite
+        /// The CLI reads only its first account: the session is ended and
+        /// resumed in a slot of the new one (`applySlotRestarts`).
+        case restart
+        /// As `restart`, but not now: the session is mid-turn or not yet
+        /// stopped, or pinned, which only unpinning frees; its slot keeps
+        /// its account.
+        case wait
+    }
+
+    /// The move from `current` to `target` for a session `idle` between
+    /// turns or not, `working` on one, `pinned` or not, of a CLI whose
+    /// moves restart it (`needsRestart`) or rewrite its slot.
+    nonisolated static func slotMove(current: UUID?, target: UUID?, needsRestart: Bool, pinned: Bool,
+                                     idle: Bool, working: Bool) -> SlotMove {
+        guard let target, target != current else { return .none }
+        guard needsRestart, current != nil else { return .rewrite }
+        return !pinned && idle && !working ? .restart : .wait
     }
 
     /// What `serveSessionSlots` decides for one claimed slot.
@@ -678,7 +733,8 @@ extension AppState {
         }
         slotsLog.info("Slot claimed for a session started on \(messageName(account))\(pinned ? ", pinned there" : "")")
         let assignments = slots.isolation.launchAssignments(forSlot: slot).map { "\($0.name)=\(Self.shellQuoted($0.value)) " }
-        return start + assignments.joined() + Self.shellQuoted(cli)
+        let arguments = slots.isolation.launchArguments(forSlot: slot).map { " " + Self.shellQuoted($0) }
+        return start + assignments.joined() + Self.shellQuoted(cli) + arguments.joined()
     }
 
     nonisolated static func shellQuoted(_ text: String) -> String {
@@ -727,8 +783,11 @@ extension AppState {
         }.flatMap { UUID(uuidString: $0.accountID) } ?? activeID
         var ready = Set<UUID>()
         var credentials: [UUID: SlotCredential] = [:]
+        // A session of a CLI that reads only the account it started on
+        // stays on its own: its slot is never rewritten for another.
+        let keepsOwn = slots.isolation.movesNeedRestart
         for slot in newSessions.subtracting([activeID].compactMap { $0 }).union(running) {
-            let servingID = pooled.contains(slot) ? slot : fallback
+            let servingID = pooled.contains(slot) || keepsOwn ? slot : fallback
             guard let servingID, let account = accounts.first(where: { $0.id == servingID }) else { continue }
             if credentials[servingID] == nil {
                 let lifetime: TimeInterval = readsLiveCredential(account) ? 60 : 2 * 60 * 60
@@ -749,7 +808,7 @@ extension AppState {
             }
         }
         for slot in running {
-            sessionSlotStates[provider, default: SessionSlotState()].directoryServing[slots.directory(for: slot).path] = pooled.contains(slot) ? slot : fallback
+            sessionSlotStates[provider, default: SessionSlotState()].directoryServing[slots.directory(for: slot).path] = pooled.contains(slot) || keepsOwn ? slot : fallback
         }
         for path in (sessionSlotStates[provider]?.directoryServing ?? [:]).keys
         where slots.account(forDirectory: path) != nil && !inUse.contains(path) {

@@ -6,7 +6,8 @@ final class SessionSlotsTests: XCTestCase {
 
     func testOnlyProvidersWithSessionSlotsHaveThem() {
         XCTAssertNotNil(SessionSlots(.claudeCode, home: home))
-        XCTAssertNil(SessionSlots(.codex, home: home))
+        XCTAssertNotNil(SessionSlots(.codex, home: home))
+        XCTAssertNil(SessionSlots(.gemini, home: home))
         XCTAssertNotNil(SessionSlots(.kimi, home: home))
     }
 

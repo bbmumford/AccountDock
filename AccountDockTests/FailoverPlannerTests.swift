@@ -222,7 +222,7 @@ final class FailoverPlannerTests: XCTestCase {
         var distributed = policy
         distributed.distributeSessions = true
         XCTAssertFalse(distributed.usesRouter(for: .claudeCode))
-        XCTAssertTrue(distributed.usesRouter(for: .codex))
+        XCTAssertFalse(distributed.usesRouter(for: .codex), "Codex sessions are distributed through its own slots")
         XCTAssertFalse(distributed.usesRouter(for: .kimi))
 
         var routed = policy

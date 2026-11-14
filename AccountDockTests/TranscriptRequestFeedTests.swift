@@ -82,19 +82,19 @@ final class TranscriptRequestFeedTests: XCTestCase {
             "timestamp": "2026-10-17T09:00:00.000Z",
             "message": ["model": "<synthetic>", "content": [["type": "text", "text": "You've reached your Fable limit."]]],
         ]
-        let refusal = try XCTUnwrap(TranscriptRequestFeed.limitRefusal(row, session: "file"))
+        let refusal = try XCTUnwrap(ClaudeTranscriptSource.limitRefusal(row, session: "file"))
         XCTAssertEqual(refusal.session, "abc")
         XCTAssertEqual(refusal.limitRefusal, "You've reached your Fable limit.")
         XCTAssertEqual(refusal.contextTokens + refusal.outputTokens, 0)
-        XCTAssertNil(TranscriptRequestFeed.request(row, session: "file", startsTurn: true), "it is not a request that used tokens")
+        XCTAssertNil(ClaudeTranscriptSource.request(row, session: "file", startsTurn: true), "it is not a request that used tokens")
 
         var other = row
         other["error"] = "invalid_request"
-        XCTAssertNil(TranscriptRequestFeed.limitRefusal(other, session: "file"), "another kind of API error")
+        XCTAssertNil(ClaudeTranscriptSource.limitRefusal(other, session: "file"), "another kind of API error")
         var reply = row
         reply["isApiErrorMessage"] = nil
-        XCTAssertNil(TranscriptRequestFeed.limitRefusal(reply, session: "file"))
-        XCTAssertEqual(TranscriptRequestFeed.limitRefusal(row, session: "parent", subagent: true)?.session, "parent",
+        XCTAssertNil(ClaudeTranscriptSource.limitRefusal(reply, session: "file"))
+        XCTAssertEqual(ClaudeTranscriptSource.limitRefusal(row, session: "parent", subagent: true)?.session, "parent",
                        "a subagent's refusal is its session's")
     }
 

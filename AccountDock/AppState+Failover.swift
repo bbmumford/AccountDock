@@ -1288,8 +1288,9 @@ extension AppState {
     // MARK: - Resuming as capacity allows
 
     /// Whether the provider's paused sessions continue a few at a time as
-    /// capacity returns. Forecasts need the request token counts only the
-    /// router reports; the user's own pause ends whole, as they asked.
+    /// capacity returns. Forecasts need each request's token counts, which
+    /// the router or the CLI's transcripts report (`learnsRequestCost`);
+    /// the user's own pause ends whole, as they asked.
     func resumesAsCapacityAllows(_ provider: AIProviderType) -> Bool {
         failoverConfig.policy(for: provider).resumeAsCapacityAllows && learnsRequestCost(provider)
             && AgentPauseGate.read(provider)?.manual != true

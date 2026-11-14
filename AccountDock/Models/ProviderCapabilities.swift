@@ -59,6 +59,10 @@ struct ProviderCapabilities: Sendable {
     /// chosen by `SessionSlots`' launcher; nil when the CLI has no
     /// per-launch credential location.
     var sessionIsolation: (any ProviderSessionIsolation)?
+    /// The CLI's session transcripts, from which
+    /// `AppState.ingestTranscriptRequests` learns each request's token use,
+    /// model and refusals; nil when it keeps none AccountDock can read.
+    var transcriptSource: (any ProviderTranscriptSource)?
     /// The service this provider's accounts offer as a route target for
     /// another provider's routed requests.
     var routeTarget: RouteTarget?
@@ -108,9 +112,17 @@ struct ProviderCapabilities: Sendable {
     /// its own, which `SessionSlots`' launcher never starts; nil when it
     /// has no such service.
     var backgroundSessions: BackgroundSessionSupport? { sessionIsolation?.background }
+    /// Whether a session moves to another account only by being restarted
+    /// on it (`ProviderSessionIsolation.movesNeedRestart`).
+    var sessionMovesNeedRestart: Bool { sessionIsolation?.movesNeedRestart ?? false }
+    /// `SessionPacer.moveCostFactor` for the provider's slot sessions: a
+    /// move that restarts the session ends its process, waits for it to
+    /// exit and resumes it, besides rewriting its whole context into the new
+    /// account's cache, so it must gain this many times the rewrite's cost.
+    var sessionMoveCostFactor: Double { sessionMovesNeedRestart ? 3 : 1 }
     /// Directory under the config directory holding the CLI's session
     /// transcripts, read by `TranscriptRequestFeed`.
-    var transcriptDirectory: String? { requestRouter?.transcriptDirectory }
+    var transcriptDirectory: String? { transcriptSource?.directory ?? requestRouter?.transcriptDirectory }
 
     /// The long window's name for one reading, shown by the usage cards and
     /// the widget: `weeklyQuotaLabel`, or, when `longWindowReportsLength`,
@@ -318,6 +330,7 @@ extension AIProviderType {
                     transcriptDirectory: "projects"
                 ),
                 sessionIsolation: ClaudeSessionIsolation(),
+                transcriptSource: ClaudeTranscriptSource(),
                 supportsExtraUsage: true,
                 reportsLimitResets: true,
                 reportsModelWeeklyLimits: true,
@@ -363,6 +376,8 @@ extension AIProviderType {
                 usageRequestBudget: (capacity: 3, refillInterval: 20),
                 supportsWindowWarming: true,
                 switchReachesRunningSessions: true,
+                sessionIsolation: CodexSessionIsolation(),
+                transcriptSource: CodexTranscriptSource(),
                 reportsLimitResets: true,
                 cliExecutableName: "codex",
                 storageKey: "codex",
@@ -413,6 +428,7 @@ extension AIProviderType {
                 usageRequestBudget: (capacity: 4, refillInterval: 15),
                 supportsWindowWarming: true,
                 sessionIsolation: KimiSessionIsolation(),
+                transcriptSource: KimiTranscriptSource(),
                 routeTarget: .kimi,
                 cliExecutableName: "kimi",
                 storageKey: "kimi",

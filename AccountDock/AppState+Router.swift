@@ -595,7 +595,8 @@ extension AppState {
         if let shared { sessions.removeAll { shared.members.contains($0.id) } }
         noteSharedGroup(shared?.group, provider: provider)
         let pinned = Set(sessionPins.pinned(provider).keys)
-        let plan = SessionPacer().plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
+        let pacer = SessionPacer(moveCostFactor: movesSessions ? 1 : provider.capabilities.sessionMoveCostFactor)
+        let plan = pacer.plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
                                        fixed: pinned)
         let onDraining = Set(sessions.filter { draining.contains($0.account) }.map(\.id))
         // A session is never moved to an account without allowance for the

@@ -271,6 +271,12 @@ struct SessionPacer {
     /// turns room.
     var limit = 100 - FailoverPlanner.minimumUsableHeadroom
     var window = FailoverPlanner.sessionWindow
+    /// What moving a session costs beyond its cache rewrite, as a multiple
+    /// of `moveCost`: 1 for a CLI whose slot is rewritten under it, and
+    /// `ProviderCapabilities.sessionMoveCostFactor` for one whose session
+    /// must be restarted to move, so such a move is made only when clearly
+    /// worth it.
+    var moveCostFactor: Double = 1
     /// Assumed when no session on an account said how long its cache lasts.
     static let defaultCacheLifetime: TimeInterval = 60 * 60
     /// Sessions idle longer than this carry no rate worth moving.
@@ -452,7 +458,7 @@ struct SessionPacer {
     /// Window percent a session spends writing `contextTokens` into the
     /// cache of the account it moves to.
     func moveCost(_ contextTokens: Int, to account: Account) -> Double {
-        Double(contextTokens) * (1.25 - 0.1) / 1_000_000 * account.percentPerMillion
+        Double(contextTokens) * (1.25 - 0.1) / 1_000_000 * account.percentPerMillion * moveCostFactor
     }
 
     /// Weighted tokens per hour freed per cache token rewritten, which orders

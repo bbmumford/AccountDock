@@ -132,7 +132,7 @@ enum SessionTerminalActions {
         if let screen = await terminal.screenText(target: target), isolation.screenReportsRunningWork(screen) {
             return .busy
         }
-        guard await SessionTerminalCommand.send(["/exit"], into: target, through: terminal) else { return .refused }
+        guard await SessionTerminalCommand.send([isolation.exitCommand], into: target, through: terminal) else { return .refused }
         if pause > 0 { try? await Task.sleep(nanoseconds: UInt64(pause * 1_000_000_000)) }
         if let screen = await terminal.screenText(target: target), isolation.screenAsksAboutRunningWork(screen) {
             _ = await terminal.type(isolation.keepRunningKey, into: target)

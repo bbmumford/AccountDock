@@ -62,11 +62,11 @@ private struct FakeFileIsolation: ProviderSessionIsolation {
 }
 
 final class ProviderSessionIsolationTests: XCTestCase {
-    func testClaudeAndKimiHaveSessionIsolation() {
-        XCTAssertEqual(AIProviderType.isolatedProviders, [.claudeCode, .kimi])
+    func testClaudeCodexAndKimiHaveSessionIsolation() {
+        XCTAssertEqual(AIProviderType.isolatedProviders, [.claudeCode, .codex, .kimi])
         XCTAssertEqual(AIProviderType.claudeCode.capabilities.sessionIsolation?.executable, "claude")
         XCTAssertEqual(AIProviderType.kimi.capabilities.sessionIsolation?.executable, "kimi")
-        XCTAssertNil(AIProviderType.codex.capabilities.sessionIsolation)
+        XCTAssertEqual(AIProviderType.codex.capabilities.sessionIsolation?.executable, "codex")
     }
 
     func testClaudeSlotCredentialHoldsNoRefreshToken() throws {
