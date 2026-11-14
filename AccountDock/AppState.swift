@@ -183,6 +183,13 @@ final class AppState: ObservableObject {
     /// when: `buildPool` keeps a share of new sessions on each, and its
     /// sessions where they are, until a reading or a refusal shows its limit.
     var drainingAccounts: [UUID: Date] = [:]
+    /// When each account's newest reading a running session reported with
+    /// a response (`PassiveUsageObservation.Source.reportsWithEachResponse`)
+    /// was taken; `quotaState` passes it on while it is the newest reading.
+    var liveReadingAt: [UUID: Date] = [:]
+    /// When the router last recorded a refusal at the limit by each account,
+    /// for `routerRefusedUntil`; a newer live reading with room answers it.
+    var routerRefusedAt: [UUID: Date] = [:]
     /// A locally elapsed reset is useful for clearing a stale 100% display,
     /// but it is not proof that the provider has opened a new quota window.
     /// Never fail over to one of these accounts until a fresh API response
@@ -1057,6 +1064,8 @@ final class AppState: ObservableObject {
         for provider in exhaustedFailoverAccounts.keys { exhaustedFailoverAccounts[provider]?.remove(id) }
         for provider in sessionsLeftOn.keys { sessionsLeftOn[provider]?.remove(id) }
         drainingAccounts[id] = nil
+        liveReadingAt[id] = nil
+        routerRefusedAt[id] = nil
         liveCredentialOwners = liveCredentialOwners.filter { $0.value.account != id }
         lockedSwitchNoted = lockedSwitchNoted.filter { $0.value != id }
         pendingResetRecovery = pendingResetRecovery.filter { $0.value.accountID != id }

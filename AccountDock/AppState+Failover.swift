@@ -269,8 +269,35 @@ extension AppState {
             if accountUsageErrors[accountID]?.isRateLimited == true {
                 accountUsageErrors[accountID] = nil
             }
+            if observation.source.reportsWithEachResponse {
+                liveReadingAt[accountID] = observation.observedAt
+                answerRouterRefusal(accountID, liveAt: observation.observedAt, now: now)
+            }
             failoverLog.debug("passive \(observation.source.rawValue) reading applied to \(accountID.uuidString)")
         }
+    }
+
+    /// Drops the router's refusal of `accountID` once a reading a session
+    /// reported after it shows room below the triggers
+    /// (`FailoverPlanner.liveReadingShowsRoom`), so failover need not wait
+    /// for an endpoint reading the request budget or a cool-down
+    /// (`usageRetryAfter`) holds back. An account with allowances of a
+    /// model's own may have been refused for one of them, which such a
+    /// reading never carries: its refusal waits for a whole reading
+    /// (`accountWholeReadings`) after it.
+    private func answerRouterRefusal(_ accountID: UUID, liveAt: Date, now: Date) {
+        guard let refusedAt = routerRefusedAt[accountID], refusedAt < liveAt,
+              routerRefusedUntil[accountID].map({ $0 > now }) ?? false,
+              let account = accounts.first(where: { $0.id == accountID }) else { return }
+        let scoped = accountUsage[accountID]?.modelWeeklyLimits.isEmpty == false
+        if scoped, (accountWholeReadings[accountID]?.at ?? .distantPast) <= refusedAt { return }
+        let planner = FailoverPlanner(settings: plannerSettings(account.provider))
+        var state = quotaState(for: account, now: now)
+        state.refusedAtLimit = false
+        guard planner.liveReadingShowsRoom(state, now: now) else { return }
+        routerRefusedUntil[accountID] = nil
+        routerRefusedAt[accountID] = nil
+        failoverLog.info("\(account.provider.rawValue): a live reading after the router's refusal shows room on \(accountID.uuidString)")
     }
 
     /// The account a passive reading belongs to: the one it names, or the
@@ -488,6 +515,7 @@ extension AppState {
             id: account.id,
             usage: plannedUsage(account, now: now, model: model, wholeAllowance: wholeAllowance),
             observedAt: accountUsageUpdatedAt[account.id],
+            liveReadingAt: liveReadingAt[account.id].flatMap { $0 == accountUsageUpdatedAt[account.id] ? $0 : nil },
             sessionBurnPerHour: rates.session,
             weeklyBurnPerHour: rates.weekly,
             sessionPerWeekly: sharedSessionPerWeekly(account.provider),
