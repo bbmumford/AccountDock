@@ -10,7 +10,9 @@ private let requestLog = FileLog("Requests")
 extension AppState {
     struct ExternalRequest: Codable {
         /// `refresh` reads usage from the provider now; `moveSession` moves
-        /// one running session to another account.
+        /// one running session to another account; `rebalance` plans, and
+        /// with `apply` makes, the moves that let a provider's slot sessions
+        /// last longest (`AppState.applyRebalance`).
         var action: String
         var session: String?
         /// An account's ID, label or email. For `refresh`, the account to
@@ -21,6 +23,12 @@ extension AppState {
         /// The model the session uses, when the requester knows it better
         /// than `sessionModel` does.
         var model: String?
+        /// For `rebalance`: the provider (its raw value or display name)
+        /// whose slot sessions are rebalanced.
+        var provider: String?
+        /// For `rebalance`: make the moves; false or absent returns the
+        /// plan only (`AppState.rebalancePreview`).
+        var apply: Bool?
     }
 
     struct ExternalOutcome: Codable {
@@ -28,6 +36,8 @@ extension AppState {
         var detail: String
         var account: String?
         var handledAt: Date
+        /// For `rebalance`: one line per move, session from → to.
+        var moves: [String]?
     }
 
     nonisolated static var requestDirectory: URL {
@@ -132,6 +142,19 @@ extension AppState {
             if switched { moveRunningSessions(provider, from: previous) }
             return outcome(switched, switched ? "Switched the active account to \(messageName(target)); every session on the shared sign-in moves with it."
                                               : "The switch to \(messageName(target)) did not complete.", target)
+        case "rebalance":
+            guard let provider = AIProviderType.implementedProviders.first(where: { provider in
+                request.provider.map {
+                    $0.caseInsensitiveCompare(provider.rawValue) == .orderedSame
+                        || $0.caseInsensitiveCompare(provider.capabilities.displayName) == .orderedSame
+                } ?? rebalanceAvailable(provider)
+            }), rebalanceAvailable(provider) else {
+                return outcome(false, "That provider's sessions do not run in slots of their own, so they cannot be rebalanced.")
+            }
+            let preview = request.apply == true ? await applyRebalance(provider, now: now) : rebalancePreview(provider, now: now)
+            var result = outcome(true, (request.apply == true ? "" : "Not applied. ") + preview.outcome)
+            result.moves = preview.lines
+            return result
         default:
             return outcome(false, "Unknown action \(request.action).")
         }

@@ -210,6 +210,8 @@ final class AppState: ObservableObject {
     /// finds a slot's model by it when the slot's process left no session
     /// record.
     var slotSessionsByDirectory: [String: String] = [:]
+    /// When each provider's sessions were last rebalanced (`applyRebalance`).
+    var lastRebalance: [AIProviderType: Date] = [:]
     /// A locally elapsed reset is useful for clearing a stale 100% display,
     /// but it is not proof that the provider has opened a new quota window.
     /// Never fail over to one of these accounts until a fresh API response

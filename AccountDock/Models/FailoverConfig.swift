@@ -84,6 +84,10 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     /// left for the model it uses (`AppState.applyModelFallbacks`): one of
     /// the provider's `sessionModelChoices`. Nil leaves the session as it is.
     var noRoomModelFallback: String?
+    /// Moves running slot sessions as "Rebalance sessions now" would, without
+    /// being asked, when that makes the first account run out more than an
+    /// hour later (`AppState.rebalanceAutomaticallyIfDue`).
+    var rebalanceAutomatically = false
     var switchMethod = FailoverSwitchMethod.safeRestart
     var accountOrder: [UUID] = []
     var excludedAccountIDs: Set<UUID> = []
@@ -115,7 +119,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         case routeToKimiWhenExhausted, routeKimiModel
         case switchMethod, accountOrder, excludedAccountIDs, activeAccountLocked
         case codexSwitchMode
-        case noRoomModelFallback
+        case noRoomModelFallback, rebalanceAutomatically
     }
 
     init() {}
@@ -150,6 +154,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         try values.encode(extendCacheLifetime, forKey: .extendCacheLifetime)
         try values.encodeIfPresent(extraUsageMonthlyLimit, forKey: .extraUsageMonthlyLimit)
         try values.encodeIfPresent(noRoomModelFallback, forKey: .noRoomModelFallback)
+        try values.encode(rebalanceAutomatically, forKey: .rebalanceAutomatically)
         try values.encode(switchMethod, forKey: .switchMethod)
         try values.encode(accountOrder, forKey: .accountOrder)
         try values.encode(excludedAccountIDs, forKey: .excludedAccountIDs)
@@ -185,6 +190,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         extendCacheLifetime = try values.decodeIfPresent(Bool.self, forKey: .extendCacheLifetime) ?? true
         extraUsageMonthlyLimit = try values.decodeIfPresent(Double.self, forKey: .extraUsageMonthlyLimit)
         noRoomModelFallback = try values.decodeIfPresent(String.self, forKey: .noRoomModelFallback)
+        rebalanceAutomatically = try values.decodeIfPresent(Bool.self, forKey: .rebalanceAutomatically) ?? false
         // Settings saved when routing could only target Kimi.
         if routeTarget == nil, try values.decodeIfPresent(Bool.self, forKey: .routeToKimiWhenExhausted) == true {
             routeTarget = "kimi"
