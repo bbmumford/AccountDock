@@ -46,7 +46,9 @@ extension AppState {
     }
 
     /// Records each new mismatch as an event the user sees. Not installed
-    /// while tests run, so no test writes the real event log.
+    /// while tests run, so the shared event history holds only the events a
+    /// test records itself.
+
     func installCredentialAuditEvents() {
         guard !CredentialAudit.isTesting else { return }
         credentialAudit.onMismatch { provider, message in

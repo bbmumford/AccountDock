@@ -2,9 +2,8 @@ import CryptoKit
 import Darwin
 import Foundation
 
-/// The app log for the audit's own failures and mismatches; silent while
-/// tests run, so no test writes the real log.
-private let auditLog: FileLog? = CredentialAudit.isTesting ? nil : FileLog("CredentialAudit")
+/// The app log for the audit's own failures and mismatches.
+private let auditLog = FileLog("CredentialAudit")
 
 /// What happened to a credential, as `CredentialAudit` records it.
 enum CredentialAuditAction: String, Codable, CaseIterable, Sendable {
@@ -144,17 +143,14 @@ final class CredentialAudit: @unchecked Sendable {
 
     static let shared = CredentialAudit(directory: defaultDirectory)
 
-    /// `~/Library/Logs`, or a temporary directory while tests run, so no
-    /// test reaches the real trail.
-    static let isTesting = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    /// True while XCTest hosts the app; read by `AppState` to leave the
+    /// mismatch events uninstalled under tests.
+    static var isTesting: Bool { AppLogs.isTesting }
 
-    static var defaultDirectory: URL {
-        if isTesting {
-            return FileManager.default.temporaryDirectory
-                .appendingPathComponent("AccountDock-audit-tests-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs", isDirectory: true)
-    }
+    /// `AppLogs.directory`: `~/Library/Logs`, or the test run's own
+    /// directory, so no test reaches the real trail.
+    static var defaultDirectory: URL { AppLogs.directory }
+
 
     static let fileName = "AccountDock-credentials.jsonl"
     static let ownersFileName = "AccountDock-credentials-owners.json"
@@ -344,7 +340,7 @@ final class CredentialAudit: @unchecked Sendable {
             return entry
         }
         if let notice {
-            auditLog?.error(notice.1)
+            auditLog.error(notice.1)
             let handler = lock.withLock { mismatchHandler }
             handler?(notice.0, notice.1)
         }
@@ -435,7 +431,7 @@ final class CredentialAudit: @unchecked Sendable {
             return entry
         }
         guard let notice else { return nil }
-        auditLog?.error(notice)
+        auditLog.error(notice)
         let handler = lock.withLock { mismatchHandler }
         handler?(provider, notice)
         return entry
@@ -557,7 +553,7 @@ final class CredentialAudit: @unchecked Sendable {
             try FileManager.default.createDirectory(at: ownersURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try PrivateFile.writeAtomically(data, to: ownersURL, mode: 0o600)
         } catch {
-            auditLog?.error("Owner map not written: \(error.localizedDescription)")
+            auditLog.error("Owner map not written: \(error.localizedDescription)")
         }
     }
 
@@ -576,7 +572,7 @@ final class CredentialAudit: @unchecked Sendable {
             try handle.write(contentsOf: line)
             size += UInt64(line.count)
         } catch {
-            auditLog?.error("Entry not written: \(error.localizedDescription)")
+            auditLog.error("Entry not written: \(error.localizedDescription)")
         }
     }
 
@@ -586,7 +582,7 @@ final class CredentialAudit: @unchecked Sendable {
         try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let descriptor = open(fileURL.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o600)
         guard descriptor >= 0 else {
-            auditLog?.error("Audit file not opened: errno \(errno)")
+            auditLog.error("Audit file not opened: errno \(errno)")
             return
         }
         fchmod(descriptor, 0o600)

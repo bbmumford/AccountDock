@@ -40,7 +40,7 @@ struct AccountDockApp: App {
         WindowGroup("AccountDockKeepalive") {
             HiddenWindowView()
                 .onAppear {
-                    guard !isRunningTests else { return }
+                    guard !AppLogs.isTesting else { return }
                     guard !didBootstrap else { return }
                     didBootstrap = true
                     #if DEBUG
@@ -91,8 +91,5 @@ struct AccountDockApp: App {
     private var currentLocale: Locale {
         appLanguage == "auto" ? .autoupdatingCurrent : Locale(identifier: appLanguage)
     }
-
-    private var isRunningTests: Bool {
-        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-    }
 }
+

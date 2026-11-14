@@ -1418,6 +1418,12 @@ Session records contain no prompt or transcript content.
 | `~/Library/Logs/AccountDock-credentials-owners.json` | Token fingerprint → owner map the audit learned (obfuscated email, account ID) |
 | `UserDefaults` `app.accountdock.mac` | Accounts, usage snapshots, failover settings and runtime, learning |
 
+The app's files in `~/Library/Logs` take their directory from `AppLogs`. While
+XCTest hosts the app it is `AccountDock-logs-tests-<pid>` under the temporary
+directory instead, so a test run never writes the logs, the failover history or
+the audit trail a person reads.
+
+
 ## Costs
 
 Costs are computed locally from session logs: Claude Code's JSONL transcripts,

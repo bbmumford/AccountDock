@@ -1,13 +1,21 @@
 import Foundation
 import Combine
 
-/// Drop-in replacement for os.Logger that writes to ~/Library/Logs/AccountDock-app.log.
+/// Drop-in replacement for os.Logger that writes `AccountDock-app.log` in
+/// `AppLogs.directory`: `~/Library/Logs`, or the test run's own directory.
 /// Rotates at 5MB, keeps 2 prior files (.1 and .2) for ~15MB total cap.
 /// Usage: `let log = FileLog("Category"); log.info("message")`
 /// Read logs: `cat ~/Library/Logs/AccountDock-app.log` or `tail -f ~/Library/Logs/AccountDock-app.log`
 struct FileLog: Sendable {
-    private static let shared = FileLogWriter()
+    private static let shared = FileLogWriter(directory: AppLogs.directory)
     private let category: String
+
+    /// The file the log writes in this process; read by `AppLogsTests`.
+    static var fileURL: URL { URL(fileURLWithPath: shared.basePath) }
+
+    /// Returns once every line logged before the call is written; for
+    /// tests that read the file back.
+    static func flush() { shared.flush() }
 
     init(_ category: String) {
         self.category = category
@@ -21,7 +29,7 @@ struct FileLog: Sendable {
 
 private final class FileLogWriter: @unchecked Sendable {
     private let logsDir: String
-    private let basePath: String
+    let basePath: String
     private var fileHandle: FileHandle?
     private var bytesWritten: UInt64 = 0
     private let queue = DispatchQueue(label: "app.accountdock.filelog")
@@ -30,8 +38,8 @@ private final class FileLogWriter: @unchecked Sendable {
     private static let maxFileBytes: UInt64 = 5 * 1024 * 1024  // 5 MB
     private static let keepRotated = 2  // .1 and .2 → ~15MB total cap
 
-    init() {
-        let logsDir = NSHomeDirectory() + "/Library/Logs"
+    init(directory: URL) {
+        let logsDir = directory.path
         self.logsDir = logsDir
         self.basePath = logsDir + "/AccountDock-app.log"
 
@@ -68,6 +76,10 @@ private final class FileLogWriter: @unchecked Sendable {
             fileHandle?.write(data)
             bytesWritten += UInt64(data.count)
         }
+    }
+
+    func flush() {
+        queue.sync {}
     }
 
     func write(_ level: String, _ category: String, _ message: String) {
@@ -155,11 +167,13 @@ final class FailoverEventLog: ObservableObject {
     static let shared = FailoverEventLog()
     @Published private(set) var events: [FailoverEvent] = []
 
-    private let path = NSHomeDirectory() + "/Library/Logs/AccountDock-failover.json"
+    /// `AccountDock-failover.json` in `AppLogs.directory`; read by `AppLogsTests`.
+    let fileURL = AppLogs.directory.appendingPathComponent("AccountDock-failover.json")
+
     private let maximumEvents = 500
 
     private init() {
-        guard let data = FileManager.default.contents(atPath: path),
+        guard let data = FileManager.default.contents(atPath: fileURL.path),
               let decoded = try? JSONDecoder().decode([FailoverEvent].self, from: data) else { return }
         events = Array(decoded.suffix(maximumEvents))
     }
@@ -184,6 +198,8 @@ final class FailoverEventLog: ObservableObject {
 
     private func persist() {
         guard let data = try? JSONEncoder().encode(events) else { return }
-        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: fileURL, options: .atomic)
+
     }
 }
