@@ -226,6 +226,15 @@ struct FailoverPlanner {
         return liveFreshness
     }
 
+    /// Whether a reading is young enough for its account to take a new
+    /// session (`poolReadingLifetime`). `AppState.buildPool` reads an
+    /// account whose reading is not before placing sessions on it, and
+    /// gives it no new session while that reading cannot be taken: its
+    /// sessions may have spent what the old reading shows left.
+    static func poolReadingIsCurrent(inUse: Bool, observedAt: Date, lastRequest: Date?, now: Date) -> Bool {
+        now.timeIntervalSince(observedAt) <= poolReadingLifetime(inUse: inUse, observedAt: observedAt, lastRequest: lastRequest)
+    }
+
     /// How long past `poolReadingLifetime` an account in use stays in the
     /// pool on its last reading. The account is read before idle ones
     /// (`AppState.readUrgencyOrder`), but the request budget or a provider's
@@ -233,13 +242,14 @@ struct FailoverPlanner {
     /// most of its allowance left must not drop out of the pool meanwhile.
     static let stalePoolReadingLimit: TimeInterval = 60 * 60
 
-    /// The share of its pool weight an account keeps on a reading of this
-    /// age, for `AppState.buildPool`: 1 within `poolReadingLifetime`, then
-    /// that lifetime over the reading's age, and 0 past
-    /// `stalePoolReadingLimit` (or the lifetime, when that is longer). The
-    /// reading of an account in use is grown by its learned burn over its
-    /// whole age (`projection`), so its tier stays a cautious one; the
-    /// weight says how far that estimate is trusted.
+    /// How far a reading of this age is trusted, for `AppState.buildPool`:
+    /// 1 within `poolReadingLifetime`, then that lifetime over the
+    /// reading's age, and 0 past `stalePoolReadingLimit` (or the lifetime,
+    /// when that is longer), when the account leaves the pool. The reading
+    /// of an account in use is grown by its learned burn over its whole
+    /// age (`projection`), so its tier stays a cautious one. Below 1 the
+    /// account keeps the sessions it serves but takes no new one
+    /// (`poolReadingIsCurrent`).
     static func poolReadingConfidence(inUse: Bool, observedAt: Date, lastRequest: Date?, now: Date) -> Double {
         let lifetime = poolReadingLifetime(inUse: inUse, observedAt: observedAt, lastRequest: lastRequest)
         let age = max(0, now.timeIntervalSince(observedAt))

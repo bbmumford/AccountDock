@@ -50,13 +50,18 @@ extension AppState {
     /// than the one held there, removed from `account`, and `account` is
     /// marked as needing sign-in with its reading cleared. A check that
     /// cannot be made leaves the copy `.unchecked`, which costs the account
-    /// nothing but that reading. The check spends background request
-    /// allowance, and waits for a later reading when there is none;
+    /// nothing but that reading. The check is the second request of the
+    /// reading `priority` admitted (`UsageRequestBudget.spendFollowUp`),
+    /// and waits for a later reading when even that is not left;
     /// `forced`, a reading the user asked for, makes it regardless.
-    func savedCopyIsOwn(_ account: Account, tokenJSON: String, accessToken: String, forced: Bool = false) async -> SavedCopyCheck {
+    func savedCopyIsOwn(_ account: Account, tokenJSON: String, accessToken: String, forced: Bool = false,
+                        priority: UsageRequestBudget.Priority = .background) async -> SavedCopyCheck {
         let digest = Self.credentialDigest(tokenJSON)
         if savedCopyVerified[account.id] == digest { return .own }
-        guard forced || spendUsageRequest(account.provider, .background) else { return .unchecked }
+        guard forced || spendUsageFollowUp(account.provider, of: priority) else {
+            ownerLog.info("Ownership check of \(account.id.uuidString)'s saved sign-in deferred: no request allowance")
+            return .unchecked
+        }
         guard let email = try? await claudeService.getProfileIdentity(accessToken: accessToken).email else {
             credentialAudit.record(.ownershipCheck, .claudeCode, account: account.id, credential: tokenJSON,
                                    outcome: "unavailable", reason: "savedCopyIsOwn")

@@ -452,8 +452,10 @@ extension AppState {
     /// Accounts below their thresholds take new sessions, with more weight
     /// for allowances that must start being used soonest; accounts above a
     /// threshold keep only the sessions they already serve, unless nothing
-    /// is below its thresholds. An account whose reading is older than
-    /// its sessions' latest request keeps a share of its weight for a while
+    /// is below its thresholds. An account whose reading is older than its
+    /// pool lifetime is read first (`FailoverPlanner.poolReadingIsCurrent`);
+    /// while that reading cannot be taken it takes no new session, and it
+    /// keeps the sessions it serves for a while
     /// (`FailoverPlanner.poolReadingConfidence`) rather than leaving the
     /// pool. `forRouter` as in `activePool`.
     func buildPool(_ provider: AIProviderType, now: Date, forRouter: Bool = true) async -> [RouterPoolMember] {
@@ -461,20 +463,32 @@ extension AppState {
         let planner = FailoverPlanner(settings: plannerSettings(provider))
         var candidates: [(Account, QuotaTier, Date)] = []
         var states: [UUID: QuotaAccountState] = [:]
-        // How far each candidate's reading is trusted; its weight is scaled
-        // by it (`FailoverPlanner.poolReadingConfidence`).
-        var confidence: [UUID: Double] = [:]
+        // Candidates whose reading is young enough for a new session
+        // (`FailoverPlanner.poolReadingIsCurrent`); the rest keep the
+        // sessions they serve while `poolReadingConfidence` holds them.
+        var current: Set<UUID> = []
         for account in accounts where account.provider == provider && !policy.excludedAccountIDs.contains(account.id) {
-            let state = quotaState(for: account, now: now, wholeAllowance: true)
-            let tier = planner.tier(state, now: now)
-            guard tier <= .usable, let observedAt = state.observedAt else { continue }
+            var state = quotaState(for: account, now: now, wholeAllowance: true)
+            var tier = planner.tier(state, now: now)
+            guard tier <= .usable, var observedAt = state.observedAt else { continue }
             let lastRequest = sessionRates.entries.values.filter { $0.account == account.id }.map(\.lastSeen).max()
+            var isCurrent = FailoverPlanner.poolReadingIsCurrent(inUse: state.mayBeConsumedElsewhere, observedAt: observedAt,
+                                                                 lastRequest: lastRequest, now: now)
+            // An account is read before it takes a session on a reading
+            // older than its lifetime.
+            if !isCurrent, await fetchUsageNow(account, priority: .candidate) {
+                state = quotaState(for: account, now: now, wholeAllowance: true)
+                tier = planner.tier(state, now: now)
+                guard tier <= .usable, let read = state.observedAt else { continue }
+                observedAt = read
+                isCurrent = true
+            }
             let trust = FailoverPlanner.poolReadingConfidence(inUse: state.mayBeConsumedElsewhere, observedAt: observedAt,
                                                               lastRequest: lastRequest, now: now)
             guard trust > 0 else { continue }
             candidates.append((account, tier, planner.latestStart(state, now: now)))
             states[account.id] = state
-            confidence[account.id] = trust
+            if isCurrent { current.insert(account.id) }
         }
         let anyBelow = candidates.contains { $0.1 == .belowTrigger }
         // An account the forecast has at its limit, while its reading does
@@ -512,7 +526,7 @@ extension AppState {
                 forecastAtLimit: forecastAtLimit.contains(account.id), anyOpen: anyOpen,
                 draining: draining.contains(account.id), othersLowOnWeeklyRoom: othersLowOnWeek,
                 shortOfRunway: !carrying.contains(account.id) && !carrying.isEmpty
-            ) * (confidence[account.id] ?? 1)
+            ) * (current.contains(account.id) ? 1 : 0)
             members.append(RouterPoolMember(accountID: account.id.uuidString, tokenFile: name, weight: weight))
         }
         // With every account at its limit, the active account serves every
@@ -532,7 +546,7 @@ extension AppState {
             return members
         }
         return paced(provider, members: members, states: states, planner: planner, movesSessions: forRouter,
-                     draining: draining, now: now)
+                     draining: draining, stale: Set(candidates.map(\.0.id)).subtracting(current), now: now)
     }
 
     /// The pool weight of a draining account: a share of new sessions,
@@ -607,9 +621,12 @@ extension AppState {
     /// go to the account they were placed on until they first reach it.
     /// Without `movesSessions` (`SessionSlots`, whose sessions keep the
     /// account they started on) only new sessions follow the weights.
-    /// Sessions on a `draining` account stay on it.
+    /// Sessions on a `draining` account stay on it. No session moves to a
+    /// `stale` account, whose reading is too old for a new session
+    /// (`FailoverPlanner.poolReadingIsCurrent`).
     private func paced(_ provider: AIProviderType, members: [RouterPoolMember], states: [UUID: QuotaAccountState],
-                       planner: FailoverPlanner, movesSessions: Bool, draining: Set<UUID>, now: Date) -> [RouterPoolMember] {
+                       planner: FailoverPlanner, movesSessions: Bool, draining: Set<UUID>, stale: Set<UUID> = [],
+                       now: Date) -> [RouterPoolMember] {
         let paced = members.compactMap { member -> SessionPacer.Account? in
             guard let id = UUID(uuidString: member.accountID), let state = states[id] else { return nil }
             return pacerAccount(id, state: state, weight: member.weight, planner: planner, now: now)
@@ -631,7 +648,8 @@ extension AppState {
             return session.sessionID
         })
         let remainders = movable.flatMap { slotted in
-            remainderSpending(provider, pooled: Set(paced.map(\.id)), slotted: slotted.subtracting(onDraining), now: now)
+            remainderSpending(provider, pooled: Set(paced.map(\.id)).subtracting(stale), slotted: slotted.subtracting(onDraining),
+                              now: now)
         }
         let pacer = SessionPacer(moveCostFactor: movesSessions ? 1 : provider.capabilities.sessionMoveCostFactor)
         let plan = pacer.plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
@@ -639,7 +657,7 @@ extension AppState {
         // A session is never moved to an account without allowance for the
         // model it uses, nor off a draining account before its limit.
         var moves = plan.moves.filter { session, destination in
-            guard !onDraining.contains(session), !pinned.contains(session) else { return false }
+            guard !onDraining.contains(session), !pinned.contains(session), !stale.contains(destination) else { return false }
             guard let model = sessionModel(session, now: now) else { return true }
             return !accountCannotServe(destination, provider: provider, planner: planner, now: now, model: model)
         }

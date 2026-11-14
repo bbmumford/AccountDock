@@ -31,7 +31,12 @@ private final class FileLogWriter: @unchecked Sendable {
     private static let keepRotated = 2  // .1 and .2 → ~15MB total cap
 
     init() {
-        let logsDir = NSHomeDirectory() + "/Library/Logs"
+        // While tests run the log goes to a temporary directory, as the
+        // credential audit does (`CredentialAudit.defaultDirectory`), so no
+        // test run writes into the app's real log.
+        let logsDir = CredentialAudit.isTesting
+            ? NSTemporaryDirectory() + "AccountDock-logs-tests-\(ProcessInfo.processInfo.processIdentifier)"
+            : NSHomeDirectory() + "/Library/Logs"
         self.logsDir = logsDir
         self.basePath = logsDir + "/AccountDock-app.log"
 

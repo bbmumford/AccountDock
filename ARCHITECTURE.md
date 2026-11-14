@@ -470,6 +470,48 @@ Throttling backs off for every account of that provider, from one minute up to
 fifteen. While a provider throttles, `QuotaTrend` projects the active account's
 usage forward from its learned burn rate so failover still acts on time.
 
+The budget ranks requests critical (the active account's decision), candidate
+(a destination before a switch, an account in use whose reading is too old
+for a new session), verification and background (idle refreshes); each keeps
+half a request more in the bucket than the rank above it, so background reads
+can never spend what verification reads need. A reading that needs a second
+request, as the first reading of a Claude saved sign-in does to check it is
+the account's own (`savedCopyIsOwn`), pays for it from its own admission
+(`UsageRequestBudget.spendFollowUp`).
+
+When an account's reset time passes, its stored windows are cleared and it
+awaits a reading that confirms the reset
+(`accountsAwaitingPostResetVerification`, kept in the usage snapshots): until
+then it is ineligible for sessions and switches, never taken for 0%. A
+reading whose reply still names a passed reset does not confirm it. The quota
+cycle reads such accounts 30 seconds after the reset, at verification rank
+(`verifyPassedResets`), and runs again as soon as a cool-down or the budget
+lets the reading through. A passive reading confirms the reset without a
+request.
+
+Window warming (`keepWindowsWarm`) starts an unused, unstarted window with one
+non-persistent probe (`performWindowWarmup`), so it resets sooner. The probe
+runs at once on a whole reading taken within the last minute that shows the
+window unstarted, or, a minute after the provider's reset time, on an
+account nothing has used since the reset and whose sign-in is known to be its
+own; otherwise the warm-up reads the account first, through the ordinary
+reader. A session window is warmed only on an account whose reading carries
+one, while its long window has room; a window a probe started is not probed
+again for 30 minutes unless another reset passes. A warm-up the budget or a
+cool-down holds back runs just after it ends; one that fails otherwise is
+retried after 2, 5, 15 and 30 minutes, then waits for the next reset.
+
+A refusal at a usage limit is checked before anything moves for it
+(`verifyRefusals`): the account it names is read when its reading predates
+the refusal, and, when that reading shows no window resetting at the time the
+refusal states, the accounts in use whose readings predate it are read too,
+and the refusal moves to the account whose window does. While the reset it
+states is no window of the account it names and the reading that would
+settle it is held back, it does not count, for up to five minutes. An account
+whose reading is older than its pool lifetime is read before it takes a new
+session (`FailoverPlanner.poolReadingIsCurrent`) and takes none while that
+reading cannot be made.
+
 A reading a running session reports with a response (the status line, a
 Codex rollout: `PassiveUsageObservation.Source.reportsWithEachResponse`)
 arrives every few seconds while it works, whatever the budget or a cool-down
