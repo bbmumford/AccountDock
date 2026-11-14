@@ -61,6 +61,14 @@ reuse it while it is a few seconds old; readers that act on a process at once
 read their own. `CommandRunnerCoverageTests` fails for a launch outside the
 runner or a `ps` outside the table.
 
+What an account's card on the usage tab and its row in the account list say
+about it (Active, its plan and why the plan cannot serve, needs sign-in, a
+failed or stale reading, credentials to capture again) is one
+`AccountStatus`, decided by `AccountStatus.make` and kept in
+`AppState.accountStatuses`, which is recomputed whenever the accounts, their
+readings, their reading errors or the rejected sign-ins change; the views
+only draw it.
+
 
 ## Providers
 

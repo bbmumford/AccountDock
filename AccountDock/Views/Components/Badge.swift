@@ -14,3 +14,22 @@ struct Badge: View {
             .background(color, in: Capsule())
     }
 }
+
+extension Badge {
+    /// One of an account's status badges (`AccountStatus.Badge`).
+    init(_ badge: AccountStatus.Badge) {
+        self.init(text: badge.text, color: badge.tone.color)
+    }
+}
+
+extension AccountStatus.Tone {
+    /// The colour an account status badge or notice is drawn in.
+    var color: Color {
+        switch self {
+        case .accent: .brand
+        case .attention: .orange
+        case .caution: .yellow
+        case .failure: .red
+        }
+    }
+}

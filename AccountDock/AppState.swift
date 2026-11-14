@@ -17,12 +17,22 @@ final class AppState: ObservableObject {
     // MARK: - Published State
 
     @Published var accounts: [Account] = [] {
-        didSet { credentialAuditAccountsChanged(from: oldValue) }
+        didSet {
+            credentialAuditAccountsChanged(from: oldValue)
+            refreshAccountStatuses()
+        }
     }
+    /// What each account's card and account-list row show
+    /// (`AccountStatus.make`), set only by `refreshAccountStatuses`
+    /// whenever the accounts, their readings, their reading errors or the
+    /// rejected sign-ins change; the views only draw it.
+    @Published var accountStatuses: [UUID: AccountStatus] = [:]
     /// Processes whose own evidence names another account than the one
     /// AccountDock believes they read, by session (`noteProcessCredential`).
     @Published var flaggedCredentialProcesses: [String: FlaggedCredentialProcess] = [:]
-    @Published var accountUsage: [UUID: UsageAPIResponse] = [:]
+    @Published var accountUsage: [UUID: UsageAPIResponse] = [:] {
+        didSet { refreshAccountStatuses() }
+    }
     @Published private(set) var accountUsageUpdatedAt: [UUID: Date] = [:]
     /// When each account's usage was last read whole from its provider's own
     /// endpoint, and the long-window use it showed then. A passive reading
@@ -70,7 +80,9 @@ final class AppState: ObservableObject {
         }
     }
     
-    @Published var accountUsageErrors: [UUID: UsageErrorState] = [:]
+    @Published var accountUsageErrors: [UUID: UsageErrorState] = [:] {
+        didSet { refreshAccountStatuses() }
+    }
 
     // MARK: - Services
 
@@ -133,7 +145,9 @@ final class AppState: ObservableObject {
     /// sign-in AccountDock holds for them even after renewal. Failover
     /// leaves them out, and the account views show the re-authenticate
     /// prompt, until a reading or re-authentication succeeds.
-    @Published var rejectedCredentialAccounts: Set<UUID> = []
+    @Published var rejectedCredentialAccounts: Set<UUID> = [] {
+        didSet { refreshAccountStatuses() }
+    }
     /// When each account's saved sign-in last passed the switch check,
     /// which renews it; read by `credentialIsUsable`.
     var credentialVerifiedAt: [UUID: Date] = [:]
