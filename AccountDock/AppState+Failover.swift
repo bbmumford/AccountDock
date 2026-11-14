@@ -1630,6 +1630,10 @@ extension AppState {
         // account; `buildPool` drains it until a reading shows the limit.
         if reason == .threshold { drainingAccounts[current.id] = Date() }
         drainingAccounts[target.id] = nil
+        // The sessions that follow the switch rewrite their contexts on the
+        // target; that burst is not its burn rate, which `nextSwitch` and the
+        // pacer project from.
+        quotaTrends[target.id]?.settle(at: Date(), for: QuotaTrend.arrivalSettlePeriod)
         if provider == AIProviderType.routedProvider { await routerFollowActiveAccount() }
         lastAutomaticFailover[provider] = Date()
         exhaustedFailoverAccounts[provider, default: []].insert(current.id)

@@ -63,8 +63,33 @@ extension AppState {
             }
         }
         let pacer = SessionPacer()
+        let sessions = slotRebalanceSessions(provider, slots: slots, now: now)
+        // The sessions on the shared sign-in are none of these and never
+        // move; they count where the active account is and will be.
+        let shared = sharedGroup(provider, sessions: pacerSessions(provider, now: now), now: now)?.group
+        let plan = pacer.rebalance(accounts: pacerAccounts, sessions: sessions, destinations: destinations, now: now,
+                                   sharedGroup: shared)
+        let from = sessions.reduce(into: [String: UUID]()) { $0[$1.id] = $1.account }
+        let moves = plan.moves.compactMap { id, to in from[id].map { RebalanceMove(session: id, from: $0, to: to) } }
+            .sorted { $0.session < $1.session }
+        func name(_ id: UUID) -> String { accounts.first { $0.id == id }.map { messageName($0) } ?? "an account" }
+        return RebalancePreview(
+            moves: moves, earliestRunOutBefore: plan.earliestRunOutBefore, earliestRunOutAfter: plan.earliestRunOutAfter,
+            lines: moves.map { "\(sessionSummary([$0.session], now: now)): \(name($0.from)) → \(name($0.to))" },
+            sharedNote: sharedGroupNote(shared)
+        )
+    }
+
+    /// The provider's running slot sessions as `SessionPacer.rebalance` and
+    /// `SessionPacer.place` take them: each on the account its slot serves,
+    /// at its rate over its last hour (at least its current rate, and
+    /// `defaultSessionRate` with no history), movable unless mid-turn or
+    /// pinned.
+    func slotRebalanceSessions(_ provider: AIProviderType, slots: SessionSlots,
+                               now: Date) -> [SessionPacer.RebalanceSession] {
+        let pacer = SessionPacer()
         let root = slots.sessionRoot.path + "/"
-        let sessions = (liveSessions[provider] ?? []).compactMap { session -> SessionPacer.RebalanceSession? in
+        return (liveSessions[provider] ?? []).compactMap { session -> SessionPacer.RebalanceSession? in
             guard let pid = session.processID, let directory = slotDirectoryByProcess[pid], directory.hasPrefix(root),
                   let account = slotDirectoryServing[directory] else { return nil }
             let id = session.sessionID
@@ -80,20 +105,40 @@ extension AppState {
                 movable: !session.isWorking && pacer.movable(pacing, now: now) && !sessionPins.isPinned(id)
             )
         }
-        // The sessions on the shared sign-in are none of these and never
-        // move; they count where the active account is and will be.
+    }
+
+    /// Where `serveSessionSlots` sends each slot session whose account can
+    /// no longer serve it (`SessionPacer.place`), among the pool's accounts
+    /// that can: those taking new sessions, or every one that can serve
+    /// when none does. Pinned sessions stay where they are pinned and are
+    /// left out.
+    func strandedPlacements(_ provider: AIProviderType, slots: SessionSlots, members: [RouterPoolMember],
+                            now: Date) -> [String: UUID] {
+        let planner = FailoverPlanner(settings: plannerSettings(provider))
+        let running = slotRebalanceSessions(provider, slots: slots, now: now)
+        let stranded = running.filter { session in
+            !sessionPins.isPinned(session.id)
+                && accountCannotServe(session.account, provider: provider, planner: planner, now: now, wholeAllowance: true)
+        }
+        guard !stranded.isEmpty else { return [:] }
+        let serving = members.filter { member in
+            UUID(uuidString: member.accountID).map {
+                !accountCannotServe($0, provider: provider, planner: planner, now: now, wholeAllowance: true)
+            } ?? false
+        }
+        let open = serving.filter { $0.weight > 0 }
+        let chosen = open.isEmpty ? serving : open
+        var pacerAccounts: [SessionPacer.Account] = []
+        for member in chosen {
+            guard let id = UUID(uuidString: member.accountID),
+                  let account = accounts.first(where: { $0.id == id }) else { continue }
+            let state = quotaState(for: account, now: now, wholeAllowance: true)
+            pacerAccounts.append(pacerAccount(id, state: state, weight: member.weight, planner: planner, now: now))
+        }
+        let strandedIDs = Set(stranded.map(\.id))
         let shared = sharedGroup(provider, sessions: pacerSessions(provider, now: now), now: now)?.group
-        let plan = pacer.rebalance(accounts: pacerAccounts, sessions: sessions, destinations: destinations, now: now,
-                                   sharedGroup: shared)
-        let from = sessions.reduce(into: [String: UUID]()) { $0[$1.id] = $1.account }
-        let moves = plan.moves.compactMap { id, to in from[id].map { RebalanceMove(session: id, from: $0, to: to) } }
-            .sorted { $0.session < $1.session }
-        func name(_ id: UUID) -> String { accounts.first { $0.id == id }.map { messageName($0) } ?? "an account" }
-        return RebalancePreview(
-            moves: moves, earliestRunOutBefore: plan.earliestRunOutBefore, earliestRunOutAfter: plan.earliestRunOutAfter,
-            lines: moves.map { "\(sessionSummary([$0.session], now: now)): \(name($0.from)) → \(name($0.to))" },
-            sharedNote: sharedGroupNote(shared)
-        )
+        return SessionPacer().place(stranded, accounts: pacerAccounts, running: running.filter { !strandedIDs.contains($0.id) },
+                                    destinations: Set(pacerAccounts.map(\.id)), now: now, sharedGroup: shared)
     }
 
     /// Makes the moves of `rebalancePreview` through the slot-move path

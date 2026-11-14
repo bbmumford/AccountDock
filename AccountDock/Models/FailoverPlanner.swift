@@ -210,6 +210,28 @@ struct FailoverPlanner {
         guard inUse, let lastRequest, lastRequest > observedAt else { return idleFallbackFreshness }
         return liveFreshness
     }
+
+    /// How long past `poolReadingLifetime` an account in use stays in the
+    /// pool on its last reading. The account is read before idle ones
+    /// (`AppState.readUrgencyOrder`), but the request budget or a provider's
+    /// cool-down can hold that reading back for minutes, and an account with
+    /// most of its allowance left must not drop out of the pool meanwhile.
+    static let stalePoolReadingLimit: TimeInterval = 60 * 60
+
+    /// The share of its pool weight an account keeps on a reading of this
+    /// age, for `AppState.buildPool`: 1 within `poolReadingLifetime`, then
+    /// that lifetime over the reading's age, and 0 past
+    /// `stalePoolReadingLimit` (or the lifetime, when that is longer). The
+    /// reading of an account in use is grown by its learned burn over its
+    /// whole age (`projection`), so its tier stays a cautious one; the
+    /// weight says how far that estimate is trusted.
+    static func poolReadingConfidence(inUse: Bool, observedAt: Date, lastRequest: Date?, now: Date) -> Double {
+        let lifetime = poolReadingLifetime(inUse: inUse, observedAt: observedAt, lastRequest: lastRequest)
+        let age = max(0, now.timeIntervalSince(observedAt))
+        if age <= lifetime { return 1 }
+        guard age <= max(lifetime, stalePoolReadingLimit) else { return 0 }
+        return lifetime / age
+    }
     static let sessionWindow: TimeInterval = 5 * 60 * 60
     /// The active account is judged as it will be this long from now, which
     /// covers one monitoring cycle plus the switch itself. Several agents can
@@ -769,30 +791,86 @@ struct FailoverPlanner {
     /// the active account is not projected to reach either, or `plan`
     /// would keep it or wait for a reset then. Read by `SessionPacer`'s
     /// shared group, which moves with the active account.
+    ///
+    /// Only a destination that `carries` the moving work for
+    /// `projectedCarry` is projected; `plan` is asked again without one
+    /// that does not. `keeping`, the account projected last time
+    /// (`AppState.sharedGroupDestination`), stays the projection while
+    /// `plan` would still switch to it and it carries the work, unless
+    /// the account `plan` prefers now has `projectionPreference` times its
+    /// headroom: the pacer keeps room on the projected account, and
+    /// moving that room between two accounts each cycle moves the slot
+    /// sessions placed around it.
     func nextSwitch(current: QuotaAccountState, ladder: [QuotaAccountState],
-                    recoveredIDs: Set<UUID> = [], now: Date) -> NextSwitch? {
-        func destination(_ plan: FailoverPlan) -> UUID? {
+                    recoveredIDs: Set<UUID> = [], keeping previous: UUID? = nil, now: Date) -> NextSwitch? {
+        let withCurrent = ladder.contains { $0.id == current.id } ? ladder : [current] + ladder
+        func destination(_ plan: FailoverPlan, from current: QuotaAccountState) -> UUID? {
             switch plan {
             case .switchTo(let id, _): id == current.id ? nil : id
             case .verify(let ids): ids.first { $0 != current.id }
             case .stay, .waitForReset, .noCapacity: nil
             }
         }
-        let others = ladder.filter { $0.id != current.id }
-        let withCurrent = ladder.contains { $0.id == current.id } ? ladder : [current] + ladder
-        if let toTrigger = secondsUntilTrigger(current, now: now) {
-            let at = now.addingTimeInterval(toTrigger)
-            let plan = plan(current: current, ladder: withCurrent, recoveredIDs: recoveredIDs, lastSwitch: nil, now: at)
-            if let id = destination(plan), others.contains(where: { $0.id == id }) { return NextSwitch(account: id, at: at) }
+        // The account `plan` switches to at `at`, skipping those that would
+        // not carry the moving work, or nil.
+        func carrier(_ current: QuotaAccountState, among ladder: [QuotaAccountState], at: Date) -> QuotaAccountState? {
+            var ladder = ladder
+            while let id = destination(plan(current: current, ladder: ladder, recoveredIDs: recoveredIDs,
+                                             lastSwitch: nil, now: at), from: current),
+                  let state = ladder.first(where: { $0.id == id }) {
+                if carries(state, from: current, at: at) { return state }
+                ladder.removeAll { $0.id == id }
+            }
+            return nil
+        }
+        func choice(_ current: QuotaAccountState, among ladder: [QuotaAccountState], at: Date) -> NextSwitch? {
+            guard let chosen = carrier(current, among: ladder, at: at) else { return nil }
+            if let previous, previous != chosen.id, previous != current.id,
+               let kept = ladder.first(where: { $0.id == previous }),
+               carrier(current, among: ladder.filter { $0.id == current.id || $0.id == previous }, at: at)?.id == previous,
+               let keptRoom = projection(kept, now: at).map({ headroom(kept, $0) }),
+               let chosenRoom = projection(chosen, now: at).map({ headroom(chosen, $0) }),
+               chosenRoom < keptRoom * Self.projectionPreference {
+                return NextSwitch(account: previous, at: at)
+            }
+            return NextSwitch(account: chosen.id, at: at)
+        }
+        if let toTrigger = secondsUntilTrigger(current, now: now),
+           let next = choice(current, among: withCurrent, at: now.addingTimeInterval(toTrigger)) {
+            return next
         }
         guard let toLimit = secondsUntilExhaustion(current, now: now) else { return nil }
-        let at = now.addingTimeInterval(toLimit)
         var limited = current
         limited.refusedAtLimit = true
         let ladderAtLimit = withCurrent.map { $0.id == current.id ? limited : $0 }
-        let plan = plan(current: limited, ladder: ladderAtLimit, recoveredIDs: recoveredIDs, lastSwitch: nil, now: at)
-        guard let id = destination(plan), others.contains(where: { $0.id == id }) else { return nil }
-        return NextSwitch(account: id, at: at)
+        return choice(limited, among: ladderAtLimit, at: now.addingTimeInterval(toLimit))
+    }
+
+    /// How long a destination `nextSwitch` projects must be able to carry
+    /// the work that moves to it: the lifetime of the prompt caches the
+    /// move writes there (`SessionPacer.defaultCacheLifetime`). The moving
+    /// sessions would leave an account with less within that time and
+    /// write their contexts a second time, for the little it served.
+    static let projectedCarry: TimeInterval = 60 * 60
+    /// How much more headroom the account `plan` prefers must have before
+    /// `nextSwitch` drops the account it projected last time for it.
+    static let projectionPreference = 2.0
+
+    /// Whether `destination` has the headroom, at `date`, to carry the work
+    /// moving from `current` for `projectedCarry`: the moving burn beside
+    /// its own slot sessions (`expectedBurn`) and its deviation, plus the
+    /// in-flight reserve and the switch's cost, and never less than
+    /// `destinationMinimum`. An account a threshold leaves just under its
+    /// limit can pass `tier`'s dwell margin, which counts long-window
+    /// percent, on a few percent of room.
+    func carries(_ destination: QuotaAccountState, from current: QuotaAccountState, at date: Date) -> Bool {
+        guard let projection = projection(destination, now: date) else { return false }
+        let deviation = current.usage?.fiveHour != nil
+            ? current.sessionBurnStdDev
+            : current.weeklyBurnStdDev * (current.sessionPerWeekly ?? Self.defaultSessionPerWeekly)
+        let burn = expectedBurn(movingFrom: current, to: destination).session + deviation
+        let need = settings.inFlightReservePercent + settings.switchCostPercent + burn * Self.projectedCarry / 3600
+        return headroom(destination, projection) >= max(need, destinationMinimum(current: current, destination: destination))
     }
 
     /// Headroom a usable account needs to take work from an account at its

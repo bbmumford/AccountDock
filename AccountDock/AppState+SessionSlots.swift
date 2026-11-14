@@ -444,6 +444,9 @@ extension AppState {
         }.flatMap { UUID(uuidString: $0.accountID) } ?? activeID
         // The pool's accounts, the one taking most new sessions first.
         let byWeight = members.sorted { $0.weight > $1.weight }.compactMap { UUID(uuidString: $0.accountID) }
+        // Sessions on an account that can no longer serve them, each placed
+        // where the pool lasts longest with it.
+        let placements = members.isEmpty ? [:] : strandedPlacements(provider, slots: slots, members: members, now: now)
         let byProcess = sessionSlotStates[provider]?.directoryByProcess ?? [:]
         let sessionsByDirectory: [String: AgentSession] = (liveSessions[provider] ?? []).reduce(into: [:]) { result, session in
             if let pid = session.processID, let directory = byProcess[pid] { result[directory] = session }
@@ -517,7 +520,8 @@ extension AppState {
             let choice = Self.slotChoice(current: slot.account, pinned: pinned,
                                          requested: session.flatMap { requestedSlotMoves.removeValue(forKey: $0.sessionID) },
                                          balance: balance, cannotServe: cannotServe, modelSpent: modelSpent,
-                                         byWeight: byWeight, fallback: fallback)
+                                         byWeight: byWeight, placed: session.flatMap { placements[$0.sessionID] },
+                                         fallback: fallback)
             let target = choice.target
             let balanced = choice.balanced
             let requested = choice.requested
@@ -547,6 +551,8 @@ extension AppState {
             sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = target
             guard slot.account != target else { continue }
             slots.assign(slot.directory, to: target)
+            // The session's first request there writes its whole context.
+            quotaTrends[target]?.settle(at: now)
             let from = slot.account.flatMap { id in accounts.first { $0.id == id } }.map { messageName($0) } ?? "its account"
             let to = accounts.first { $0.id == target }.map { messageName($0) } ?? "another account"
             let subject = Self.eventName(of: session)
@@ -603,17 +609,19 @@ extension AppState {
 
     /// The account a claimed slot serves: its own while that can serve the
     /// session, else, when only the session's model is spent there, the
-    /// first account by weight with room for it, else `fallback`; a
-    /// requested move (`requested`) wins, and failing one a balancing move
-    /// (`balance`, already checked by the caller to be allowed). A pinned
-    /// session (`pinned`) keeps its pinned account whatever else would
-    /// apply, and a request for it is dropped: only unpinning frees it.
+    /// first account by weight with room for it, else the account
+    /// `strandedPlacements` placed it on (`placed`) while that can serve it,
+    /// else `fallback`; a requested move (`requested`) wins, and failing
+    /// one a balancing move (`balance`, already checked by the caller to be
+    /// allowed). A pinned session (`pinned`) keeps its pinned account
+    /// whatever else would apply, and a request for it is dropped: only
+    /// unpinning frees it.
     nonisolated static func slotChoice(current: UUID?, pinned: UUID?, requested: UUID?, balance: UUID?,
                                        cannotServe: (UUID) -> Bool, modelSpent: Bool, byWeight: [UUID],
-                                       fallback: UUID?) -> SlotChoice {
+                                       placed: UUID? = nil, fallback: UUID?) -> SlotChoice {
         if let pinned { return SlotChoice(target: pinned, keptPinned: cannotServe(pinned)) }
         let target = current.flatMap { cannotServe($0) ? nil : $0 }
-            ?? (modelSpent ? byWeight.first { !cannotServe($0) } : fallback)
+            ?? (modelSpent ? byWeight.first { !cannotServe($0) } : placed.flatMap { cannotServe($0) ? nil : $0 } ?? fallback)
         if let requested { return SlotChoice(target: requested, requested: true) }
         if let balance, balance != target { return SlotChoice(target: balance, balanced: true) }
         return SlotChoice(target: target)
