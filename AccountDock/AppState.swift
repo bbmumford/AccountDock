@@ -19,6 +19,12 @@ final class AppState: ObservableObject {
     @Published var accounts: [Account] = []
     @Published var accountUsage: [UUID: UsageAPIResponse] = [:]
     @Published private(set) var accountUsageUpdatedAt: [UUID: Date] = [:]
+    /// When each account's usage was last read whole from its provider's own
+    /// endpoint, and the long-window use it showed then. A passive reading
+    /// carries the session and long windows only, so a model's own limit is
+    /// as old as this however recent `accountUsageUpdatedAt` is;
+    /// `wholeReadingIsDue` and `usageReadPriority` read it.
+    var accountWholeReadings: [UUID: WholeReading] = [:]
     /// When each account's limit resets were last asked for, by
     /// `refreshLimitResetsIfDue`.
     var limitResetsCheckedAt: [UUID: Date] = [:]
@@ -783,7 +789,7 @@ final class AppState: ObservableObject {
             }
             log.info("[addAccount] Current auth: logged in, sub=\(status.subscriptionType ?? "nil")")
 
-            if accounts.contains(where: { $0.matches(email: email) }) {
+            if accounts.contains(where: { $0.provider == .claudeCode && $0.matches(email: email) }) {
                 errorMessage = String(localized: "Account already exists", bundle: L10n.bundle)
                 log.warning("[addAccount] Aborted: duplicate account")
                 return
@@ -865,7 +871,7 @@ final class AppState: ObservableObject {
             log.info("[loginNewAccount] Step 3: Logged in as \(email)")
 
             // 4. Check for duplicate — if exists, just refresh its backup
-            if let existing = accounts.firstIndex(where: { $0.matches(email: email) }) {
+            if let existing = accounts.firstIndex(where: { $0.provider == .claudeCode && $0.matches(email: email) }) {
                 log.info("[loginNewAccount] Step 4: Account already exists, refreshing backup")
                 _ = claudeService.captureCurrentCredentials(
                     forAccountId: accounts[existing].id.uuidString,
@@ -958,7 +964,37 @@ final class AppState: ObservableObject {
         log.info("[account-order] Moved provider \(source.rawValue) to section index \(destinationIndex)")
     }
 
+    /// Removes an account. An active one first hands its provider's sign-in
+    /// to `successor(of:)` through `switchTo`, while it is still there to be
+    /// switched away from. When no account can take over, or the switch does
+    /// not complete, the provider is left with no active account: the CLI
+    /// stays signed in to the account removed, and `updateActiveAccount`
+    /// names an active account again once the CLI is signed in to one held
+    /// here.
     func removeAccount(_ account: Account) {
+        guard account.isActive,
+              let next = Self.successor(of: account, among: accounts, needsSignIn: needsSignIn) else {
+            finishRemoving(account)
+            return
+        }
+        log.info("[removeAccount] Removing the active account; switching to another first")
+        Task {
+            await switchTo(next)
+            finishRemoving(account)
+        }
+    }
+
+    /// The account that becomes active when `account` is removed: another
+    /// of its provider that can run the provider's workloads and does not
+    /// need signing in, in the order the accounts are kept.
+    nonisolated static func successor(of account: Account, among accounts: [Account],
+                                      needsSignIn: (Account) -> Bool) -> Account? {
+        accounts.first {
+            $0.provider == account.provider && $0.id != account.id && $0.supportsProviderWorkloads && !needsSignIn($0)
+        }
+    }
+
+    private func finishRemoving(_ account: Account) {
         log.info("[removeAccount] Removing account \(account.id)")
         if let adapter = managedProviderAdapter(for: account.provider) {
             if let location = account.credentialLocation { try? adapter.remove(location) }
@@ -969,12 +1005,6 @@ final class AppState: ObservableObject {
         forgetAccount(account.id)
         saveUsageSnapshots()
         saveFailoverRuntime()
-        if account.isActive,
-           let firstIndex = accounts.firstIndex(where: { $0.provider == account.provider }) {
-            accounts.makeActive(accounts[firstIndex].id)
-            log.info("[removeAccount] Removed active account, switching to first remaining")
-            Task { await switchTo(accounts[firstIndex]) }
-        }
         saveAccounts()
         log.info("[removeAccount] Done. Remaining accounts: \(self.accounts.count)")
     }
@@ -986,6 +1016,7 @@ final class AppState: ObservableObject {
     func forgetAccount(_ id: UUID) {
         accountUsage[id] = nil
         accountUsageUpdatedAt[id] = nil
+        accountWholeReadings[id] = nil
         accountUsageErrors[id] = nil
         limitResetsCheckedAt[id] = nil
         unavailablePlanCheckedAt[id] = nil
@@ -1445,6 +1476,7 @@ final class AppState: ObservableObject {
         case .reading(let usage):
             usageBudgets[account.provider]?.recordSuccess()
             recordUsage(usage, for: account.id)
+            accountWholeReadings[account.id] = WholeReading(at: Date(), longUtilization: usage.sevenDay?.utilization)
             accountUsageErrors[account.id] = nil
             usageRetryAfter[account.id] = nil
             if !account.isActive { credentialQuarantine[account.id] = nil }
@@ -1713,6 +1745,7 @@ final class AppState: ObservableObject {
     func forgetUsage(of accountID: UUID) {
         accountUsage[accountID] = nil
         accountUsageUpdatedAt[accountID] = nil
+        accountWholeReadings[accountID] = nil
         saveUsageSnapshots()
     }
 
@@ -1746,6 +1779,9 @@ final class AppState: ObservableObject {
     private struct PersistedUsageSnapshot: Codable {
         let usage: UsageAPIResponse
         let updatedAt: Date
+        /// `accountWholeReadings`; absent in a snapshot saved without one.
+        var wholeAt: Date?
+        var wholeLongUtilization: Double?
     }
 
     private func loadFailoverRuntime() {
@@ -1857,6 +1893,9 @@ final class AppState: ObservableObject {
             // persists the corrected snapshot, and refreshes widget data.
             accountUsage[id] = snapshot.usage
             accountUsageUpdatedAt[id] = snapshot.updatedAt
+            if let wholeAt = snapshot.wholeAt {
+                accountWholeReadings[id] = WholeReading(at: wholeAt, longUtilization: snapshot.wholeLongUtilization)
+            }
         }
         scheduleNextUsageReset()
     }
@@ -2110,7 +2149,9 @@ final class AppState: ObservableObject {
                   let updatedAt = accountUsageUpdatedAt[item.key] else { return }
             result[item.key.uuidString] = PersistedUsageSnapshot(
                 usage: item.value,
-                updatedAt: updatedAt
+                updatedAt: updatedAt,
+                wholeAt: accountWholeReadings[item.key]?.at,
+                wholeLongUtilization: accountWholeReadings[item.key]?.longUtilization
             )
         }
         if let data = try? JSONEncoder().encode(snapshots) {

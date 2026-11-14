@@ -185,6 +185,16 @@ struct FailoverPlanner {
     /// While no reading can be afforded, an idle account's reading is trusted
     /// for this long, because only its own resets change it.
     static let idleFallbackFreshness: TimeInterval = 6 * 60 * 60
+
+    /// How old a reading may be for its account to take new sessions
+    /// (`AppState.buildPool`). An account sessions are running on needs one
+    /// within `liveFreshness` once any of them has made a request since the
+    /// reading (`lastRequest`); until then nothing here has used the
+    /// account, and the reading stands as an idle account's does.
+    static func poolReadingLifetime(inUse: Bool, observedAt: Date, lastRequest: Date?) -> TimeInterval {
+        guard inUse, let lastRequest, lastRequest > observedAt else { return idleFallbackFreshness }
+        return liveFreshness
+    }
     static let sessionWindow: TimeInterval = 5 * 60 * 60
     /// The active account is judged as it will be this long from now, which
     /// covers one monitoring cycle plus the switch itself. Several agents can

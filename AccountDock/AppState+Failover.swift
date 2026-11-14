@@ -73,9 +73,10 @@ extension AppState {
         synchronizePauseGateIfDue()
         let now = Date()
         for provider in monitoredProviders {
-            guard let account = activeAccount(for: provider) else { continue }
-            if activeReadingIsDue(account, now: now) {
-                await fetchUsageNow(account, priority: .critical)
+            for account in accountsServingSessions(provider) {
+                let due = (account.isActive && activeReadingIsDue(account, now: now))
+                    || Self.wholeReadingIsDue(accountUsage[account.id], whole: accountWholeReadings[account.id], now: now)
+                if due { await fetchUsageNow(account, priority: account.isActive ? .critical : .candidate) }
             }
         }
         await refreshLimitResetsIfDue(now: now)
@@ -157,6 +158,44 @@ extension AppState {
         accounts
             .filter { checkedAt[$0.id].map { now.timeIntervalSince($0) >= limitResetsInterval } ?? true }
             .min { (checkedAt[$0.id] ?? .distantPast) < (checkedAt[$1.id] ?? .distantPast) }
+    }
+
+    /// The provider's active account, then its other accounts that
+    /// `refreshSessions` counts running sessions on: the accounts in use,
+    /// which `runQuotaCycle` keeps read.
+    func accountsServingSessions(_ provider: AIProviderType) -> [Account] {
+        accounts.filter { $0.provider == provider && ($0.isActive || accountSessions[$0.id]?.isEmpty == false) }
+            .sorted { $0.isActive && !$1.isActive }
+    }
+
+    /// One reading of an account taken whole from its provider's endpoint.
+    struct WholeReading: Equatable {
+        var at: Date
+        /// Percent of the long window used then; nil when it reported none.
+        var longUtilization: Double?
+    }
+
+    /// The least time between two whole readings of one account that
+    /// `wholeReadingIsDue` asks for.
+    nonisolated static let wholeReadingSpacing: TimeInterval = 60
+    /// Points of the long window an account's passive readings must show
+    /// used since its last whole reading for another to be due. A model's
+    /// own allowance is a share of the long window, so it can have moved by
+    /// as many points of the window, which is more of its own limit.
+    nonisolated static let wholeReadingDrift = 1.0
+
+    /// Whether an account in use needs reading from its provider although
+    /// passive readings keep its windows current. Its reading holds a
+    /// model's own limit, which only the provider's endpoint reports, and
+    /// either that limit was never read whole or the long window has moved
+    /// by `wholeReadingDrift` since it was, in either direction. Consumed
+    /// by `runQuotaCycle` for every account serving sessions.
+    nonisolated static func wholeReadingIsDue(_ usage: UsageAPIResponse?, whole: WholeReading?, now: Date) -> Bool {
+        guard let usage, !usage.modelWeeklyLimits.isEmpty else { return false }
+        guard let whole else { return true }
+        guard now.timeIntervalSince(whole.at) >= wholeReadingSpacing,
+              let known = whole.longUtilization, let current = usage.sevenDay?.utilization else { return false }
+        return abs(current - known) >= wholeReadingDrift
     }
 
     /// The active account is read when its newest reading is older than half
@@ -302,10 +341,16 @@ extension AppState {
         guard accountUsage[account.id] != nil, let updatedAt = accountUsageUpdatedAt[account.id] else {
             return forced ? .candidate : .background
         }
-        let age = now.timeIntervalSince(updatedAt)
+        // A reading holding a model's own limit is as old as its last whole
+        // reading: the passive readings since carry the windows alone.
+        let holdsModelLimits = accountUsage[account.id]?.modelWeeklyLimits.isEmpty == false
+        let readAt = (holdsModelLimits ? accountWholeReadings[account.id]?.at : nil) ?? updatedAt
+        let age = now.timeIntervalSince(readAt)
         if forced { return age > 60 ? .candidate : nil }
         // An account serving sessions is consumed as the active one is.
-        if account.isActive || slotServedAccounts.contains(account.id) { return age > 120 ? .background : nil }
+        if account.isActive || slotServedAccounts.contains(account.id) || accountSessions[account.id]?.isEmpty == false {
+            return age > 120 ? .background : nil
+        }
         let recentlyAway = lastSwitchedAway[account.id].map { now.timeIntervalSince($0) < FailoverPlanner.sessionWindow } ?? false
         return age >= (recentlyAway ? 10 * 60 : 30 * 60) ? .background : nil
     }

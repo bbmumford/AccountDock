@@ -459,7 +459,9 @@ extension AppState {
             let state = quotaState(for: account, now: now, wholeAllowance: true)
             let tier = planner.tier(state, now: now)
             guard tier <= .usable, let observedAt = state.observedAt else { continue }
-            let maximumAge = state.mayBeConsumedElsewhere ? FailoverPlanner.liveFreshness : FailoverPlanner.idleFallbackFreshness
+            let lastRequest = sessionRates.entries.values.filter { $0.account == account.id }.map(\.lastSeen).max()
+            let maximumAge = FailoverPlanner.poolReadingLifetime(inUse: state.mayBeConsumedElsewhere,
+                                                                  observedAt: observedAt, lastRequest: lastRequest)
             guard now.timeIntervalSince(observedAt) <= maximumAge else { continue }
             candidates.append((account, tier, planner.latestStart(state, now: now)))
             states[account.id] = state
@@ -516,16 +518,16 @@ extension AppState {
         for (id, account) in pendingPlacements(provider) where moves[id] == nil { moves[id] = account }
         routerSessionMoves = movesSessions ? moves : [:]
         slotSessionMoves = movesSessions ? [:] : moves
+        // Without the router only sessions in one-session slots can move.
+        let movable = movesSessions ? nil : Set((liveSessions[provider] ?? []).compactMap { session -> String? in
+            guard let pid = session.processID, let directory = slotDirectoryByProcess[pid],
+                  let root = SessionSlots(provider)?.sessionRoot.path, directory.hasPrefix(root + "/") else { return nil }
+            return session.sessionID
+        })
         for (id, outlook) in plan.shedding where !pacingShedding.contains(id) {
             guard let account = accounts.first(where: { $0.id == id }), let limitAt = outlook.limitAt else { continue }
             let time = limitAt.formatted(date: .omitted, time: .shortened)
             let wait = Int((outlook.waitAtLimit / 60).rounded())
-            // Without the router only sessions in one-session slots can move.
-            let movable = movesSessions ? nil : Set((liveSessions[provider] ?? []).compactMap { session -> String? in
-                guard let pid = session.processID, let directory = slotDirectoryByProcess[pid],
-                      let root = SessionSlots(provider)?.sessionRoot.path, directory.hasPrefix(root + "/") else { return nil }
-                return session.sessionID
-            })
             let moving = plan.moves.keys.filter {
                 sessionRates.entries[$0]?.account == id && (movable?.contains($0) ?? true)
             }.count
@@ -543,12 +545,16 @@ extension AppState {
                 guard !pacingScopedShedding.contains(mark), let account = accounts.first(where: { $0.id == id }),
                       let limitAt = outlook.limitAt else { continue }
                 let name = accountUsage[id]?.modelWeeklyLimits.first { $0.model.lowercased() == key }?.model ?? key
-                let moving = plan.moves.keys.filter {
-                    sessionRates.entries[$0]?.account == id && sessionModel($0, now: now)?.lowercased().contains(key) == true
+                let moving = moves.keys.filter {
+                    sessionRates.entries[$0]?.account == id && (movable?.contains($0) ?? true)
+                        && sessionModel($0, now: now)?.lowercased().contains(key) == true
                 }.count
                 let time = limitAt.formatted(date: .omitted, time: .shortened)
                 let wait = Int((outlook.waitAtLimit / 60).rounded())
-                failoverEvents.record(provider, "At its \(name) sessions' current rate \(messageName(account)) would use up its \(name) allowance at \(time), \(wait) min before it resets; \(moving) \(name) session(s) move to other accounts at their next turn, and new \(name) sessions start elsewhere.")
+                let outcome = moving > 0
+                    ? "\(moving) \(name) session(s) move to other accounts at their next turn, and new \(name) sessions start elsewhere."
+                    : "new \(name) sessions start elsewhere."
+                failoverEvents.record(provider, "At its \(name) sessions' current rate \(messageName(account)) would use up its \(name) allowance at \(time), \(wait) min before it resets; \(outcome)")
             }
         }
         pacingScopedShedding = scopedShedding
