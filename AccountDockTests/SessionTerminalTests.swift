@@ -73,6 +73,39 @@ final class SessionTerminalTests: XCTestCase {
         XCTAssertNotNil(AppState.modelFallbackEvent(.notInTerminal, session: "s", model: "Sonnet 5.5"))
     }
 
+    func testAnIdleAgtermSessionRestartsThroughTheLauncher() async throws {
+        let terminal = FakeTerminal(sessions: [42: "agt-1"])
+        let idle = try session("abc-123", event: "Stop", pid: 42)
+        XCTAssertNil(AppState.restartBlocker(idle, terminal: "agt-1"))
+        let outcome = await SessionTerminalActions.restartInOwnSlot(idle, executable: "claude", terminal: terminal, pause: 0)
+        XCTAssertEqual(outcome, .typed)
+        XCTAssertEqual(terminal.log.map(\.text),
+                       ["/exit", SessionTerminalCommand.enter, "claude --resume 'abc-123'", SessionTerminalCommand.enter])
+        XCTAssertEqual(Set(terminal.log.map(\.terminal)), ["agt-1"])
+    }
+
+    func testAWorkingOrNonAgtermSessionIsNotRestarted() async throws {
+        let terminal = FakeTerminal(sessions: [42: "agt-1"])
+        let working = try session("abc-123", event: "UserPromptSubmit", pid: 42)
+        XCTAssertNotNil(AppState.restartBlocker(working, terminal: "agt-1"))
+        let outcomeWorking = await SessionTerminalActions.restartInOwnSlot(working, executable: "claude", terminal: terminal, pause: 0)
+        XCTAssertEqual(outcomeWorking, .notIdle)
+
+        let elsewhere = try session("def-456", event: "Stop", pid: 7)
+        XCTAssertNotNil(AppState.restartBlocker(elsewhere, terminal: nil))
+        let outcomeElsewhere = await SessionTerminalActions.restartInOwnSlot(elsewhere, executable: "claude", terminal: terminal, pause: 0)
+        XCTAssertEqual(outcomeElsewhere, .notInTerminal)
+        XCTAssertTrue(terminal.log.isEmpty, "nothing is typed into either")
+    }
+
+    func testSessionsWhoseProcessReadsNoSlotAreUnisolated() throws {
+        let inSlot = try session("a", event: "Stop", pid: 1)
+        let outside = try session("b", event: "Stop", pid: 2)
+        let unknown = try session("c", event: "Stop", pid: nil)
+        let found = AppState.unisolated([inSlot, outside, unknown], slotDirectoryByProcess: [1: "/slots/x"])
+        XCTAssertEqual(found.map(\.sessionID), ["b"])
+    }
+
     func testTheAgtermSessionIsReadFromTheProcessEnvironment() {
         XCTAssertEqual(AgtermTerminalInput.sessionID(inProcessList: "claude --resume x PATH=/bin AGTERM_SESSION_ID=ab12 TERM=xterm"), "ab12")
         XCTAssertNil(AgtermTerminalInput.sessionID(inProcessList: "claude PATH=/bin AGTERM_SESSION_ID= TERM=xterm"))

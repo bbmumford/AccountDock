@@ -36,7 +36,14 @@ struct SessionSlots: Sendable {
     /// Marks the profile line `installLauncher` adds, so `removeLauncher`
     /// finds it again.
     static let profileMarker = "# accountdock session slots"
-    static let profileFile = ".zshrc"
+    /// Read by every zsh, interactive or not, so `zsh -c`, scripts and
+    /// tools that start the CLI through a shell find the launcher too.
+    static let profileFile = ".zshenv"
+    /// Read by interactive zsh after the login files, whose `path_helper`
+    /// and Homebrew's `shellenv` put the CLI's own directory ahead of
+    /// anything `profileFile` added: the line goes here too, last, so a
+    /// terminal's shell finds the launcher first.
+    static let interactiveProfileFile = ".zshrc"
 
     init?(_ provider: AIProviderType, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         guard let support = provider.capabilities.sessionSlots,
@@ -409,6 +416,7 @@ struct SessionSlots: Sendable {
     var launcherInstalled: Bool {
         (try? String(contentsOf: launcher, encoding: .utf8)) == launcherScript()
             && Self.profileHasLine(profileText(), line: profileLine)
+            && Self.profileHasLine(profileText(interactiveProfileURL), line: profileLine)
     }
 
     /// Writes the launcher and puts its directory first on the shell's
@@ -417,9 +425,11 @@ struct SessionSlots: Sendable {
         try FileManager.default.createDirectory(at: binDirectory, withIntermediateDirectories: true)
         try Data(launcherScript().utf8).write(to: launcher, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcher.path)
-        let text = profileText()
-        if !Self.profileHasLine(text, line: profileLine) {
-            try Self.addingLine(profileLine, to: text).write(to: profileURL, atomically: true, encoding: .utf8)
+        for url in [profileURL, interactiveProfileURL] {
+            let text = profileText(url)
+            if !Self.profileHasLine(text, line: profileLine) {
+                try Self.addingLine(profileLine, to: text).write(to: url, atomically: true, encoding: .utf8)
+            }
         }
     }
 
@@ -428,13 +438,16 @@ struct SessionSlots: Sendable {
     func removeLauncher() {
         removePool()
         try? FileManager.default.removeItem(at: launcher)
-        let text = profileText()
-        if Self.profileHasLine(text, line: profileLine) {
-            try? Self.removingLine(profileLine, from: text).write(to: profileURL, atomically: true, encoding: .utf8)
+        for url in [profileURL, interactiveProfileURL] {
+            let text = profileText(url)
+            if Self.profileHasLine(text, line: profileLine) {
+                try? Self.removingLine(profileLine, from: text).write(to: url, atomically: true, encoding: .utf8)
+            }
         }
     }
 
     var profileURL: URL { home.appendingPathComponent(Self.profileFile) }
+    var interactiveProfileURL: URL { home.appendingPathComponent(Self.interactiveProfileFile) }
 
     /// Prepended on every shell start, so the launcher stays ahead of
     /// directories the profile adds earlier.
@@ -442,8 +455,8 @@ struct SessionSlots: Sendable {
         "export PATH=\"$HOME/.accountdock/bin:$PATH\"  \(Self.profileMarker)"
     }
 
-    private func profileText() -> String {
-        (try? String(contentsOf: profileURL, encoding: .utf8)) ?? ""
+    private func profileText(_ url: URL? = nil) -> String {
+        (try? String(contentsOf: url ?? profileURL, encoding: .utf8)) ?? ""
     }
 
     static func profileHasLine(_ text: String, line: String) -> Bool {

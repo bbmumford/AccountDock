@@ -726,6 +726,19 @@ cannot change model within a session), `AppState.applyModelFallbacks` types
 each call limited to 15 seconds. The switch, or why it could not be made, is
 recorded as an event.
 
+Sessions served from one-session slots start through the launcher, which
+`SessionSlots.installLauncher` puts first on `PATH` from `~/.zshenv`, read by
+every zsh, and again last in `~/.zshrc`, since the login files' `path_helper`
+and Homebrew's `shellenv` put the CLI's own directory ahead of it in a
+terminal's shell. A run started by full path, from an IDE or the desktop app,
+or before the pool was ready reads no slot (no `slotDirectoryByProcess`
+entry): `AppState.noteUnisolatedSessions` lists such sessions on the usage
+tab ("N sessions not isolated") and records each once. At the user's request
+only, one idle in agterm (its last event `Stop`) is restarted in its own slot:
+`/exit`, Enter, then `claude --resume <id>`, Enter, typed into its agterm
+session, so the resumed run goes through the launcher. A session mid-turn or
+outside agterm is never typed into; the list says why.
+
 While sessions are served from several accounts, pausing waits for the whole
 pool: sessions pause only when no other included account is below its limit
 with more than `suspensionLead` to go, because each account keeps serving its
