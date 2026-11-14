@@ -328,4 +328,22 @@ final class SessionSlotsTests: XCTestCase {
         XCTAssertEqual(AppState.sessionPeak(stored: before, running: 12, now: now).at, now, "a peak still matched is kept current")
         XCTAssertEqual(AppState.sessionPeak(stored: (12, now.addingTimeInterval(-25 * hour)), running: 2, now: now).count, 2)
     }
+
+    func testEventsNameEachSessionApart() {
+        func session(_ id: String, _ directory: String?) -> AgentSession {
+            AgentSession(sessionID: id, provider: "claude", event: "Stop", workingDirectory: directory,
+                         processID: 1, host: nil, observedAt: nil)
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        XCTAssertEqual(AppState.eventName(of: session("8c64c5f8-45c6", home + "/Work")), "session 8c64c5f8 in ~/Work")
+        XCTAssertEqual(AppState.eventName(of: session("583fb354-740e", nil)), "session 583fb354")
+        XCTAssertEqual(AppState.eventName(of: nil), "a run with no session record")
+    }
+
+    func testASessionIsListedByItsOwnNameThenItsFolderThenItsID() {
+        XCTAssertEqual(AppState.sessionLabel(id: "8c64c5f8-45c6", name: "cf-builder", directory: "/Users/a/ORBTR", model: "Fable 5.2"),
+                       "cf-builder · Fable 5.2")
+        XCTAssertEqual(AppState.sessionLabel(id: "8c64c5f8-45c6", name: nil, directory: "/Users/a/ORBTR", model: nil), "ORBTR")
+        XCTAssertEqual(AppState.sessionLabel(id: "8c64c5f8-45c6", name: nil, directory: nil, model: nil), "session 8c64c5f8")
+    }
 }

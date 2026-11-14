@@ -75,4 +75,36 @@ final class TranscriptRequestFeedTests: XCTestCase {
         XCTAssertEqual(added.map(\.contextTokens), [501], "a file added to a quiet directory changes its time, so it is listed again")
         XCTAssertEqual(Set(added.map(\.session)), ["s1"])
     }
+
+    func testARefusalAtAUsageLimitIsReadAsARefusalThatUsedNothing() throws {
+        let row: [String: Any] = [
+            "type": "assistant", "isApiErrorMessage": true, "error": "rate_limit", "sessionId": "abc",
+            "timestamp": "2026-10-17T09:00:00.000Z",
+            "message": ["model": "<synthetic>", "content": [["type": "text", "text": "You've reached your Fable limit."]]],
+        ]
+        let refusal = try XCTUnwrap(TranscriptRequestFeed.limitRefusal(row, session: "file"))
+        XCTAssertEqual(refusal.session, "abc")
+        XCTAssertEqual(refusal.limitRefusal, "You've reached your Fable limit.")
+        XCTAssertEqual(refusal.contextTokens + refusal.outputTokens, 0)
+        XCTAssertNil(TranscriptRequestFeed.request(row, session: "file", startsTurn: true), "it is not a request that used tokens")
+
+        var other = row
+        other["error"] = "invalid_request"
+        XCTAssertNil(TranscriptRequestFeed.limitRefusal(other, session: "file"), "another kind of API error")
+        var reply = row
+        reply["isApiErrorMessage"] = nil
+        XCTAssertNil(TranscriptRequestFeed.limitRefusal(reply, session: "file"))
+        XCTAssertEqual(TranscriptRequestFeed.limitRefusal(row, session: "parent", subagent: true)?.session, "parent",
+                       "a subagent's refusal is its session's")
+    }
+
+    func testARunOfRefusalsIsOneEventAndOldOnesAreNone() {
+        let now = Date()
+        XCTAssertTrue(AppState.refusalIsNews(at: now.addingTimeInterval(-30), last: nil, now: now))
+        XCTAssertFalse(AppState.refusalIsNews(at: now.addingTimeInterval(-30), last: now.addingTimeInterval(-90), now: now),
+                       "the session tried again a minute later")
+        XCTAssertTrue(AppState.refusalIsNews(at: now.addingTimeInterval(-30), last: now.addingTimeInterval(-40 * 60), now: now))
+        XCTAssertFalse(AppState.refusalIsNews(at: now.addingTimeInterval(-60 * 60), last: nil, now: now),
+                       "read back from the transcript at launch")
+    }
 }

@@ -246,6 +246,15 @@ final class AppState: ObservableObject {
     @Published var liveSessions: [AIProviderType: [AgentSession]] = [:]
     /// The running sessions each account serves, shown on the account cards.
     @Published var accountSessions: [UUID: Set<String>] = [:]
+    /// The name each session shows for itself, from its status line
+    /// (`ingestPassiveTelemetry`); `sessionSummary` lists them when the
+    /// pointer rests on an account card's session count.
+    @Published var sessionNames: [String: String] = [:]
+    /// Sessions whose last request the provider refused at a usage limit,
+    /// from their transcripts (`ingestTranscriptRequests`), until a later
+    /// request of theirs is served. The account cards mark them, since such
+    /// a session stops until someone tells it to go on.
+    @Published var sessionRefusals: [String: SessionRefusal] = [:]
     var routedSessionSeen: [String: (account: UUID, at: Date)] = [:]
     /// The account each session's own status line last named by its reset
     /// times, kept by `ingestPassiveTelemetry` for `sessionAttribution`.
