@@ -124,6 +124,20 @@ final class BackgroundSessionTests: XCTestCase {
         XCTAssertEqual(Set(terminal.log.map(\.terminal)), ["agt-7"])
     }
 
+    func testABackgroundSessionWhoseFooterReportsWorkIsNotStopped() async throws {
+        let terminal = FakeTerminal(sessions: [62154: "agt-7"], screens: ["> \n  · 1 shell · ↓ to manage\n"])
+        let control = FakeBackgroundControl()
+        let idle = try session("4822c359-040f-403c-a651-ae45b46cfd8b", event: "Stop", pid: 10878)
+        let ready = BackgroundSessionState(transcriptChangedAt: now.addingTimeInterval(-3 * 60), shellRunning: false,
+                                           attachProcess: 62154)
+        let outcome = await SessionTerminalActions.restartBackground(
+            idle, state: ready, isolation: ClaudeSessionIsolation(), stopper: "claude", support: support,
+            control: control, terminal: terminal, pause: 0, now: now)
+        XCTAssertEqual(outcome, .busy)
+        XCTAssertTrue(control.log.isEmpty, "a session whose footer reports a shell is not stopped")
+        XCTAssertTrue(terminal.log.isEmpty)
+    }
+
     func testABusyOrUnreachableBackgroundSessionIsNeitherStoppedNorTypedInto() async throws {
         let terminal = FakeTerminal(sessions: [62154: "agt-7"])
         let control = FakeBackgroundControl()

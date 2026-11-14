@@ -36,6 +36,36 @@ struct ClaudeSessionIsolation: ProviderSessionIsolation {
         "\(executable) --resume \(SessionSlots.shellQuoted(sessionID))"
     }
 
+    // MARK: - Screen
+
+    /// Lines at the bottom of the screen read for Claude Code's footer and
+    /// its exit question; the transcript above them may quote either.
+    static let footerLines = 8
+    static let exitQuestionLines = 20
+
+    /// Claude Code's footer counts what still runs in the session, as in
+    /// `· 1 shell` or `· 2 agents`, including commands it started directly
+    /// rather than through a shell under its process.
+    func screenReportsRunningWork(_ screen: String) -> Bool {
+        Self.bottomLines(screen, count: Self.footerLines).contains { line in
+            line.range(of: #"·\s*[1-9][0-9]*\s+(shell|agent|task|monitor|workflow)s?\b"#,
+                       options: .regularExpression) != nil
+        }
+    }
+
+    /// Asked by `/exit` while work still runs; its first choice, which Enter
+    /// takes, stops that work.
+    func screenAsksAboutRunningWork(_ screen: String) -> Bool {
+        Self.bottomLines(screen, count: Self.exitQuestionLines).contains { $0.contains("Background work is running") }
+    }
+
+    /// Escape keeps the session running, its third choice.
+    let keepRunningKey = "\u{1B}"
+
+    static func bottomLines(_ screen: String, count: Int) -> [Substring] {
+        Array(screen.split(separator: "\n").filter { !$0.allSatisfy(\.isWhitespace) }.suffix(count))
+    }
+
     // MARK: - Credential
 
     /// The stored credential JSON without any refresh token, with every

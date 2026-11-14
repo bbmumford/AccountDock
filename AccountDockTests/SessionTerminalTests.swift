@@ -8,10 +8,14 @@ final class FakeTerminal: SessionTerminalInput, @unchecked Sendable {
     private let sessions: [Int32: String]
     private let accepts: Bool
     private var typed: [(String, String)] = []
+    /// What each read of a screen returns in turn, the last one repeated;
+    /// none reads as unreadable.
+    private var screens: [String]
 
-    init(sessions: [Int32: String], accepts: Bool = true) {
+    init(sessions: [Int32: String], accepts: Bool = true, screens: [String] = []) {
         self.sessions = sessions
         self.accepts = accepts
+        self.screens = screens
     }
 
     var log: [(terminal: String, text: String)] { lock.withLock { typed.map { ($0.0, $0.1) } } }
@@ -21,6 +25,10 @@ final class FakeTerminal: SessionTerminalInput, @unchecked Sendable {
     func type(_ text: String, into terminalSession: String) async -> Bool {
         lock.withLock { typed.append((terminalSession, text)) }
         return accepts
+    }
+
+    func screenText(target: String) async -> String? {
+        lock.withLock { screens.count > 1 ? screens.removeFirst() : screens.first }
     }
 }
 
@@ -96,6 +104,48 @@ final class SessionTerminalTests: XCTestCase {
         let outcomeElsewhere = await SessionTerminalActions.restartInOwnSlot(elsewhere, isolation: ClaudeSessionIsolation(), terminal: terminal, pause: 0)
         XCTAssertEqual(outcomeElsewhere, .notInTerminal)
         XCTAssertTrue(terminal.log.isEmpty, "nothing is typed into either")
+    }
+
+    func testASessionWhoseFooterReportsWorkIsNotRestarted() async throws {
+        let footer = "> \n  ⏵⏵ accept edits on (shift+tab to cycle) · 1 shell · ctrl+t to hide tasks\n"
+        let terminal = FakeTerminal(sessions: [42: "agt-1"], screens: [footer])
+        let idle = try session("abc-123", event: "Stop", pid: 42)
+        let outcome = await SessionTerminalActions.restartInOwnSlot(idle, isolation: ClaudeSessionIsolation(),
+                                                                    terminal: terminal, pause: 0)
+        XCTAssertEqual(outcome, .busy)
+        XCTAssertTrue(terminal.log.isEmpty, "nothing is typed while the footer reports a shell")
+    }
+
+    func testAnExitQuestionAboutBackgroundWorkIsAnsweredWithEscapeAndTheRestartCancelled() async throws {
+        let quiet = "> \n  ? for shortcuts\n"
+        let question = """
+        Background work is running
+        A shell is still running in this session.
+        ❯ 1. Exit and stop tasks
+          2. Move to background and exit
+          3. Stay
+        """
+        let terminal = FakeTerminal(sessions: [42: "agt-1"], screens: [quiet, question])
+        let idle = try session("abc-123", event: "Stop", pid: 42)
+        let outcome = await SessionTerminalActions.restartInOwnSlot(idle, isolation: ClaudeSessionIsolation(),
+                                                                    terminal: terminal, pause: 0)
+        XCTAssertEqual(outcome, .cancelled)
+        XCTAssertEqual(terminal.log.map(\.text), ["/exit", SessionTerminalCommand.enter, "\u{1B}"],
+                       "the question is answered with Escape, never Enter, and nothing is resumed")
+        XCTAssertTrue(AppState.restartEvent(.cancelled, session: "s").contains("not restarted"))
+    }
+
+    func testClaudesFooterAndExitQuestionAreReadFromTheBottomOfTheScreen() {
+        let claude = ClaudeSessionIsolation()
+        for footer in ["· 1 shell", "· 2 shells", "· 1 agent", "· 3 tasks", "· 1 monitor", "· 2 workflows"] {
+            XCTAssertTrue(claude.screenReportsRunningWork("> \n  ⏵⏵ bypass permissions on \(footer) · esc to interrupt\n"), footer)
+        }
+        XCTAssertFalse(claude.screenReportsRunningWork("> \n  ? for shortcuts\n"))
+        XCTAssertFalse(claude.screenReportsRunningWork("  · 0 shells\n"))
+        let quoted = "I saw · 1 shell earlier\n" + String(repeating: "transcript line\n", count: 12) + "> \n"
+        XCTAssertFalse(claude.screenReportsRunningWork(quoted), "a transcript line far above the footer does not count")
+        XCTAssertTrue(claude.screenAsksAboutRunningWork("Background work is running\n 3. Stay\n"))
+        XCTAssertFalse(claude.screenAsksAboutRunningWork("> \n"))
     }
 
     func testSessionsWhoseProcessReadsNoSlotAreUnisolated() throws {

@@ -114,7 +114,7 @@ extension AppState {
         let name = Self.eventName(of: session)
         let event = switch outcome {
         case .typed: "Switched \(name) to \(choice.label) in its terminal."
-        case .notIdle, .busy: "\(name) was not switched to \(choice.label): its turn is under way; try again once it ends."
+        case .notIdle, .busy, .cancelled: "\(name) was not switched to \(choice.label): its turn is under way; try again once it ends."
         case .notInTerminal: "\(name) does not run in agterm, so it could not be switched to \(choice.label); change its model with /model."
         case .refused, .notStopped: "agterm did not take the switch of \(name) to \(choice.label); change its model with /model."
         }

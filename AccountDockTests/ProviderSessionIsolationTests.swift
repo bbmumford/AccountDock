@@ -21,6 +21,9 @@ private struct FakeFileIsolation: ProviderSessionIsolation {
     """
 
     func resumeCommand(sessionID: String) -> String { "fakecli resume \(SessionSlots.shellQuoted(sessionID))" }
+    func screenReportsRunningWork(_ screen: String) -> Bool { screen.contains("[running]") }
+    func screenAsksAboutRunningWork(_ screen: String) -> Bool { screen.contains("Quit anyway?") }
+    let keepRunningKey = "n"
 
     func slotCredential(from credential: String) -> SlotCredential? {
         guard let data = credential.data(using: .utf8),

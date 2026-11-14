@@ -763,9 +763,16 @@ or before the pool was ready reads no slot (no `slotDirectoryByProcess`
 entry): `AppState.noteUnisolatedSessions` lists such sessions on the usage
 tab ("N sessions not isolated") and records each once. At the user's request
 only, one idle in agterm (its last event `Stop`) is restarted in its own slot:
-`/exit`, Enter, then `claude --resume <id>`, Enter, typed into its agterm
-session, so the resumed run goes through the launcher. A session mid-turn or
-outside agterm is never typed into; the list says why.
+`/exit`, Enter, then the isolation's resume command (`claude --resume <id>`),
+Enter, typed into its agterm session, so the resumed run goes through the
+launcher. A session mid-turn or outside agterm is never typed into; the list
+says why. Its screen is read first (`SessionTerminalInput.screenText`,
+`agtermctl session text`): a footer that reports work still running, such as
+Claude Code's `· 1 shell` for a command it started directly, leaves it alone,
+and so does the CLI's exit question about such work ("Background work is
+running"), which is answered with Escape (stay), never Enter, whose first
+choice stops the work. A background session's restart reads its attach
+client's screen the same way before stopping it.
 
 A CLI with a background-session service (`backgroundSessions`; Claude
 Code's `claude --bg`, `claude attach <id>`, `claude stop <id>`) runs each

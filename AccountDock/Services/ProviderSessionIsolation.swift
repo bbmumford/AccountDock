@@ -51,6 +51,16 @@ protocol ProviderSessionIsolation: Sendable {
     /// The command line that resumes the session `sessionID` through the
     /// launcher, typed by `SessionTerminalActions`.
     func resumeCommand(sessionID: String) -> String
+    /// Whether the CLI's screen, as `SessionTerminalInput.screenText` reads
+    /// it, reports work still running in the session that ending it would
+    /// stop, such as a command it started; `SessionTerminalActions` then
+    /// leaves the session running.
+    func screenReportsRunningWork(_ screen: String) -> Bool
+    /// Whether the screen shows the CLI asking, as it exits, what to do with
+    /// work still running; the next key typed would answer it.
+    func screenAsksAboutRunningWork(_ screen: String) -> Bool
+    /// The key that answers that question by keeping the session running.
+    var keepRunningKey: String { get }
     /// What a slot holds for `credential` as AccountDock stores it; nil
     /// when it is not one.
     func slotCredential(from credential: String) -> SlotCredential?

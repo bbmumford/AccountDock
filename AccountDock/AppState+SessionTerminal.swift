@@ -20,7 +20,7 @@ extension AppState {
         switch outcome {
         case .typed:
             "No account has allowance left for the model \(session) used; switched it to \(model) in its terminal."
-        case .notIdle, .busy, .notStopped:
+        case .notIdle, .busy, .notStopped, .cancelled:
             nil
         case .notInTerminal:
             "No account has allowance left for the model \(session) uses, and it does not run in agterm, so it could not be switched to \(model); change its model with /model."
@@ -154,10 +154,11 @@ extension AppState {
         switch outcome {
         case .typed: "Restarted \(session) in its own slot: it was ended and resumed from its terminal through the launcher."
         case .notIdle: "\(session) was not restarted: its turn is under way."
-        case .busy: "\(session) was not restarted: its transcripts or a shell under it are still active."
+        case .busy: "\(session) was not restarted: its transcripts, a shell under it or work its terminal reports are still active."
         case .notInTerminal: "\(session) was not restarted: it does not run in agterm."
         case .refused: "\(session) was not restarted: agterm did not take the text."
         case .notStopped: "\(session) was not restarted: its background session could not be stopped."
+        case .cancelled: "\(session) was not restarted: asked to exit, it still had background work running, so it was kept running."
         }
     }
 
