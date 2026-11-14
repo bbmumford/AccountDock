@@ -236,9 +236,15 @@ The trail also records which account served each session and agent
 whole right after a warm read (`servedChange`, the change of account the
 transcript itself shows), and what a running process's status line or
 refusal reset times say about the token it holds (`processCredential`).
-A process holding another account's token than its slot's or the live one
-is flagged with an event; Settings → General → Audit, or the request
+A refusal names its reset as a time of day ("resets 2am") for a five-hour
+limit and as a day and time ("resets Nov 20 at 12pm", "resets Mon 7:59am")
+for a weekly one; the one account whose window resets within ten minutes of
+it refused the request. A process holding another account's token than its
+slot's or the live one is flagged with an event, whether it reads a slot, the
+shared sign-in or runs in the CLI's background service, and flagged again by
+every later piece of such evidence; Settings → General → Audit, or the request
 `{"action":"signalSessions"}`, tells it to read its sign-in again.
+
 
 Query it with the request `{"action":"audit","since":"<ISO time>","account":"<id, label or email>"}`;
 Settings → General → Audit opens the file. `CredentialAuditCoverageTests`

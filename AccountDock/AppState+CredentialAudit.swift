@@ -100,10 +100,16 @@ extension AppState {
     }
 
     /// Records what a process's own evidence (`source`) says about the
-    /// token it holds, and flags the process when that is not the account
-    /// AccountDock believes it reads. A process on the shared sign-in that
-    /// holds an account switched away from is still flagged; the entry says
-    /// so, since signalling moves it.
+    /// token it holds, and flags the process whenever that is not the
+    /// account AccountDock believes it reads: a session in a slot, one on
+    /// the shared sign-in and one in the CLI's background service alike.
+    /// The audit writes an entry and raises its event once per session and
+    /// account (`CredentialAudit.recordProcessCredential`); the flag is set
+    /// again by every such piece of evidence, so a session still holding
+    /// the other token after `signalFlaggedProcesses` is listed again for
+    /// it. A process on the shared sign-in that holds an account switched
+    /// away from is still flagged; the entry says so, since signalling
+    /// moves it.
     func noteProcessCredential(_ provider: AIProviderType, session: String, process: Int32?, observed: UUID,
                                source: String, observedAt: Date?) {
         let believed = believedCredentialAccount(provider, process: process)
@@ -112,19 +118,22 @@ extension AppState {
             detail = "AccountDock switched away from that account at \(away.formatted(.iso8601)); "
                 + "a session not signalled since keeps the token it read before."
         }
-        if credentialAudit.recordProcessCredential(provider, session: session, process: process, observed: observed,
-                                                   believed: believed.account, source: source,
-                                                   believedSource: believed.source, observedAt: observedAt,
-                                                   detail: detail) != nil {
+        credentialAudit.recordProcessCredential(provider, session: session, process: process, observed: observed,
+                                                believed: believed.account, source: source,
+                                                believedSource: believed.source, observedAt: observedAt,
+                                                detail: detail)
+        if believed.account != observed {
             flaggedCredentialProcesses[session] = FlaggedCredentialProcess(
                 provider: provider, session: session, process: process,
                 slot: believed.source == "slot" ? process.flatMap { slotDirectoryByProcess[$0] } : nil,
                 observed: observed, believed: believed.account, at: Date()
             )
-        } else if believed.account == observed {
+        } else {
             flaggedCredentialProcesses[session] = nil
         }
     }
+
+
 
     /// Tells every flagged process to read its sign-in again: sessions on
     /// the shared sign-in through `moveRunningSessions`, and slot sessions
@@ -142,26 +151,44 @@ extension AppState {
         return "Told \(flagged.count) flagged session(s) to read their sign-in again."
     }
 
-    /// When a refusal's words name the reset of the limit it met
-    /// ("resets 2am", "resets 2:30pm (Australia/Melbourne)"), that reset as
-    /// a date: the first such time at or after the refusal, in the named
-    /// time zone or else `calendar`'s.
+    /// When a refusal's words name the reset of the limit it met, that
+    /// reset as a date: a time of day ("resets 2am", "resets 2:30pm
+    /// (Australia/Melbourne)"), as a five-hour limit's refusal names it, or
+    /// a day and time ("resets Nov 20 at 12pm", "resets Mon 7:59am"), as a
+    /// weekly limit's does. The first such time at or after the refusal, in
+    /// the named time zone or else `calendar`'s. Read by `refusingAccount`
+    /// and `account(namedByRefusal:)`, which match it with the accounts'
+    /// window resets.
     nonisolated static func refusalResetDate(_ words: String, at: Date, calendar: Calendar = .current) -> Date? {
-        let pattern = #"resets\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?"#
+        let weekday = #"(?:(?:on\s+)?(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+)?"#
+        let day = #"(?:(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+)?"#
+        let time = #"(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?"#
+        let pattern = #"resets?\s+(?:at\s+)?"# + weekday + day + time
         guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
-              let match = regex.firstMatch(in: words, range: NSRange(words.startIndex..., in: words)),
-              let hourRange = Range(match.range(at: 1), in: words), var hour = Int(words[hourRange]),
-              let meridiemRange = Range(match.range(at: 3), in: words), (1...12).contains(hour) else { return nil }
-        let minute = Range(match.range(at: 2), in: words).flatMap { Int(words[$0]) } ?? 0
-        if words[meridiemRange].lowercased() == "pm" { hour = hour % 12 + 12 } else { hour %= 12 }
+              let match = regex.firstMatch(in: words, range: NSRange(words.startIndex..., in: words)) else { return nil }
+        func group(_ index: Int) -> String? {
+            Range(match.range(at: index), in: words).map { String(words[$0]) }
+        }
+        guard let hourText = group(4), var hour = Int(hourText), (1...12).contains(hour),
+              let meridiem = group(6) else { return nil }
+        let minute = group(5).flatMap(Int.init) ?? 0
+        if meridiem.lowercased() == "pm" { hour = hour % 12 + 12 } else { hour %= 12 }
+        var components = DateComponents(hour: hour, minute: minute)
+        let names = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+        if let month = group(2).flatMap({ names.firstIndex(of: $0.lowercased()) }), let date = group(3).flatMap(Int.init) {
+            components.month = month + 1
+            components.day = date
+        } else if let name = group(1)?.lowercased(),
+                  let index = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"].firstIndex(of: name) {
+            components.weekday = index + 1
+        }
         var calendar = calendar
-        if let zoneRange = Range(match.range(at: 4), in: words),
-           let zone = TimeZone(identifier: words[zoneRange].trimmingCharacters(in: .whitespaces)) {
+        if let zoneText = group(7), let zone = TimeZone(identifier: zoneText.trimmingCharacters(in: .whitespaces)) {
             calendar.timeZone = zone
         }
-        return calendar.nextDate(after: at.addingTimeInterval(-60), matching: DateComponents(hour: hour, minute: minute),
-                                 matchingPolicy: .nextTime)
+        return calendar.nextDate(after: at.addingTimeInterval(-60), matching: components, matchingPolicy: .nextTime)
     }
+
 
     /// The one account whose five-hour or weekly window resets within ten
     /// minutes of `reset`; nil when none or several do.

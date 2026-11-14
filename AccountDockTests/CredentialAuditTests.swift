@@ -417,7 +417,43 @@ final class CredentialAuditTests: XCTestCase {
                      "two accounts resetting then name neither")
     }
 
+    /// A weekly limit's refusal names its reset by day: a background
+    /// session on the shared sign-in, attributed to the active account
+    /// (Personal), was refused "resets Nov 20 at 12pm", which is HSTLES's
+    /// weekly reset and none of Personal's, so HSTLES refused it.
+    func testAWeeklyRefusalNamesItsResetByDayAndTheAccountResettingThen() throws {
+        var melbourne = Calendar(identifier: .gregorian)
+        melbourne.timeZone = try XCTUnwrap(TimeZone(identifier: "Australia/Melbourne"))
+        let refused = try XCTUnwrap(CredentialAudit.date("2026-11-14T18:16:00Z"))
+        let words = "You've hit your weekly limit · resets Nov 20 at 12pm"
+        XCTAssertEqual(AppState.refusalResetDate(words, at: refused, calendar: melbourne),
+                       CredentialAudit.date("2026-11-20T01:00:00Z"), "noon on 20 November in Melbourne")
+        XCTAssertEqual(AppState.refusalResetDate("Weekly limit reached ∙ resets Nov 20, 12:30pm (UTC)", at: refused,
+                                                 calendar: melbourne),
+                       CredentialAudit.date("2026-11-20T12:30:00Z"), "the named time zone wins")
+        XCTAssertEqual(AppState.refusalResetDate("resets Jan 2 at 9am", at: refused, calendar: melbourne),
+                       CredentialAudit.date("2027-01-01T22:00:00Z"), "a day already past this year is next year's")
+        XCTAssertEqual(AppState.refusalResetDate("limit reached · resets Mon 7:59am", at: refused, calendar: melbourne),
+                       CredentialAudit.date("2026-11-15T20:59:00Z"), "the Monday after the refusal, a Sunday in Melbourne")
+        XCTAssertEqual(AppState.refusalResetDate("Your limit will reset at 2pm (Australia/Melbourne).", at: refused),
+                       CredentialAudit.date("2026-11-15T03:00:00Z"))
+
+        let personal = UUID(), hstles = UUID()
+        let windows = [
+            (id: personal, resets: [try XCTUnwrap(CredentialAudit.date("2026-11-15T04:00:00Z")),
+                                    try XCTUnwrap(CredentialAudit.date("2026-11-18T09:00:00Z"))]),
+            (id: hstles, resets: [try XCTUnwrap(CredentialAudit.date("2026-11-20T00:59:59Z"))]),
+        ]
+        let refusing = AppState.refusingAccount(words: words, at: refused, attributed: personal, windows: windows,
+                                                calendar: melbourne)
+        XCTAssertEqual(refusing.account, hstles)
+        XCTAssertTrue(refusing.byReset)
+        let reset = try XCTUnwrap(AppState.refusalResetDate(words, at: refused, calendar: melbourne))
+        XCTAssertEqual(AppState.account(resettingAt: reset, among: windows), hstles)
+    }
+
     /// A slot moved from cybrio (Pro, five-hour window resetting 3:20am) to
+
     /// Personal (Max, no five-hour window) at 02:15:04; at 02:15:27 the
     /// session was refused "resets 3:20am". The CLI had not read its slot
     /// again, so cybrio refused it, not Personal.
