@@ -59,6 +59,10 @@ struct AccountDockApp: App {
                     SessionResumeShortcut.shared.install { [appState] in appState.resumeFrontmostSession() }
                     // Kick off background usage tracking immediately upon app start
                     Task {
+                        // Sessions a terminal restores at login start as soon as
+                        // it opens; the pool and spares their launchers wait for
+                        // come before anything slower.
+                        if appState.sessionSlotsWanted { await appState.maintainSessionSlots() }
                         await appState.refresh()
                         appState.startAutoRefresh(interval: refreshInterval)
                     }
