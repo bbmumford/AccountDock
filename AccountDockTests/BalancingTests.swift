@@ -222,6 +222,23 @@ final class BalancingTests: XCTestCase {
                        "it lasts 15 of the 100 hours")
     }
 
+    func testOnlyAnAccountRunningOutBeforeThePoolGivesSessionsUp() {
+        let early = UUID(), late = UUID()
+        // Both reach their limits days before their weekly resets; the
+        // two together last 55 hours at 4%/h, `early` alone 50.
+        let accounts = [pacerAccount(early, left: 100, resetIn: 150, burn: 2),
+                        pacerAccount(late, left: 120, resetIn: 150, burn: 2)]
+        let plan = SessionPacer().plan(accounts: accounts, sessions: [], now: now)
+        XCTAssertEqual(Set(plan.shedding.keys), [early])
+        XCTAssertEqual(plan.shedReasons[early], .poolRunsOut(now.addingTimeInterval(55 * 3600)))
+
+        // Running out half an hour before the pool is not worth a session's
+        // cache rewrite.
+        let even = [pacerAccount(early, left: 100, resetIn: 150, burn: 2),
+                    pacerAccount(late, left: 102, resetIn: 150, burn: 2)]
+        XCTAssertTrue(SessionPacer().plan(accounts: even, sessions: [], now: now).shedding.isEmpty)
+    }
+
     func testStrandedSessionsSpreadOverTheAccountsWithRoom() {
         let a = UUID(), b = UUID()
         let accounts = [pacerAccount(a, left: 100, resetIn: 150), pacerAccount(b, left: 100, resetIn: 150)]
@@ -360,12 +377,35 @@ final class BalancingTests: XCTestCase {
         let shared = SessionPacer.SharedGroup(account: hstlesBrandon, tokensPerHour: groupTokens, contextTokens: 600_000,
                                               models: [], nextAccount: projected, switchAt: switchAt, sessionCount: 4)
         let pacer = SessionPacer()
-        let plan = pacer.plan(accounts: accounts, sessions: [slot("p1", on: personal), slot("b1", on: backup)], now: now,
-                              sharedGroup: shared)
+        // Backup's readings show its slot session's rate; the session
+        // itself is not among those the pacer may move.
+        let plan = pacer.plan(accounts: accounts, sessions: [slot("p1", on: personal)], now: now, sharedGroup: shared)
         XCTAssertGreaterThan(plan.weights[personal] ?? 0, 0, "the account the group moves to keeps the room it does not need")
         XCTAssertEqual(plan.weights[hstlesBrandon] ?? -1, 0, accuracy: 0.0001,
                        "the group alone spends the active account by the switch")
         XCTAssertEqual(plan.weights[backup] ?? -1, 0, accuracy: 0.0001)
+
+        // Shedding: every account here reaches its limit days before its
+        // weekly reset, but only Backup does so while the others still
+        // have room. Personal, which the group moves to, lasts past the
+        // accounts' run-out; HSTLES (brandon) reaches its limit only as the
+        // group's switch does.
+        XCTAssertEqual(Set(plan.shedding.keys), [backup])
+        guard case .poolRunsOut(let end)? = plan.shedReasons[backup] else {
+            return XCTFail("Backup sheds because it runs out before the pool does")
+        }
+        XCTAssertEqual(end.timeIntervalSince(now) / 3600, 47.5, accuracy: 0.1,
+                       "1424% left in tokens at the group's 80M and two sessions' 20M an hour each")
+        XCTAssertTrue(AppState.sheddingEvent(account: "Backup", allowance: nil, limitAt: now.addingTimeInterval(1.6 * 3600),
+                                             reason: .poolRunsOut(end), outcome: "1 session(s) move to other accounts at their next turn.",
+                                             now: now)
+            .contains("while the other accounts still have room"))
+        // Its slot session moves to Personal, which then still lasts about
+        // as long as the accounts together; HSTLES (brandon) would run out
+        // a day sooner with it.
+        let shedding = pacer.plan(accounts: accounts, sessions: [slot("p1", on: personal), slot("b1", on: backup)], now: now,
+                                  sharedGroup: shared)
+        XCTAssertEqual(shedding.moves, ["b1": personal])
 
         // ORBTR (brandon) reaches its limit: its three slot sessions leave.
         let running = [SessionPacer.RebalanceSession(id: "p1", account: personal, tokensPerHour: sessionTokens,

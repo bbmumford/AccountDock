@@ -782,14 +782,23 @@ the pool weights and which sessions move, each time the pool is rebuilt
   soon takes more new sessions before its allowance is lost.
 - An account that would reach its limit and then wait there longer than its
   sessions' prompt cache lasts (the longest `cache_control` lifetime they
-  sent, an hour when unknown) gives sessions up: those relieving the most
-  rate per cache rewrite first, until it no longer would. Sessions whose
-  next turn comes soon go before one deep in a turn that began more than 15
-  minutes ago and is still sending (`SessionPacer.movable`), since a move
-  applies only at a session's next turn. A session moves
-  only to an account that, with the session's rate and the cost of writing
-  its context into that account's cache, stays within its own window. The
-  router moves it at its next turn (`RouterState.moves`).
+  sent, an hour when unknown) gives sessions up when moving them keeps the
+  work running longer (`SessionPacer.ShedReason`): it reaches that limit
+  more than a cache lifetime before the accounts together would have spent
+  what they have (`poolRunOut`), or, for the account carrying the shared
+  group while a switch is projected, before the group alone would take it
+  to its limit or the switch. Over the days to a weekly reset any rate
+  reaches a limit, so the wait alone would have every busy weekly-only
+  account give sessions up. It gives up those relieving the most rate per
+  cache rewrite first, until it no longer would. Sessions whose next turn
+  comes soon go before one deep in a turn that began more than 15 minutes
+  ago and is still sending (`SessionPacer.movable`), since a move applies
+  only at a session's next turn. A session moves only to an account that,
+  with the session's rate and the cost of writing its context into that
+  account's cache, reaches no limit before its reset, or none until within
+  an hour of the pool's run-out. The router moves it at its next turn
+  (`RouterState.moves`). The event names the reason ("… while the other
+  accounts still have room (together they last until …)").
 - An account that would reach its limit only shortly before its reset keeps
   its sessions. When one of them is refused at the limit and the reset the
   refusal names comes within five minutes and at least a minute before the

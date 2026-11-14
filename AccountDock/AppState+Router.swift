@@ -619,16 +619,16 @@ extension AppState {
             return session.sessionID
         })
         for (id, outlook) in plan.shedding where !pacingShedding.contains(id) {
-            guard let account = accounts.first(where: { $0.id == id }), let limitAt = outlook.limitAt else { continue }
-            let time = limitAt.formatted(date: .omitted, time: .shortened)
-            let wait = Int((outlook.waitAtLimit / 60).rounded())
+            guard let account = accounts.first(where: { $0.id == id }), let limitAt = outlook.limitAt,
+                  let reason = plan.shedReasons[id] else { continue }
             let moving = moves.keys.filter {
                 sessionRates.entries[$0]?.account == id && (movable?.contains($0) ?? true)
             }.count
             let outcome = movesSessions || moving > 0
                 ? "\(moving) session(s) move to other accounts at their next turn."
                 : "new sessions start on other accounts."
-            failoverEvents.record(provider, "At its sessions' current rate \(messageName(account)) would reach its limit at \(time), \(wait) min before that window resets; \(outcome)")
+            failoverEvents.record(provider, Self.sheddingEvent(account: messageName(account), allowance: nil, limitAt: limitAt,
+                                                               reason: reason, outcome: outcome, now: now))
         }
         pacingShedding = Set(plan.shedding.keys)
         var scopedShedding = Set<String>()
@@ -637,18 +637,17 @@ extension AppState {
                 let mark = id.uuidString + "|" + key
                 scopedShedding.insert(mark)
                 guard !pacingScopedShedding.contains(mark), let account = accounts.first(where: { $0.id == id }),
-                      let limitAt = outlook.limitAt else { continue }
+                      let limitAt = outlook.limitAt, let reason = plan.scopedShedReasons[id]?[key] else { continue }
                 let name = accountUsage[id]?.modelWeeklyLimits.first { $0.model.lowercased() == key }?.model ?? key
                 let moving = moves.keys.filter {
                     sessionRates.entries[$0]?.account == id && (movable?.contains($0) ?? true)
                         && sessionModel($0, now: now)?.lowercased().contains(key) == true
                 }.count
-                let time = limitAt.formatted(date: .omitted, time: .shortened)
-                let wait = Int((outlook.waitAtLimit / 60).rounded())
                 let outcome = moving > 0
                     ? "\(moving) \(name) session(s) move to other accounts at their next turn, and new \(name) sessions start elsewhere."
                     : "new \(name) sessions start elsewhere."
-                failoverEvents.record(provider, "At its \(name) sessions' current rate \(messageName(account)) would use up its \(name) allowance at \(time), \(wait) min before it resets; \(outcome)")
+                failoverEvents.record(provider, Self.sheddingEvent(account: messageName(account), allowance: name, limitAt: limitAt,
+                                                                   reason: reason, outcome: outcome, now: now))
             }
         }
         pacingScopedShedding = scopedShedding
@@ -664,6 +663,28 @@ extension AppState {
             if let id = UUID(uuidString: member.accountID), let weight = weights[id] { member.weight = weight }
             return member
         }
+    }
+
+    /// The event for an account giving sessions up (`SessionPacer.Plan`):
+    /// when it reaches its limit, or the limit of the `allowance` only one
+    /// model's sessions draw on, and why moving its sessions keeps the work
+    /// running longer (`reason`), then `outcome`.
+    nonisolated static func sheddingEvent(account: String, allowance: String?, limitAt: Date,
+                                          reason: SessionPacer.ShedReason, outcome: String, now: Date) -> String {
+        func when(_ date: Date) -> String {
+            Calendar.current.isDate(date, inSameDayAs: now)
+                ? date.formatted(date: .omitted, time: .shortened)
+                : date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+        }
+        let reaches = allowance.map { "At its \($0) sessions' current rate \(account) would use up its \($0) allowance" }
+            ?? "At its sessions' current rate \(account) would reach its limit"
+        let why = switch reason {
+        case .poolRunsOut(let end):
+            "while the other accounts still have room (together they last until \(when(end))), so moving its sessions keeps the work running longer"
+        case .sharedGroupSwitch(let at):
+            "before the sessions on the shared sign-in are due to move off it at \(when(at)), so moving its own sessions puts that switch off"
+        }
+        return "\(reaches) at \(when(limitAt)), \(why); \(outcome)"
     }
 
     /// The account as `SessionPacer` sees it: its windows projected to now,
