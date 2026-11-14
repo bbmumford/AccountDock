@@ -1,34 +1,56 @@
+import CryptoKit
 import Foundation
 
 private let log = FileLog("KimiSessionIsolation")
 
-/// Kimi Code's slots. `KIMI_CODE_HOME` names the directory Kimi Code uses as
-/// its whole home: its configuration, its credential under `credentials/`,
-/// its sessions, logs and caches all live there. A slot is such a home with
-/// the configuration copied from Kimi Code's own home (`prepareSlot`) and a
-/// credential holding one account's access token with its real expiry and
-/// an empty refresh token (`slotCredential`). With an empty refresh token
-/// Kimi Code never renews in the slot: when the token reaches its renewal
-/// threshold it refuses that request before any network call and leaves
-/// the file as it is, so it never presents a refresh token AccountDock owns
-/// and never writes its revoked placeholder into the slot. AccountDock
-/// therefore writes a renewed access token into every slot serving the
-/// account before the threshold (`minimumLifetime(expiresIn:)`). Kimi Code
-/// reads the credential file again before every model request, so a slot
-/// rewritten for another account moves its session at the next request and
-/// `signalReread` has nothing to do.
+/// Kimi Code's slots. Every slot runs in Kimi Code's own home, so all its
+/// sessions share their history, settings and hooks; only the credential
+/// file differs. With `KIMI_CODE_BASE_URL` or `KIMI_CODE_OAUTH_HOST` set,
+/// Kimi Code reads the credential named after a hash of the two values,
+/// `credentials/kimi-code-env-<16 hex>.json`, instead of the one
+/// `config.toml` names (`credentialName(oauthHost:baseURL:)`). A slot is
+/// therefore a pair of values: the real OAuth host, and the real API base
+/// URL spelt with some host letters in upper case (`spelling(of:number:)`),
+/// which names a credential of its own while every request still reaches
+/// the same server; Kimi Code sends its model requests to `config.toml`'s
+/// `base_url` whatever the variable says. The slot directory holds only
+/// that pair (`baseURLFile`, `oauthHostFile`) and the shared slot
+/// bookkeeping; the credential lives in Kimi Code's home.
+///
+/// A slot's credential holds one account's access token with its real
+/// expiry and an empty refresh token (`slotCredential`). With an empty
+/// refresh token Kimi Code never renews it: at its renewal threshold it
+/// refuses that request before any network call and leaves the file as it
+/// is, so it never presents a refresh token AccountDock owns and never
+/// writes its revoked placeholder. AccountDock therefore writes a renewed
+/// access token into every slot serving the account before the threshold
+/// (`minimumLifetime(expiresIn:)`). Kimi Code reads the credential file
+/// again before every model request, so a slot rewritten for another
+/// account moves its session at the next request and `signalReread` has
+/// nothing to do.
+///
+/// A Kimi Code session that finds the server's model list changed writes
+/// its provider entry back into `config.toml` with the base URL and
+/// credential name it runs on; `restoreSharedState` puts Kimi Code's own
+/// spelling back, so sessions outside slots keep their own credential.
 struct KimiSessionIsolation: ProviderSessionIsolation {
     let executable = "kimi"
-    let directoryVariable = "KIMI_CODE_HOME"
-    /// `KIMI_CODE_HOME` already names a home; `KIMI_MODEL_NAME` defines a
+    /// Names the slot directory in a session's environment. Kimi Code does
+    /// not read it; `SessionSlots.directoriesByProcess` finds the slot by it.
+    let directoryVariable = "ACCOUNTDOCK_KIMI_SLOT"
+    /// The variables `launcherExportLines` sets from the slot's files, which
+    /// make Kimi Code read the slot's credential.
+    static let baseURLVariable = "KIMI_CODE_BASE_URL"
+    static let oauthHostVariable = "KIMI_CODE_OAUTH_HOST"
+    /// `KIMI_CODE_HOME` names another home; `KIMI_MODEL_NAME` defines a
     /// model with its own API key; the base URL and OAuth host overrides
-    /// make Kimi Code read a credential stored under another name.
+    /// already choose a credential, as they do in a slot's own session, so
+    /// a launch from inside one stays on that slot.
     let passThroughVariables = ["KIMI_CODE_HOME", "KIMI_MODEL_NAME", "KIMI_CODE_BASE_URL",
                                 "KIMI_CODE_OAUTH_HOST", "KIMI_OAUTH_HOST"]
     /// Sign-in and sign-out, the commands that manage providers, the
     /// installation and its configuration, and those that read or write the
-    /// session history in Kimi Code's own home; none starts a session that
-    /// sends model requests.
+    /// session history; none starts a session that sends model requests.
     let passThroughCommands = ["login", "logout", "provider", "doctor", "migrate", "upgrade", "update",
                                "install-desktop", "app", "session", "import-sessions", "export", "fork", "vis"]
     let background: BackgroundSessionSupport? = nil
@@ -36,15 +58,14 @@ struct KimiSessionIsolation: ProviderSessionIsolation {
     let installDirectories = [".kimi-code/bin"]
     var preferredExecutable: String? { nil }
 
-    /// Kimi Code's own home, which slots copy their configuration from and
-    /// which is never written here.
-    let sourceHome: URL
+    /// Kimi Code's home: its `config.toml`, and every slot's credential.
+    let home: URL
     /// How long `writeCredential` waits for a lock Kimi Code keeps fresh.
     let lockWait: TimeInterval
 
-    init(sourceHome: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".kimi-code", isDirectory: true),
+    init(home: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".kimi-code", isDirectory: true),
          lockWait: TimeInterval = 10) {
-        self.sourceHome = sourceHome
+        self.home = home
         self.lockWait = lockWait
     }
 
@@ -195,45 +216,188 @@ struct KimiSessionIsolation: ProviderSessionIsolation {
 
     // MARK: - Slot
 
-    /// Files of Kimi Code's own home a slot needs before Kimi Code starts in
-    /// it: `config.toml` (providers, models, the hooks AccountDock installs,
-    /// and the OAuth table naming the credential), `tui.toml`, `mcp.json`,
-    /// `device_id`, which Kimi Code and AccountDock's own renewals send with
-    /// their requests, and the `region` marker.
-    static let copiedFiles = ["config.toml", "tui.toml", "mcp.json", "device_id", "region"]
+    /// Files in a slot directory holding the values its sessions run with:
+    /// `KIMI_CODE_BASE_URL` and `KIMI_CODE_OAUTH_HOST`.
+    static let baseURLFile = "base-url"
+    static let oauthHostFile = "oauth-host"
 
-    /// Creates the slot and copies `copiedFiles` from `sourceHome` where the
-    /// slot has none or an older one, so a change in Kimi Code's own home,
-    /// such as reinstalled hooks, reaches spare slots, and a change Kimi
-    /// Code made in the slot since stays. Each copy keeps its source's
-    /// permissions.
+    /// The table of `config.toml` holding the managed provider's `base_url`.
+    static let providerTable = #"providers."managed:kimi-code""#
+    /// Kimi Code's OAuth host when `config.toml` names none.
+    static let defaultOAuthHost = "https://auth.kimi.com"
+    /// The OAuth host and API base URL pair that keeps Kimi Code's
+    /// unscoped credential name `kimi-code`.
+    static let sharedDefaultBaseURL = "https://api.kimi.com/coding/v1"
+    /// Prefix of every credential name Kimi Code derives from the two
+    /// values; the only names a slot's removal deletes.
+    static let scopedNamePrefix = "kimi-code-env-"
+    /// API base URL of each region's OAuth host, for a `config.toml` whose
+    /// `base_url` names no Kimi host, as while AccountDock's request hold
+    /// points it at the local router.
+    static let regionBaseURLs = ["https://auth.kimi.ai": "https://api.kimi.ai/coding/v1",
+                                 "https://auth.kimi.com": "https://api.kimi.com/coding/v1"]
+
+    var configFile: URL { home.appendingPathComponent("config.toml") }
+
+    /// The credential name Kimi Code reads for `oauthHost` and `baseURL`,
+    /// as it derives it: both trimmed of trailing slashes (the host of
+    /// surrounding white space too), then the first 16 hex digits of the
+    /// SHA-256 of `JSON.stringify({ oauthHost, baseUrl })`; the default
+    /// host with the shared default base URL keeps `kimi-code`.
+    static func credentialName(oauthHost: String, baseURL: String) -> String {
+        let host = trimmingTrailingSlashes(oauthHost.trimmingCharacters(in: .whitespacesAndNewlines))
+        let base = trimmingTrailingSlashes(baseURL)
+        if host == defaultOAuthHost, base == sharedDefaultBaseURL { return "kimi-code" }
+        let json = #"{"oauthHost":"# + jsonString(host) + #","baseUrl":"# + jsonString(base) + "}"
+        let digest = SHA256.hash(data: Data(json.utf8)).map { String(format: "%02x", $0) }.joined()
+        return scopedNamePrefix + digest.prefix(16)
+    }
+
+    private static func trimmingTrailingSlashes(_ value: String) -> String {
+        var value = Substring(value)
+        while value.hasSuffix("/") { value = value.dropLast() }
+        return String(value)
+    }
+
+    /// A string as JavaScript's `JSON.stringify` writes it.
+    private static func jsonString(_ value: String) -> String {
+        var out = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\u{08}": out += "\\b"
+            case "\u{0C}": out += "\\f"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            case _ where scalar.value < 0x20: out += String(format: "\\u%04x", scalar.value)
+            default: out.unicodeScalars.append(scalar)
+            }
+        }
+        return out + "\""
+    }
+
+    /// The range of the host in an `http(s)://host[:port]/path` URL.
+    private static func hostRange(in url: String) -> Range<String.Index>? {
+        guard let scheme = url.range(of: "://") else { return nil }
+        let rest = url[scheme.upperBound...]
+        let end = rest.firstIndex(where: { $0 == "/" || $0 == ":" || $0 == "?" || $0 == "#" }) ?? url.endIndex
+        return scheme.upperBound..<end
+    }
+
+    /// `url` with its host in lower case, as Kimi Code and its login write
+    /// it; nil when it has no host.
+    static func canonicalBaseURL(_ url: String) -> String? {
+        guard let range = hostRange(in: url), !range.isEmpty else { return nil }
+        return url.replacingCharacters(in: range, with: url[range].lowercased())
+    }
+
+    /// The `number`th slot spelling of `base`: the host letters whose bit is
+    /// set in `number`, counted from the left, in upper case. Every number
+    /// from 1 below `2^letters` gives a different spelling and none gives
+    /// the canonical one, so a slot never reads the credential of sessions
+    /// outside slots. Nil past the last one. URL parsing lower-cases the
+    /// host, so every spelling reaches the same server.
+    static func spelling(of base: String, number: Int) -> String? {
+        guard number > 0, let canonical = canonicalBaseURL(base), let range = hostRange(in: canonical) else { return nil }
+        let host = canonical[range]
+        let letters = host.filter(\.isLetter).count
+        guard letters > 0, number < 1 << min(letters, 16) else { return nil }
+        var index = 0
+        let spelt = String(host.map { character -> Character in
+            guard character.isLetter else { return character }
+            defer { index += 1 }
+            return number & (1 << index) != 0 ? Character(character.uppercased()) : character
+        })
+        return canonical.replacingCharacters(in: range, with: spelt)
+    }
+
+    /// Whether `url`'s host has a letter in upper case, which only a slot
+    /// spelling has.
+    static func isSlotSpelling(_ url: String) -> Bool {
+        guard let range = hostRange(in: url) else { return false }
+        return url[range].contains(where: \.isUppercase)
+    }
+
+    /// The managed provider's OAuth host and canonical API base URL in
+    /// `config.toml`, which slots are spelt from. The base URL falls back
+    /// to the OAuth host's region when `base_url` names no host with
+    /// letters. Nil without a managed provider.
+    func sharedEndpoints() -> (oauthHost: String, baseURL: String)? {
+        guard let configured = TOMLHookConfig.value(at: configFile, table: Self.providerTable, key: "base_url") else { return nil }
+        let oauthHost = TOMLHookConfig.value(at: configFile, table: KimiService.credentialTable, key: "oauth_host")
+            .flatMap { $0.isEmpty ? nil : $0 } ?? Self.defaultOAuthHost
+        if let canonical = Self.canonicalBaseURL(configured), Self.spelling(of: canonical, number: 1) != nil {
+            return (oauthHost, canonical)
+        }
+        guard let regional = Self.regionBaseURLs[Self.trimmingTrailingSlashes(oauthHost)] else { return nil }
+        return (oauthHost, regional)
+    }
+
+    /// The pair of values a slot runs with, from its files; nil when either
+    /// is missing or the base URL is not a slot spelling.
+    func selector(in directory: URL) -> (oauthHost: String, baseURL: String)? {
+        func read(_ name: String) -> String? {
+            (try? String(contentsOf: directory.appendingPathComponent(name), encoding: .utf8))
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .flatMap { $0.isEmpty ? nil : $0 }
+        }
+        guard let oauthHost = read(Self.oauthHostFile), let baseURL = read(Self.baseURLFile),
+              Self.isSlotSpelling(baseURL) else { return nil }
+        return (oauthHost, baseURL)
+    }
+
+    /// Creates the slot directory and, the first time, gives it a spelling
+    /// no other slot holds: it takes the first spelling whose credential
+    /// file it can create in Kimi Code's home with `O_EXCL`, so two slots
+    /// prepared at once never share one; the empty file reads as no
+    /// credential until `writeCredential` replaces it. The slot's files are
+    /// written after, the base URL last. Throws without a managed provider
+    /// in `config.toml` or when every spelling is taken.
     func prepareSlot(_ directory: URL) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        for name in Self.copiedFiles {
-            let source = sourceHome.appendingPathComponent(name)
-            guard let sourceAttributes = try? fm.attributesOfItem(atPath: source.path),
-                  sourceAttributes[.type] as? FileAttributeType == .typeRegular else { continue }
-            let destination = directory.appendingPathComponent(name)
-            if let copied = (try? fm.attributesOfItem(atPath: destination.path))?[.modificationDate] as? Date,
-               let changed = sourceAttributes[.modificationDate] as? Date, copied >= changed {
-                continue
-            }
-            let mode = (sourceAttributes[.posixPermissions] as? NSNumber).map { mode_t($0.uint16Value) } ?? 0o600
-            try PrivateFile.writeAtomically(try Data(contentsOf: source), to: destination, mode: mode)
+        guard selector(in: directory) == nil else { return }
+        guard let endpoints = sharedEndpoints() else {
+            throw NSError(domain: "KimiSessionIsolation", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Kimi Code's config.toml names no managed provider"])
         }
+        let credentials = home.appendingPathComponent("credentials", isDirectory: true)
+        try fm.createDirectory(at: credentials, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        var number = 1
+        while let baseURL = Self.spelling(of: endpoints.baseURL, number: number) {
+            number += 1
+            let name = Self.credentialName(oauthHost: endpoints.oauthHost, baseURL: baseURL)
+            let file = credentials.appendingPathComponent("\(name).json")
+            let descriptor = open(file.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+            if descriptor < 0 {
+                if errno == EEXIST { continue }
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno),
+                              userInfo: [NSLocalizedDescriptionKey: "Slot credential not created"])
+            }
+            close(descriptor)
+            do {
+                try PrivateFile.writeAtomically(Data(endpoints.oauthHost.utf8), to: directory.appendingPathComponent(Self.oauthHostFile), mode: 0o600)
+                try PrivateFile.writeAtomically(Data(baseURL.utf8), to: directory.appendingPathComponent(Self.baseURLFile), mode: 0o600)
+            } catch {
+                unlink(file.path)
+                throw error
+            }
+            return
+        }
+        throw NSError(domain: "KimiSessionIsolation", code: 2,
+                      userInfo: [NSLocalizedDescriptionKey: "Every slot spelling of Kimi Code's base URL is taken"])
     }
 
-    /// The credential file Kimi Code reads in `directory`: named by the
-    /// `key` of `KimiService.credentialTable` in the slot's `config.toml`,
-    /// or Kimi Code's default `oauth/kimi-code` when it names none. Nil for
-    /// a key that names no file.
+    /// The credential file Kimi Code reads in a session of the slot
+    /// `directory`: the name its pair derives, in Kimi Code's home. Nil for
+    /// a slot without a pair, or one whose name is not a derived one.
     func credentialFile(in directory: URL) -> URL? {
-        let key = TOMLHookConfig.value(at: directory.appendingPathComponent("config.toml"),
-                                       table: KimiService.credentialTable, key: "key")
-            .flatMap { $0.isEmpty ? nil : $0 } ?? "oauth/kimi-code"
-        return KimiService.credentialStorageName(for: key)
-            .map { directory.appendingPathComponent("credentials/\($0).json") }
+        guard let selector = selector(in: directory) else { return nil }
+        let name = Self.credentialName(oauthHost: selector.oauthHost, baseURL: selector.baseURL)
+        guard name.hasPrefix(Self.scopedNamePrefix) else { return nil }
+        return home.appendingPathComponent("credentials/\(name).json")
     }
 
     /// Writes the credential as Kimi Code writes it, to a new file set to
@@ -242,18 +406,16 @@ struct KimiSessionIsolation: ProviderSessionIsolation {
     /// waited for up to `lockWait` while Kimi Code keeps it fresh.
     func writeCredential(_ credential: SlotCredential, to directory: URL) -> Bool {
         guard let file = credentialFile(in: directory) else {
-            log.error("The slot's config.toml names no credential file Kimi Code reads")
+            log.error("A Kimi slot names no credential")
             return false
         }
-        let lock = KimiCredentialLock(home: directory, name: file.deletingPathExtension().lastPathComponent)
+        let lock = KimiCredentialLock(home: home, name: file.deletingPathExtension().lastPathComponent)
         guard lock.acquire(waitingUpTo: lockWait) else {
-            log.warning("Kimi Code's credential lock in a slot is held; the slot is written at the next pass")
+            log.warning("Kimi Code's lock on a slot credential is held; the slot is written at the next pass")
             return false
         }
         defer { lock.release() }
         do {
-            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true,
-                                                    attributes: [.posixPermissions: 0o700])
             try PrivateFile.writeAtomically(Data(credential.contents.utf8), to: file, mode: 0o600)
         } catch {
             log.error("Slot credential not written: \(error.localizedDescription)")
@@ -268,8 +430,91 @@ struct KimiSessionIsolation: ProviderSessionIsolation {
             .map(SlotCredential.init(contents:))
     }
 
-    /// Kimi Code keeps nothing for a slot outside its home.
-    func removeSlot(_ directory: URL) {}
+    /// Deletes the slot's own credential file from Kimi Code's home, and
+    /// nothing else there: only a regular file whose name its pair derives
+    /// with the `kimi-code-env-` prefix, and only while `config.toml`, once
+    /// `restoreSharedState` has run, neither selects it nor names it as its
+    /// `key`, so sessions outside slots never lose the file they read.
+    /// `SessionSlots.remove` deletes the slot directory after.
+    func removeSlot(_ directory: URL) {
+        restoreSharedState()
+        guard let file = credentialFile(in: directory) else { return }
+        let name = file.deletingPathExtension().lastPathComponent
+        guard !configuredCredentialNames().contains(name) else {
+            log.warning("A removed Kimi slot's credential is still the one config.toml names; it is kept")
+            return
+        }
+        var status = stat()
+        guard lstat(file.path, &status) == 0, status.st_mode & S_IFMT == S_IFREG else { return }
+        unlink(file.path)
+    }
+
+    /// The credential names `config.toml` points sessions outside slots
+    /// at: the one Kimi Code derives from its `oauth_host` and `base_url`,
+    /// and the one its `key` names.
+    func configuredCredentialNames() -> Set<String> {
+        var names = Set<String>()
+        if let configured = TOMLHookConfig.value(at: configFile, table: Self.providerTable, key: "base_url") {
+            let oauthHost = TOMLHookConfig.value(at: configFile, table: KimiService.credentialTable, key: "oauth_host")
+                .flatMap { $0.isEmpty ? nil : $0 } ?? Self.defaultOAuthHost
+            names.insert(Self.credentialName(oauthHost: oauthHost, baseURL: configured))
+        }
+        if let key = TOMLHookConfig.value(at: configFile, table: KimiService.credentialTable, key: "key"),
+           let name = KimiService.credentialStorageName(for: key) {
+            names.insert(name)
+        }
+        return names
+    }
+
+    /// Puts `config.toml`'s managed provider back on Kimi Code's own
+    /// spelling after a slot's session wrote its own there: a `base_url`
+    /// with an upper-case host letter goes back to lower case, and `key` to
+    /// the name Kimi Code derives for it. Kimi Code reads the credential
+    /// that pair names, so until this runs, sessions outside slots and
+    /// `KimiService.activeCredentialURL` read the slot's. Left alone when
+    /// the credential that spelling names holds a refresh token: then it is
+    /// a sign-in of Kimi Code's own, made with that spelling, not a slot.
+    func restoreSharedState() {
+        guard let configured = TOMLHookConfig.value(at: configFile, table: Self.providerTable, key: "base_url"),
+              Self.isSlotSpelling(configured), let canonical = Self.canonicalBaseURL(configured) else { return }
+        let oauthHost = TOMLHookConfig.value(at: configFile, table: KimiService.credentialTable, key: "oauth_host")
+            .flatMap { $0.isEmpty ? nil : $0 } ?? Self.defaultOAuthHost
+        let selected = home.appendingPathComponent("credentials/\(Self.credentialName(oauthHost: oauthHost, baseURL: configured)).json")
+        if let data = try? Data(contentsOf: selected),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let refresh = object["refresh_token"] as? String, !refresh.isEmpty {
+            return
+        }
+        do {
+            try TOMLHookConfig.setValue(at: configFile, table: Self.providerTable, key: "base_url", value: canonical, comment: nil)
+            try TOMLHookConfig.setValue(at: configFile, table: KimiService.credentialTable, key: "key",
+                                        value: "oauth/" + Self.credentialName(oauthHost: oauthHost, baseURL: canonical), comment: nil)
+            log.info("Kimi Code's config.toml put back on its own base URL after a slot's session wrote its own")
+        } catch {
+            log.warning("Kimi Code's config.toml not put back yet: \(error.localizedDescription)")
+        }
+    }
+
+    /// Exports the slot directory, then the pair from its files; a slot
+    /// whose files cannot be read runs the CLI unchanged.
+    func launcherExportLines(slot: String) -> [String] {
+        let base = Self.baseURLVariable, host = Self.oauthHostVariable
+        return [
+            "\(directoryVariable)=\(slot)",
+            "\(base)=$(cat \"\(slot)/\(Self.baseURLFile)\" 2>/dev/null) || exec \"$real\" \"$@\"",
+            "\(host)=$(cat \"\(slot)/\(Self.oauthHostFile)\" 2>/dev/null) || exec \"$real\" \"$@\"",
+            "[ -n \"$\(base)\" ] && [ -n \"$\(host)\" ] || exec \"$real\" \"$@\"",
+            "export \(directoryVariable) \(base) \(host)",
+        ]
+    }
+
+    func launchAssignments(forSlot directory: URL) -> [(name: String, value: String)] {
+        var assignments = [(name: directoryVariable, value: directory.path)]
+        if let selector = selector(in: directory) {
+            assignments += [(Self.baseURLVariable, selector.baseURL), (Self.oauthHostVariable, selector.oauthHost)]
+        }
+        return assignments
+    }
 
     /// Kimi Code reads the credential file before every model request.
     func signalReread(_ directory: URL) {}

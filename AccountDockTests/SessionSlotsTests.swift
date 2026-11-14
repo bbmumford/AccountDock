@@ -7,7 +7,7 @@ final class SessionSlotsTests: XCTestCase {
     func testOnlyProvidersWithSessionSlotsHaveThem() {
         XCTAssertNotNil(SessionSlots(.claudeCode, home: home))
         XCTAssertNil(SessionSlots(.codex, home: home))
-        XCTAssertNil(SessionSlots(.kimi, home: home))
+        XCTAssertNotNil(SessionSlots(.kimi, home: home))
     }
 
     func testKeychainServiceIsTheDefaultServiceAndEightHexDigitsOfThePathDigest() {

@@ -223,7 +223,7 @@ final class FailoverPlannerTests: XCTestCase {
         distributed.distributeSessions = true
         XCTAssertFalse(distributed.usesRouter(for: .claudeCode))
         XCTAssertTrue(distributed.usesRouter(for: .codex))
-        XCTAssertTrue(distributed.usesRouter(for: .kimi))
+        XCTAssertFalse(distributed.usesRouter(for: .kimi))
 
         var routed = policy
         routed.routeTarget = "kimi"

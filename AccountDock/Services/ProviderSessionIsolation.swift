@@ -22,11 +22,26 @@ protocol ProviderSessionIsolation: Sendable {
     /// slot root (`~/.accountdock/<executable>-slots`), and the name its
     /// processes are found by.
     var executable: String { get }
-    /// The environment variable naming the slot directory the CLI then
-    /// reads its credential from. The launcher exports it, and
+    /// The environment variable naming the slot directory a session runs
+    /// on. The launcher exports it (`launcherExportLines`), and
     /// `SessionSlots.directoriesByProcess` finds each process's slot by it
     /// in `ps -E` output.
     var directoryVariable: String { get }
+    /// Launcher lines that point the CLI at the slot directory the shell
+    /// expression `slot` names, ending with the exports, written into
+    /// `SessionSlots.launcherScript` where a slot was chosen; they may
+    /// `exec "$real" "$@"` to run the CLI unchanged when the slot cannot
+    /// be read. By default `directoryVariable` names the slot.
+    func launcherExportLines(slot: String) -> [String]
+    /// The variables a session started on the slot `directory` outside the
+    /// launcher sets, in order; read by `AppState.sessionLaunch`. By default
+    /// `directoryVariable` alone.
+    func launchAssignments(forSlot directory: URL) -> [(name: String, value: String)]
+    /// Puts back what a CLI running in a slot may have written into the
+    /// CLI's own settings that would make sessions outside slots read a
+    /// slot's credential. Called by `AppState.maintainSessionSlots` on every
+    /// pass; nothing by default.
+    func restoreSharedState()
     /// Variables that already decide the CLI's credential; a launch that
     /// sets any of them runs the CLI unchanged.
     var passThroughVariables: [String] { get }
@@ -84,4 +99,16 @@ protocol ProviderSessionIsolation: Sendable {
     /// for a CLI that does not read it again before each request on its
     /// own. Called by `SessionSlots.serve` after each write.
     func signalReread(_ directory: URL)
+}
+
+extension ProviderSessionIsolation {
+    func launcherExportLines(slot: String) -> [String] {
+        ["\(directoryVariable)=\(slot)", "export \(directoryVariable)"]
+    }
+
+    func launchAssignments(forSlot directory: URL) -> [(name: String, value: String)] {
+        [(directoryVariable, directory.path)]
+    }
+
+    func restoreSharedState() {}
 }

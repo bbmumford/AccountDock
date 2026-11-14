@@ -157,6 +157,7 @@ extension AppState {
     }
 
     private func maintainSessionSlots(_ provider: AIProviderType, slots: SessionSlots, now: Date) async {
+        await Task.detached(priority: .utility) { slots.isolation.restoreSharedState() }.value
         let inUse = Set((sessionSlotStates[provider]?.directoryByProcess ?? [:]).values)
         // The router's pool mirrors the slot pool of the provider it would
         // serve, so `applyRouterState` starts from it when the router is
@@ -668,7 +669,8 @@ extension AppState {
             sessionPins.save()
         }
         slotsLog.info("Slot claimed for a session started on \(messageName(account))\(pinned ? ", pinned there" : "")")
-        return start + "\(slots.isolation.directoryVariable)=\(Self.shellQuoted(slot.path)) \(Self.shellQuoted(cli))"
+        let assignments = slots.isolation.launchAssignments(forSlot: slot).map { "\($0.name)=\(Self.shellQuoted($0.value)) " }
+        return start + assignments.joined() + Self.shellQuoted(cli)
     }
 
     nonisolated static func shellQuoted(_ text: String) -> String {
