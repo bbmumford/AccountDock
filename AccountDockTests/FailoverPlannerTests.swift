@@ -798,6 +798,24 @@ final class FailoverPlannerTests: XCTestCase {
                      "an account of another provider, or one needing sign-in, does not take over")
     }
 
+    func testAnIdleAccountAtAModelLimitCountsAsAtALimit() throws {
+        let scoped = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(scopedResponse.utf8))
+        let atLimit = scoped.modelWeeklyLimits.contains { $0.percent >= AppState.atLimitPercent }
+            || (scoped.sevenDay?.utilization ?? 0) >= AppState.atLimitPercent
+        XCTAssertEqual(AppState.readingIsAtALimit(scoped), atLimit)
+        let spent = UsageAPIResponse(
+            fiveHour: nil, sevenDay: UsageWindow(utilization: 96, resetsAt: nil), sevenDayOauthApps: nil, sevenDayOpus: nil,
+            sevenDaySonnet: nil, sevenDayCowork: nil, iguanaNecktie: nil, extraUsage: nil
+        )
+        XCTAssertTrue(AppState.readingIsAtALimit(spent))
+        let roomy = UsageAPIResponse(
+            fiveHour: nil, sevenDay: UsageWindow(utilization: 40, resetsAt: nil), sevenDayOauthApps: nil, sevenDayOpus: nil,
+            sevenDaySonnet: nil, sevenDayCowork: nil, iguanaNecktie: nil, extraUsage: nil
+        )
+        XCTAssertFalse(AppState.readingIsAtALimit(roomy))
+        XCTAssertFalse(AppState.readingIsAtALimit(nil))
+    }
+
     func testAModelsOwnLimitIsReadAgainOnceTheLongWindowHasMoved() throws {
         let scoped = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(scopedResponse.utf8))
         XCTAssertFalse(scoped.modelWeeklyLimits.isEmpty)
