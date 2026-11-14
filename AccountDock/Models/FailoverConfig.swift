@@ -99,7 +99,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     /// no request through it, so with neither set the CLI reaches its
     /// provider directly and the router does not run.
     func usesRouter(for provider: AIProviderType) -> Bool {
-        routeTarget != nil || (distributeSessions && provider.capabilities.sessionSlots == nil)
+        routeTarget != nil || (distributeSessions && provider.capabilities.sessionIsolation == nil)
     }
 
     /// Whether the provider's CLI is to reach the router through its bridged

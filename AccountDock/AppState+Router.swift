@@ -599,8 +599,12 @@ extension AppState {
             return !accountCannotServe(destination, provider: provider, planner: planner, now: now, model: model)
         }
         for (id, account) in pendingPlacements(provider) where moves[id] == nil { moves[id] = account }
-        routerSessionMoves = movesSessions ? moves : [:]
-        slotSessionMoves = movesSessions ? [:] : moves
+        // The router's moves are the routed provider's alone: another
+        // provider's slot pool leaves them as they are.
+        if movesSessions || provider == AIProviderType.routedProvider {
+            routerSessionMoves = movesSessions ? moves : [:]
+        }
+        sessionSlotStates[provider, default: SessionSlotState()].sessionMoves = movesSessions ? [:] : moves
         // Without the router only sessions in one-session slots can move.
         let movable = movesSessions ? nil : Set((liveSessions[provider] ?? []).compactMap { session -> String? in
             guard let pid = session.processID, let directory = slotDirectoryByProcess[pid],

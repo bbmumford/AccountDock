@@ -38,10 +38,10 @@ extension AppState {
     }
 
     /// Whether the provider's sessions can be rebalanced: they run in
-    /// one-session slots (`ProviderCapabilities.sessionSlots`) and the
+    /// one-session slots (`ProviderCapabilities.sessionIsolation`) and the
     /// launcher is serving them.
     func rebalanceAvailable(_ provider: AIProviderType) -> Bool {
-        provider.capabilities.sessionSlots != nil && provider == AIProviderType.routedProvider && sessionSlotsInUse
+        sessionSlotsInUse(provider)
     }
 
     /// The plan for the provider's running slot sessions now.
