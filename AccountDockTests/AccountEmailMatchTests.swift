@@ -18,14 +18,6 @@ final class AccountEmailMatchTests: XCTestCase {
         XCTAssertFalse(source.matches(email: ""))
     }
 
-    func testTheOutgoingAccountIsBackedUpWhenTheLiveIdentityDiffersOnlyInCase() {
-        XCTAssertTrue(ClaudeService.backsUpLiveCredential(liveEmail: "dev.person@example.com", from: source, to: target))
-        XCTAssertFalse(ClaudeService.backsUpLiveCredential(liveEmail: "someone@example.com", from: source, to: target))
-        XCTAssertFalse(ClaudeService.backsUpLiveCredential(liveEmail: "?", from: source, to: target))
-        XCTAssertFalse(ClaudeService.backsUpLiveCredential(liveEmail: source.email, from: source, to: source),
-                       "restoring the same account never overwrites the backup being restored")
-    }
-
     func testASwitchReportedInAnotherCaseIsConfirmed() {
         XCTAssertNil(ClaudeService.verificationFailure(of: status(email: "OTHER@example.com"), switchingTo: target))
     }

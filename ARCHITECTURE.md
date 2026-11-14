@@ -100,7 +100,10 @@ Some data is the same for every provider by construction:
   `SessionAttribution` decides the account serving each session, for the
   account cards' counts, transcript learning, pacing, holds and moves alike:
   the slot it reads, else the router's account within ten minutes, else the
-  account its own status line matched by reset times, else the account its
+  account its own status line matched by reset times (never one of two
+  accounts sharing their weekly reset, as two sign-ins of one subscription do,
+  unless a session reset matches one alone: `AppState.matchByResets`), else
+  the account its
   last recorded request was on (both only when seen after its sessions were
   last signalled to read the sign-in again, and within a session window),
   else the live credential's owner, else the active account. A session on
@@ -163,9 +166,40 @@ macOS Keychain
   refused as a backup. Each backup keeps the previous complete token, and a
   restore whose stored token is incomplete uses that earlier copy.
 
-The token JSON carries no identity. AccountDock therefore only backs up the
-live token under an account after `oauthAccount` in `~/.claude.json` names that
-same account.
+The token JSON carries no identity, and running sessions on the shared sign-in
+renew the live token and write their own account into `~/.claude.json` at any
+moment, so neither the moment of a read nor the identity file says whose a live
+token is.
+
+Signing in a new Claude account and re-authenticating one never touch the live
+sign-in (`ClaudeIsolatedLogin`): `claude auth login` runs with
+`CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` both set to a new
+temporary directory. The CLI (read from its 2.1.311 build) then keeps the
+credential in the Keychain item `Claude Code-credentials-` plus the first eight
+hex digits of the SHA-256 of that path, the item the session slots use
+(`ClaudeSessionIsolation.keychainService`), or in `.credentials.json` there, and
+the identity in `.claude.json` inside `CLAUDE_CONFIG_DIR`. AccountDock reads
+both, asks the profile endpoint whose the credential is, saves it as that
+account's copy (a new account, a refreshed existing one, or the account being
+re-authenticated; another account's for a re-authentication saves nothing),
+and removes the directory and its Keychain item. No session can race the
+sign-in and no account has to be switched back afterwards; only the first
+account of the provider, or a re-authenticated active one, is installed as the
+live sign-in.
+
+Every capture of the live token itself (adding the account the CLI is signed
+in to, the backup of the outgoing account before a switch, the copy kept after
+one, a renewal of the live credential) goes through
+`AppState.captureOwnCredential`: the profile endpoint is asked whose the token
+is, and it is saved only as that account's copy. A token that is another saved
+account's is saved for that account instead when newer than its copy, and the
+slot is read again a second later, up to `captureAttempts` times; when it never
+is the account's, nothing is saved and adding the account says why.
+The identity saved is the live one when it names the account, else the one
+saved with its copy. A saved copy whose ownership the provider has not yet
+confirmed (no request allowance, or no answer) reads no usage for its account
+(`AppState.recordsReading`); the check is made again at the next reading, and a
+reading the user asks for always makes it.
 
 ### Token JSON format
 
@@ -196,7 +230,7 @@ The token stored in keychain is a single JSON object (captured from real keychai
 - `expiresAt` is a Unix timestamp in **milliseconds** (not seconds)
 - `scopes` is an **array of strings** (not a single string)
 - The token JSON does **NOT** contain email or account identity — the only way to determine which account a token belongs to is by calling `claude auth status` while that token is active
-- This lack of embedded identity is why AccountDock checks `oauthAccount` before it backs up a live token.
+- This lack of embedded identity is why AccountDock asks the profile endpoint whose a live token is before it saves it under an account.
 
 ### Codex and Kimi
 
@@ -249,11 +283,12 @@ refresh token (see [provider-cli-facts.md](docs/provider-cli-facts.md)).
 `ClaudeService.switchAccount(from:to:)` is transactional: it snapshots the live
 token and identity first and restores them if any later step fails.
 
-1. **Back up the source.** If `oauthAccount` names the source account, the live
-   token and identity are saved as its backup. When the source and target are
-   the same account (restoring the active profile), nothing is backed up: the
-   live credential is the one being replaced and must not overwrite the copy
-   being restored.
+1. **Back up the source.** Before the switch, `AppState.switchTo` saves the
+   live token as the source's copy only when the provider says it is the
+   source's (`captureOwnCredential`). When the source and target are the same
+   account (restoring the active profile), nothing is backed up: the live
+   credential is the one being replaced and must not overwrite the copy being
+   restored.
 2. **Read the target backup.** An incomplete stored token falls back to the
    backup's previous token; with neither, the switch stops.
 3. **Write.** The target token goes into `Claude Code-credentials` and the
@@ -261,9 +296,19 @@ token and identity first and restores them if any later step fails.
    that file, so `ClaudeIdentityFile` replaces the text of `oauthAccount` only,
    keeps every other byte and the file's permissions, and replaces the file
    only if it is unchanged since it was read, reading it again otherwise.
-4. **Verify.** `claude auth status` must report the target's email, in any
-   case, and be logged in, within `ClaudeService.cliTimeout`. Anything else,
-   a CLI that does not answer included, rolls back to the snapshot.
+4. **Verify** (`ClaudeService.verifySwitch`). The provider's profile
+   endpoint is asked whose the written token is (the token as `claude auth
+   status` refreshed it, when the written one had expired). Running sessions
+   rewrite `~/.claude.json` with their own account within a second of the
+   write, so the identity `claude auth status` reports cannot confirm or
+   refute a switch while sessions run. The profile naming the target
+   confirms it, and the target's identity is written again if a session
+   replaced it. The profile naming another account, or the provider
+   rejecting the token, rolls back to the snapshot and quarantines the
+   target (`AppState.switchFailureQuarantines`). When the profile cannot be
+   asked, `claude auth status` naming the target and logged in, within
+   `ClaudeService.cliTimeout`, confirms it; anything else rolls back without
+   quarantine (`switchUnconfirmed`).
 
 Running Claude Code processes keep the token they started with until they
 refresh it, so a switch moves new requests, not requests already in flight.
@@ -459,14 +504,29 @@ rule 1, but it never makes the exhausted move of rule 3, moves sessions off
 the account, or waits for a reset; the account serves on until a reading or a
 refusal shows the limit.
 
+Every switch destination must carry the work that moves to it
+(`FailoverPlanner.carries`): the shared group's rate (`expectedBurn`, the
+active account's burn less its slot sessions, beside the destination's own
+slot sessions) plus one deviation, or the destination's own measured rate when
+larger, for an hour (`projectedCarry`, the lifetime of the caches the move
+writes) or until the window resets when sooner, on each window it has: the
+5-hour window at the session rate, the weekly window at the weekly rate. An
+account without a 5-hour window has no learned session rate, so its weekly
+rate is converted by the plan's ratio. A rate that would spend a whole window
+within the hour needs room for as long as half an unused window would carry
+it (`burstCarryShare`). An account a few percent from its weekly limit passes
+the dwell margin of `tier` but is no destination.
+
 1. The active account crosses a threshold (or will within the lookahead):
-   switch to the first account below its thresholds, in the user's order.
+   switch to the first account below its thresholds that carries the work, in
+   the user's order.
 2. No such account: keep serving up to the provider's 100% limit. Moving to an
    account that is merely less full than its threshold adds no capacity and
    causes switch loops.
-3. At its limit: move to the usable account with the most headroom, if that
-   headroom covers the in-flight reserve, the switch cost and ten minutes of the
-   current burn. A smaller sliver would be spent before the move paid off.
+3. At its limit: move to the usable account with the most headroom that
+   carries the work, and has at least the in-flight reserve, the switch cost
+   and ten minutes of the moving burn (`destinationMinimum`). A smaller sliver
+   would be spent before the move paid off; with none, step 5 waits.
 4. Every allowance spent: serve on extra usage if the user allowed it and the
    monthly spending limit has room.
 5. Otherwise: wait for the account whose limiting windows all reset first. A
@@ -504,7 +564,13 @@ latestStart = R_w − (100 − w) / ((100 / k) / 5 h)
 
 where `R_w` is the weekly reset. An allowance that resets sooner, or that the
 5-hour cap could no longer drain in time, is used first. A minimum deadline
-advantage and dwell prevent oscillation.
+advantage and dwell prevent oscillation. Without a session window nothing caps
+the pace, so the latest start is the reset itself, and the event's figure
+("must start being used N hour(s) before …'s") is how much sooner the
+destination resets. A balance switch moves the whole shared group, so its
+destination must carry the moving work as any switch destination must
+(`FailoverPlanner.carries`); a remainder too small for that is spent by slot
+sessions and new sessions the pool sizes to it, never by the group.
 
 Whether an account has a session window is read from each reading, account by
 account, because a plan can drop it while others keep it (Claude's Ultra plan
@@ -790,13 +856,11 @@ the pool weights and which sessions move, each time the pool is rebuilt
   off for the provider or the active account locked, the group stays on the
   active account for the whole horizon. The active account's readings
   already include the group's rate, which its share counts instead.
-  A projected destination must carry the moving work, at its expected
-  burn plus one deviation, for an hour (`FailoverPlanner.carries`,
-  `projectedCarry`, the lifetime of the caches the move writes); an
-  account a few percent short of its limit passes `plan`'s dwell margin
-  but is not projected. The account projected last time
+  `plan` switches only to a destination that carries the moving work
+  (`FailoverPlanner.carries`, above), so the projected account is the one
+  the switch will pick. The account projected last time
   (`AppState.sharedGroupDestination`) stays projected while `plan` would
-  still switch to it and it carries the work, unless the account `plan`
+  still switch to it, unless the account `plan`
   prefers has twice its headroom (`projectionPreference`), so the room the
   pacer keeps does not move between accounts from cycle to cycle.
   While the group is projected to move, new sessions go by the room each

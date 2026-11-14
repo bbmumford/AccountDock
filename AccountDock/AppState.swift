@@ -891,12 +891,9 @@ final class AppState: ObservableObject {
             log.info("[addAccount] Created account model, id=\(account.id)")
 
             log.info("[addAccount] Capturing token from keychain...")
-            let captured = claudeService.captureCurrentCredentials(
-                forAccountId: account.id.uuidString,
-                expectedEmail: account.email
-            )
-            if !captured {
-                errorMessage = String(localized: "Could not capture auth token from keychain", bundle: L10n.bundle)
+            let captured = await captureOwnCredential(of: account)
+            if captured != .saved {
+                errorMessage = Self.captureFailure(captured, account: account)
                 log.error("[addAccount] Token capture failed!")
                 return
             }
@@ -924,76 +921,39 @@ final class AppState: ObservableObject {
         guard let loginID = beginLoginAttempt() else { return }
         defer { finishLoginAttempt(loginID) }
 
-        // The account to put back once the new one has signed in, when its
-        // live sign-in could be saved first.
-        var displacedByLogin: Account?
         do {
-            // 1. Back up current account (token + oauthAccount) before login overwrites them
-            if let current = activeAccount(for: .claudeCode) {
-                log.info("[loginNewAccount] Step 1: Backing up current account (\(current.email))...")
-                let backed = claudeService.captureCurrentCredentials(
-                    forAccountId: current.id.uuidString,
-                    expectedEmail: current.email
-                )
-                if backed { displacedByLogin = current }
-                log.info("[loginNewAccount] Step 1: Backup result: \(backed)")
-            } else {
-                log.info("[loginNewAccount] Step 1: No active account, skipping backup")
-            }
-
-            // 2. Run `claude auth login` — this overwrites both keychain and ~/.claude.json
-            log.info("[loginNewAccount] Step 2: Running `claude auth login`...")
-            try await claudeService.login()
-            log.info("[loginNewAccount] Step 2: Login process completed")
-
-            // 3. Read the new identity from ~/.claude.json
-            log.info("[loginNewAccount] Step 3: Reading post-login state...")
-            let status = try await claudeService.getAuthStatus()
-            guard status.loggedIn, let email = status.email else {
-                errorMessage = String(localized: "Login did not complete", bundle: L10n.bundle)
-                log.error("[loginNewAccount] Step 3: Not logged in after login!")
+            // The sign-in runs isolated (`ClaudeIsolatedLogin`): the live
+            // sign-in and every session on it are left as they are.
+            log.info("[loginNewAccount] Running isolated `claude auth login`...")
+            let (signIn, outcome) = try await isolatedClaudeSignIn(reauthenticating: nil)
+            switch outcome {
+            case .wrongAccount:
                 return
-            }
-            log.info("[loginNewAccount] Step 3: Logged in as \(email)")
-
-            // 4. Check for duplicate — if exists, just refresh its backup
-            if let existing = accounts.firstIndex(where: { $0.provider == .claudeCode && $0.matches(email: email) }) {
-                log.info("[loginNewAccount] Step 4: Account already exists, refreshing backup")
-                _ = claudeService.captureCurrentCredentials(
-                    forAccountId: accounts[existing].id.uuidString,
-                    expectedEmail: accounts[existing].email
-                )
-                await keepActiveAfterAdding(accounts[existing].id, previous: displacedByLogin)
+            case .refresh(let id):
+                log.info("[loginNewAccount] Account already exists, refreshing its saved sign-in")
+                guard let existing = accounts.first(where: { $0.id == id }) else { return }
+                saveIsolatedSignIn(signIn, for: existing)
                 errorMessage = String(localized: "Account already exists - credentials refreshed", bundle: L10n.bundle)
                 return
+            case .add(let email):
+                let orgName = signIn.identity["organizationName"]?.value as? String
+                // The first account of the provider becomes the active one;
+                // any other is added beside the account in use.
+                let first = !accounts.contains { $0.provider == .claudeCode }
+                let account = Account(
+                    email: email,
+                    displayName: orgName ?? email,
+                    provider: .claudeCode,
+                    orgName: orgName,
+                    subscriptionType: ClaudeIsolatedLogin.subscriptionType(of: signIn.token),
+                    isActive: first
+                )
+                accounts.append(account)
+                excludeAddedAccountFromFailover(account)
+                saveIsolatedSignIn(signIn, for: account)
+                saveAccounts(refreshWidget: true)
+                log.info("[loginNewAccount] Added \(account.id) (active: \(first)). Total: \(self.accounts.count)")
             }
-
-            // 5. Create new account and capture credentials (token + oauthAccount)
-            let account = Account(
-                email: email,
-                displayName: status.orgName ?? email,
-                provider: .claudeCode,
-                orgName: status.orgName,
-                subscriptionType: status.subscriptionType,
-                isActive: true
-            )
-            log.info("[loginNewAccount] Step 5: Created account, id=\(account.id)")
-
-            let captured = claudeService.captureCurrentCredentials(
-                forAccountId: account.id.uuidString,
-                expectedEmail: account.email
-            )
-            if !captured {
-                errorMessage = String(localized: "Could not capture credentials", bundle: L10n.bundle)
-                log.error("[loginNewAccount] Step 5: Capture failed!")
-                return
-            }
-
-            // 6. Mark new account as active
-            accounts.append(account)
-            excludeAddedAccountFromFailover(account)
-            await keepActiveAfterAdding(account.id, previous: displacedByLogin)
-            log.info("[loginNewAccount] Step 6: New account active. Total: \(self.accounts.count)")
 
             finishLoginAttempt(loginID)
             await refresh()
@@ -1305,6 +1265,14 @@ final class AppState: ObservableObject {
             return
         }
 
+        // The outgoing account's live credential is saved as its copy only
+        // when the provider says it is that account's: sessions on the
+        // shared sign-in rewrite the slot and the identity file at any time.
+        if currentActive.id != account.id {
+            let backup = await captureOwnCredential(of: currentActive)
+            log.info("[switchTo] Backup of the outgoing account: \(String(describing: backup))")
+        }
+
         do {
             let status = try await claudeService.switchAccount(from: currentActive, to: account)
             rejectedCredentialAccounts.remove(account.id)
@@ -1343,10 +1311,7 @@ final class AppState: ObservableObject {
             }
             // Preserve any token rotation performed while validating the newly
             // active profile so the managed copy is current on the next switch.
-            _ = claudeService.captureCurrentCredentials(
-                forAccountId: account.id.uuidString,
-                expectedEmail: account.email
-            )
+            _ = await captureOwnCredential(of: account)
             saveAccounts()
             await routerFollowActiveAccount()
 
@@ -1357,14 +1322,26 @@ final class AppState: ObservableObject {
             log.info("[switchTo] ===== Switch completed =====")
         } catch {
             errorMessage = error.localizedDescription
-            switch error {
-            case ClaudeServiceError.switchVerificationFailed, ClaudeServiceError.switchWrongAccount,
-                 ClaudeServiceError.noTokenForAccount:
+            if Self.switchFailureQuarantines(error) {
                 quarantineCredentials(of: account, reason: error.localizedDescription)
-            default:
-                break
             }
             log.error("[switchTo] Switch failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Whether a failed Claude switch (`ClaudeService.switchAccount`) shows
+    /// the target's saved credential unusable, so the target is kept from
+    /// automatic switching until it signs in again: no saved credential,
+    /// the provider rejecting it, or the provider naming another account
+    /// as its owner. A switch nothing confirmed or refuted quarantines
+    /// nothing.
+    nonisolated static func switchFailureQuarantines(_ error: Error) -> Bool {
+        switch error {
+        case ClaudeServiceError.switchVerificationFailed, ClaudeServiceError.switchWrongAccount,
+             ClaudeServiceError.noTokenForAccount:
+            true
+        default:
+            false
         }
     }
 
@@ -1389,73 +1366,18 @@ final class AppState: ObservableObject {
         guard let loginID = beginLoginAttempt() else { return }
         defer { finishLoginAttempt(loginID) }
 
-        // The account to put back once `account` has signed in, when its
-        // live sign-in could be saved first.
-        var displaced: Account?
         do {
-            // 1. Back up current active account before login overwrites it
-            if let current = activeAccount(for: .claudeCode), current.id != account.id {
-                log.info("[reauth] Backing up current account before login...")
-                let preserved = claudeService.captureCurrentCredentials(
-                    forAccountId: current.id.uuidString,
-                    expectedEmail: current.email
-                )
-                if preserved { displaced = current }
-                if !preserved {
-                    log.warning("[reauth] Skipped pre-login backup because the live identity does not match the selected account")
-                }
-            }
-
-            // 2. Run login
-            log.info("[reauth] Running `claude auth login`...")
-            try await claudeService.login()
-
-            // 3. Verify the login result matches the target account
-            let status = try await claudeService.getAuthStatus()
-            guard status.loggedIn, let email = status.email else {
-                errorMessage = String(localized: "Login did not complete", bundle: L10n.bundle)
-                return
-            }
-
-            guard account.matches(email: email) else {
-                errorMessage = String(localized: "Logged in as \(email), but expected \(account.email). Credentials not updated.", bundle: L10n.bundle)
-                log.error("[reauth] Email mismatch: got \(email), expected \(account.email)")
-                return
-            }
-
-            // 4. Capture the fresh token
-            let captured = claudeService.captureCurrentCredentials(
-                forAccountId: account.id.uuidString,
-                expectedEmail: account.email
-            )
-            log.info("[reauth] Token capture result: \(captured)")
-            if captured { noteLiveCredentialOwner(.claudeCode, account: account.id) }
-            rejectedCredentialAccounts.remove(account.id)
-            credentialQuarantine[account.id] = nil
-
-            // 5. Update account metadata
+            // The sign-in runs isolated (`ClaudeIsolatedLogin`): the active
+            // account and every session on the shared sign-in stay as they
+            // are, so nothing needs putting back.
+            log.info("[reauth] Running isolated `claude auth login`...")
+            let (signIn, outcome) = try await isolatedClaudeSignIn(reauthenticating: account)
+            guard case .refresh = outcome else { return }
+            saveIsolatedSignIn(signIn, for: account)
             if let index = accounts.firstIndex(where: { $0.id == account.id }) {
-                accounts[index].orgName = status.orgName
-                accounts[index].subscriptionType = status.subscriptionType
-
-                // Mark this account as active (it's what the CLI is now using)
-                accounts.makeActive(account.id)
+                if let orgName = signIn.identity["organizationName"]?.value as? String { accounts[index].orgName = orgName }
+                if let plan = ClaudeIsolatedLogin.subscriptionType(of: signIn.token) { accounts[index].subscriptionType = plan }
                 saveAccounts()
-            }
-
-            // The login left the CLI signed in as `account`, and every
-            // session on the CLI's own credential follows that sign-in. The
-            // account that was active is put back, so renewing one account's
-            // sign-in moves no session; sessions that read the credential
-            // meanwhile are told to read it again.
-            if let displaced {
-                await performSwitch(to: displaced, refreshAfter: false)
-                if activeAccount(for: .claudeCode)?.id == displaced.id {
-                    moveRunningSessions(.claudeCode, from: account.id)
-                    log.info("[reauth] Put the account that was active back")
-                } else {
-                    failoverEvents.record(.claudeCode, "\(messageName(account)) signed in again and is now the active account, because \(messageName(displaced)) could not be put back; sessions on the shared sign-in follow it.")
-                }
             }
 
             finishLoginAttempt(loginID)
@@ -1690,8 +1612,14 @@ final class AppState: ObservableObject {
             log.warning("[fetchUsage] No token for \(account.email), skipping")
             return .skipped
         }
-        if usesSavedCopy, !(await savedCopyIsOwn(account, tokenJSON: tokenJSON, accessToken: accessToken, forced: forced)) {
-            return .credentialRejected("This account's saved sign-in was another account's. Sign it in again.")
+        if usesSavedCopy {
+            let check = await savedCopyIsOwn(account, tokenJSON: tokenJSON, accessToken: accessToken, forced: forced)
+            if check == .notOwn {
+                return .credentialRejected("This account's saved sign-in was another account's. Sign it in again.")
+            }
+            // A copy not yet checked may be another account's, whose usage
+            // its reading would show as this account's.
+            guard Self.recordsReading(after: check) else { return .skipped }
         }
         setRateLimitTier(ClaudeService.rateLimitTier(from: tokenJSON), for: account.id)
         if includeMetadata, shouldCheckClaudeProfile(account, forced: forced),
@@ -2322,11 +2250,8 @@ final class AppState: ObservableObject {
                 isActive: true
             )
             accounts.append(account)
-            _ = claudeService.captureCurrentCredentials(
-                forAccountId: account.id.uuidString,
-                expectedEmail: account.email
-            )
             saveAccounts()
+            Task { _ = await self.captureOwnCredential(of: account) }
             log.info("[updateActiveAccount] Auto-created first account, id=\(account.id)")
         } else {
             log.info("[updateActiveAccount] Logged-in account not in our list (might be new)")
