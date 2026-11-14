@@ -75,7 +75,8 @@ struct QuotaTrend: Codable, Equatable {
             sessionBurnVariance = 0
             sessionRates = nil
         }
-        if Self.startsWindow(session, usage.fiveHour, at: date) || Self.startsWindow(weekly, usage.sevenDay, at: date) {
+        if Self.startsWindow(session, usage.fiveHour, at: date) || Self.startsWindow(weekly, usage.sevenDay, at: date)
+            || Self.refills(session, usage.fiveHour) || Self.refills(weekly, usage.sevenDay) {
             settle(at: date)
         }
         let settling = settlesAt.map { date < $0 } ?? false
@@ -127,12 +128,34 @@ struct QuotaTrend: Codable, Equatable {
         ratioBase = current
     }
 
-    /// Starts a settle period: readings until `settlePeriod` from `date`
-    /// move the baselines without teaching a rate. `AppState.endPause`
-    /// calls it for the accounts whose sessions resume.
-    mutating func settle(at date: Date) {
-        let until = date.addingTimeInterval(Self.settlePeriod)
+    /// Starts a settle period: readings until `period` from `date` move the
+    /// baselines without teaching a rate. `AppState.endPause` and
+    /// `admitPausedSessions` call it for the accounts whose sessions
+    /// resume, `AppState.serveSessionSlots` for an account a slot session
+    /// moves to, and a failover switch for the account it makes active,
+    /// with `arrivalSettlePeriod`.
+    mutating func settle(at date: Date, for period: TimeInterval = settlePeriod) {
+        let until = date.addingTimeInterval(period)
         settlesAt = max(settlesAt ?? until, until)
+    }
+
+    /// How long readings teach no rate after a switch brings the sessions
+    /// on the shared sign-in to an account: each writes its whole context
+    /// into the account's cache at its first request there, and a session
+    /// between turns sends that request minutes later, so the readings rise
+    /// several times faster than the work's own rate for longer than
+    /// `settlePeriod`.
+    static let arrivalSettlePeriod: TimeInterval = 10 * 60
+
+    /// Whether `window` shows less use than `sample` within the same
+    /// window: a reset granted before the scheduled one, which can leave
+    /// the reset time where it was. The sessions sent to the account once
+    /// it has room again write their contexts there, as after a window
+    /// starts.
+    private static func refills(_ sample: Sample?, _ window: UsageWindow?) -> Bool {
+        guard let sample, let window, let value = window.utilization else { return false }
+        let next = Sample(utilization: value, reset: window.resetsAtDate, at: sample.at)
+        return sameWindow(sample, next) && value < sample.utilization - wholePoint
     }
 
     /// Moves the baseline to this reading without learning a rate. Used while
