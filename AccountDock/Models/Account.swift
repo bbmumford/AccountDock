@@ -45,6 +45,16 @@ struct Account: Identifiable, Codable, Hashable {
         return subscriptionType?.prefix(1).uppercased().appending(subscriptionType?.dropFirst() ?? "")
     }
 
+    /// The plan's allowance relative to the provider's other plans
+    /// (`ProviderCapabilities.planSizes`), by its plan and tier or its plan
+    /// alone; nil when the provider's table does not know it.
+    var planSize: Double? {
+        guard let plan = subscriptionType?.lowercased() else { return nil }
+        let sizes = provider.capabilities.planSizes
+        if let tier = rateLimitTier, let size = sizes["\(plan):\(tier)"] { return size }
+        return sizes[plan]
+    }
+
     /// Whether this profile is a viable destination for provider workloads.
     /// A ChatGPT Free login remains a valid identity, but does not provide the
     /// Codex subscription capacity needed for account switching/failover.

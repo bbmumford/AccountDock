@@ -132,7 +132,8 @@ struct QuotaTrend: Codable, Equatable {
     /// baselines without teaching a rate. `AppState.endPause` and
     /// `admitPausedSessions` call it for the accounts whose sessions
     /// resume, `AppState.serveSessionSlots` for an account a slot session
-    /// moves to, and a failover switch for the account it makes active,
+    /// moves to, `AppState.routedArrival` for an account the router moves a
+    /// session to, and a failover switch for the account it makes active,
     /// with `arrivalSettlePeriod`.
     mutating func settle(at date: Date, for period: TimeInterval = settlePeriod) {
         let until = date.addingTimeInterval(period)

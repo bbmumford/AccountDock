@@ -105,7 +105,7 @@ extension AppState {
         }
         return states.map { state in
             var state = state
-            state.stayingSessionBurnPerHour = (tokens[state.id] ?? 0) / 1_000_000 * turnCostModel.ratio(for: state.id)
+            state.stayingSessionBurnPerHour = (tokens[state.id] ?? 0) / 1_000_000 * accountRatio(state.id)
             return state
         }
     }

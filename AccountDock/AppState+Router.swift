@@ -486,6 +486,17 @@ extension AppState {
         let othersLowOnWeek = Self.weeklyRoomIsLow(candidates.filter { !draining.contains($0.0.id) }.map { candidate in
             states[candidate.0.id].flatMap { planner.projection($0, now: now)?.weekly }
         })
+        // Which candidates can carry one more session of the running
+        // sessions' typical rate for `SessionPacer.newSessionRunway` beside
+        // their own rate; the rest take none while one can.
+        let typical = SessionPacer.typicalNewSessionRate(pacerSessions(provider, now: now))
+        let carrying = Set(candidates.compactMap { candidate -> UUID? in
+            let id = candidate.0.id
+            guard let state = states[id], let projection = planner.projection(state, now: now) else { return nil }
+            return Self.carriesNewSession(headroom: planner.headroom(state, projection),
+                                          burn: planner.expectedSessionBurn(of: state),
+                                          newSessionBurn: typical / 1_000_000 * accountRatio(id)) ? id : nil
+        })
         var members: [RouterPoolMember] = []
         for (account, tier, latestStart) in candidates {
             let name = Self.poolTokenFile(account)
@@ -496,7 +507,8 @@ extension AppState {
             let weight = Self.poolWeight(
                 tier: tier, urgent: latestStart.timeIntervalSince(now) < 24 * 60 * 60, anyBelow: anyBelow,
                 forecastAtLimit: forecastAtLimit.contains(account.id), anyOpen: anyOpen,
-                draining: draining.contains(account.id), othersLowOnWeeklyRoom: othersLowOnWeek
+                draining: draining.contains(account.id), othersLowOnWeeklyRoom: othersLowOnWeek,
+                shortOfRunway: !carrying.contains(account.id) && !carrying.isEmpty
             ) * (confidence[account.id] ?? 1)
             members.append(RouterPoolMember(accountID: account.id.uuidString, tokenFile: name, weight: weight))
         }
@@ -532,16 +544,29 @@ extension AppState {
 
     /// An account's weight in the pool `buildPool` writes, before pacing.
     /// One the forecast has at its limit takes no new session while another
-    /// is not so forecast; a draining one above its thresholds takes
-    /// `drainingShare`, or `drainingPreferred` when the others are low on
-    /// weekly room; one below its thresholds takes 1, or 2 when its
-    /// allowance must start being used within a day; one above them takes
-    /// none while another is below.
+    /// is not so forecast, and one `shortOfRunway` (it cannot carry one
+    /// more typical session for `SessionPacer.newSessionRunway` while
+    /// another can, `carriesNewSession`) takes none: whatever its tier or
+    /// drain, the session would be refused there, or moved and made to
+    /// write its cache again, within the hour. Otherwise a draining one
+    /// above its thresholds takes `drainingShare`, or `drainingPreferred`
+    /// when the others are low on weekly room; one below its thresholds
+    /// takes 1, or 2 when its allowance must start being used within a day;
+    /// one above them takes none while another is below. `SessionPacer`
+    /// applies the same runway to the weights it paces.
     nonisolated static func poolWeight(tier: QuotaTier, urgent: Bool, anyBelow: Bool, forecastAtLimit: Bool, anyOpen: Bool,
-                                       draining: Bool, othersLowOnWeeklyRoom: Bool) -> Double {
+                                       draining: Bool, othersLowOnWeeklyRoom: Bool, shortOfRunway: Bool = false) -> Double {
         if forecastAtLimit && anyOpen { return 0 }
+        if shortOfRunway { return 0 }
         if draining && tier == .usable { return othersLowOnWeeklyRoom ? drainingPreferred : drainingShare }
         return tier == .belowTrigger ? (urgent ? 2 : 1) : (anyBelow ? 0 : 1)
+    }
+
+    /// Whether an account with `headroom` session percent left, spending
+    /// `burn` percent an hour, carries one more session spending
+    /// `newSessionBurn` for `SessionPacer.newSessionRunway`.
+    nonisolated static func carriesNewSession(headroom: Double, burn: Double, newSessionBurn: Double) -> Bool {
+        headroom >= (max(0, burn) + newSessionBurn) * SessionPacer.newSessionRunway / 3600
     }
 
     /// Whether every one of `weekly` (accounts' long-window use, nil when
@@ -595,9 +620,18 @@ extension AppState {
         if let shared { sessions.removeAll { shared.members.contains($0.id) } }
         noteSharedGroup(shared?.group, provider: provider)
         let pinned = Set(sessionPins.pinned(provider).keys)
-        let plan = SessionPacer().plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
-                                       fixed: pinned)
         let onDraining = Set(sessions.filter { draining.contains($0.account) }.map(\.id))
+        // Without the router only sessions in one-session slots can move.
+        let movable = movesSessions ? nil : Set((liveSessions[provider] ?? []).compactMap { session -> String? in
+            guard let pid = session.processID, let directory = slotDirectoryByProcess[pid],
+                  let root = SessionSlots(provider)?.sessionRoot.path, directory.hasPrefix(root + "/") else { return nil }
+            return session.sessionID
+        })
+        let remainders = movable.flatMap { slotted in
+            remainderSpending(provider, pooled: Set(paced.map(\.id)), slotted: slotted.subtracting(onDraining), now: now)
+        }
+        let plan = SessionPacer().plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
+                                       fixed: pinned, remainders: remainders)
         // A session is never moved to an account without allowance for the
         // model it uses, nor off a draining account before its limit.
         var moves = plan.moves.filter { session, destination in
@@ -612,23 +646,26 @@ extension AppState {
             routerSessionMoves = movesSessions ? moves : [:]
         }
         sessionSlotStates[provider, default: SessionSlotState()].sessionMoves = movesSessions ? [:] : moves
-        // Without the router only sessions in one-session slots can move.
-        let movable = movesSessions ? nil : Set((liveSessions[provider] ?? []).compactMap { session -> String? in
-            guard let pid = session.processID, let directory = slotDirectoryByProcess[pid],
-                  let root = SessionSlots(provider)?.sessionRoot.path, directory.hasPrefix(root + "/") else { return nil }
-            return session.sessionID
-        })
+        sessionSlotStates[provider, default: SessionSlotState()].remainderMoves = movesSessions ? [:]
+            : plan.remainders.reduce(into: [:]) { result, entry in
+                let (session, remainder) = entry
+                guard moves[session] == remainder.account else { return }
+                let weekly = states[remainder.account].flatMap { planner.projection($0, now: now)?.weekly }
+                result[session] = RemainderMove(account: remainder.account,
+                                                percentLeft: max(1, Int((100 - (weekly ?? 99)).rounded())),
+                                                resetsAt: remainder.resetsAt)
+            }
         for (id, outlook) in plan.shedding where !pacingShedding.contains(id) {
-            guard let account = accounts.first(where: { $0.id == id }), let limitAt = outlook.limitAt else { continue }
-            let time = limitAt.formatted(date: .omitted, time: .shortened)
-            let wait = Int((outlook.waitAtLimit / 60).rounded())
+            guard let account = accounts.first(where: { $0.id == id }), let limitAt = outlook.limitAt,
+                  let reason = plan.shedReasons[id] else { continue }
             let moving = moves.keys.filter {
                 sessionRates.entries[$0]?.account == id && (movable?.contains($0) ?? true)
             }.count
             let outcome = movesSessions || moving > 0
                 ? "\(moving) session(s) move to other accounts at their next turn."
                 : "new sessions start on other accounts."
-            failoverEvents.record(provider, "At its sessions' current rate \(messageName(account)) would reach its limit at \(time), \(wait) min before that window resets; \(outcome)")
+            failoverEvents.record(provider, Self.sheddingEvent(account: messageName(account), allowance: nil, limitAt: limitAt,
+                                                               reason: reason, outcome: outcome, now: now))
         }
         pacingShedding = Set(plan.shedding.keys)
         var scopedShedding = Set<String>()
@@ -637,18 +674,17 @@ extension AppState {
                 let mark = id.uuidString + "|" + key
                 scopedShedding.insert(mark)
                 guard !pacingScopedShedding.contains(mark), let account = accounts.first(where: { $0.id == id }),
-                      let limitAt = outlook.limitAt else { continue }
+                      let limitAt = outlook.limitAt, let reason = plan.scopedShedReasons[id]?[key] else { continue }
                 let name = accountUsage[id]?.modelWeeklyLimits.first { $0.model.lowercased() == key }?.model ?? key
                 let moving = moves.keys.filter {
                     sessionRates.entries[$0]?.account == id && (movable?.contains($0) ?? true)
                         && sessionModel($0, now: now)?.lowercased().contains(key) == true
                 }.count
-                let time = limitAt.formatted(date: .omitted, time: .shortened)
-                let wait = Int((outlook.waitAtLimit / 60).rounded())
                 let outcome = moving > 0
                     ? "\(moving) \(name) session(s) move to other accounts at their next turn, and new \(name) sessions start elsewhere."
                     : "new \(name) sessions start elsewhere."
-                failoverEvents.record(provider, "At its \(name) sessions' current rate \(messageName(account)) would use up its \(name) allowance at \(time), \(wait) min before it resets; \(outcome)")
+                failoverEvents.record(provider, Self.sheddingEvent(account: messageName(account), allowance: name, limitAt: limitAt,
+                                                                   reason: reason, outcome: outcome, now: now))
             }
         }
         pacingScopedShedding = scopedShedding
@@ -666,13 +702,96 @@ extension AppState {
         }
     }
 
+    /// Whether a routed session reaching `account` arrives there from
+    /// another account, as one the router moves (`RouterState.moves`) does:
+    /// it was last seen on another. The arrival's account then starts a
+    /// settle period (`QuotaTrend.settle`), as a failover switch or a slot
+    /// session's move starts one, so the cache rewrite its first requests
+    /// bring is not learned as the account's rate. A session seen for the
+    /// first time arrives nowhere.
+    nonisolated static func routedArrival(_ session: String, on account: UUID,
+                                          seen: [String: (account: UUID, at: Date)]) -> Bool {
+        guard let previous = seen[session] else { return false }
+        return previous.account != account
+    }
+
+    /// The event for an account giving sessions up (`SessionPacer.Plan`):
+    /// when it reaches its limit, or the limit of the `allowance` only one
+    /// model's sessions draw on, and why moving its sessions keeps the work
+    /// running longer (`reason`), then `outcome`.
+    nonisolated static func sheddingEvent(account: String, allowance: String?, limitAt: Date,
+                                          reason: SessionPacer.ShedReason, outcome: String, now: Date) -> String {
+        func when(_ date: Date) -> String {
+            Calendar.current.isDate(date, inSameDayAs: now)
+                ? date.formatted(date: .omitted, time: .shortened)
+                : date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+        }
+        let reaches = allowance.map { "At its \($0) sessions' current rate \(account) would use up its \($0) allowance" }
+            ?? "At its sessions' current rate \(account) would reach its limit"
+        let why = switch reason {
+        case .poolRunsOut(let end):
+            "while the other accounts still have room (together they last until \(when(end))), so moving its sessions keeps the work running longer"
+        case .sharedGroupSwitch(let at):
+            "before the sessions on the shared sign-in are due to move off it at \(when(at)), so moving its own sessions puts that switch off"
+        }
+        return "\(reaches) at \(when(limitAt)), \(why); \(outcome)"
+    }
+
+    /// A slot session moving to spend an allowance that would otherwise
+    /// expire: the account, the whole percent of its week left, and when
+    /// that week resets, for `remainderMoveEvent`.
+    struct RemainderMove: Equatable {
+        var account: UUID
+        var percentLeft: Int
+        var resetsAt: Date
+    }
+
+    /// What `SessionPacer.plan` may spend on allowances that would
+    /// otherwise expire, with intelligent balancing on: the pool's accounts
+    /// (`pooled`) other than the active one that cannot carry the work a
+    /// switch would move there (`FailoverPlanner.carries`, judged as
+    /// `nextActiveSwitch` judges it, slot sessions staying where they are),
+    /// leaving out any a session moved to for a remainder within
+    /// `balanceMoveInterval`; and the `slotted` sessions not mid-turn. A
+    /// balance switch moves the whole shared group, so such an account's
+    /// remainder is otherwise left to expire. Nil when balancing is off or
+    /// no account qualifies.
+    func remainderSpending(_ provider: AIProviderType, pooled: Set<UUID>, slotted: Set<String>,
+                           now: Date) -> SessionPacer.RemainderSpending? {
+        let policy = failoverConfig.policy(for: provider)
+        guard policy.intelligentBalancingEnabled, !slotted.isEmpty,
+              let active = activeAccount(for: provider)?.id else { return nil }
+        let planner = FailoverPlanner(settings: plannerSettings(provider))
+        let ladder = accounts.filter { $0.provider == provider && ($0.id == active || pooled.contains($0.id)) }
+        let states = withStayingBurns(ladder.map { quotaState(for: $0, now: now) }, provider: provider, now: now)
+        guard let current = states.first(where: { $0.id == active }) else { return nil }
+        let small = Set(states.filter { state in
+            state.id != active && !planner.carries(state, from: current, at: now)
+                && (remainderMovedAt[state.id].map { now.timeIntervalSince($0) >= Self.balanceMoveInterval } ?? true)
+        }.map(\.id))
+        guard !small.isEmpty else { return nil }
+        let working = Set((liveSessions[provider] ?? []).filter(\.isWorking).map(\.sessionID))
+        return SessionPacer.RemainderSpending(accounts: small, sessions: slotted.subtracting(working))
+    }
+
+    /// The event for a slot session moved to spend what an account has
+    /// left before its weekly reset (`RemainderMove`), recorded by
+    /// `serveSessionSlots`.
+    nonisolated static func remainderMoveEvent(session: String, account: String, percentLeft: Int, resetsAt: Date,
+                                               now: Date) -> String {
+        let when = Calendar.current.isDate(resetsAt, inSameDayAs: now)
+            ? "at " + resetsAt.formatted(date: .omitted, time: .shortened)
+            : "on " + resetsAt.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+        return "Moved \(session) (light use) to \(account) to use its last \(percentLeft)% before it resets \(when); it rebuilds its cache there."
+    }
+
     /// The account as `SessionPacer` sees it: its windows projected to now,
     /// its observed rate less what sessions that just left it took, and its
     /// own token cost.
     func pacerAccount(_ id: UUID, state: QuotaAccountState, weight: Double, planner: FailoverPlanner, now: Date) -> SessionPacer.Account {
         let projection = planner.projection(state, now: now)
         let perWeekly = state.sessionPerWeekly ?? FailoverPlanner.defaultSessionPerWeekly
-        let ratio = turnCostModel.ratio(for: id)
+        let ratio = accountRatio(id)
         let limit = SessionPacer().limit
         // Each model's own weekly allowance, in the unit of
         // `weeklyRemaining`, up to the same share of it as `limit`.
@@ -929,6 +1048,11 @@ extension AppState {
             let accountID = event.accountID.flatMap(UUID.init(uuidString:))
                 ?? event.detail.flatMap { credentialFingerprints[$0] }
             if let session = event.session, let accountID, event.kind == .assigned || event.kind == .turnUsage {
+                // A session the router moved writes its whole context into
+                // the new account's cache at its first request there.
+                if Self.routedArrival(session, on: accountID, seen: routedSessionSeen) {
+                    quotaTrends[accountID]?.settle(at: event.at)
+                }
                 routedSessionSeen[session] = (accountID, event.at)
             }
             switch event.kind {
