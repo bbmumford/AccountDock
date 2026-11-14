@@ -146,6 +146,43 @@ final class FailoverPlannerTests: XCTestCase {
         XCTAssertEqual(p.servingVerdict(spentModel, now: now, lead: 0), .atLimit)
     }
 
+    func testTwoStatusesAlternatingEachCycleRecordNoStreamOfEvents() {
+        var gate = AppState.StatusEventGate()
+        let exhausted = "All accounts exhausted. Waiting for A to reset at 9:00."
+        let draining = "Using A up to its limit; no other account is below its failover threshold."
+        var events: [String] = []
+        var t = now
+        func note(_ status: String) {
+            if let event = gate.note(status, now: t, settle: AppState.statusSettle) { events.append(event) }
+            t = t.addingTimeInterval(20)
+        }
+        // The first status is recorded once it has stood for a cycle.
+        for _ in 0..<8 { note(draining) }
+        XCTAssertEqual(events, [draining])
+        for _ in 0..<30 { note(exhausted); note(draining) }
+        XCTAssertEqual(events, [draining], "alternating each cycle records nothing")
+        for _ in 0..<8 { note(exhausted) }
+        XCTAssertEqual(events, [draining, exhausted], "a status that lasts is recorded once")
+
+        gate.recorded("Switched to B.")
+        XCTAssertNil(gate.note("Switched to B.", now: t, settle: AppState.statusSettle))
+    }
+
+    func testEveryAccountAtItsLimitWaitsForReadingsFromThisLaunch() {
+        let launched = now.addingTimeInterval(-60)
+        let stale = (readAt: Optional(now.addingTimeInterval(-3 * 3600)), fresh: false)
+        let current = (readAt: Optional(now.addingTimeInterval(-10)), fresh: true)
+        let storedFresh = (readAt: Optional(launched.addingTimeInterval(-120)), fresh: true)
+        let unread = (readAt: Date?.none, fresh: false)
+        XCTAssertTrue(AppState.awaitsFirstReadings([current, stale], launchedAt: launched, now: now))
+        XCTAssertTrue(AppState.awaitsFirstReadings([current, unread], launchedAt: launched, now: now))
+        XCTAssertFalse(AppState.awaitsFirstReadings([current, storedFresh], launchedAt: launched, now: now))
+        let readThisLaunch = (readAt: Optional(launched.addingTimeInterval(5)), fresh: false)
+        XCTAssertFalse(AppState.awaitsFirstReadings([readThisLaunch], launchedAt: launched, now: now))
+        XCTAssertFalse(AppState.awaitsFirstReadings([stale], launchedAt: now.addingTimeInterval(-FailoverPlanner.liveFreshness),
+                                                    now: now), "not for longer than a reading's freshness after launch")
+    }
+
     func testARecordedRefusalStandsUntilAReadingAnswersIt() {
         let refused = now.addingTimeInterval(-60)
         let before = now.addingTimeInterval(-600)

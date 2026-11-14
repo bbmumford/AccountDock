@@ -805,12 +805,20 @@ extension AppState {
             }
         }
 
+        // Every account at its limit is concluded only from readings: one
+        // stored before launch and since grown stale says nothing yet.
+        switch plan {
+        case .waitForReset, .noCapacity:
+            if awaitsFirstReadings(ladder, planner: planner, now: now) { return }
+        default: break
+        }
+
         switch plan {
         case .stay(let reason):
             if reason == .drainingToLimit {
-                updateStatus(provider, "Using \(messageName(current)) up to its limit; no other account is below its failover threshold.")
+                updateStatus(provider, "Using \(messageName(current)) up to its limit; no other account is below its failover threshold.", settles: true)
             } else if reason == .holdingForImminentReset {
-                updateStatus(provider, "Holding \(messageName(current)); its limiting window resets soon.")
+                updateStatus(provider, "Holding \(messageName(current)); its limiting window resets soon.", settles: true)
             }
             // On extra usage the account keeps serving past its limit, so its
             // sessions are not paused for reaching it.
@@ -855,14 +863,14 @@ extension AppState {
             if accountID != current.id, !provider.capabilities.switchReachesRunningSessions,
                credentialModule(for: provider)?.liveCredential == nil,
                policy.enabled || policy.intelligentBalancingEnabled, let target {
-                updateStatus(provider, "All accounts exhausted. Preparing \(messageName(target)), which resets at \(resetText).\(signInNote(ladder))")
+                updateStatus(provider, "All accounts exhausted. Preparing \(messageName(target)), which resets at \(resetText).\(signInNote(ladder))", settles: true)
                 await performAutomaticSwitch(provider: provider, policy: policy, from: current, to: target, reason: .exhausted)
             } else {
-                updateStatus(provider, "All accounts exhausted. Waiting for \(messageName(target ?? current)) to reset at \(resetText).\(signInNote(ladder))")
+                updateStatus(provider, "All accounts exhausted. Waiting for \(messageName(target ?? current)) to reset at \(resetText).\(signInNote(ladder))", settles: true)
             }
 
         case .noCapacity:
-            updateStatus(provider, "All configured accounts are at their limits; reset times are unavailable.\(signInNote(ladder))")
+            updateStatus(provider, "All configured accounts are at their limits; reset times are unavailable.\(signInNote(ladder))", settles: true)
             await holdWork(provider, policy: policy, current: current, because: "every included account is exhausted")
 
         case .verify:
@@ -884,10 +892,81 @@ extension AppState {
         return " \(names.joined(separator: ", ")) \(names.count == 1 ? "needs" : "need") signing in again."
     }
 
-    private func updateStatus(_ provider: AIProviderType, _ message: String) {
-        guard failoverStatus[provider] != message else { return }
+    /// Shows `message` as the provider's status. A status that describes
+    /// the plan's standing state (`settles`), restated every cycle, becomes
+    /// an event only once it has differed from the last one recorded for
+    /// longer than `statusSettle` (`StatusEventGate`); any other status,
+    /// the outcome of an action, is recorded when it changes.
+    private func updateStatus(_ provider: AIProviderType, _ message: String, settles: Bool = false) {
+        let changed = failoverStatus[provider] != message
         failoverStatus[provider] = message
-        failoverEvents.record(provider, message)
+        if settles {
+            if let event = statusEventGates[provider, default: StatusEventGate()].note(message, now: Date(), settle: Self.statusSettle) {
+                failoverEvents.record(provider, event)
+            }
+        } else if changed {
+            failoverEvents.record(provider, message)
+            statusEventGates[provider, default: StatusEventGate()].recorded(message)
+        }
+    }
+
+    /// How long a standing status must differ from the last one recorded
+    /// before it is recorded: the longest quota cycle
+    /// (`nextQuotaCycleInterval`), so two states alternating from one cycle
+    /// to the next record nothing.
+    nonisolated static let statusSettle: TimeInterval = 120
+
+    /// Decides when a provider's standing status becomes an event.
+    struct StatusEventGate: Equatable {
+        private(set) var lastRecorded: String?
+        private(set) var pending: String?
+        private(set) var pendingSince: Date?
+
+        /// Takes the status shown at `now`; returns it when it is to be
+        /// recorded: it differs from the last recorded status and has been
+        /// shown unchanged for at least `settle`.
+        mutating func note(_ status: String, now: Date, settle: TimeInterval) -> String? {
+            guard status != lastRecorded else {
+                pending = nil
+                pendingSince = nil
+                return nil
+            }
+            guard status == pending, let since = pendingSince else {
+                pending = status
+                pendingSince = now
+                return nil
+            }
+            guard now.timeIntervalSince(since) >= settle else { return nil }
+            recorded(status)
+            return status
+        }
+
+        /// Notes a status recorded without waiting.
+        mutating func recorded(_ status: String) {
+            lastRecorded = status
+            pending = nil
+            pendingSince = nil
+        }
+    }
+
+    /// Whether the provider's plan that every account is at its limit waits
+    /// for readings: within `FailoverPlanner.liveFreshness` of launch, some
+    /// account in `ladder` that can be read, signed in and not failing to
+    /// read, has neither a reading from this launch nor a stored one still
+    /// fresh (`FailoverPlanner.isFresh`).
+    func awaitsFirstReadings(_ ladder: [Account], planner: FailoverPlanner, now: Date) -> Bool {
+        let readings = ladder.compactMap { account -> (readAt: Date?, fresh: Bool)? in
+            guard !needsSignIn(account), accountUsageErrors[account.id] == nil else { return nil }
+            return (accountUsageUpdatedAt[account.id], planner.isFresh(quotaState(for: account, now: now), now: now))
+        }
+        return Self.awaitsFirstReadings(readings, launchedAt: launchedAt, now: now)
+    }
+
+    nonisolated static func awaitsFirstReadings(_ readings: [(readAt: Date?, fresh: Bool)], launchedAt: Date, now: Date) -> Bool {
+        guard now.timeIntervalSince(launchedAt) < FailoverPlanner.liveFreshness else { return false }
+        return readings.contains { reading in
+            !reading.fresh && (reading.readAt.map { $0 < launchedAt } ?? true)
+        }
     }
 
     // MARK: - Suspension
