@@ -48,7 +48,7 @@ final class BackgroundSessionTests: XCTestCase {
     }
 
     func testWorkersAttachClientsAndShellsAreRecognised() {
-        let processes = BackgroundSessionProcesses(processList: processList, executable: "claude", support: support)
+        let processes = BackgroundSessionProcesses(table: ProcessTable(listing: processList, columns: .pidPPID), executable: "claude", support: support)
         XCTAssertEqual(processes.workers, [10740, 10878])
         XCTAssertEqual(processes.nonSessions, [9965, 62154, 62200], "the supervisor, the attach client and a --bg launch")
         XCTAssertEqual(processes.attachClient(of: "4822c359-040f-403c-a651-ae45b46cfd8b"), 62154)
@@ -61,8 +61,8 @@ final class BackgroundSessionTests: XCTestCase {
     }
 
     @MainActor func testAnAttachClientHoldsNoSlotAndIsNoSession() throws {
-        let processes = BackgroundSessionProcesses(processList: processList, executable: "claude", support: support)
-        let directories = SessionSlots.directoriesByProcess(inProcessList: processList,
+        let processes = BackgroundSessionProcesses(table: ProcessTable(listing: processList, columns: .pidPPID), executable: "claude", support: support)
+        let directories = SessionSlots.directoriesByProcess(in: ProcessTable(listing: processList, columns: .pidPPID),
                                                             variable: "CLAUDE_SECURESTORAGE_CONFIG_DIR",
                                                             root: "/h/.accountdock/claude-slots")
         XCTAssertEqual(Set(directories.keys), [62154, 62200, 70000])
@@ -168,7 +168,89 @@ final class BackgroundSessionTests: XCTestCase {
         XCTAssertTrue(terminal.log.isEmpty, "nothing is typed when the session was not stopped")
     }
 
+    /// A background session refused at a usage limit is restarted though
+    /// its turn looks under way and its transcript just changed: its turns
+    /// all fail. A shell under its worker and its attach client's footer
+    /// still hold it, and a refused session outside the background service
+    /// is judged as before.
+    func testARefusedBackgroundSessionCountsAsIdleForItsRestart() async throws {
+        let working = try session("4822c359-040f-403c-a651-ae45b46cfd8b", event: "UserPromptSubmit", pid: 10878)
+        let recent = BackgroundSessionState(transcriptChangedAt: now.addingTimeInterval(-20), shellRunning: false,
+                                            attachProcess: 62154)
+        XCTAssertNotNil(AppState.restartBlocker(working, terminal: "agt-7", background: recent, now: now))
+        XCTAssertNil(AppState.restartBlocker(working, terminal: "agt-7", background: recent, refused: true, now: now))
+        var shell = recent
+        shell.shellRunning = true
+        XCTAssertNotNil(AppState.restartBlocker(working, terminal: "agt-7", background: shell, refused: true, now: now))
+        XCTAssertNotNil(AppState.restartBlocker(working, terminal: nil, background: recent, refused: true, now: now))
+        XCTAssertNotNil(AppState.restartBlocker(working, terminal: "agt-7", refused: true, now: now),
+                        "a refused session outside the background service still waits for its turn to end")
+
+        let terminal = FakeTerminal(sessions: [62154: "agt-7"])
+        let control = FakeBackgroundControl()
+        let outcome = await SessionTerminalActions.restartBackground(
+            working, state: recent, isolation: ClaudeSessionIsolation(), stopper: "claude", support: support,
+            control: control, terminal: terminal, refused: true, pause: 0, now: now)
+        XCTAssertEqual(outcome, .typed)
+        XCTAssertEqual(control.log, [working.sessionID])
+
+        let footer = FakeTerminal(sessions: [62154: "agt-7"], screens: ["> \n  · 1 shell · ↓ to manage\n"])
+        let held = FakeBackgroundControl()
+        let busy = await SessionTerminalActions.restartBackground(
+            working, state: recent, isolation: ClaudeSessionIsolation(), stopper: "claude", support: support,
+            control: held, terminal: footer, refused: true, pause: 0, now: now)
+        XCTAssertEqual(busy, .busy, "the footer reporting work holds a refused session too")
+        XCTAssertTrue(held.log.isEmpty)
+    }
+
+    /// A background session is stuck when the account it was refused on,
+    /// or whose token its evidence names, can no longer serve it; a session
+    /// outside the background service, or on an account with room, is not.
+    func testABackgroundSessionIsStuckOnlyOnAnAccountThatCannotServeIt() throws {
+        let full = UUID(), roomy = UUID(), active = UUID()
+        let refusedHere = try session("s-refused", event: "Stop", pid: 10878)
+        let refusedRoomy = try session("s-roomy", event: "Stop", pid: 10879)
+        let flaggedHere = try session("s-flagged", event: "Stop", pid: 10880)
+        let foreground = try session("s-foreground", event: "Stop", pid: 70000)
+        let state = BackgroundSessionState(transcriptChangedAt: nil, attachProcess: 62154)
+        let background = ["s-refused": state, "s-roomy": state, "s-flagged": state]
+        let refusals = [
+            "s-refused": AppState.SessionRefusal(at: now, account: full, words: "resets Nov 20 at 12pm"),
+            "s-roomy": AppState.SessionRefusal(at: now, account: roomy, words: "resets 2am"),
+            "s-foreground": AppState.SessionRefusal(at: now, account: full, words: "resets 2am"),
+        ]
+        let flagged = ["s-flagged": AppState.FlaggedCredentialProcess(provider: .claudeCode, session: "s-flagged",
+                                                                      process: 10880, slot: nil, observed: full,
+                                                                      believed: active, at: now)]
+        let stuck = AppState.stuckBackgroundSessions(.claudeCode, sessions: [refusedHere, refusedRoomy, flaggedHere, foreground],
+                                                     background: background, refusals: refusals, flagged: flagged,
+                                                     cannotServe: { $0 == full })
+        XCTAssertEqual(stuck, [
+            StuckBackgroundSession(provider: .claudeCode, session: "s-refused", account: full, refused: true),
+            StuckBackgroundSession(provider: .claudeCode, session: "s-flagged", account: full, refused: false),
+        ])
+
+        let offer = AppState.stuckBackgroundEvent(session: "platform-app", account: "HSTLES", cli: "Claude Code",
+                                                  refused: true, restarts: false)
+        XCTAssertTrue(offer.contains("refused at a usage limit on HSTLES"))
+        XCTAssertTrue(offer.contains("Restart it in its own slot from the usage tab"))
+        XCTAssertTrue(AppState.stuckBackgroundEvent(session: "platform-app", account: "HSTLES", cli: "Claude Code",
+                                                    refused: false, restarts: true)
+            .contains("AccountDock restarts it in its own slot"))
+    }
+
+    func testRestartingStuckBackgroundSessionsIsOffByDefaultAndKept() throws {
+        let decoded = try JSONDecoder().decode(ProviderFailoverPolicy.self, from: Data("{}".utf8))
+        XCTAssertFalse(decoded.restartStuckBackgroundSessions)
+        XCTAssertFalse(ProviderFailoverPolicy.defaults(for: .claudeCode).restartStuckBackgroundSessions)
+        var policy = ProviderFailoverPolicy()
+        policy.restartStuckBackgroundSessions = true
+        let again = try JSONDecoder().decode(ProviderFailoverPolicy.self, from: JSONEncoder().encode(policy))
+        XCTAssertTrue(again.restartStuckBackgroundSessions)
+    }
+
     func testTheNewestTranscriptChangeCountsTheSubagents() throws {
+
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let project = root.appendingPathComponent("-Users-u-project", isDirectory: true)

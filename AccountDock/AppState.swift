@@ -221,6 +221,18 @@ final class AppState: ObservableObject {
     @Published var backgroundSessionStates: [String: BackgroundSessionState] = [:]
     /// Ends background sessions (`restartBackgroundSession`).
     var backgroundSessionControl: BackgroundSessionControl = CLIBackgroundSessionControl()
+    /// Background sessions on an account that can no longer serve them,
+    /// by session ID, with that account (`handleStuckBackgroundSessions`),
+    /// for the usage tab.
+    @Published var stuckBackgroundSessions: [String: StuckBackgroundSession] = [:]
+    /// Stuck background sessions already offered in an event, until they
+    /// are no longer stuck.
+    var stuckBackgroundNoted: Set<String> = []
+    /// When each stuck background session was last restarted without being
+    /// asked, so a restart that did not take is tried again only after
+    /// `stuckRestartSpacing`.
+    var stuckBackgroundRestartedAt: [String: Date] = [:]
+
     /// The session each slot directory serves, as its status line reported
     /// it (`PassiveUsageObservation.slotDirectory`): `serveSessionSlots`
     /// finds a slot's model by it when the slot's process left no session

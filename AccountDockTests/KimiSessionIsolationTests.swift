@@ -206,7 +206,7 @@ final class KimiSessionIsolationTests: XCTestCase {
           323     1 /Users/me/.kimi-code/bin/kimi KIMI_CODE_BASE_URL=https://api.kimi.ai/coding/v1 HOME=/x
           324     1 /Users/me/.kimi-code/bin/kimi -y ACCOUNTDOCK_KIMI_SLOT=\(spare.path)
         """
-        XCTAssertEqual(slots.directoriesByProcess(inProcessList: list), [321: otherSpare.path, 324: spare.path])
+        XCTAssertEqual(slots.directoriesByProcess(in: ProcessTable(listing: list, columns: .pidPPID)), [321: otherSpare.path, 324: spare.path])
     }
 
     func testASessionStartedOnASlotSetsItsPair() throws {

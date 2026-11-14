@@ -20,9 +20,10 @@ struct ClaudeCredentialModule: ProviderCredentialModule, LiveCredentialModule {
     }
 
     func renewSavedCopy(_ account: Account, reason: String) async -> CredentialRenewal {
+        let subject = CredentialRenewalClient.AuditSubject(provider: .claudeCode, account: account.id)
         guard let backup = keychain.getAccountBackup(forAccountId: account.id.uuidString, reason: reason) else {
             let outcome: CredentialRenewal = keychain.backupStoreAvailable ? .rejected : .unavailable
-            audit.record(.renewal, .claudeCode, account: account.id, outcome: "noSavedCopy", reason: reason)
+            audit.recordRenewal(subject, token: nil, previous: nil, outcome: "noSavedCopy", reason: reason)
             return outcome
         }
         do {
@@ -33,18 +34,23 @@ struct ClaudeCredentialModule: ProviderCredentialModule, LiveCredentialModule {
                 forAccountId: account.id.uuidString,
                 reason: reason + ".renewal"
             )
-            audit.record(.renewal, .claudeCode, account: account.id, credential: renewed, previousCredential: backup.token,
-                         outcome: saved ? "renewed" : "notSaved", reason: reason)
+            audit.recordRenewal(subject, token: .credential(renewed), previous: .credential(backup.token),
+                                outcome: saved ? "renewed" : "notSaved", reason: reason)
             return saved ? .renewed : .unavailable
-        } catch ClaudeService.UsageError.expired {
-            audit.record(.renewal, .claudeCode, account: account.id, credential: backup.token, outcome: "rejected", reason: reason)
-            return .rejected
         } catch {
-            audit.record(.renewal, .claudeCode, account: account.id, credential: backup.token, outcome: "unavailable",
-                         reason: reason)
-            return .unavailable
+            let outcome = CredentialRenewalClient.auditOutcome(error, refused: Self.refusesGrant)
+            audit.recordRenewal(subject, token: .credential(backup.token), previous: nil, outcome: outcome,
+                                reason: reason)
+            return outcome == "rejected" ? .rejected : .unavailable
         }
     }
+
+    /// Whether `ClaudeService.refreshStoredToken` failed for a refused grant.
+    nonisolated static func refusesGrant(_ error: Error) -> Bool {
+        if case ClaudeService.UsageError.expired = error { return true }
+        return false
+    }
+
 
     func savedCopyLasts(_ account: Account, for interval: TimeInterval) -> Bool {
         guard let token = keychain.getAccountBackup(forAccountId: account.id.uuidString, reason: "savedCopyLasts")?.token

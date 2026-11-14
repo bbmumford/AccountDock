@@ -237,35 +237,27 @@ enum RequestRouterController {
 
     @discardableResult
     private static func launchctl(_ arguments: [String]) throws -> String {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = arguments
-        process.standardOutput = output
-        process.standardError = output
-        try process.run()
-        process.waitUntilExit()
-        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        guard process.terminationStatus == 0 else { throw InstallError.launchctl(text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        let result = try CommandRunner.runSynchronously(
+            CommandRunner.Command("/bin/launchctl", arguments, errorOutput: .merged), timeout: .infinity
+        )
+        let text = result.text
+        guard result.status == 0 else { throw InstallError.launchctl(text.trimmingCharacters(in: .whitespacesAndNewlines)) }
         return text
     }
 
     private static func configureEnv(_ action: String) throws {
         try FileManager.default.createDirectory(at: configuratorURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data(envConfigurator.utf8).write(to: configuratorURL, options: .atomic)
-        let process = Process()
-        let errors = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         guard let client, let settingsURL else { return }
-        process.arguments = [
-            "-l", "JavaScript", configuratorURL.path, action, settingsURL.path, RouterConfig.baseURL, client.baseURLVariable,
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = errors
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let detail = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let result = try CommandRunner.runSynchronously(
+            CommandRunner.Command("/usr/bin/osascript", [
+                "-l", "JavaScript", configuratorURL.path, action, settingsURL.path, RouterConfig.baseURL, client.baseURLVariable,
+            ], outputLimit: 0),
+            timeout: .infinity
+        )
+        guard result.status == 0 else {
+            let detail = String(decoding: result.errorOutput, as: UTF8.self)
+
             throw InstallError.launchctl("\(settingsURL.lastPathComponent): \(detail.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
     }

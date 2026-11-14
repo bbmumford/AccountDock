@@ -61,21 +61,19 @@ enum ClaudeStatusLineTelemetry {
 
     private static func runConfigurator(_ action: String) throws {
         try Data(configurator.utf8).write(to: configuratorURL, options: .atomic)
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = [
-            "-l", "JavaScript", configuratorURL.path, action,
-            settingsURL.path, scriptURL.path, nextCommandURL.path, marker,
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
+        let result = try CommandRunner.runSynchronously(
+            CommandRunner.Command("/usr/bin/osascript", [
+                "-l", "JavaScript", configuratorURL.path, action,
+                settingsURL.path, scriptURL.path, nextCommandURL.path, marker,
+            ], errorOutput: .discarded, outputLimit: 0),
+            timeout: .infinity
+        )
+        guard result.status == 0 else {
             throw NSError(
                 domain: "ClaudeStatusLineTelemetry",
-                code: Int(process.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: "status-line configurator exited \(process.terminationStatus)"]
+                code: Int(result.status),
+                userInfo: [NSLocalizedDescriptionKey: "status-line configurator exited \(result.status)"]
+
             )
         }
         telemetryLog.info("Status-line telemetry \(action) completed")

@@ -46,7 +46,9 @@ extension AppState {
     }
 
     /// Records each new mismatch as an event the user sees. Not installed
-    /// while tests run, so no test writes the real event log.
+    /// while tests run, so the shared event history holds only the events a
+    /// test records itself.
+
     func installCredentialAuditEvents() {
         guard !CredentialAudit.isTesting else { return }
         credentialAudit.onMismatch { provider, message in
@@ -98,10 +100,16 @@ extension AppState {
     }
 
     /// Records what a process's own evidence (`source`) says about the
-    /// token it holds, and flags the process when that is not the account
-    /// AccountDock believes it reads. A process on the shared sign-in that
-    /// holds an account switched away from is still flagged; the entry says
-    /// so, since signalling moves it.
+    /// token it holds, and flags the process whenever that is not the
+    /// account AccountDock believes it reads: a session in a slot, one on
+    /// the shared sign-in and one in the CLI's background service alike.
+    /// The audit writes an entry and raises its event once per session and
+    /// account (`CredentialAudit.recordProcessCredential`); the flag is set
+    /// again by every such piece of evidence, so a session still holding
+    /// the other token after `signalFlaggedProcesses` is listed again for
+    /// it. A process on the shared sign-in that holds an account switched
+    /// away from is still flagged; the entry says so, since signalling
+    /// moves it.
     func noteProcessCredential(_ provider: AIProviderType, session: String, process: Int32?, observed: UUID,
                                source: String, observedAt: Date?) {
         let believed = believedCredentialAccount(provider, process: process)
@@ -110,64 +118,92 @@ extension AppState {
             detail = "AccountDock switched away from that account at \(away.formatted(.iso8601)); "
                 + "a session not signalled since keeps the token it read before."
         }
-        if credentialAudit.recordProcessCredential(provider, session: session, process: process, observed: observed,
-                                                   believed: believed.account, source: source,
-                                                   believedSource: believed.source, observedAt: observedAt,
-                                                   detail: detail) != nil {
+        credentialAudit.recordProcessCredential(provider, session: session, process: process, observed: observed,
+                                                believed: believed.account, source: source,
+                                                believedSource: believed.source, observedAt: observedAt,
+                                                detail: detail)
+        if believed.account != observed {
             flaggedCredentialProcesses[session] = FlaggedCredentialProcess(
                 provider: provider, session: session, process: process,
                 slot: believed.source == "slot" ? process.flatMap { slotDirectoryByProcess[$0] } : nil,
                 observed: observed, believed: believed.account, at: Date()
             )
-        } else if believed.account == observed {
+        } else {
             flaggedCredentialProcesses[session] = nil
         }
     }
 
+
+
     /// Tells every flagged process to read its sign-in again: sessions on
     /// the shared sign-in through `moveRunningSessions`, and slot sessions
-    /// by having their slot written afresh at the next slot pass. Returns
-    /// what was done, for the request and the Settings button.
+    /// by having their slot written afresh at the next slot pass. A flagged
+    /// session in its CLI's background service stays flagged: its worker
+    /// keeps the token it read, so the answer names its restart instead
+    /// (`handleStuckBackgroundSessions`). Returns what was done, for the
+    /// request and the Settings button.
     @discardableResult
     func signalFlaggedProcesses(_ only: AIProviderType? = nil) -> String {
         let flagged = flaggedCredentialProcesses.values.filter { only == nil || $0.provider == only }
         guard !flagged.isEmpty else { return "No session is flagged." }
-        for provider in Set(flagged.filter { $0.slot == nil }.map(\.provider)) {
+        let background = flagged.filter { runsInBackgroundService($0) }
+        let signalled = flagged.filter { !runsInBackgroundService($0) }
+        for provider in Set(signalled.filter { $0.slot == nil }.map(\.provider)) {
             moveRunningSessions(provider, reason: "audit.signalFlagged")
         }
-        for slot in flagged.compactMap(\.slot) { slotCredentialWritten[slot] = nil }
-        for item in flagged { flaggedCredentialProcesses[item.session] = nil }
-        return "Told \(flagged.count) flagged session(s) to read their sign-in again."
+        for slot in signalled.compactMap(\.slot) { slotCredentialWritten[slot] = nil }
+        for item in signalled { flaggedCredentialProcesses[item.session] = nil }
+        var parts: [String] = []
+        if !signalled.isEmpty { parts.append("Told \(signalled.count) flagged session(s) to read their sign-in again.") }
+        if !background.isEmpty {
+            let restarts = background.contains { failoverConfig.policy(for: $0.provider).restartStuckBackgroundSessions }
+            parts.append("\(background.count) flagged session(s) run in the background service, whose worker keeps the token it read: "
+                + (restarts
+                    ? "AccountDock restarts each in its own slot once its account can no longer serve it and its attach client shows no work running."
+                    : "restart them in their own slot from the usage tab."))
+        }
+        return parts.joined(separator: " ")
     }
 
-    /// When a refusal's words name the reset of the limit it met
-    /// ("resets 2am", "resets 2:30pm (Australia/Melbourne)", and a weekly
-    /// limit's "resets Nov 20 at 12pm"), that reset as a date: the first
-    /// such time, on the named day when there is one, at or after the
-    /// refusal, in the named time zone or else `calendar`'s.
+
+    /// When a refusal's words name the reset of the limit it met, that
+    /// reset as a date: a time of day ("resets 2am", "resets 2:30pm
+    /// (Australia/Melbourne)"), as a five-hour limit's refusal names it, or
+    /// a day and time ("resets Nov 20 at 12pm", "resets Mon 7:59am"), as a
+    /// weekly limit's does. The first such time at or after the refusal, in
+    /// the named time zone or else `calendar`'s. Read by `refusingAccount`
+    /// and `account(namedByRefusal:)`, which match it with the accounts'
+    /// window resets.
     nonisolated static func refusalResetDate(_ words: String, at: Date, calendar: Calendar = .current) -> Date? {
-        let pattern = #"resets\s+(?:([a-z]{3,9})\.?\s+(\d{1,2}),?\s+)?(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?"#
+        let weekday = #"(?:(?:on\s+)?(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+)?"#
+        let day = #"(?:(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+)?"#
+        let time = #"(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)(?:\s*\(([^)]+)\))?"#
+        let pattern = #"resets?\s+(?:at\s+)?"# + weekday + day + time
         guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
-              let match = regex.firstMatch(in: words, range: NSRange(words.startIndex..., in: words)),
-              let hourRange = Range(match.range(at: 3), in: words), var hour = Int(words[hourRange]),
-              let meridiemRange = Range(match.range(at: 5), in: words), (1...12).contains(hour) else { return nil }
-        let minute = Range(match.range(at: 4), in: words).flatMap { Int(words[$0]) } ?? 0
-        if words[meridiemRange].lowercased() == "pm" { hour = hour % 12 + 12 } else { hour %= 12 }
-        var calendar = calendar
-        if let zoneRange = Range(match.range(at: 6), in: words),
-           let zone = TimeZone(identifier: words[zoneRange].trimmingCharacters(in: .whitespaces)) {
-            calendar.timeZone = zone
+              let match = regex.firstMatch(in: words, range: NSRange(words.startIndex..., in: words)) else { return nil }
+        func group(_ index: Int) -> String? {
+            Range(match.range(at: index), in: words).map { String(words[$0]) }
         }
+        guard let hourText = group(4), var hour = Int(hourText), (1...12).contains(hour),
+              let meridiem = group(6) else { return nil }
+        let minute = group(5).flatMap(Int.init) ?? 0
+        if meridiem.lowercased() == "pm" { hour = hour % 12 + 12 } else { hour %= 12 }
         var components = DateComponents(hour: hour, minute: minute)
-        if let monthRange = Range(match.range(at: 1), in: words) {
-            let months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
-            guard let month = months.firstIndex(of: String(words[monthRange].prefix(3)).lowercased()),
-                  let dayRange = Range(match.range(at: 2), in: words), let day = Int(words[dayRange]) else { return nil }
+        let names = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+        if let month = group(2).flatMap({ names.firstIndex(of: $0.lowercased()) }), let date = group(3).flatMap(Int.init) {
             components.month = month + 1
-            components.day = day
+            components.day = date
+        } else if let name = group(1)?.lowercased(),
+                  let index = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"].firstIndex(of: name) {
+            components.weekday = index + 1
+        }
+        var calendar = calendar
+        if let zoneText = group(7), let zone = TimeZone(identifier: zoneText.trimmingCharacters(in: .whitespaces)) {
+            calendar.timeZone = zone
         }
         return calendar.nextDate(after: at.addingTimeInterval(-60), matching: components, matchingPolicy: .nextTime)
     }
+
 
     /// The one account whose five-hour or weekly window resets within ten
     /// minutes of `reset`; nil when none or several do.

@@ -444,9 +444,9 @@ final class AgentHookInstallerTests: XCTestCase {
             try JSONSerialization.data(withJSONObject: ["model": "x", "hooks": hooks]).write(to: url)
         }
         try write("/bin/sh \"/bin/sh\" # accountdock-hook", events: ["SessionStart", "Stop"])
-        XCTAssertTrue(AgentHookInstaller.hasHooks(at: url, events: ["SessionStart", "Stop"], marker: "# accountdock-hook"))
-        XCTAssertFalse(AgentHookInstaller.hasHooks(at: url, events: ["SessionStart", "Stop", "SessionEnd"], marker: "# accountdock-hook"))
+        XCTAssertTrue(JSONHookFile.hasHooks(at: url, events: ["SessionStart", "Stop"], marker: "# accountdock-hook"))
+        XCTAssertFalse(JSONHookFile.hasHooks(at: url, events: ["SessionStart", "Stop", "SessionEnd"], marker: "# accountdock-hook"))
         try write("/bin/sh \"/Applications/Gone.app/hook.sh\" # accountdock-hook", events: ["SessionStart"])
-        XCTAssertFalse(AgentHookInstaller.hasHooks(at: url, events: ["SessionStart"], marker: "# accountdock-hook"))
+        XCTAssertFalse(JSONHookFile.hasHooks(at: url, events: ["SessionStart"], marker: "# accountdock-hook"))
     }
 }

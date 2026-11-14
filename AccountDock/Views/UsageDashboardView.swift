@@ -129,7 +129,8 @@ private struct SessionPinList: View {
                 .padding(.leading, 22)
             } else if !pinned, !inSlot, let session = appState.unisolatedSessions[provider]?.first(where: { $0.sessionID == id }) {
                 let blocker = AppState.restartBlocker(session, terminal: appState.unisolatedTerminals[id],
-                                                      background: appState.backgroundSessionStates[id])
+                                                      background: appState.backgroundSessionStates[id],
+                                                      refused: appState.sessionRefusals[id] != nil)
                 Button("Restart in its own slot first") { Task { await appState.restartInOwnSlot(id) } }
                     .controlSize(.small)
                     .disabled(blocker != nil)
@@ -825,12 +826,21 @@ private struct UnisolatedSessionsLine: View {
             ForEach(sessions, id: \.sessionID) { session in
                 let background = appState.backgroundSessionStates[session.sessionID]
                 let blocker = AppState.restartBlocker(session, terminal: appState.unisolatedTerminals[session.sessionID],
-                                                      background: background)
+                                                      background: background,
+                                                      refused: appState.sessionRefusals[session.sessionID] != nil)
+                let stuck = appState.stuckBackgroundSessions[session.sessionID]
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(verbatim: appState.sessionSummary([session.sessionID])
                              + (background != nil ? " · background session" : ""))
                             .font(.caption)
+                        if let stuck {
+                            let name = appState.accounts.first { $0.id == stuck.account }.map { appState.messageName($0) } ?? "its account"
+                            Text(verbatim: "On \(name), which can no longer serve it; telling it to read its sign-in again does not move it.")
+                                .font(.caption2)
+                                .foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         if let blocker {
                             Text(blocker)
                                 .font(.caption2)
@@ -851,7 +861,9 @@ private struct UnisolatedSessionsLine: View {
             }
             let ready = sessions.filter {
                 AppState.restartBlocker($0, terminal: appState.unisolatedTerminals[$0.sessionID],
-                                        background: appState.backgroundSessionStates[$0.sessionID]) == nil
+                                        background: appState.backgroundSessionStates[$0.sessionID],
+                                        refused: appState.sessionRefusals[$0.sessionID] != nil) == nil
+
             }
             if sessions.count > 1 {
                 Button("Restart all idle unisolated sessions") {

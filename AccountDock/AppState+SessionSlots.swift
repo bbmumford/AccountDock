@@ -226,20 +226,23 @@ extension AppState {
 
     /// Reads which slot each running process reads, for `refreshSessions`
     /// and `maintainSessionSlots`, and each isolated CLI's background-session
-    /// processes, from one process list; run first on every quota cycle.
+    /// processes, from one fresh `ProcessTable`; run first on every quota
+    /// cycle, and the readers after it within seconds reuse that table
+    /// (`ProcessTable.current(maxAge:)`).
     func refreshSlotProcesses() async {
         let isolated = AIProviderType.isolatedProviders.compactMap { provider in
             SessionSlots(provider).map { (provider, $0) }
         }
         guard !isolated.isEmpty else { return }
         let read = await Task.detached(priority: .utility) { () -> [([Int32: String], BackgroundSessionProcesses)] in
-            let list = SessionSlots.processList() ?? ""
+            let table = ProcessTable.read() ?? ProcessTable(entries: [])
             return isolated.map { _, slots in
                 let background = slots.background.map {
-                    BackgroundSessionProcesses(processList: list, executable: slots.executable, support: $0)
+                    BackgroundSessionProcesses(table: table, executable: slots.executable, support: $0)
                 } ?? BackgroundSessionProcesses()
-                return (slots.directoriesByProcess(inProcessList: list), background)
+                return (slots.directoriesByProcess(in: table), background)
             }
+
         }.value
         for ((provider, slots), (directories, background)) in zip(isolated, read) {
             sessionSlotStates[provider, default: SessionSlotState()].background = background

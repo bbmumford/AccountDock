@@ -325,9 +325,9 @@ enum AgentPauseGate {
                 let wanted = enabled.contains(provider)
                 // Current only when every event runs this command with this
                 // timeout, so a gate written with other arguments is replaced.
-                let current = provider.capabilities.pauseGate?.format == .tomlHooks
-                    ? TOMLHookConfig.hasHooks(at: url, events: gateEvents(provider), marker: marker, command: command, timeout: timeout)
-                    : AgentHookInstaller.hasHooks(at: url, events: gateEvents(provider), marker: marker, command: command, timeout: timeout)
+                guard let format = provider.capabilities.pauseGate?.format else { continue }
+                let current = HookConfigEditor.hasHooks(format, at: url, events: gateEvents(provider), marker: marker,
+                                                        command: command, timeout: timeout)
                 if wanted, current, installedMarker(provider) == nil {
                     // Installed before the time was kept: when is unknown, and
                     // the hook file's modification time records unrelated
@@ -339,25 +339,15 @@ enum AgentPauseGate {
                 // A repair that keeps the events and timeout leaves running
                 // sessions' gates working, since they run the same script;
                 // any other write is one sessions started earlier never read.
-                let sameShape = provider.capabilities.pauseGate?.format == .tomlHooks
-                    ? TOMLHookConfig.hasHooks(at: url, events: gateEvents(provider), marker: marker, timeout: timeout)
-                    : AgentHookInstaller.hasHooks(at: url, events: gateEvents(provider), marker: marker, timeout: timeout)
-                if provider.capabilities.pauseGate?.format == .tomlHooks {
-                    if wanted {
-                        try TOMLHookConfig.install(at: url, events: gateEvents(provider), command: command, timeout: timeout, marker: marker)
-                    } else {
-                        try TOMLHookConfig.uninstall(at: url, marker: marker)
-                    }
+                let sameShape = HookConfigEditor.hasHooks(format, at: url, events: gateEvents(provider), marker: marker,
+                                                          timeout: timeout)
+                if wanted {
+                    // Each event's marked hooks are replaced, so a gate written
+                    // with other arguments is not added to.
+                    try HookConfigEditor.install(format, at: url, events: gateEvents(provider), command: command,
+                                                 timeout: timeout, marker: marker)
                 } else {
-                    // A gate installed for fewer events is replaced, not added to.
-                    try AgentHookInstaller.configure(
-                        "uninstall", url, events: gateEvents(provider), command: command, timeout: timeout, marker: marker
-                    )
-                    if wanted {
-                        try AgentHookInstaller.configure(
-                            "install", url, events: gateEvents(provider), command: command, timeout: timeout, marker: marker
-                        )
-                    }
+                    try HookConfigEditor.uninstall(format, at: url, events: gateEvents(provider), marker: marker)
                 }
                 if wanted {
                     if !sameShape || installedMarker(provider) == nil { markInstalled(provider, at: Date()) }

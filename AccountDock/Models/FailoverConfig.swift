@@ -88,6 +88,13 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     /// being asked, when that makes the first account run out more than an
     /// hour later (`AppState.rebalanceAutomaticallyIfDue`).
     var rebalanceAutomatically = false
+    /// Restarts a session of the CLI's background service in its own slot
+    /// once the account it is on can no longer serve it
+    /// (`AppState.handleStuckBackgroundSessions`): its worker keeps the
+    /// token it read and does not read the sign-in again when signalled.
+    /// While off, AccountDock offers the restart in the events and the
+    /// usage tab.
+    var restartStuckBackgroundSessions = false
     var switchMethod = FailoverSwitchMethod.safeRestart
     var accountOrder: [UUID] = []
     var excludedAccountIDs: Set<UUID> = []
@@ -119,7 +126,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         case routeToKimiWhenExhausted, routeKimiModel
         case switchMethod, accountOrder, excludedAccountIDs, activeAccountLocked
         case codexSwitchMode
-        case noRoomModelFallback, rebalanceAutomatically
+        case noRoomModelFallback, rebalanceAutomatically, restartStuckBackgroundSessions
     }
 
     init() {}
@@ -155,6 +162,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         try values.encodeIfPresent(extraUsageMonthlyLimit, forKey: .extraUsageMonthlyLimit)
         try values.encodeIfPresent(noRoomModelFallback, forKey: .noRoomModelFallback)
         try values.encode(rebalanceAutomatically, forKey: .rebalanceAutomatically)
+        try values.encode(restartStuckBackgroundSessions, forKey: .restartStuckBackgroundSessions)
         try values.encode(switchMethod, forKey: .switchMethod)
         try values.encode(accountOrder, forKey: .accountOrder)
         try values.encode(excludedAccountIDs, forKey: .excludedAccountIDs)
@@ -191,6 +199,8 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         extraUsageMonthlyLimit = try values.decodeIfPresent(Double.self, forKey: .extraUsageMonthlyLimit)
         noRoomModelFallback = try values.decodeIfPresent(String.self, forKey: .noRoomModelFallback)
         rebalanceAutomatically = try values.decodeIfPresent(Bool.self, forKey: .rebalanceAutomatically) ?? false
+        restartStuckBackgroundSessions = try values.decodeIfPresent(Bool.self, forKey: .restartStuckBackgroundSessions) ?? false
+
         // Settings saved when routing could only target Kimi.
         if routeTarget == nil, try values.decodeIfPresent(Bool.self, forKey: .routeToKimiWhenExhausted) == true {
             routeTarget = "kimi"

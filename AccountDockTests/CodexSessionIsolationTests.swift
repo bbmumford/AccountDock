@@ -206,7 +206,7 @@ final class CodexSessionIsolationTests: XCTestCase {
         101 1 /Users/me/.local/bin/codex -c model_provider="accountdock" resume x ACCOUNTDOCK_CODEX_SLOT=\(root)/session/AAA TERM=xterm
         102 1 /Users/me/.local/bin/codex HOME=/Users/me
         """
-        XCTAssertEqual(SessionSlots.directoriesByProcess(inProcessList: list, variable: isolation.directoryVariable, root: root),
+        XCTAssertEqual(SessionSlots.directoriesByProcess(in: ProcessTable(listing: list, columns: .pidPPID), variable: isolation.directoryVariable, root: root),
                        [101: "\(root)/session/AAA"])
         XCTAssertFalse(CodexService.isRestartableCodexCommand(#"/Users/me/.local/bin/codex -c model_provider="accountdock" resume x"#))
         XCTAssertTrue(CodexService.isRestartableCodexCommand("/Users/me/.local/bin/codex resume x"))

@@ -448,7 +448,16 @@ struct FailoverSettingsView: View {
                 .disabled(!appState.rebalanceAvailable(provider))
                 pinnedSessions(provider)
                     .padding(.leading, 20)
+                if provider.capabilities.backgroundSessions != nil {
+                    Toggle("Restart stuck background sessions in their own slot", isOn: Binding(
+                        get: { store.policy(for: provider).restartStuckBackgroundSessions },
+                        set: { on in store.update(provider) { $0.restartStuckBackgroundSessions = on } }
+                    ))
+                    .padding(.leading, 20)
+                    .help("A session in \(cli)'s background service keeps the token it read and does not read the sign-in again when told to. When the account it is on can no longer serve it, AccountDock stops it with \(cli)'s stop command once its attach client shows no work running, and resumes it in that client's agterm tab through the launcher, in a slot of its own. A session refused at a usage limit counts as idle for this, since its turns all fail. While off, the restart is offered in the events and the usage tab.")
+                }
             }
+
             let choices = provider.capabilities.sessionModelChoices
             if let first = choices.first {
                 Toggle("When no account has allowance for a session's model, switch it to another model", isOn: Binding(

@@ -142,19 +142,8 @@ enum SessionTerminal: String, CaseIterable, Identifiable {
     }
 
     private static func run(_ executable: URL, _ arguments: [String]) async -> Bool {
-        await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            process.executableURL = executable
-            process.arguments = arguments
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            do {
-                try process.run()
-                process.waitUntilExit()
-                return process.terminationStatus == 0
-            } catch {
-                return false
-            }
-        }.value
+        let command = CommandRunner.Command(executable, arguments, errorOutput: .discarded, outputLimit: 0)
+        return (try? await CommandRunner.run(command, timeout: .infinity))?.status == 0
     }
+
 }

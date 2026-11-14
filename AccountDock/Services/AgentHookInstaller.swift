@@ -85,10 +85,6 @@ enum AgentHookInstaller {
         )) ?? []
         return children.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
     }
-    private static var configuratorURL: URL {
-        home.appendingPathComponent("Library/Application Support/AccountDock/bin/configure-hooks.js")
-    }
-
 
     /// The bundled lifecycle script, addressed where this copy of the app runs.
     private static func lifecycleCommand(_ script: String) -> String? {
@@ -185,62 +181,20 @@ enum AgentHookInstaller {
 
     private static func lifecycleInstalled(_ provider: AIProviderType) -> Bool {
         guard let spec = provider.capabilities.lifecycleHooks, let url = lifecycleFileURL(provider) else { return false }
-        switch spec.format {
-        case .jsonHooks:
-            return hasHooks(at: url, events: spec.events, marker: lifecycleMarker)
-        case .tomlHooks:
-            return TOMLHookConfig.hasHooks(at: url, events: spec.events, marker: lifecycleMarker)
-                && FileManager.default.fileExists(atPath: shellHookScriptURL(provider).path)
-        }
+        // A TOML hook runs the shell script AccountDock writes beside it.
+        return HookConfigEditor.hasHooks(spec.format, at: url, events: spec.events, marker: lifecycleMarker)
+            && (spec.format != .tomlHooks || FileManager.default.fileExists(atPath: shellHookScriptURL(provider).path))
     }
 
     private static func pauseGateInstalled(_ provider: AIProviderType) -> Bool {
         guard let gate = provider.capabilities.pauseGate else { return false }
         let events = AgentPauseGate.gateEvents(provider)
-        switch gate.format {
-        case .jsonHooks:
-            return hasHooks(at: home.appendingPathComponent(gate.hookFile), events: events, marker: AgentPauseGate.marker)
-        case .tomlHooks:
-            return TOMLHookConfig.hasHooks(at: home.appendingPathComponent(gate.hookFile), events: events, marker: AgentPauseGate.marker)
-        }
+        return HookConfigEditor.hasHooks(gate.format, at: home.appendingPathComponent(gate.hookFile), events: events,
+                                         marker: AgentPauseGate.marker)
     }
 
     static func missing(pausingProviders: Set<AIProviderType>) -> [Status] {
         statuses(pausingProviders: pausingProviders).filter { $0.required && !$0.installed }
-    }
-
-    /// Whether every listed event has a hook whose command carries `marker`
-    /// and, for lifecycle hooks, still points at a script that exists.
-    /// Whether a marked hook exists for every event; with `command` and
-    /// `timeout`, each must also run that command with that timeout.
-    static func hasHooks(at url: URL, events: [String], marker: String,
-                         command expected: String? = nil, timeout: Int? = nil) -> Bool {
-        guard let data = try? Data(contentsOf: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let hooks = root["hooks"] as? [String: Any] else { return false }
-        return events.allSatisfy { event in
-            let groups = hooks[event] as? [[String: Any]] ?? []
-            return groups.contains { group in
-                (group["hooks"] as? [[String: Any]] ?? []).contains { hook in
-                    guard let command = hook["command"] as? String, command.contains(marker) else { return false }
-                    if let expected, command != expected { return false }
-                    if let timeout, (hook["timeout"] as? Int) != timeout { return false }
-                    return scriptExists(in: command)
-                }
-            }
-        }
-    }
-
-    /// The first quoted path in a hook command must exist; a hook left
-    /// pointing at a moved or deleted app is reported as missing.
-    private static func scriptExists(in command: String) -> Bool {
-        for quote in ["\"", "'"] {
-            let parts = command.components(separatedBy: quote)
-            if parts.count >= 3, parts[1].hasPrefix("/") {
-                return FileManager.default.fileExists(atPath: parts[1])
-            }
-        }
-        return true
     }
 
     // MARK: - Install
@@ -271,16 +225,15 @@ enum AgentHookInstaller {
             case .jsonHooks:
                 guard let script = spec.bundledScript, let command = lifecycleCommand(script) else { throw missingResource }
                 for file in [url] + additionalLifecycleFiles(provider) {
-                    if reinstall {
-                        try configure("uninstall", file, events: spec.events, command: command, timeout: spec.timeout, marker: lifecycleMarker)
-                    }
-                    try configure("install", file, events: spec.events, command: command, timeout: spec.timeout, marker: lifecycleMarker)
+                    try HookConfigEditor.install(.jsonHooks, at: file, events: spec.events, command: command,
+                                                 timeout: spec.timeout, marker: lifecycleMarker)
                 }
             case .tomlHooks:
                 try writeShellHookScript(provider)
                 let path = shellHookScriptURL(provider).path.replacingOccurrences(of: "'", with: "'\\''")
-                try TOMLHookConfig.install(at: url, events: spec.events, command: "/bin/sh '\(path)' \(lifecycleMarker)",
-                                           timeout: spec.timeout, marker: lifecycleMarker)
+                try HookConfigEditor.install(.tomlHooks, at: url, events: spec.events,
+                                             command: "/bin/sh '\(path)' \(lifecycleMarker)", timeout: spec.timeout,
+                                             marker: lifecycleMarker)
             }
         case .liveUsageFeed:
             ClaudeStatusLineTelemetry.synchronize()
@@ -305,90 +258,6 @@ enum AgentHookInstaller {
             NSLocalizedDescriptionKey: "The hook script is missing from the AccountDock app bundle."
         ])
     }
-
-    /// Adds or removes hooks carrying `marker` for `events` in a JSON hooks
-    /// file (`ProviderCapabilities` format `.jsonHooks`).
-    static func configure(
-        _ action: String,
-        _ url: URL,
-        events: [String],
-        command: String,
-        timeout: Int,
-        marker: String
-    ) throws {
-        if action == "uninstall", !FileManager.default.fileExists(atPath: url.path) { return }
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: configuratorURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data(configurator.utf8).write(to: configuratorURL, options: .atomic)
-        let process = Process()
-        let errors = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = [
-            "-l", "JavaScript", configuratorURL.path, action, url.path,
-            events.joined(separator: ","), command, String(timeout), marker,
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = errors
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let detail = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw NSError(domain: "AgentHookInstaller", code: Int(process.terminationStatus), userInfo: [
-                NSLocalizedDescriptionKey: "\(url.lastPathComponent): \(detail.isEmpty ? "configurator exited \(process.terminationStatus)" : detail)"
-            ])
-        }
-    }
-
-    /// Edits a hooks file in place: other settings and their order are kept,
-    /// an unreadable, empty or non-object file is never replaced, a symlink is
-    /// followed, the first edit keeps a backup, and a file that changed while
-    /// being edited is left alone.
-    private static let configurator = #"""
-    ObjC.import("Foundation");
-    function readText(path) {
-        const value = $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, null);
-        if (!value || value.isNil()) throw new Error("could not read " + path);
-        return ObjC.unwrap(value);
-    }
-    function modified(path) {
-        const attributes = $.NSFileManager.defaultManager.attributesOfItemAtPathError(path, null);
-        return attributes && !attributes.isNil() ? ObjC.unwrap(attributes.fileModificationDate.timeIntervalSince1970) : 0;
-    }
-    function run(argv) {
-        const [action, linkedPath, eventList, command, timeout, marker] = argv;
-        const manager = $.NSFileManager.defaultManager;
-        const path = ObjC.unwrap($(linkedPath).stringByResolvingSymlinksInPath);
-        const exists = manager.fileExistsAtPath(path);
-        const before = exists ? modified(path) : 0;
-        const text = exists ? readText(path) : "";
-        if (exists && !text.trim()) throw new Error("file is empty");
-        const settings = text ? JSON.parse(text) : {};
-        if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
-            throw new Error("file is not a JSON object");
-        }
-        if (!settings.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks)) settings.hooks = {};
-        eventList.split(",").forEach((event) => {
-            const groups = Array.isArray(settings.hooks[event]) ? settings.hooks[event] : [];
-            const kept = groups.filter((group) => !(group && Array.isArray(group.hooks) && group.hooks.some(
-                (hook) => hook && typeof hook.command === "string" && hook.command.includes(marker))));
-            if (action === "install") {
-                const hook = { type: "command", command: command };
-                if (Number(timeout) > 0) hook.timeout = Number(timeout);
-                kept.push({ matcher: "", hooks: [hook] });
-            }
-            if (kept.length) settings.hooks[event] = kept; else delete settings.hooks[event];
-        });
-        if (exists) {
-            const backup = path + ".accountdock-hooks-backup";
-            if (!manager.fileExistsAtPath(backup)) manager.copyItemAtPathToPathError(path, backup, null);
-            if (modified(path) !== before) throw new Error("file changed during update");
-        }
-        if (!$(JSON.stringify(settings, null, 2) + "\n").writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null)) {
-            throw new Error("could not write " + path);
-        }
-    }
-    """#
 
     // MARK: - Launch check
 

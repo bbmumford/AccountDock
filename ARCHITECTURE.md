@@ -49,6 +49,19 @@ releasing are in [BUILD_GUIDE.md](BUILD_GUIDE.md).
 command-line tool target embedded in the app bundle under `Contents/MacOS`, so
 one installed app always carries a matching router build.
 
+The app runs every other program through `CommandRunner`: output is read
+while the program runs, a time limit or a cancel stops it with `SIGTERM` then
+`SIGKILL`, secrets go on standard input, and standard error is kept apart,
+merged or discarded; `start` launches the few programs that outlive the call
+(the pause watchdog, the update helper). Every question about running
+processes is asked of a `ProcessTable`: pid, parent, terminal, the exact
+command (`ps -axww`) and the environment (what `ps -axEww` adds after it).
+The quota cycle reads one fresh (`refreshSlotProcesses`) and terminal lookups
+reuse it while it is a few seconds old; readers that act on a process at once
+read their own. `CommandRunnerCoverageTests` fails for a launch outside the
+runner or a `ps` outside the table.
+
+
 ## Providers
 
 `AccountDock/Models/ProviderCapabilities.swift` declares each provider once.
@@ -236,9 +249,15 @@ The trail also records which account served each session and agent
 whole right after a warm read (`servedChange`, the change of account the
 transcript itself shows), and what a running process's status line or
 refusal reset times say about the token it holds (`processCredential`).
-A process holding another account's token than its slot's or the live one
-is flagged with an event; Settings → General → Audit, or the request
+A refusal names its reset as a time of day ("resets 2am") for a five-hour
+limit and as a day and time ("resets Nov 20 at 12pm", "resets Mon 7:59am")
+for a weekly one; the one account whose window resets within ten minutes of
+it refused the request. A process holding another account's token than its
+slot's or the live one is flagged with an event, whether it reads a slot, the
+shared sign-in or runs in the CLI's background service, and flagged again by
+every later piece of such evidence; Settings → General → Audit, or the request
 `{"action":"signalSessions"}`, tells it to read its sign-in again.
+
 
 Query it with the request `{"action":"audit","since":"<ISO time>","account":"<id, label or email>"}`;
 Settings → General → Audit opens the file. `CredentialAuditCoverageTests`
@@ -293,8 +312,21 @@ lock on the file, and Kimi Code, finding its refresh token already used,
 replaces the slot with a revoked credential. While the CLI runs, a reading
 whose token has expired reports it as expired and the CLI renews it with its
 next request. Kimi renewals of one managed copy run one after another
-(`KimiRenewalQueue`), and one that finds the copy already renewed while it
-waited uses that result instead of presenting the spent refresh token.
+(`CredentialRenewalClient.Queue`), and one that finds the copy already renewed
+while it waited uses that result instead of presenting the spent refresh token.
+
+Every provider's token renewal goes through `CredentialRenewalClient`. Each
+service describes its endpoint (`TokenEndpoint`: URL, form or JSON body,
+client fields, headers, time limit, which replies refuse the grant and which
+throttle); the client writes the `refresh_token` request, sends it, and tells
+a refused grant (the account needs signing in again: Claude's 401 or 400
+`invalid_grant`, Codex's and Kimi's 400 or 401) from every transient failure
+(throttling, other statuses, no connection), which leave the stored credential
+usable later. A renewal asked for while another presenting the same refresh
+token is under way shares that one's reply instead of presenting the token a
+second time. Each attempt is written to the audit through
+`CredentialAudit.recordRenewal`, as `renewed`, `rejected` or `unavailable`.
+
 
 `KimiSessionIsolation` is Kimi Code's one-session slot. Every slot runs in
 `~/.kimi-code` itself, so all sessions share their history, settings and
@@ -1121,12 +1153,27 @@ of the service's commands (the attach client, the supervisor, `stop`, `logs`,
 `rm`, `agents`) or a `--bg` launch is no session. The launcher runs those
 unchanged, as it runs the sign-in commands, and such a process is left out of
 `slotDirectoryByProcess`, so a slot an attach client reads is released
-like any slot no process reads, and no session record it left is counted. Restarting a background session in its own slot, at the user's
-request only, waits until it is idle by every sign: its last event `Stop`,
+like any slot no process reads, and no session record it left is counted. Restarting a background session in its own slot
+waits until it is idle by every sign: its last event `Stop`,
 its transcript and its subagents' quiet for two minutes, and no shell under
 its worker, as its Bash tool starts; then it runs `claude stop <id>` and
 types `claude --resume <id>` and Enter into the agterm tab of its attach
-client, so the resumed run goes through the launcher.
+client, so the resumed run goes through the launcher. A background session
+refused at a usage limit since its last served request counts as idle and
+quiet, since its turns all fail; the shell under its worker and its attach
+client's footer still hold it.
+
+A worker keeps the token it read in memory and does not read the shared
+sign-in again when signalled, so a background session on an account that can
+no longer serve it (refused at its limit there, or flagged by the audit as
+holding that account's token while the account is at its limit) is stuck:
+`handleStuckBackgroundSessions` offers its restart once in the events and
+marks it in the usage tab's list of unisolated sessions, and with **Restart
+stuck background sessions in their own slot** (Settings → Failover, off by
+default) makes the restart itself, at most once every ten minutes per
+session. The audit's `signalSessions` keeps such a session flagged and names
+its restart rather than signalling it.
+
 
 **Rebalance sessions now** (Settings → Failover and the usage tab, for a
 provider whose sessions run in one-session slots; also the requests action
@@ -1433,6 +1480,19 @@ Each component is a provider and a kind (`lifecycle`, `liveUsageFeed`,
 `pauseGate`, `router`), offered when the provider's capabilities declare it and
 required when its CLI is installed and the feature is on.
 
+The session hooks and the pause gate are written by one editor,
+`HookConfigEditor`, with an adapter per file format: `JSONHookFile` for
+Claude Code's `settings.json` and Codex's `hooks.json`, `TOMLHookConfig` for
+Kimi Code's `config.toml`. Each hook carries a marker in its command or table
+header. Installing replaces an event's marked hooks with one; removing deletes
+them, and an event left with no hooks. A JSON edit adds a group after the
+event's last one, in the file's own indentation, and removes one with the
+separator before it, so every other byte of the file is kept and an edit that
+changes nothing leaves the file untouched; a file that is empty, not a JSON
+object or changed while being edited is never replaced.
+`HookConfigEditorTests` holds the exact text each edit leaves.
+
+
 | Component | File changed | Purpose |
 | --- | --- | --- |
 | Claude Code session hooks | `~/.claude/settings.json` | Record session ID, directory and state for recovery |
@@ -1459,6 +1519,12 @@ Session records contain no prompt or transcript content.
 | `~/Library/Logs/AccountDock-credentials.jsonl` | Credential audit trail, JSON Lines, owner-only, rotated at 20 MB keeping `.1`–`.3` |
 | `~/Library/Logs/AccountDock-credentials-owners.json` | Token fingerprint → owner map the audit learned (obfuscated email, account ID) |
 | `UserDefaults` `app.accountdock.mac` | Accounts, usage snapshots, failover settings and runtime, learning |
+
+The app's files in `~/Library/Logs` take their directory from `AppLogs`. While
+XCTest hosts the app it is `AccountDock-logs-tests-<pid>` under the temporary
+directory instead, so a test run never writes the logs, the failover history or
+the audit trail a person reads.
+
 
 ## Costs
 

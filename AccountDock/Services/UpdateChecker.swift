@@ -187,13 +187,12 @@ final class UpdateChecker: ObservableObject {
     }
 
     private static func unzip(_ archive: URL, into directory: URL) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
-        process.arguments = ["-x", "-k", archive.path, directory.path]
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw UpdateError.unreadableArchive }
+        let result = try CommandRunner.runSynchronously(
+            CommandRunner.Command("/usr/bin/ditto", ["-x", "-k", archive.path, directory.path]), timeout: .infinity
+        )
+        guard result.status == 0 else { throw UpdateError.unreadableArchive }
     }
+
 
     nonisolated private static func validatedDownloadURL(_ string: String) -> URL? {
         guard let url = URL(string: string),
