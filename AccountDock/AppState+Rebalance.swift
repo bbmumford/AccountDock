@@ -77,7 +77,7 @@ extension AppState {
             return SessionPacer.RebalanceSession(
                 id: id, account: account, tokensPerHour: measured > 0 ? measured : SessionPacer.defaultSessionRate,
                 contextTokens: entry?.contextTokens ?? 0, model: model,
-                movable: !session.isWorking && pacer.movable(pacing, now: now)
+                movable: !session.isWorking && pacer.movable(pacing, now: now) && !sessionPins.isPinned(id)
             )
         }
         // The sessions on the shared sign-in are none of these and never
