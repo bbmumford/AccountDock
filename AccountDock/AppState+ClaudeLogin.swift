@@ -43,6 +43,11 @@ extension AppState {
         savedCopyVerified[account.id] = Self.credentialDigest(signIn.token)
         rejectedCredentialAccounts.remove(account.id)
         credentialQuarantine[account.id] = nil
+        // Read it at once: an account just signed in has no reading, and a
+        // background read can wait for request allowance for many minutes,
+        // leaving its card empty.
+        let signedIn = account
+        Task { _ = await readUsageNow(signedIn) }
         let active = accounts.first { $0.id == account.id }?.isActive ?? account.isActive
         guard active, let module = credentialModule(for: .claudeCode)?.liveCredential else { return }
         if module.install(savedCopyOf: account) {

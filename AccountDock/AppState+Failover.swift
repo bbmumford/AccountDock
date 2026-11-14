@@ -484,11 +484,16 @@ extension AppState {
         return applyUsageRead(outcome, for: account)
     }
 
-    /// `readUsageNow` for each provider's active account; the menu's Refresh
-    /// button calls it before the ordinary refresh.
+    /// `readUsageNow` for each provider's active account, and for every
+    /// signed-in account that has no reading yet, whose card would otherwise
+    /// stay empty until a background read; the menu's Refresh button calls
+    /// it before the ordinary refresh.
     func readActiveUsageNow() async {
         for provider in AIProviderType.implementedProviders {
             if let active = activeAccount(for: provider), !needsSignIn(active) { await readUsageNow(active) }
+        }
+        for account in accounts where !account.isActive && accountUsage[account.id] == nil && !needsSignIn(account) {
+            await readUsageNow(account)
         }
     }
 
