@@ -852,6 +852,36 @@ final class FailoverPlannerTests: XCTestCase {
         XCTAssertFalse(AppState.describesSupersededWindow(reading(50, resetIn: 96), stored: nil))
     }
 
+    func testASwitchForAModelsOwnLimitSaysSo() throws {
+        let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(scopedResponse.utf8))
+        XCTAssertEqual(AppState.limitingModel(usage: usage, models: ["claude-fable-5"], wholeAtLimit: false, narrowedAtLimit: true),
+                       "Fable")
+        XCTAssertNil(AppState.limitingModel(usage: usage, models: ["claude-fable-5"], wholeAtLimit: true, narrowedAtLimit: true),
+                     "the whole allowance spent is the limit")
+        XCTAssertNil(AppState.limitingModel(usage: usage, models: ["claude-other-1"], wholeAtLimit: false, narrowedAtLimit: true))
+        XCTAssertNil(AppState.limitingModel(usage: usage, models: ["claude-fable-5"], wholeAtLimit: false, narrowedAtLimit: false))
+        XCTAssertEqual(AppState.exhaustedSwitchEvent(source: "Personal", target: "ORBTR", modelLimit: "Fable"),
+                       "Personal has no Fable allowance left for the sessions on the shared sign-in; switching to ORBTR.")
+        XCTAssertEqual(AppState.exhaustedSwitchEvent(source: "Personal", target: "ORBTR", modelLimit: nil),
+                       "Personal is at its limit; switching to ORBTR.")
+    }
+
+    func testASlotSessionOfUnknownModelIsJudgedByTheWholeAllowance() throws {
+        // Fable has 5% of the weekly left here: the shared sessions on Fable
+        // see the narrowed window at 95%; a slot of unknown model sees 60%.
+        let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(scopedResponse.utf8))
+        XCTAssertEqual(usage.weeklyWindow(forModels: ["claude-fable-5"])?.utilization ?? 0, 95, accuracy: 0.001)
+        XCTAssertEqual(usage.weeklyWindow(forModel: nil)?.utilization ?? 0, 60, accuracy: 0.001)
+        // Its model is learned from its status line by its slot directory.
+        let payload = Data(#"{"session_id":"abc","model":{"id":"claude-fable-5","display_name":"Fable"},"rate_limits":{"five_hour":{"used_percentage":7}}}"#.utf8)
+        var observation = try XCTUnwrap(PassiveUsageTelemetry.statusLineObservation(from: payload, observedAt: now, processKey: nil))
+        observation.slotDirectory = "/slots/session/x"
+        let carried = observation.with(usage: observation.usage)
+        XCTAssertEqual(carried.slotDirectory, "/slots/session/x")
+        XCTAssertEqual(carried.processKey, "abc")
+        XCTAssertEqual(carried.model, "Fable")
+    }
+
     func testOnlyWorkOnAModelWithItsOwnLimitIsJudgedByThatLimit() throws {
         let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(scopedResponse.utf8))
         let whole = try XCTUnwrap(usage.sevenDay?.utilization)
