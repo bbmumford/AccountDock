@@ -26,8 +26,9 @@ struct QuotaAccountState: Equatable {
     /// The account can keep serving past its plan limit on extra usage
     /// within the user's spending limit.
     var extraUsageAvailable = false
-    /// Set when the provider has just refused this account at its limit;
-    /// nothing more is sent to it until then.
+    /// Set when the provider has refused this account at its limit, through
+    /// the router or in a session's transcript, since its last reading;
+    /// nothing more is sent to it until a reading shows room.
     var refusedAtLimit = false
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id && lhs.observedAt == rhs.observedAt }
@@ -47,7 +48,8 @@ enum QuotaTier: Int, Comparable {
     case belowTrigger
     /// Above a trigger but still able to serve requests.
     case usable
-    /// A window is at the provider limit.
+    /// A window is at the provider limit by the account's last reading; a
+    /// forecast alone never places an account here.
     case exhausted
     /// No trustworthy reading, unusable credentials or no workload entitlement.
     case ineligible
@@ -61,9 +63,11 @@ enum QuotaTier: Int, Comparable {
 enum ServingVerdict: Equatable {
     /// Below its limits, and not expected to reach one within the lead.
     case canServe
-    /// Below its limits, but expected to reach one within the lead.
+    /// Below its limits by its last reading, but forecast to reach one
+    /// within the lead, or forecast past one already. New sessions are not
+    /// placed here; running ones are not moved off for it.
     case nearLimit
-    /// At a limit, or just refused at it by the provider.
+    /// At a limit by its last reading, or refused at it by the provider.
     case atLimit
     /// No trustworthy reading, unusable credentials, an unconfirmed reset or
     /// no workload entitlement.
@@ -223,6 +227,43 @@ struct FailoverPlanner {
         )
     }
 
+    /// The account's last reading as it was read, without growth for its
+    /// age: what `tier`, `availableAt` and `isMeasuredAtLimit` judge a limit
+    /// by, so a forecast never counts as one.
+    func measuredProjection(_ state: QuotaAccountState, now: Date) -> QuotaProjection? {
+        var still = state
+        still.isActive = false
+        still.mayBeConsumedElsewhere = false
+        return projection(still, now: now)
+    }
+
+    /// Whether `projection` leaves no usable room: a window within
+    /// `margin` session percent of its limit (the long window within
+    /// `minimumUsableHeadroom`), or too little headroom by the plan's ratio.
+    func reachesLimit(_ state: QuotaAccountState, _ projection: QuotaProjection, margin: Double = minimumUsableHeadroom) -> Bool {
+        guard let weekly = projection.weekly else { return false }
+        if let session = projection.session, session >= 100 - margin { return true }
+        return weekly >= 100 - Self.minimumUsableHeadroom || headroom(state, projection) < margin
+    }
+
+    /// Whether the account is at its limit by measurement: a refusal at the
+    /// limit, or its last reading within `reserve` (the in-flight reserve
+    /// `plan` holds the active account at) of a limit. A forecast that the
+    /// burn has carried it there does not count: that only keeps new
+    /// sessions off it (`servingVerdict`).
+    func isMeasuredAtLimit(_ state: QuotaAccountState, now: Date, reserve: Double = 0) -> Bool {
+        if state.refusedAtLimit { return true }
+        guard let measured = measuredProjection(state, now: now) else { return false }
+        return reachesLimit(state, measured, margin: reserve + Self.minimumUsableHeadroom)
+    }
+
+    /// Whether the forecast, the reading grown by the burn over its age,
+    /// has the account at a limit its reading does not show.
+    func isForecastAtLimit(_ state: QuotaAccountState, now: Date) -> Bool {
+        guard let projection = projection(state, now: now) else { return false }
+        return reachesLimit(state, projection) && !isMeasuredAtLimit(state, now: now)
+    }
+
     func isFresh(_ state: QuotaAccountState, now: Date) -> Bool {
         guard let observedAt = state.observedAt else { return false }
         let age = now.timeIntervalSince(observedAt)
@@ -273,8 +314,7 @@ struct FailoverPlanner {
               let weekly = projection.weekly else { return .ineligible }
         if projection.session == nil, settings.sessionQuotaMode == .required { return .ineligible }
         let session = projection.session ?? 0
-        if session >= 100 - Self.minimumUsableHeadroom || weekly >= 100 - Self.minimumUsableHeadroom
-            || headroom(state, projection) < Self.minimumUsableHeadroom {
+        if let measured = measuredProjection(state, now: now), reachesLimit(state, measured) {
             return .exhausted
         }
         let dwellHours = settings.minimumDwell / 3600
@@ -291,13 +331,17 @@ struct FailoverPlanner {
     /// as at the limit, though `tier` places such an account among the
     /// ineligible, so a session resumed onto it is not taken to have room.
     /// `lead` is how long before a projected limit the account counts as
-    /// near it; 0 asks only whether it can serve at all.
+    /// near it; 0 asks only whether it can serve at all. Only a reading or
+    /// a refusal gives `.atLimit`; a forecast at or past a limit gives
+    /// `.nearLimit` whatever the lead, so new sessions are not placed there
+    /// while the sessions on it stay.
     func servingVerdict(_ state: QuotaAccountState, now: Date, lead: TimeInterval) -> ServingVerdict {
         if state.refusedAtLimit { return .atLimit }
         switch tier(state, now: now) {
         case .exhausted: return .atLimit
         case .ineligible: return .ineligible
         case .belowTrigger, .usable:
+            if isForecastAtLimit(state, now: now) { return .nearLimit }
             return (secondsUntilExhaustion(state, now: now) ?? .infinity) < lead ? .nearLimit : .canServe
         }
     }
@@ -376,7 +420,9 @@ struct FailoverPlanner {
         return times.min()
     }
 
-    /// Seconds until the active account is expected to reach a provider limit.
+    /// Seconds until the active account is forecast to reach a provider
+    /// limit. A forecast: it can keep new sessions off the account
+    /// (`servingVerdict`) and time readings, never mark it exhausted.
     func secondsUntilExhaustion(_ state: QuotaAccountState, now: Date) -> TimeInterval? {
         guard let projection = projection(state, now: now) else { return nil }
         var times: [TimeInterval] = []
@@ -402,7 +448,7 @@ struct FailoverPlanner {
         }
         guard state.credentialsUsable || state.isActive,
               tier(limitState, now: now) == .exhausted,
-              let projection = projection(state, now: now) else { return nil }
+              let projection = measuredProjection(state, now: now) else { return nil }
         var limiting: [Date?] = []
         if let session = projection.session, session >= 100 - Self.minimumUsableHeadroom {
             limiting.append(projection.sessionReset)
@@ -415,20 +461,20 @@ struct FailoverPlanner {
     }
 
     /// When the active account, which `plan` holds at its limit, can serve
-    /// again. It is held by the same test `plan` applies: the upper estimate
+    /// again. It is held by the same test `plan` applies: its last reading
     /// within the in-flight reserve of a limit, or a refusal at the limit.
     /// The windows within that margin must reset; with none, as after a
     /// refusal, the fuller window. `availableAt` alone counts only windows at
-    /// 99%, so an account held at 98% had no reset and an account resetting
-    /// days later was waited on instead.
+    /// 99%, so an account held at 98% would have no reset and an account
+    /// resetting days later would be waited on instead.
     func heldAvailableAt(_ state: QuotaAccountState, now: Date) -> Date? {
-        guard let upper = upperProjection(state, now: now) else { return nil }
+        guard let measured = measuredProjection(state, now: now) else { return nil }
         let margin = settings.inFlightReservePercent + Self.minimumUsableHeadroom
         var limiting: [Date?] = []
-        if let session = upper.session, session >= 100 - margin { limiting.append(upper.sessionReset) }
-        if let weekly = upper.weekly, weekly >= 100 - margin { limiting.append(upper.weeklyReset) }
+        if let session = measured.session, session >= 100 - margin { limiting.append(measured.sessionReset) }
+        if let weekly = measured.weekly, weekly >= 100 - margin { limiting.append(measured.weeklyReset) }
         if limiting.isEmpty {
-            limiting.append((upper.session ?? -1) >= (upper.weekly ?? -1) ? upper.sessionReset : upper.weeklyReset)
+            limiting.append((measured.session ?? -1) >= (measured.weekly ?? -1) ? measured.sessionReset : measured.weeklyReset)
         }
         guard limiting.allSatisfy({ $0 != nil }) else { return nil }
         return limiting.compactMap { $0 }.max()
@@ -455,8 +501,12 @@ struct FailoverPlanner {
         }
         let serving = servingView(current)
         let currentTier = current.workloadAvailable ? tier(serving, now: now) : .exhausted
+        // Only a reading or a refusal holds the account at its limit; a
+        // forecast reaching it crosses a trigger (`isTriggered`), which
+        // moves work only to an account below its thresholds and never
+        // starts an exhausted move or a wait for a reset.
         let atLimit = currentTier == .exhausted || current.refusedAtLimit
-            || (upperHeadroom(serving, now: now).map { $0 < settings.inFlightReservePercent + Self.minimumUsableHeadroom } ?? false)
+            || isMeasuredAtLimit(serving, now: now, reserve: settings.inFlightReservePercent)
         let forced = !current.workloadAvailable || atLimit || isTriggered(current, now: now)
         guard forced else {
             return balancePlan(current: current, others: others, lastSwitch: lastSwitch, now: now)

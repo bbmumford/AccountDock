@@ -382,11 +382,21 @@ first request then re-sends its whole context.
 
 ### Rules, in order
 
-The active account counts as at its limit once its headroom on the upper
-estimate is less than the **in-flight reserve**: one expected request (from
+The active account counts as at its limit once the headroom its last reading
+shows is less than the **in-flight reserve**: one expected request (from
 `TurnCostModel`) for every session active in the last three minutes, capped at
 10%. Requests already under way still spend that much after a switch, so work
-moves while they still fit.
+moves while they still fit. A refusal at the limit, by the router or in a
+session's transcript (`AppState.recordedLimitRefusal`), counts the same until a
+reading answers it.
+
+Only such a measurement marks an account exhausted (`isMeasuredAtLimit`). A
+forecast, the reading grown by the burn over its age, that reaches a limit
+the reading does not show (`isForecastAtLimit`) gives `ServingVerdict.nearLimit`:
+no new session is placed there (pool weight 0) and it crosses the trigger of
+rule 1, but it never makes the exhausted move of rule 3, moves sessions off
+the account, or waits for a reset; the account serves on until a reading or a
+refusal shows the limit.
 
 1. The active account crosses a threshold (or will within the lookahead):
    switch to the first account below its thresholds, in the user's order.

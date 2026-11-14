@@ -62,6 +62,75 @@ final class FailoverPlannerTests: XCTestCase {
         )
     }
 
+    // MARK: - Measured and forecast exhaustion
+
+    func testAForecastAtTheLimitMakesNoExhaustedSwitchAndNoWait() {
+        let p = planner(policy())
+        // Read at 97% ten minutes ago; the burn carries the forecast past 100%.
+        let current = account(session: 97, weekly: 40, age: 600, active: true, burn: 20)
+        XCTAssertFalse(p.isMeasuredAtLimit(current, now: now))
+        XCTAssertTrue(p.isForecastAtLimit(current, now: now))
+        XCTAssertEqual(p.tier(current, now: now), .usable)
+        XCTAssertEqual(p.servingVerdict(current, now: now, lead: 0), .nearLimit, "no new sessions start there")
+        XCTAssertNil(p.availableAt(current, now: now))
+
+        let roomy = account(session: 50, weekly: 95)
+        XCTAssertEqual(p.plan(current: current, ladder: [current, roomy], lastSwitch: nil, now: now), .stay(.drainingToLimit),
+                       "a forecast does not move the whole workload to an account above its thresholds")
+        let spent = account(session: 100, weekly: 40, sessionReset: 1800)
+        XCTAssertEqual(p.plan(current: current, ladder: [current, spent], lastSwitch: nil, now: now), .stay(.drainingToLimit),
+                       "a forecast does not wait for another account's reset")
+    }
+
+    func testAForecastCrossingAThresholdStillMovesToAnAccountBelowItsThresholds() {
+        let current = account(session: 97, weekly: 40, age: 600, active: true, burn: 20)
+        let fresh = account(session: 5, weekly: 5)
+        XCTAssertEqual(planner(policy()).plan(current: current, ladder: [current, fresh], lastSwitch: nil, now: now),
+                       .switchTo(fresh.id, .threshold))
+    }
+
+    func testAReadingAtTheLimitOrARefusalStillMovesWorkAndWaits() {
+        let p = planner(policy())
+        let roomy = account(session: 50, weekly: 95)
+        let atLimit = account(session: 99.5, weekly: 40, active: true)
+        XCTAssertEqual(p.plan(current: atLimit, ladder: [atLimit, roomy], lastSwitch: nil, now: now), .switchTo(roomy.id, .exhausted))
+
+        var refused = account(session: 50, weekly: 40, active: true)
+        refused.refusedAtLimit = true
+        XCTAssertTrue(p.isMeasuredAtLimit(refused, now: now))
+        XCTAssertEqual(p.plan(current: refused, ladder: [refused, roomy], lastSwitch: nil, now: now), .switchTo(roomy.id, .exhausted))
+
+        let spent = account(session: 100, weekly: 40, sessionReset: 1800)
+        guard case .waitForReset = p.plan(current: atLimit, ladder: [atLimit, spent], lastSwitch: nil, now: now) else {
+            return XCTFail("a measured limit with every account spent waits for a reset")
+        }
+    }
+
+    func testARecordedRefusalStandsUntilAReadingAnswersIt() {
+        let refused = now.addingTimeInterval(-60)
+        let before = now.addingTimeInterval(-600)
+        XCTAssertTrue(AppState.refusalStands(at: refused, scopedKey: nil, askedKey: nil, readAt: before, wholeAt: before, now: now))
+        XCTAssertFalse(AppState.refusalStands(at: refused, scopedKey: nil, askedKey: nil, readAt: now, wholeAt: before, now: now),
+                       "a newer reading answers it")
+        XCTAssertFalse(AppState.refusalStands(at: now.addingTimeInterval(-AppState.refusalStanding - 1), scopedKey: nil,
+                                              askedKey: nil, readAt: before.addingTimeInterval(-3600), wholeAt: before, now: now))
+        // A refusal of a session on a model with its own allowance is about
+        // that allowance: it counts for that model only, until a whole reading.
+        XCTAssertTrue(AppState.refusalStands(at: refused, scopedKey: "fable", askedKey: "fable", readAt: now, wholeAt: before, now: now))
+        XCTAssertFalse(AppState.refusalStands(at: refused, scopedKey: "fable", askedKey: nil, readAt: before, wholeAt: before, now: now))
+        XCTAssertFalse(AppState.refusalStands(at: refused, scopedKey: "fable", askedKey: "fable", readAt: now, wholeAt: now, now: now))
+    }
+
+    func testAReadingWithinTheInFlightReserveCountsAsMeasuredAtTheLimit() {
+        var settings = FailoverPlanner.Settings(policy: policy(), provider: .claudeCode)
+        settings.inFlightReservePercent = 5
+        let p = FailoverPlanner(settings: settings)
+        let current = account(session: 96, weekly: 40, active: true)
+        let roomy = account(session: 50, weekly: 95)
+        XCTAssertTrue(p.isMeasuredAtLimit(current, now: now, reserve: 5))
+        XCTAssertEqual(p.plan(current: current, ladder: [current, roomy], lastSwitch: nil, now: now), .switchTo(roomy.id, .exhausted))
+    }
+
     // MARK: - Waiting for a reset
 
     func testRoutingAndDistributionWithoutSessionSlotsNeedTheRouter() {
