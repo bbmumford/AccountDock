@@ -179,6 +179,10 @@ struct SessionPacer {
         var lastTurnStart: Date? = nil
         /// The model the session uses; nil when it has not said.
         var model: String? = nil
+        /// Weighted tokens per hour over its last hour, idle time included
+        /// (`SessionRates.demand`); unlike `tokensPerHour`, it does not fade
+        /// to nothing while the session waits between turns.
+        var recentTokensPerHour: Double? = nil
     }
 
     /// How an account's windows go at its sessions' current rate.
@@ -395,15 +399,13 @@ struct SessionPacer {
                 }
             }
         }
-        // A session started now is expected to use what the running ones
-        // use on average, or `defaultSessionRate` when none is running. An
-        // account that could not carry one more such session for
+        // A session started now is expected to use `typicalNewSessionRate`.
+        // An account that could not carry one more such session for
         // `newSessionRunway` takes none while another account can: the
         // session would be refused there, or moved and made to write its
         // cache again, within the hour. `key` adds the allowance of the
         // model the session uses.
-        let rates = active.map(\.tokensPerHour).filter { $0 > 0 }
-        let typical = rates.isEmpty ? Self.defaultSessionRate : rates.reduce(0, +) / Double(rates.count)
+        let typical = Self.typicalNewSessionRate(active)
         // How long the account carries one more such session before it
         // reaches a limit; nil when it reaches none before its resets.
         func runway(_ account: Account, _ key: String?) -> TimeInterval? {
@@ -484,6 +486,20 @@ struct SessionPacer {
     /// Weighted tokens per hour assumed of a session with no history, as
     /// one about to start.
     static let defaultSessionRate = 20_000_000.0
+
+    /// The rate a session started now is expected to use: the median of the
+    /// running sessions' rates over their last hour (the larger of
+    /// `recentTokensPerHour` and the current `tokensPerHour`), at least
+    /// `defaultSessionRate`. A decayed current rate alone reads near zero
+    /// between turns, which would let every account look able to carry
+    /// another session.
+    static func typicalNewSessionRate(_ sessions: [Session]) -> Double {
+        let rates = sessions.map { max($0.tokensPerHour, $0.recentTokensPerHour ?? 0) }.filter { $0 > 0 }.sorted()
+        guard !rates.isEmpty else { return defaultSessionRate }
+        let middle = rates.count / 2
+        let median = rates.count % 2 == 1 ? rates[middle] : (rates[middle - 1] + rates[middle]) / 2
+        return max(defaultSessionRate, median)
+    }
 
     /// The share of its present rate an account's allowance sustains until
     /// its window resets, at most `maximumSustainedShare`: an account barely
@@ -579,5 +595,125 @@ struct SessionPacer {
             }
         }
         return admitted
+    }
+}
+
+// MARK: - Rebalancing
+
+extension SessionPacer {
+    /// A running session as `rebalance` places it.
+    struct RebalanceSession: Equatable {
+        let id: String
+        var account: UUID
+        /// Weighted tokens per hour it is expected to keep using: its rate
+        /// over its last hour, at least its current rate, and
+        /// `defaultSessionRate` when it has no history.
+        var tokensPerHour: Double
+        var contextTokens: Int
+        var model: String?
+        /// False for a session mid-turn: it keeps its account.
+        var movable: Bool
+    }
+
+    struct Rebalance: Equatable {
+        /// The account each moved session goes to.
+        var moves: [String: UUID] = [:]
+        /// When the first account reaches a limit before and after the
+        /// moves; nil when none does before its windows reset.
+        var earliestRunOutBefore: Date?
+        var earliestRunOutAfter: Date?
+    }
+
+    /// How long `account` lasts carrying `sessions` after `spent` percent
+    /// more than its readings show, over its windows and each model's own
+    /// allowance the sessions draw on; infinity when it reaches no limit
+    /// before they reset.
+    func runway(_ account: Account, sessions: [RebalanceSession], spent: Double,
+                scopedSpent: [String: Double] = [:], now: Date) -> TimeInterval {
+        let burn = sessions.reduce(0) { $0 + percent($1.tokensPerHour, on: account) }
+        var times = [outlook(account, spent: spent, burn: burn, now: now).limitAt]
+        for (key, allowance) in account.scoped where allowance.resetsAt > now {
+            let users = sessions.filter { session in session.model?.lowercased().contains(key) == true }
+            guard !users.isEmpty else { continue }
+            let scopedBurn = users.reduce(0) { $0 + percent($1.tokensPerHour, on: account) }
+            times.append(projected(allowance.remaining - (scopedSpent[key] ?? 0), burn: scopedBurn,
+                                   until: allowance.resetsAt, now: now).limitAt)
+        }
+        return times.compactMap { $0?.timeIntervalSince(now) }.min() ?? .infinity
+    }
+
+    /// Places the movable sessions so the first account to reach a limit
+    /// does so as late as possible. `destinations` are the accounts a
+    /// session may move to.
+    ///
+    /// Local search from where the sessions run now: each step takes the
+    /// account that runs out first and tries every movable session on it
+    /// on every other destination, charging the destination the session's
+    /// cache rewrite (`moveCost`), and makes the move that leaves the
+    /// latest earliest run-out. A move is made only when it raises that
+    /// time, and by more than the cache rewrite costs: the hours gained at
+    /// the bottleneck account's burn must exceed the rewrite's window
+    /// percent. Each session moves at most once, and a mid-turn session
+    /// never. Guarantees: the earliest run-out never gets earlier, every
+    /// move pays for its cache rewrite, and the result is a local optimum
+    /// (no single further move of a session on the first account to run out
+    /// helps), not necessarily the best of all assignments.
+    func rebalance(accounts: [Account], sessions: [RebalanceSession], destinations: Set<UUID>, now: Date) -> Rebalance {
+        var placed = sessions.filter { session in accounts.contains { $0.id == session.account } }
+        var spent: [UUID: Double] = [:]
+        var scopedSpent: [UUID: [String: Double]] = [:]
+        var moved = Set<String>()
+        func runway(_ account: Account) -> TimeInterval {
+            self.runway(account, sessions: placed.filter { $0.account == account.id }, spent: spent[account.id] ?? 0,
+                        scopedSpent: scopedSpent[account.id] ?? [:], now: now)
+        }
+        func earliest() -> (account: Account, runway: TimeInterval)? {
+            accounts.map { ($0, runway($0)) }.min { $0.1 < $1.1 }
+        }
+        func date(_ runway: TimeInterval) -> Date? { runway.isFinite ? now.addingTimeInterval(runway) : nil }
+        var result = Rebalance(earliestRunOutBefore: earliest().flatMap { date($0.runway) })
+        for _ in 0..<sessions.count {
+            guard let bottleneck = earliest(), bottleneck.runway.isFinite else { break }
+            let burn = placed.filter { $0.account == bottleneck.account.id }
+                .reduce(0) { $0 + percent($1.tokensPerHour, on: bottleneck.account) }
+            var best: (index: Int, to: Account, runway: TimeInterval, cost: Double)?
+            for (index, session) in placed.enumerated()
+            where session.account == bottleneck.account.id && session.movable && !moved.contains(session.id) {
+                for destination in accounts where destination.id != session.account && destinations.contains(destination.id) {
+                    let cost = moveCost(session.contextTokens, to: destination)
+                    var trial = placed
+                    trial[index].account = destination.id
+                    var trialSpent = spent
+                    trialSpent[destination.id, default: 0] += cost
+                    var trialScoped = scopedSpent
+                    for key in scopedKeys(Session(id: session.id, account: destination.id, tokensPerHour: 0, contextTokens: 0,
+                                                  lastSeen: now, cacheLifetime: nil, model: session.model), on: destination) {
+                        trialScoped[destination.id, default: [:]][key, default: 0] += cost
+                    }
+                    let after = accounts.map { account in
+                        self.runway(account, sessions: trial.filter { $0.account == account.id },
+                                    spent: trialSpent[account.id] ?? 0, scopedSpent: trialScoped[account.id] ?? [:], now: now)
+                    }.min() ?? .infinity
+                    guard after > bottleneck.runway else { continue }
+                    let gained = after.isFinite ? (after - bottleneck.runway) / 3600 * burn : .infinity
+                    guard gained > cost else { continue }
+                    if best.map({ after > $0.runway || (after == $0.runway && cost < $0.cost) }) ?? true {
+                        best = (index, destination, after, cost)
+                    }
+                }
+            }
+            guard let best else { break }
+            let session = placed[best.index]
+            placed[best.index].account = best.to.id
+            spent[best.to.id, default: 0] += best.cost
+            for key in scopedKeys(Session(id: session.id, account: best.to.id, tokensPerHour: 0, contextTokens: 0,
+                                          lastSeen: now, cacheLifetime: nil, model: session.model), on: best.to) {
+                scopedSpent[best.to.id, default: [:]][key, default: 0] += best.cost
+            }
+            moved.insert(session.id)
+            result.moves[session.id] = best.to.id
+        }
+        result.earliestRunOutAfter = earliest().flatMap { date($0.runway) }
+        return result
     }
 }

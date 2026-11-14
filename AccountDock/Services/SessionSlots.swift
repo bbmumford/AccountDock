@@ -36,7 +36,14 @@ struct SessionSlots: Sendable {
     /// Marks the profile line `installLauncher` adds, so `removeLauncher`
     /// finds it again.
     static let profileMarker = "# accountdock session slots"
-    static let profileFile = ".zshrc"
+    /// Read by every zsh, interactive or not, so `zsh -c`, scripts and
+    /// tools that start the CLI through a shell find the launcher too.
+    static let profileFile = ".zshenv"
+    /// Read by interactive zsh after the login files, whose `path_helper`
+    /// and Homebrew's `shellenv` put the CLI's own directory ahead of
+    /// anything `profileFile` added: the line goes here too, last, so a
+    /// terminal's shell finds the launcher first.
+    static let interactiveProfileFile = ".zshrc"
 
     init?(_ provider: AIProviderType, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         guard let support = provider.capabilities.sessionSlots,
@@ -81,6 +88,10 @@ struct SessionSlots: Sendable {
     /// Names the file a launcher leaves in `sessionRoot` when it finds no
     /// spare, for `takeSpareRequests`.
     static let requestPrefix = ".wanted."
+    /// Follows `requestPrefix` in the request a launcher leaves when the
+    /// pool file is stale: `takeSpareRequests` takes it like a spare's, and
+    /// `AppState.maintainSessionSlots` then writes the pool again.
+    static let poolRequestMarker = "pool"
     /// How long a launcher waits for a spare before it starts its session
     /// on a credential shared with other sessions; `spareWaitVariable` in
     /// the launch's environment gives another number of seconds.
@@ -405,6 +416,7 @@ struct SessionSlots: Sendable {
     var launcherInstalled: Bool {
         (try? String(contentsOf: launcher, encoding: .utf8)) == launcherScript()
             && Self.profileHasLine(profileText(), line: profileLine)
+            && Self.profileHasLine(profileText(interactiveProfileURL), line: profileLine)
     }
 
     /// Writes the launcher and puts its directory first on the shell's
@@ -413,9 +425,11 @@ struct SessionSlots: Sendable {
         try FileManager.default.createDirectory(at: binDirectory, withIntermediateDirectories: true)
         try Data(launcherScript().utf8).write(to: launcher, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcher.path)
-        let text = profileText()
-        if !Self.profileHasLine(text, line: profileLine) {
-            try Self.addingLine(profileLine, to: text).write(to: profileURL, atomically: true, encoding: .utf8)
+        for url in [profileURL, interactiveProfileURL] {
+            let text = profileText(url)
+            if !Self.profileHasLine(text, line: profileLine) {
+                try Self.addingLine(profileLine, to: text).write(to: url, atomically: true, encoding: .utf8)
+            }
         }
     }
 
@@ -424,13 +438,16 @@ struct SessionSlots: Sendable {
     func removeLauncher() {
         removePool()
         try? FileManager.default.removeItem(at: launcher)
-        let text = profileText()
-        if Self.profileHasLine(text, line: profileLine) {
-            try? Self.removingLine(profileLine, from: text).write(to: profileURL, atomically: true, encoding: .utf8)
+        for url in [profileURL, interactiveProfileURL] {
+            let text = profileText(url)
+            if Self.profileHasLine(text, line: profileLine) {
+                try? Self.removingLine(profileLine, from: text).write(to: url, atomically: true, encoding: .utf8)
+            }
         }
     }
 
     var profileURL: URL { home.appendingPathComponent(Self.profileFile) }
+    var interactiveProfileURL: URL { home.appendingPathComponent(Self.interactiveProfileFile) }
 
     /// Prepended on every shell start, so the launcher stays ahead of
     /// directories the profile adds earlier.
@@ -438,8 +455,8 @@ struct SessionSlots: Sendable {
         "export PATH=\"$HOME/.accountdock/bin:$PATH\"  \(Self.profileMarker)"
     }
 
-    private func profileText() -> String {
-        (try? String(contentsOf: profileURL, encoding: .utf8)) ?? ""
+    private func profileText(_ url: URL? = nil) -> String {
+        (try? String(contentsOf: url ?? profileURL, encoding: .utf8)) ?? ""
     }
 
     static func profileHasLine(_ text: String, line: String) -> Bool {
@@ -462,7 +479,8 @@ struct SessionSlots: Sendable {
     /// The launcher: starts the first other `executable` on `PATH`, on an
     /// account picked from the pool file at random by weight. It starts the
     /// CLI unchanged when the launch already decides its credential, signs
-    /// in or out, or the pool file is missing or stale.
+    /// in or out, or the pool file is missing, or stale and not written
+    /// again within `spareWaitSeconds` of asking (`poolRequestMarker`).
     func launcherScript() -> String {
         let passThrough = support.credentialVariables
             .map { "[ -n \"${\($0):-}\" ] && exec \"$real\" \"$@\"" }
@@ -494,7 +512,24 @@ struct SessionSlots: Sendable {
         case "${1:-}" in
           \#(support.accountCommands.joined(separator: "|"))) exec "$real" "$@" ;;
         esac
-        [ -n "$(find "$pool" -mmin -\#(Self.poolLifetimeMinutes) 2>/dev/null)" ] || exec "$real" "$@"
+        # A stale pool, as after a restart before AccountDock has written a
+        # new one, is asked for again the way a spare is, and given
+        # \#(Self.spareWaitSeconds) seconds; without AccountDock running the CLI starts unchanged.
+        fresh_pool() { [ -n "$(find "$pool" -mmin -\#(Self.poolLifetimeMinutes) 2>/dev/null)" ]; }
+        if ! fresh_pool; then
+          [ -d "$sessions" ] || exec "$real" "$@"
+          request="$sessions/\#(Self.requestPrefix)\#(Self.poolRequestMarker).$$"
+          wait=${\#(Self.spareWaitVariable):-\#(Self.spareWaitSeconds)}
+          case "$wait" in ''|*[!0-9]*) wait=\#(Self.spareWaitSeconds) ;; esac
+          tries=0
+          while ! fresh_pool && [ "$tries" -lt $((wait * 5)) ]; do
+            : > "$request" 2>/dev/null || break
+            tries=$((tries + 1))
+            sleep 0.2
+          done
+          rm -f "$request"
+          fresh_pool || exec "$real" "$@"
+        fi
         resumes=\#(Self.shellQuoted(resumeFile.path))
         resumed=
         previous=

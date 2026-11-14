@@ -91,6 +91,9 @@ extension AppState {
         await handleExternalRequests()
         await ingestTranscriptRequests()
         await maintainSessionSlots(processesRead: true)
+        await applyModelFallbacks()
+        await noteUnisolatedSessions()
+        await rebalanceAutomaticallyIfDue()
         await evaluateFailover()
         saveLearningIfDue()
         for provider in AgentPauseGate.providers { prunePausedSessions(provider) }
@@ -237,6 +240,9 @@ extension AppState {
                 workloadModels[provider] = (model, observation.observedAt)
                 if let session = observation.processKey { noteSessionModel(session, model: model, at: observation.observedAt) }
             }
+            if let directory = observation.slotDirectory, let session = observation.processKey {
+                slotSessionsByDirectory[directory] = session
+            }
             // A session in a slot reports its slot's account; others are
             // matched by their reset times.
             if sessionSlotIsSettling(observation.processKey, provider: provider,
@@ -269,8 +275,35 @@ extension AppState {
             if accountUsageErrors[accountID]?.isRateLimited == true {
                 accountUsageErrors[accountID] = nil
             }
+            if observation.source.reportsWithEachResponse {
+                liveReadingAt[accountID] = observation.observedAt
+                answerRouterRefusal(accountID, liveAt: observation.observedAt, now: now)
+            }
             failoverLog.debug("passive \(observation.source.rawValue) reading applied to \(accountID.uuidString)")
         }
+    }
+
+    /// Drops the router's refusal of `accountID` once a reading a session
+    /// reported after it shows room below the triggers
+    /// (`FailoverPlanner.liveReadingShowsRoom`), so failover need not wait
+    /// for an endpoint reading the request budget or a cool-down
+    /// (`usageRetryAfter`) holds back. An account with allowances of a
+    /// model's own may have been refused for one of them, which such a
+    /// reading never carries: its refusal waits for a whole reading
+    /// (`accountWholeReadings`) after it.
+    private func answerRouterRefusal(_ accountID: UUID, liveAt: Date, now: Date) {
+        guard let refusedAt = routerRefusedAt[accountID], refusedAt < liveAt,
+              routerRefusedUntil[accountID].map({ $0 > now }) ?? false,
+              let account = accounts.first(where: { $0.id == accountID }) else { return }
+        let scoped = accountUsage[accountID]?.modelWeeklyLimits.isEmpty == false
+        if scoped, (accountWholeReadings[accountID]?.at ?? .distantPast) <= refusedAt { return }
+        let planner = FailoverPlanner(settings: plannerSettings(account.provider))
+        var state = quotaState(for: account, now: now)
+        state.refusedAtLimit = false
+        guard planner.liveReadingShowsRoom(state, now: now) else { return }
+        routerRefusedUntil[accountID] = nil
+        routerRefusedAt[accountID] = nil
+        failoverLog.info("\(account.provider.rawValue): a live reading after the router's refusal shows room on \(accountID.uuidString)")
     }
 
     /// The account a passive reading belongs to: the one it names, or the
@@ -503,6 +536,7 @@ extension AppState {
             id: account.id,
             usage: plannedUsage(account, now: now, model: model, wholeAllowance: wholeAllowance),
             observedAt: accountUsageUpdatedAt[account.id],
+            liveReadingAt: liveReadingAt[account.id].flatMap { $0 == accountUsageUpdatedAt[account.id] ? $0 : nil },
             sessionBurnPerHour: rates.session,
             weeklyBurnPerHour: rates.weekly,
             sessionPerWeekly: sharedSessionPerWeekly(account.provider),
@@ -514,8 +548,49 @@ extension AppState {
             sessionBurnStdDev: uncertainty.session,
             weeklyBurnStdDev: uncertainty.weekly,
             extraUsageAvailable: extraUsageAvailable(account),
-            refusedAtLimit: routerRefusedUntil[account.id].map { $0 > now } ?? false
+            refusedAtLimit: (routerRefusedUntil[account.id].map { $0 > now } ?? false)
+                || recordedLimitRefusal(account, model: model, now: now)
         )
+    }
+
+    /// How long a refusal recorded in a transcript stands without a reading.
+    nonisolated static let refusalStanding: TimeInterval = 30 * 60
+
+    /// Whether a session's transcript recorded a refusal at a usage limit on
+    /// `account` (`sessionRefusals`) that no reading has answered since,
+    /// within `refusalStanding`: `quotaState` counts it as a measured limit.
+    ///
+    /// A refused session whose model has an allowance of its own on the
+    /// account may have been refused for that allowance alone: its refusal
+    /// counts only when `model` is that model, and stands until a whole
+    /// reading (`accountWholeReadings`), the only kind that carries a
+    /// model's own limit. Any other refusal counts for every model until any
+    /// newer reading.
+    func recordedLimitRefusal(_ account: Account, model: String?, now: Date) -> Bool {
+        guard !sessionRefusals.isEmpty else { return false }
+        let readAt = accountUsageUpdatedAt[account.id] ?? .distantPast
+        let wholeAt = accountWholeReadings[account.id]?.at ?? .distantPast
+        let keys = (accountUsage[account.id]?.modelWeeklyLimits ?? []).map { $0.model.lowercased() }
+        func key(_ model: String?) -> String? {
+            guard let model = model?.lowercased() else { return nil }
+            return keys.first { model.contains($0) }
+        }
+        let asked = key(model)
+        return sessionRefusals.contains { session, refusal in
+            refusal.account == account.id
+                && Self.refusalStands(at: refusal.at, scopedKey: key(sessionModel(session, now: now)), askedKey: asked,
+                                      readAt: readAt, wholeAt: wholeAt, now: now)
+        }
+    }
+
+    /// `recordedLimitRefusal`'s rule for one refusal at `at`: `scopedKey`
+    /// names the allowance of the refused session's model when it has one
+    /// of its own, `askedKey` that of the model asked about.
+    nonisolated static func refusalStands(at: Date, scopedKey: String?, askedKey: String?,
+                                          readAt: Date, wholeAt: Date, now: Date) -> Bool {
+        guard now.timeIntervalSince(at) < refusalStanding else { return false }
+        if let scopedKey { return scopedKey == askedKey && at > wholeAt }
+        return at > readAt
     }
 
     /// The account's usage with its weekly window narrowed to what work on
@@ -536,6 +611,41 @@ extension AppState {
         guard !wholeAllowance, !usage.modelWeeklyLimits.isEmpty else { return usage }
         let models = model.map { [$0] } ?? sharedSessionModels(account.provider, now: now)
         return usage.replacingSevenDay(usage.weeklyWindow(forModels: models))
+    }
+
+    /// The model whose own weekly allowance is what has `account` at its
+    /// limit for sessions on `models`: the account is measured at its limit
+    /// for them (`plannedUsage` narrowed to their tightest model) but not by
+    /// its whole allowance. Nil when the whole allowance is spent too, or
+    /// when none of the models has an allowance of its own. Names the limit
+    /// in failover and session-move events.
+    func limitingModel(_ account: Account, models: [String], now: Date = Date()) -> String? {
+        guard !models.isEmpty, let usage = accountUsage[account.id] else { return nil }
+        let planner = FailoverPlanner(settings: plannerSettings(account.provider))
+        let reserve = planner.settings.inFlightReservePercent
+        let whole = planner.isMeasuredAtLimit(quotaState(for: account, now: now, wholeAllowance: true), now: now, reserve: reserve)
+        let narrowed = planner.isMeasuredAtLimit(
+            quotaState(for: account, now: now, model: models.count == 1 ? models[0] : nil), now: now, reserve: reserve)
+        return Self.limitingModel(usage: usage, models: models, wholeAtLimit: whole, narrowedAtLimit: narrowed)
+    }
+
+    /// `limitingModel`'s rule: with the narrowed allowance at its limit and
+    /// the whole one not, the tightest own allowance among `models`.
+    nonisolated static func limitingModel(usage: UsageAPIResponse, models: [String], wholeAtLimit: Bool,
+                                          narrowedAtLimit: Bool) -> String? {
+        guard narrowedAtLimit, !wholeAtLimit else { return nil }
+        let names = models.map { $0.lowercased() }
+        return usage.modelWeeklyLimits
+            .filter { limit in names.contains { $0.contains(limit.model.lowercased()) } }
+            .max { $0.percent < $1.percent }?.model
+    }
+
+    /// The event for an exhausted switch away from `source`; `modelLimit`
+    /// names the model whose own allowance ran out for the sessions on the
+    /// shared sign-in, when that is the limit (`limitingModel`).
+    nonisolated static func exhaustedSwitchEvent(source: String, target: String, modelLimit: String?) -> String {
+        guard let modelLimit else { return "\(source) is at its limit; switching to \(target)." }
+        return "\(source) has no \(modelLimit) allowance left for the sessions on the shared sign-in; switching to \(target)."
     }
 
     /// How long a session's last reported model is taken as the one it uses.
@@ -751,12 +861,20 @@ extension AppState {
             }
         }
 
+        // Every account at its limit is concluded only from readings: one
+        // stored before launch and since grown stale says nothing yet.
+        switch plan {
+        case .waitForReset, .noCapacity:
+            if awaitsFirstReadings(ladder, planner: planner, now: now) { return }
+        default: break
+        }
+
         switch plan {
         case .stay(let reason):
             if reason == .drainingToLimit {
-                updateStatus(provider, "Using \(messageName(current)) up to its limit; no other account is below its failover threshold.")
+                updateStatus(provider, "Using \(messageName(current)) up to its limit; no other account is below its failover threshold.", settles: true)
             } else if reason == .holdingForImminentReset {
-                updateStatus(provider, "Holding \(messageName(current)); its limiting window resets soon.")
+                updateStatus(provider, "Holding \(messageName(current)); its limiting window resets soon.", settles: true)
             }
             // On extra usage the account keeps serving past its limit, so its
             // sessions are not paused for reaching it.
@@ -801,14 +919,14 @@ extension AppState {
             if accountID != current.id, !provider.capabilities.switchReachesRunningSessions,
                credentialModule(for: provider)?.liveCredential == nil,
                policy.enabled || policy.intelligentBalancingEnabled, let target {
-                updateStatus(provider, "All accounts exhausted. Preparing \(messageName(target)), which resets at \(resetText).\(signInNote(ladder))")
+                updateStatus(provider, "All accounts exhausted. Preparing \(messageName(target)), which resets at \(resetText).\(signInNote(ladder))", settles: true)
                 await performAutomaticSwitch(provider: provider, policy: policy, from: current, to: target, reason: .exhausted)
             } else {
-                updateStatus(provider, "All accounts exhausted. Waiting for \(messageName(target ?? current)) to reset at \(resetText).\(signInNote(ladder))")
+                updateStatus(provider, "All accounts exhausted. Waiting for \(messageName(target ?? current)) to reset at \(resetText).\(signInNote(ladder))", settles: true)
             }
 
         case .noCapacity:
-            updateStatus(provider, "All configured accounts are at their limits; reset times are unavailable.\(signInNote(ladder))")
+            updateStatus(provider, "All configured accounts are at their limits; reset times are unavailable.\(signInNote(ladder))", settles: true)
             await holdWork(provider, policy: policy, current: current, because: "every included account is exhausted")
 
         case .verify:
@@ -830,10 +948,81 @@ extension AppState {
         return " \(names.joined(separator: ", ")) \(names.count == 1 ? "needs" : "need") signing in again."
     }
 
-    private func updateStatus(_ provider: AIProviderType, _ message: String) {
-        guard failoverStatus[provider] != message else { return }
+    /// Shows `message` as the provider's status. A status that describes
+    /// the plan's standing state (`settles`), restated every cycle, becomes
+    /// an event only once it has differed from the last one recorded for
+    /// longer than `statusSettle` (`StatusEventGate`); any other status,
+    /// the outcome of an action, is recorded when it changes.
+    private func updateStatus(_ provider: AIProviderType, _ message: String, settles: Bool = false) {
+        let changed = failoverStatus[provider] != message
         failoverStatus[provider] = message
-        failoverEvents.record(provider, message)
+        if settles {
+            if let event = statusEventGates[provider, default: StatusEventGate()].note(message, now: Date(), settle: Self.statusSettle) {
+                failoverEvents.record(provider, event)
+            }
+        } else if changed {
+            failoverEvents.record(provider, message)
+            statusEventGates[provider, default: StatusEventGate()].recorded(message)
+        }
+    }
+
+    /// How long a standing status must differ from the last one recorded
+    /// before it is recorded: the longest quota cycle
+    /// (`nextQuotaCycleInterval`), so two states alternating from one cycle
+    /// to the next record nothing.
+    nonisolated static let statusSettle: TimeInterval = 120
+
+    /// Decides when a provider's standing status becomes an event.
+    struct StatusEventGate: Equatable {
+        private(set) var lastRecorded: String?
+        private(set) var pending: String?
+        private(set) var pendingSince: Date?
+
+        /// Takes the status shown at `now`; returns it when it is to be
+        /// recorded: it differs from the last recorded status and has been
+        /// shown unchanged for at least `settle`.
+        mutating func note(_ status: String, now: Date, settle: TimeInterval) -> String? {
+            guard status != lastRecorded else {
+                pending = nil
+                pendingSince = nil
+                return nil
+            }
+            guard status == pending, let since = pendingSince else {
+                pending = status
+                pendingSince = now
+                return nil
+            }
+            guard now.timeIntervalSince(since) >= settle else { return nil }
+            recorded(status)
+            return status
+        }
+
+        /// Notes a status recorded without waiting.
+        mutating func recorded(_ status: String) {
+            lastRecorded = status
+            pending = nil
+            pendingSince = nil
+        }
+    }
+
+    /// Whether the provider's plan that every account is at its limit waits
+    /// for readings: within `FailoverPlanner.liveFreshness` of launch, some
+    /// account in `ladder` that can be read, signed in and not failing to
+    /// read, has neither a reading from this launch nor a stored one still
+    /// fresh (`FailoverPlanner.isFresh`).
+    func awaitsFirstReadings(_ ladder: [Account], planner: FailoverPlanner, now: Date) -> Bool {
+        let readings = ladder.compactMap { account -> (readAt: Date?, fresh: Bool)? in
+            guard !needsSignIn(account), accountUsageErrors[account.id] == nil else { return nil }
+            return (accountUsageUpdatedAt[account.id], planner.isFresh(quotaState(for: account, now: now), now: now))
+        }
+        return Self.awaitsFirstReadings(readings, launchedAt: launchedAt, now: now)
+    }
+
+    nonisolated static func awaitsFirstReadings(_ readings: [(readAt: Date?, fresh: Bool)], launchedAt: Date, now: Date) -> Bool {
+        guard now.timeIntervalSince(launchedAt) < FailoverPlanner.liveFreshness else { return false }
+        return readings.contains { reading in
+            !reading.fresh && (reading.readAt.map { $0 < launchedAt } ?? true)
+        }
     }
 
     // MARK: - Suspension
@@ -901,6 +1090,12 @@ extension AppState {
         agentPauseStatus[provider] = nil
         sessionAdmissions[provider] = nil
         userResumes[provider] = nil
+        // Each resumed session's first request re-sends its whole context;
+        // that burst is not the accounts' burn rate.
+        let now = Date()
+        for account in accounts where account.provider == provider {
+            quotaTrends[account.id]?.settle(at: now)
+        }
         return held
     }
 
@@ -1106,6 +1301,7 @@ extension AppState {
             sessionRates.resume(id, tokensPerHour: demands[id] ?? typical, at: now)
             sessionAdmissions[provider, default: [:]][id] = SessionAdmission(
                 session: id, account: placement.account, at: now, surplus: placement.surplus)
+            quotaTrends[placement.account]?.settle(at: now)
         }
         refreshPauseStatus(provider)
         if provider == AIProviderType.routedProvider, routerInUse {
@@ -1388,6 +1584,8 @@ extension AppState {
             running = prepared
         }
 
+        let modelLimit = reason == .exhausted
+            ? limitingModel(current, models: sharedSessionModels(provider, now: now), now: now) : nil
         switch reason {
         case .balance(let hours) where hours < 1:
             // The forecast decided: staying would leave more allowance unused.
@@ -1397,7 +1595,7 @@ extension AppState {
         case .threshold:
             failoverEvents.record(provider, "Threshold reached; switching \(sourceName) → \(targetName).")
         case .exhausted:
-            failoverEvents.record(provider, "\(sourceName) is at its limit; switching to \(targetName).")
+            failoverEvents.record(provider, Self.exhaustedSwitchEvent(source: sourceName, target: targetName, modelLimit: modelLimit))
         case .workloadUnavailable:
             failoverEvents.record(provider, "\(sourceName) no longer includes this workload; switching to \(targetName).")
         }
@@ -1423,12 +1621,17 @@ extension AppState {
         } else if credentialModule(for: provider)?.liveCredential != nil {
             sessionsLeftOn[provider, default: []].insert(current.id)
         }
+        // A threshold, or a forecast crossing one, leaves room on the
+        // account; `buildPool` drains it until a reading shows the limit.
+        if reason == .threshold { drainingAccounts[current.id] = Date() }
+        drainingAccounts[target.id] = nil
         if provider == AIProviderType.routedProvider { await routerFollowActiveAccount() }
         lastAutomaticFailover[provider] = Date()
         exhaustedFailoverAccounts[provider, default: []].insert(current.id)
         exhaustedFailoverAccounts[provider, default: []].remove(target.id)
         saveFailoverRuntime()
-        updateStatus(provider, "Switched to \(targetName).")
+        updateStatus(provider, "Switched to \(targetName)."
+            + (modelLimit.map { " \(sourceName) has no \($0) allowance left for the sessions on the shared sign-in." } ?? ""))
 
         // A fresh reading of the new account confirms it before paused
         // agents continue.

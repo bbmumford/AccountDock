@@ -62,6 +62,152 @@ final class FailoverPlannerTests: XCTestCase {
         )
     }
 
+    // MARK: - Measured and forecast exhaustion
+
+    func testAForecastAtTheLimitMakesNoExhaustedSwitchAndNoWait() {
+        let p = planner(policy())
+        // Read at 97% ten minutes ago; the burn carries the forecast past 100%.
+        let current = account(session: 97, weekly: 40, age: 600, active: true, burn: 20)
+        XCTAssertFalse(p.isMeasuredAtLimit(current, now: now))
+        XCTAssertTrue(p.isForecastAtLimit(current, now: now))
+        XCTAssertEqual(p.tier(current, now: now), .usable)
+        XCTAssertEqual(p.servingVerdict(current, now: now, lead: 0), .nearLimit, "no new sessions start there")
+        XCTAssertNil(p.availableAt(current, now: now))
+
+        let roomy = account(session: 50, weekly: 95)
+        XCTAssertEqual(p.plan(current: current, ladder: [current, roomy], lastSwitch: nil, now: now), .stay(.drainingToLimit),
+                       "a forecast does not move the whole workload to an account above its thresholds")
+        let spent = account(session: 100, weekly: 40, sessionReset: 1800)
+        XCTAssertEqual(p.plan(current: current, ladder: [current, spent], lastSwitch: nil, now: now), .stay(.drainingToLimit),
+                       "a forecast does not wait for another account's reset")
+    }
+
+    func testAForecastCrossingAThresholdStillMovesToAnAccountBelowItsThresholds() {
+        let current = account(session: 97, weekly: 40, age: 600, active: true, burn: 20)
+        let fresh = account(session: 5, weekly: 5)
+        XCTAssertEqual(planner(policy()).plan(current: current, ladder: [current, fresh], lastSwitch: nil, now: now),
+                       .switchTo(fresh.id, .threshold))
+    }
+
+    func testAReadingAtTheLimitOrARefusalStillMovesWorkAndWaits() {
+        let p = planner(policy())
+        let roomy = account(session: 50, weekly: 95)
+        let atLimit = account(session: 99.5, weekly: 40, active: true)
+        XCTAssertEqual(p.plan(current: atLimit, ladder: [atLimit, roomy], lastSwitch: nil, now: now), .switchTo(roomy.id, .exhausted))
+
+        var refused = account(session: 50, weekly: 40, active: true)
+        refused.refusedAtLimit = true
+        XCTAssertTrue(p.isMeasuredAtLimit(refused, now: now))
+        XCTAssertEqual(p.plan(current: refused, ladder: [refused, roomy], lastSwitch: nil, now: now), .switchTo(roomy.id, .exhausted))
+
+        let spent = account(session: 100, weekly: 40, sessionReset: 1800)
+        guard case .waitForReset = p.plan(current: atLimit, ladder: [atLimit, spent], lastSwitch: nil, now: now) else {
+            return XCTFail("a measured limit with every account spent waits for a reset")
+        }
+    }
+
+    func testAFreshStatusLineReadingWithRoomStandsOverTheForecast() {
+        let p = planner(policy())
+        // A burst-learned burn grows a reading 90 seconds old from 40% to 100%.
+        var current = account(session: 40, weekly: 40, age: 90, active: true, burn: 2400)
+        XCTAssertTrue(p.isForecastAtLimit(current, now: now))
+        XCTAssertTrue(p.isTriggered(current, now: now))
+        XCTAssertEqual(p.servingVerdict(current, now: now, lead: 150), .nearLimit)
+
+        current.liveReadingAt = current.observedAt
+        XCTAssertTrue(p.liveReadingShowsRoom(current, now: now))
+        XCTAssertFalse(p.isForecastAtLimit(current, now: now))
+        XCTAssertFalse(p.isTriggered(current, now: now))
+        XCTAssertEqual(p.servingVerdict(current, now: now, lead: 150), .canServe)
+        let other = account(session: 5, weekly: 5)
+        XCTAssertEqual(p.plan(current: current, ladder: [current, other], lastSwitch: nil, now: now), .stay(.healthy))
+
+        // Too old, over a trigger, or refused since: the forecast stands.
+        XCTAssertFalse(p.liveReadingShowsRoom(current, now: now.addingTimeInterval(FailoverPlanner.liveReadingLifetime)))
+        var over = account(session: 92, weekly: 40, age: 10, active: true, burn: 50)
+        over.liveReadingAt = over.observedAt
+        XCTAssertFalse(p.liveReadingShowsRoom(over, now: now))
+        XCTAssertTrue(p.isTriggered(over, now: now))
+        var refused = current
+        refused.refusedAtLimit = true
+        XCTAssertFalse(p.liveReadingShowsRoom(refused, now: now))
+        var older = current
+        older.liveReadingAt = current.observedAt?.addingTimeInterval(-30)
+        XCTAssertFalse(p.liveReadingShowsRoom(older, now: now), "only while it is the newest reading")
+    }
+
+    func testAStatusLineNeverOverridesAModelLimitFromTheLastWholeReading() {
+        let p = planner(policy())
+        // `plannedUsage` narrows the long window to the session model's own
+        // allowance from the last whole reading: spent here.
+        var spentModel = account(session: 40, weekly: 100, age: 10, active: true, burn: 10)
+        spentModel.liveReadingAt = spentModel.observedAt
+        XCTAssertFalse(p.liveReadingShowsRoom(spentModel, now: now))
+        XCTAssertEqual(p.servingVerdict(spentModel, now: now, lead: 0), .atLimit)
+    }
+
+    func testTwoStatusesAlternatingEachCycleRecordNoStreamOfEvents() {
+        var gate = AppState.StatusEventGate()
+        let exhausted = "All accounts exhausted. Waiting for A to reset at 9:00."
+        let draining = "Using A up to its limit; no other account is below its failover threshold."
+        var events: [String] = []
+        var t = now
+        func note(_ status: String) {
+            if let event = gate.note(status, now: t, settle: AppState.statusSettle) { events.append(event) }
+            t = t.addingTimeInterval(20)
+        }
+        // The first status is recorded once it has stood for a cycle.
+        for _ in 0..<8 { note(draining) }
+        XCTAssertEqual(events, [draining])
+        for _ in 0..<30 { note(exhausted); note(draining) }
+        XCTAssertEqual(events, [draining], "alternating each cycle records nothing")
+        for _ in 0..<8 { note(exhausted) }
+        XCTAssertEqual(events, [draining, exhausted], "a status that lasts is recorded once")
+
+        gate.recorded("Switched to B.")
+        XCTAssertNil(gate.note("Switched to B.", now: t, settle: AppState.statusSettle))
+    }
+
+    func testEveryAccountAtItsLimitWaitsForReadingsFromThisLaunch() {
+        let launched = now.addingTimeInterval(-60)
+        let stale = (readAt: Optional(now.addingTimeInterval(-3 * 3600)), fresh: false)
+        let current = (readAt: Optional(now.addingTimeInterval(-10)), fresh: true)
+        let storedFresh = (readAt: Optional(launched.addingTimeInterval(-120)), fresh: true)
+        let unread = (readAt: Date?.none, fresh: false)
+        XCTAssertTrue(AppState.awaitsFirstReadings([current, stale], launchedAt: launched, now: now))
+        XCTAssertTrue(AppState.awaitsFirstReadings([current, unread], launchedAt: launched, now: now))
+        XCTAssertFalse(AppState.awaitsFirstReadings([current, storedFresh], launchedAt: launched, now: now))
+        let readThisLaunch = (readAt: Optional(launched.addingTimeInterval(5)), fresh: false)
+        XCTAssertFalse(AppState.awaitsFirstReadings([readThisLaunch], launchedAt: launched, now: now))
+        XCTAssertFalse(AppState.awaitsFirstReadings([stale], launchedAt: now.addingTimeInterval(-FailoverPlanner.liveFreshness),
+                                                    now: now), "not for longer than a reading's freshness after launch")
+    }
+
+    func testARecordedRefusalStandsUntilAReadingAnswersIt() {
+        let refused = now.addingTimeInterval(-60)
+        let before = now.addingTimeInterval(-600)
+        XCTAssertTrue(AppState.refusalStands(at: refused, scopedKey: nil, askedKey: nil, readAt: before, wholeAt: before, now: now))
+        XCTAssertFalse(AppState.refusalStands(at: refused, scopedKey: nil, askedKey: nil, readAt: now, wholeAt: before, now: now),
+                       "a newer reading answers it")
+        XCTAssertFalse(AppState.refusalStands(at: now.addingTimeInterval(-AppState.refusalStanding - 1), scopedKey: nil,
+                                              askedKey: nil, readAt: before.addingTimeInterval(-3600), wholeAt: before, now: now))
+        // A refusal of a session on a model with its own allowance is about
+        // that allowance: it counts for that model only, until a whole reading.
+        XCTAssertTrue(AppState.refusalStands(at: refused, scopedKey: "fable", askedKey: "fable", readAt: now, wholeAt: before, now: now))
+        XCTAssertFalse(AppState.refusalStands(at: refused, scopedKey: "fable", askedKey: nil, readAt: before, wholeAt: before, now: now))
+        XCTAssertFalse(AppState.refusalStands(at: refused, scopedKey: "fable", askedKey: "fable", readAt: now, wholeAt: now, now: now))
+    }
+
+    func testAReadingWithinTheInFlightReserveCountsAsMeasuredAtTheLimit() {
+        var settings = FailoverPlanner.Settings(policy: policy(), provider: .claudeCode)
+        settings.inFlightReservePercent = 5
+        let p = FailoverPlanner(settings: settings)
+        let current = account(session: 96, weekly: 40, active: true)
+        let roomy = account(session: 50, weekly: 95)
+        XCTAssertTrue(p.isMeasuredAtLimit(current, now: now, reserve: 5))
+        XCTAssertEqual(p.plan(current: current, ladder: [current, roomy], lastSwitch: nil, now: now), .switchTo(roomy.id, .exhausted))
+    }
+
     // MARK: - Waiting for a reset
 
     func testRoutingAndDistributionWithoutSessionSlotsNeedTheRouter() {
@@ -463,6 +609,83 @@ final class FailoverPlannerTests: XCTestCase {
         XCTAssertEqual(trend.currentRates(now: now.addingTimeInterval(1800 + 1800)).session, 16, accuracy: 0.01)
     }
 
+    private func sessionReading(_ s: Double, resetIn: TimeInterval?) -> UsageAPIResponse {
+        UsageAPIResponse(
+            fiveHour: UsageWindow(utilization: s, resetsAt: resetIn.map { iso(now.addingTimeInterval($0)) }),
+            sevenDay: UsageWindow(utilization: 40, resetsAt: iso(now.addingTimeInterval(4 * 86_400))),
+            sevenDayOauthApps: nil, sevenDayOpus: nil, sevenDaySonnet: nil,
+            sevenDayCowork: nil, iguanaNecktie: nil, extraUsage: nil
+        )
+    }
+
+    func testAResumeBurstAfterAWindowResetDoesNotSetTheBurnRate() {
+        var trend = QuotaTrend()
+        // The old window, read at a steady 12% per hour.
+        trend.record(sessionReading(80, resetIn: 600), at: now)
+        trend.record(sessionReading(81, resetIn: 600), at: now.addingTimeInterval(300))
+        // It resets; paused sessions resume and re-send their contexts.
+        let newReset: TimeInterval = 600 + 5 * 3600
+        trend.record(sessionReading(2, resetIn: newReset), at: now.addingTimeInterval(700))
+        trend.record(sessionReading(20, resetIn: newReset), at: now.addingTimeInterval(760))
+        trend.record(sessionReading(33, resetIn: newReset), at: now.addingTimeInterval(820))
+        // Then the steady rate again.
+        for step in 1...4 {
+            trend.record(sessionReading(33 + Double(step), resetIn: newReset), at: now.addingTimeInterval(820 + Double(step) * 300))
+        }
+        XCTAssertEqual(trend.sessionBurnPerHour, 12, accuracy: 0.01)
+        XCTAssertEqual(trend.currentUncertainty(now: now.addingTimeInterval(2020)).session, 0, accuracy: 0.01)
+    }
+
+    func testABurstWhenAnUnstartedWindowStartsIsNotLearned() {
+        var trend = QuotaTrend()
+        trend.record(sessionReading(0, resetIn: nil), at: now)
+        trend.record(sessionReading(33, resetIn: 5 * 3600), at: now.addingTimeInterval(120))
+        trend.record(sessionReading(34, resetIn: 5 * 3600), at: now.addingTimeInterval(240))
+        trend.record(sessionReading(35, resetIn: 5 * 3600), at: now.addingTimeInterval(540))
+        trend.record(sessionReading(36, resetIn: 5 * 3600), at: now.addingTimeInterval(840))
+        XCTAssertEqual(trend.sessionBurnPerHour, 12, accuracy: 0.01)
+    }
+
+    func testReadingsJustAfterPausedSessionsResumeTeachNoRate() {
+        var trend = QuotaTrend()
+        trend.record(sessionReading(10, resetIn: 3 * 3600), at: now)
+        trend.settle(at: now)
+        trend.record(sessionReading(25, resetIn: 3 * 3600), at: now.addingTimeInterval(60))
+        trend.record(sessionReading(33, resetIn: 3 * 3600), at: now.addingTimeInterval(120))
+        trend.record(sessionReading(34, resetIn: 3 * 3600), at: now.addingTimeInterval(420))
+        trend.record(sessionReading(35, resetIn: 3 * 3600), at: now.addingTimeInterval(720))
+        XCTAssertEqual(trend.sessionBurnPerHour, 12, accuracy: 0.01)
+    }
+
+    func testOneBurstInASteadySeriesCannotSetTheForecast() {
+        var trend = QuotaTrend()
+        var t: TimeInterval = 0
+        var used = 10.0
+        func read(_ rise: Double, after: TimeInterval) {
+            t += after
+            used += rise
+            trend.record(sessionReading(used, resetIn: 4 * 3600), at: now.addingTimeInterval(t))
+        }
+        read(0, after: 0)
+        read(1, after: 300)
+        read(1, after: 300)
+        read(1, after: 300)
+        read(20, after: 60)
+        read(1, after: 300)
+        XCTAssertEqual(trend.sessionBurnPerHour, 12, accuracy: 0.01)
+        XCTAssertLessThan(trend.currentUncertainty(now: now.addingTimeInterval(t)).session, 1)
+    }
+
+    func testWholePercentReadingsGiveTheAverageRateNotAlternatingZeros() {
+        var trend = QuotaTrend()
+        // 12% per hour read in whole percent every 40 seconds.
+        for step in 0...60 {
+            let at = Double(step) * 40
+            trend.record(sessionReading((10 + at / 300).rounded(.down), resetIn: 4 * 3600), at: now.addingTimeInterval(at))
+        }
+        XCTAssertEqual(trend.sessionBurnPerHour, 12, accuracy: 1)
+    }
+
     func testWindowMergeIsMonotonicWithinAWindowAndAdvancesToANewOne() {
         let reset = now.addingTimeInterval(3600)
         let stored = UsageWindow(utilization: 70, resetsAt: iso(reset))
@@ -627,6 +850,36 @@ final class FailoverPlannerTests: XCTestCase {
         XCTAssertFalse(AppState.describesSupersededWindow(reading(2, resetIn: 168), stored: reading(99, resetIn: 0.1)),
                        "a later window replaces the stored one")
         XCTAssertFalse(AppState.describesSupersededWindow(reading(50, resetIn: 96), stored: nil))
+    }
+
+    func testASwitchForAModelsOwnLimitSaysSo() throws {
+        let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(scopedResponse.utf8))
+        XCTAssertEqual(AppState.limitingModel(usage: usage, models: ["claude-fable-5"], wholeAtLimit: false, narrowedAtLimit: true),
+                       "Fable")
+        XCTAssertNil(AppState.limitingModel(usage: usage, models: ["claude-fable-5"], wholeAtLimit: true, narrowedAtLimit: true),
+                     "the whole allowance spent is the limit")
+        XCTAssertNil(AppState.limitingModel(usage: usage, models: ["claude-other-1"], wholeAtLimit: false, narrowedAtLimit: true))
+        XCTAssertNil(AppState.limitingModel(usage: usage, models: ["claude-fable-5"], wholeAtLimit: false, narrowedAtLimit: false))
+        XCTAssertEqual(AppState.exhaustedSwitchEvent(source: "Personal", target: "ORBTR", modelLimit: "Fable"),
+                       "Personal has no Fable allowance left for the sessions on the shared sign-in; switching to ORBTR.")
+        XCTAssertEqual(AppState.exhaustedSwitchEvent(source: "Personal", target: "ORBTR", modelLimit: nil),
+                       "Personal is at its limit; switching to ORBTR.")
+    }
+
+    func testASlotSessionOfUnknownModelIsJudgedByTheWholeAllowance() throws {
+        // Fable has 5% of the weekly left here: the shared sessions on Fable
+        // see the narrowed window at 95%; a slot of unknown model sees 60%.
+        let usage = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(scopedResponse.utf8))
+        XCTAssertEqual(usage.weeklyWindow(forModels: ["claude-fable-5"])?.utilization ?? 0, 95, accuracy: 0.001)
+        XCTAssertEqual(usage.weeklyWindow(forModel: nil)?.utilization ?? 0, 60, accuracy: 0.001)
+        // Its model is learned from its status line by its slot directory.
+        let payload = Data(#"{"session_id":"abc","model":{"id":"claude-fable-5","display_name":"Fable"},"rate_limits":{"five_hour":{"used_percentage":7}}}"#.utf8)
+        var observation = try XCTUnwrap(PassiveUsageTelemetry.statusLineObservation(from: payload, observedAt: now, processKey: nil))
+        observation.slotDirectory = "/slots/session/x"
+        let carried = observation.with(usage: observation.usage)
+        XCTAssertEqual(carried.slotDirectory, "/slots/session/x")
+        XCTAssertEqual(carried.processKey, "abc")
+        XCTAssertEqual(carried.model, "Fable")
     }
 
     func testOnlyWorkOnAModelWithItsOwnLimitIsJudgedByThatLimit() throws {

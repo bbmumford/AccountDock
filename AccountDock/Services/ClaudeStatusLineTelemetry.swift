@@ -83,7 +83,11 @@ enum ClaudeStatusLineTelemetry {
 
     /// Writes only the session's own status-line payload. The payload carries
     /// model, workspace, cost and rate-limit metadata; prompt and transcript
-    /// content are not part of it.
+    /// content are not part of it. A session in a one-session slot also
+    /// leaves the slot directory it reads (Claude Code's
+    /// `SessionSlotSupport.directoryVariable`) beside it, so
+    /// `PassiveUsageTelemetry` can name the session of a slot whose process
+    /// left no session record.
     private static let script = #"""
     #!/bin/sh
     dir="$HOME/Library/Application Support/AccountDock/Telemetry"
@@ -95,6 +99,9 @@ enum ClaudeStatusLineTelemetry {
     tmp="$dir/.claude-$sid.$$"
     if printf '%s' "$payload" > "$tmp" 2>/dev/null; then
         /bin/mv -f "$tmp" "$dir/claude-$sid.json" 2>/dev/null
+    fi
+    if [ -n "${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}" ]; then
+        printf '%s' "$CLAUDE_SECURESTORAGE_CONFIG_DIR" > "$dir/claude-$sid.slot" 2>/dev/null
     fi
     pause="$HOME/Library/Application Support/AccountDock/Pause/claude.json"
     if [ -f "$pause" ] && /usr/bin/grep -q "\"$sid\"" "$pause" 2>/dev/null; then
