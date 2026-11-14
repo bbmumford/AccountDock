@@ -566,8 +566,7 @@ struct SessionSlots: Sendable {
               [ "$(cat "$spare/\#(Self.accountFile)" 2>/dev/null)" = "$account" ] || continue
               if mkdir "$spare/\#(Self.claimedMarker)" 2>/dev/null; then
                 [ "$tries" -eq 0 ] || rm -f "$request"
-                \#(isolation.directoryVariable)=$spare
-                export \#(isolation.directoryVariable)
+                \#(isolation.launcherExportLines(slot: "$spare").joined(separator: "\n        "))
                 exec "$real" "$@"
               fi
             done
@@ -581,8 +580,7 @@ struct SessionSlots: Sendable {
         if [ -z "$slot" ] || [ "$slot" = "\#(Self.activeEntry)" ] || [ ! -d "$slot" ]; then
           exec "$real" "$@"
         fi
-        \#(isolation.directoryVariable)=$slot
-        export \#(isolation.directoryVariable)
+        \#(isolation.launcherExportLines(slot: "$slot").joined(separator: "\n"))
         exec "$real" "$@"
 
         """#

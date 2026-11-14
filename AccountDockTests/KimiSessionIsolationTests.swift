@@ -2,23 +2,56 @@ import XCTest
 @testable import AccountDock
 
 /// Kimi Code's slots, in temporary directories with fake credentials: the
-/// launcher the shared slot code generates for them, the credential a slot
-/// holds and how it is written next to Kimi Code's own lock, moving a slot
-/// to another account, and the renewal threshold slots are kept above.
+/// credential name Kimi Code derives for a slot's pair of values, the
+/// spellings that tell slots apart, the launcher the shared slot code
+/// generates for them, the credential a slot holds and how it is written
+/// next to Kimi Code's own lock, what removing a slot deletes, putting
+/// `config.toml` back after a slot's session wrote its own spelling, and
+/// the renewal threshold slots are kept above.
 final class KimiSessionIsolationTests: XCTestCase {
     private var root: URL!
-    /// Stands in for Kimi Code's own home, which slots copy from.
-    private var source: URL!
+    /// Stands in for Kimi Code's own home, which holds every slot's
+    /// credential.
+    private var kimiHome: URL!
+
+    static let oauthHost = "https://auth.kimi.ai"
+    static let baseURL = "https://api.kimi.ai/coding/v1"
+    /// The credential sessions outside slots read for the pair above.
+    static var liveName: String { KimiSessionIsolation.credentialName(oauthHost: oauthHost, baseURL: baseURL) }
+
+    static func config(baseURL: String = baseURL, key: String = "oauth/" + liveName) -> String {
+        """
+        default_model = "kimi-code/kimi-for-coding"
+        # kept as written
+
+        [providers."managed:kimi-code"]
+        type = "kimi"
+        base_url = "\(baseURL)"
+        api_key = ""
+
+        [providers."managed:kimi-code".oauth]
+        storage = "file"
+        key = "\(key)"
+        oauth_host = "\(oauthHost)"
+
+        [models."kimi-code/kimi-for-coding"]
+        provider = "managed:kimi-code"
+        model = "kimi-for-coding"
+        max_context_size = 262144
+
+        """
+    }
 
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("KimiSessionIsolationTests-\(UUID().uuidString)", isDirectory: true)
-        source = root.appendingPathComponent("kimi-code", isDirectory: true)
-        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
-        try write("default_model = \"kimi\"\n\n[providers.\"managed:kimi-code\".oauth]\nstorage = \"file\"\nkey = \"oauth/kimi-code\"\n",
-                  to: source.appendingPathComponent("config.toml"))
-        try write("00000000-0000-0000-0000-000000000000\n", to: source.appendingPathComponent("device_id"))
-        try write("global\n", to: source.appendingPathComponent("region"))
+        kimiHome = root.appendingPathComponent("kimi-code", isDirectory: true)
+        try write(Self.config(), to: kimiHome.appendingPathComponent("config.toml"))
+        try write(#"{"access_token":"live","refresh_token":"refresh-live","expires_at":1900000000}"#,
+                  to: kimiHome.appendingPathComponent("credentials/\(Self.liveName).json"))
+        try write("{}", to: kimiHome.appendingPathComponent("credentials/other.json"))
+        try write("{}\n", to: kimiHome.appendingPathComponent("session_index.jsonl"))
+        try write("{}\n", to: kimiHome.appendingPathComponent("sessions/s-1/wire.jsonl"))
         StubURLProtocol.reply = { _ in (599, [:], Data()) }
         StubURLProtocol.requested = []
         URLProtocol.registerClass(StubURLProtocol.self)
@@ -35,7 +68,7 @@ final class KimiSessionIsolationTests: XCTestCase {
     }
 
     private func isolation(lockWait: TimeInterval = 10) -> KimiSessionIsolation {
-        KimiSessionIsolation(sourceHome: source, lockWait: lockWait)
+        KimiSessionIsolation(home: kimiHome, lockWait: lockWait)
     }
 
     /// A stored credential as `KimiService` keeps it, with a refresh token
@@ -46,6 +79,50 @@ final class KimiSessionIsolationTests: XCTestCase {
 
     private func object(_ credential: SlotCredential) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: Data(credential.contents.utf8)) as? [String: Any])
+    }
+
+    /// Every file under Kimi Code's home with its contents, for comparing
+    /// what a removal left.
+    private func snapshot() throws -> [String: Data] {
+        var files: [String: Data] = [:]
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: kimiHome, includingPropertiesForKeys: [.isRegularFileKey]))
+        for case let url as URL in enumerator where (try url.resourceValues(forKeys: [.isRegularFileKey])).isRegularFile == true {
+            files[String(url.resolvingSymlinksInPath().path.dropFirst(kimiHome.resolvingSymlinksInPath().path.count))] = try Data(contentsOf: url)
+        }
+        return files
+    }
+
+    // MARK: Credential name and spellings
+
+    /// Names Kimi Code 2.6.1 read in a scratch home for these pairs.
+    func testTheCredentialNameIsTheOneKimiCodeDerives() {
+        typealias K = KimiSessionIsolation
+        XCTAssertEqual(K.credentialName(oauthHost: "https://auth.kimi.com", baseURL: "http://127.0.0.1:18765/coding/v1"),
+                       "kimi-code-env-cd7f2a44eee9aa1a")
+        XCTAssertEqual(K.credentialName(oauthHost: "https://auth.kimi.com/", baseURL: "http://127.0.0.1:18765/coding/v1/"),
+                       "kimi-code-env-cd7f2a44eee9aa1a", "trailing slashes are removed")
+        XCTAssertEqual(K.credentialName(oauthHost: "https://auth.kimi.com", baseURL: "http://LocalHost:18765/coding/v1"),
+                       "kimi-code-env-4c985a707aed11eb")
+        XCTAssertEqual(K.credentialName(oauthHost: "https://auth.kimi.ai", baseURL: "http://LOCALHOST:18765/coding/v1"),
+                       "kimi-code-env-da9ed4f6e0787ac0")
+        XCTAssertEqual(K.credentialName(oauthHost: "https://auth.kimi.com", baseURL: "https://api.kimi.com/coding/v1"), "kimi-code")
+    }
+
+    func testEverySpellingIsDistinctAndNoneIsKimisOwn() {
+        typealias K = KimiSessionIsolation
+        XCTAssertEqual(K.spelling(of: Self.baseURL, number: 1), "https://Api.kimi.ai/coding/v1")
+        XCTAssertEqual(K.spelling(of: Self.baseURL, number: 511), "https://API.KIMI.AI/coding/v1")
+        XCTAssertNil(K.spelling(of: Self.baseURL, number: 512), "api.kimi.ai has 9 letters")
+        XCTAssertNil(K.spelling(of: Self.baseURL, number: 0))
+        XCTAssertNil(K.spelling(of: "http://127.0.0.1:1/coding/v1", number: 1), "a host without letters has no spelling")
+        let spellings = (1...511).compactMap { K.spelling(of: Self.baseURL, number: $0) }
+        XCTAssertEqual(Set(spellings).count, 511)
+        XCTAssertTrue(spellings.allSatisfy { K.isSlotSpelling($0) && K.canonicalBaseURL($0) == Self.baseURL })
+        let names = Set(spellings.map { K.credentialName(oauthHost: Self.oauthHost, baseURL: $0) })
+        XCTAssertEqual(names.count, 511)
+        XCTAssertFalse(names.contains(Self.liveName))
+        XCTAssertTrue(names.allSatisfy { $0.hasPrefix("kimi-code-env-") })
+        XCTAssertEqual(K.spelling(of: "https://api.kimi.ai:443/coding/v1", number: 3), "https://APi.kimi.ai:443/coding/v1")
     }
 
     // MARK: Launcher
@@ -63,7 +140,8 @@ final class KimiSessionIsolationTests: XCTestCase {
         let realBin = root.appendingPathComponent("real", isDirectory: true)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         let real = realBin.appendingPathComponent("kimi")
-        try write("#!/bin/sh\nprintf '%s|%s' \"${KIMI_CODE_HOME:-}\" \"$*\"\n", to: real)
+        try write("#!/bin/sh\nprintf '%s|%s|%s|%s' \"${ACCOUNTDOCK_KIMI_SLOT:-}\" \"${KIMI_CODE_BASE_URL:-}\" \"${KIMI_CODE_OAUTH_HOST:-}\" \"$*\"\n",
+                  to: real)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: real.path)
 
         let isolation = isolation()
@@ -90,34 +168,102 @@ final class KimiSessionIsolationTests: XCTestCase {
             process.waitUntilExit()
             return String(decoding: data, as: UTF8.self)
         }
+        func expected(_ slot: URL, _ arguments: String) throws -> String {
+            let selector = try XCTUnwrap(isolation.selector(in: slot))
+            return "\(slot.path)|\(selector.baseURL)|\(selector.oauthHost)|\(arguments)"
+        }
 
         // Sign-in, account and configuration commands run the real CLI
-        // unchanged, on Kimi Code's own home.
+        // unchanged, on Kimi Code's own credential.
         for command in [["login"], ["logout"], ["provider", "list"], ["doctor"], ["session", "list"], ["export", "s-9"]] {
-            XCTAssertEqual(try launch(command), "|" + command.joined(separator: " "), command.joined(separator: " "))
+            XCTAssertEqual(try launch(command), "|||" + command.joined(separator: " "), command.joined(separator: " "))
         }
-        XCTAssertEqual(try launch(["-p", "hi"], environment: ["KIMI_CODE_HOME": "/elsewhere"]), "/elsewhere|-p hi")
-        XCTAssertEqual(try launch(["-p", "hi"], environment: ["KIMI_MODEL_NAME": "m"]), "|-p hi")
+        XCTAssertEqual(try launch(["-p", "hi"], environment: ["KIMI_CODE_HOME": "/elsewhere"]), "|||-p hi")
+        XCTAssertEqual(try launch(["-p", "hi"], environment: ["KIMI_MODEL_NAME": "m"]), "|||-p hi")
+        XCTAssertEqual(try launch(["-p", "hi"], environment: ["KIMI_CODE_BASE_URL": "https://API.kimi.ai/coding/v1"]),
+                       "|https://API.kimi.ai/coding/v1||-p hi", "a launch inside a slot's session stays on that slot")
 
         // A session resumed by ID goes back to the account its history ran
         // on, by either spelling of the option.
         slots.writeResumes([(session: "s-1", path: slots.directory(for: other).path)])
-        XCTAssertEqual(try launch(["-S", "s-1"]), otherSpare.path + "|-S s-1")
+        XCTAssertEqual(try launch(["-S", "s-1"]), try expected(otherSpare, "-S s-1"))
         let again = try XCTUnwrap(slots.makeSlot(for: other, credential: otherCredential))
-        XCTAssertEqual(try launch(["--session=s-1"]), again.path + "|--session=s-1")
+        XCTAssertEqual(try launch(["--session=s-1"]), try expected(again, "--session=s-1"))
 
         // A new session claims a spare of the pool's account.
-        XCTAssertEqual(try launch(["-y"]), spare.path + "|-y")
+        XCTAssertEqual(try launch(["-y"]), try expected(spare, "-y"))
 
-        // Each kimi process is mapped to the slot its environment names;
-        // a process on Kimi Code's own home reads no slot.
+        // A spare whose pair cannot be read runs the CLI unchanged.
+        let broken = try XCTUnwrap(slots.makeSlot(for: account, credential: credential))
+        try FileManager.default.removeItem(at: broken.appendingPathComponent(KimiSessionIsolation.baseURLFile))
+        XCTAssertEqual(try launch(["-y"]), "|||-y")
+
+        // Each kimi process is mapped to the slot its environment names; a
+        // process on Kimi Code's own credential reads no slot.
         let list = """
-          321     1 /Users/me/.kimi-code/bin/kimi -S s-1 KIMI_CODE_HOME=\(otherSpare.path) HOME=/x
+          321     1 /Users/me/.kimi-code/bin/kimi -S s-1 ACCOUNTDOCK_KIMI_SLOT=\(otherSpare.path) KIMI_CODE_BASE_URL=https://API.kimi.ai/coding/v1 HOME=/x
           322     1 /Users/me/.kimi-code/bin/kimi -y HOME=/x
-          323     1 /Users/me/.kimi-code/bin/kimi KIMI_CODE_HOME=/Users/me/.kimi-code HOME=/x
-          324     1 /Users/me/.kimi-code/bin/kimi -y KIMI_CODE_HOME=\(spare.path)
+          323     1 /Users/me/.kimi-code/bin/kimi KIMI_CODE_BASE_URL=https://api.kimi.ai/coding/v1 HOME=/x
+          324     1 /Users/me/.kimi-code/bin/kimi -y ACCOUNTDOCK_KIMI_SLOT=\(spare.path)
         """
         XCTAssertEqual(slots.directoriesByProcess(inProcessList: list), [321: otherSpare.path, 324: spare.path])
+    }
+
+    func testASessionStartedOnASlotSetsItsPair() throws {
+        let isolation = isolation()
+        let slot = root.appendingPathComponent("slot", isDirectory: true)
+        try isolation.prepareSlot(slot)
+        let assignments = isolation.launchAssignments(forSlot: slot)
+        XCTAssertEqual(assignments.map { $0.name }, ["ACCOUNTDOCK_KIMI_SLOT", "KIMI_CODE_BASE_URL", "KIMI_CODE_OAUTH_HOST"])
+        XCTAssertEqual(assignments.map { $0.value }, [slot.path, "https://Api.kimi.ai/coding/v1", Self.oauthHost])
+    }
+
+    // MARK: Slot
+
+    func testASlotHoldsOnlyItsPairAndItsCredentialLivesInKimisHome() throws {
+        let isolation = isolation()
+        let first = root.appendingPathComponent("first", isDirectory: true)
+        let second = root.appendingPathComponent("second", isDirectory: true)
+        try isolation.prepareSlot(first)
+        try isolation.prepareSlot(second)
+        try isolation.prepareSlot(first)
+
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: first.path)), ["base-url", "oauth-host"])
+        let slotMode = try FileManager.default.attributesOfItem(atPath: first.path)[.posixPermissions]
+        XCTAssertEqual((slotMode as? NSNumber)?.intValue, 0o700)
+        let firstSelector = try XCTUnwrap(isolation.selector(in: first))
+        let secondSelector = try XCTUnwrap(isolation.selector(in: second))
+        XCTAssertEqual(firstSelector.baseURL, "https://Api.kimi.ai/coding/v1", "preparing again keeps the slot's spelling")
+        XCTAssertEqual(secondSelector.baseURL, "https://aPi.kimi.ai/coding/v1", "a second slot takes the next free spelling")
+        XCTAssertEqual(firstSelector.oauthHost, Self.oauthHost)
+
+        let file = try XCTUnwrap(isolation.credentialFile(in: first))
+        XCTAssertEqual(file.deletingLastPathComponent().standardizedFileURL.path,
+                       kimiHome.appendingPathComponent("credentials").standardizedFileURL.path)
+        XCTAssertEqual(file.deletingPathExtension().lastPathComponent,
+                       KimiSessionIsolation.credentialName(oauthHost: Self.oauthHost, baseURL: firstSelector.baseURL))
+        XCTAssertNotEqual(isolation.credentialFile(in: first), isolation.credentialFile(in: second))
+        XCTAssertEqual(isolation.readCredential(in: first), SlotCredential(contents: ""), "claimed empty until written")
+        XCTAssertEqual(try String(contentsOf: kimiHome.appendingPathComponent("config.toml"), encoding: .utf8), Self.config(),
+                       "preparing a slot leaves config.toml alone")
+    }
+
+    func testASpellingWhoseCredentialExistsIsSkipped() throws {
+        let isolation = isolation()
+        let taken = KimiSessionIsolation.credentialName(oauthHost: Self.oauthHost, baseURL: "https://Api.kimi.ai/coding/v1")
+        try write("{}", to: kimiHome.appendingPathComponent("credentials/\(taken).json"))
+        let slot = root.appendingPathComponent("slot", isDirectory: true)
+        try isolation.prepareSlot(slot)
+        XCTAssertEqual(isolation.selector(in: slot)?.baseURL, "https://aPi.kimi.ai/coding/v1")
+        XCTAssertEqual(try String(contentsOf: kimiHome.appendingPathComponent("credentials/\(taken).json"), encoding: .utf8), "{}")
+    }
+
+    func testASlotNeedsAManagedProviderAndFollowsTheRegionWhileTheBaseURLIsLocal() throws {
+        let isolation = isolation()
+        try write(Self.config(baseURL: "http://127.0.0.1:43521/__provider/kimi"), to: kimiHome.appendingPathComponent("config.toml"))
+        XCTAssertEqual(isolation.sharedEndpoints()?.baseURL, Self.baseURL)
+        try write("default_model = \"x\"\n", to: kimiHome.appendingPathComponent("config.toml"))
+        XCTAssertThrowsError(try isolation.prepareSlot(root.appendingPathComponent("slot", isDirectory: true)))
     }
 
     // MARK: Credential
@@ -141,8 +287,8 @@ final class KimiSessionIsolationTests: XCTestCase {
         let isolation = isolation()
         let slot = root.appendingPathComponent("slot", isDirectory: true)
         try isolation.prepareSlot(slot)
-        let file = slot.appendingPathComponent("credentials/kimi-code.json")
-        XCTAssertEqual(isolation.credentialFile(in: slot), file)
+        let file = try XCTUnwrap(isolation.credentialFile(in: slot))
+        let name = file.deletingPathExtension().lastPathComponent
 
         let first = try XCTUnwrap(isolation.slotCredential(from: stored("a1")))
         XCTAssertTrue(isolation.writeCredential(first, to: slot))
@@ -153,17 +299,16 @@ final class KimiSessionIsolationTests: XCTestCase {
         let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
         XCTAssertNotEqual(attributes[.systemFileNumber] as? Int, firstInode, "replaced by a rename, not rewritten in place")
-        let directoryMode = try FileManager.default.attributesOfItem(atPath: file.deletingLastPathComponent().path)[.posixPermissions]
-        XCTAssertEqual((directoryMode as? NSNumber)?.intValue, 0o700)
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: file.deletingLastPathComponent().path), ["kimi-code.json"])
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: file.deletingLastPathComponent().path)),
+                       ["\(Self.liveName).json", "other.json", "\(name).json"])
         XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), second.contents)
         XCTAssertEqual(isolation.readCredential(in: slot), second)
 
-        // Kimi Code's lock target exists, as Kimi Code creates it, and the
-        // lock is released.
-        let lock = KimiCredentialLock(home: slot, name: "kimi-code")
-        XCTAssertEqual(lock.directory.path, slot.appendingPathComponent("oauth/kimi-code.lock").path)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: slot.appendingPathComponent("oauth/kimi-code").path))
+        // Kimi Code's lock target for that name exists, as Kimi Code
+        // creates it, and the lock is released.
+        let lock = KimiCredentialLock(home: kimiHome, name: name)
+        XCTAssertEqual(lock.directory.path, kimiHome.appendingPathComponent("oauth/\(name).lock").path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: kimiHome.appendingPathComponent("oauth/\(name)").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: lock.directory.path))
     }
 
@@ -171,7 +316,8 @@ final class KimiSessionIsolationTests: XCTestCase {
         let isolation = isolation()
         let slot = root.appendingPathComponent("slot", isDirectory: true)
         try isolation.prepareSlot(slot)
-        let lock = KimiCredentialLock(home: slot, name: "kimi-code")
+        let name = try XCTUnwrap(isolation.credentialFile(in: slot)).deletingPathExtension().lastPathComponent
+        let lock = KimiCredentialLock(home: kimiHome, name: name)
         XCTAssertTrue(lock.acquire(waitingUpTo: 0), "Kimi Code holds its lock")
         let credential = try XCTUnwrap(isolation.slotCredential(from: stored("a1")))
 
@@ -183,7 +329,8 @@ final class KimiSessionIsolationTests: XCTestCase {
         }
         Thread.sleep(forTimeInterval: 0.6)
         lock.touch()
-        XCTAssertNil(isolation.readCredential(in: slot), "nothing is written while Kimi Code holds the lock")
+        XCTAssertEqual(isolation.readCredential(in: slot), SlotCredential(contents: ""),
+                       "nothing is written while Kimi Code holds the lock")
         lock.release()
         wait(for: [written], timeout: 5)
         XCTAssertEqual(result.value, true)
@@ -194,18 +341,20 @@ final class KimiSessionIsolationTests: XCTestCase {
         let isolation = isolation(lockWait: 0.3)
         let slot = root.appendingPathComponent("slot", isDirectory: true)
         try isolation.prepareSlot(slot)
-        let lock = KimiCredentialLock(home: slot, name: "kimi-code")
+        let name = try XCTUnwrap(isolation.credentialFile(in: slot)).deletingPathExtension().lastPathComponent
+        let lock = KimiCredentialLock(home: kimiHome, name: name)
         XCTAssertTrue(lock.acquire(waitingUpTo: 0))
         defer { lock.release() }
         XCTAssertFalse(isolation.writeCredential(try XCTUnwrap(isolation.slotCredential(from: stored("a1"))), to: slot))
-        XCTAssertNil(isolation.readCredential(in: slot))
+        XCTAssertEqual(isolation.readCredential(in: slot), SlotCredential(contents: ""))
     }
 
     func testAStaleLockIsTakenOver() throws {
         let isolation = isolation(lockWait: 0)
         let slot = root.appendingPathComponent("slot", isDirectory: true)
         try isolation.prepareSlot(slot)
-        let lock = KimiCredentialLock(home: slot, name: "kimi-code")
+        let name = try XCTUnwrap(isolation.credentialFile(in: slot)).deletingPathExtension().lastPathComponent
+        let lock = KimiCredentialLock(home: kimiHome, name: name)
         XCTAssertTrue(lock.acquire(waitingUpTo: 0))
         try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-10)], ofItemAtPath: lock.directory.path)
         let credential = try XCTUnwrap(isolation.slotCredential(from: stored("a1")))
@@ -228,31 +377,92 @@ final class KimiSessionIsolationTests: XCTestCase {
         XCTAssertEqual((fields["expires_at"] as? NSNumber)?.intValue, 1_900_000_500)
     }
 
-    // MARK: Slot contents
+    // MARK: Removal
 
-    func testASlotCopiesKimisConfigurationAndKeepsItsOwnNewerCopy() throws {
+    func testRemovingASlotDeletesOnlyItsOwnCredentialFromKimisHome() throws {
+        let isolation = isolation()
+        let slots = SessionSlots(isolation: isolation, home: root.appendingPathComponent("home", isDirectory: true))
+        let credential = try XCTUnwrap(isolation.slotCredential(from: stored("a1")))
+        let removed = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: credential))
+        let kept = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: credential))
+        let removedFile = try XCTUnwrap(isolation.credentialFile(in: removed))
+        let before = try snapshot()
+
+        slots.remove(removed)
+
+        var expected = before
+        expected["/credentials/\(removedFile.lastPathComponent)"] = nil
+        XCTAssertEqual(try snapshot(), expected, "nothing else in Kimi Code's home changes")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: removed.path))
+        XCTAssertEqual(isolation.readCredential(in: kept), credential)
+
+        // A removed slot leaves its spelling free for the next one.
+        let next = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: credential))
+        XCTAssertEqual(isolation.credentialFile(in: next), removedFile)
+    }
+
+    func testRemovingASlotKeepsACredentialConfigTomlStillNames() throws {
+        let isolation = isolation()
+        let slots = SessionSlots(isolation: isolation, home: root.appendingPathComponent("home", isDirectory: true))
+        let slot = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: try XCTUnwrap(isolation.slotCredential(from: stored("a1")))))
+        let file = try XCTUnwrap(isolation.credentialFile(in: slot))
+        let selector = try XCTUnwrap(isolation.selector(in: slot))
+        // config.toml names the slot's spelling, and the file under that
+        // name holds a refresh token, so it is not put back.
+        try write(Self.config(baseURL: selector.baseURL, key: "oauth/" + file.deletingPathExtension().lastPathComponent),
+                  to: kimiHome.appendingPathComponent("config.toml"))
+        try write(stored("signed-in"), to: file)
+
+        slots.remove(slot)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    func testRemovalLeavesAnythingButADerivedCredentialAlone() throws {
         let isolation = isolation()
         let slot = root.appendingPathComponent("slot", isDirectory: true)
-        let sourceConfig = try String(contentsOf: source.appendingPathComponent("config.toml"), encoding: .utf8)
-        try isolation.prepareSlot(slot)
-        XCTAssertEqual(try String(contentsOf: slot.appendingPathComponent("config.toml"), encoding: .utf8), sourceConfig)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: slot.appendingPathComponent("device_id").path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: slot.appendingPathComponent("region").path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: slot.appendingPathComponent("mcp.json").path))
-        let slotMode = try FileManager.default.attributesOfItem(atPath: slot.path)[.posixPermissions]
-        XCTAssertEqual((slotMode as? NSNumber)?.intValue, 0o700)
+        try FileManager.default.createDirectory(at: slot, withIntermediateDirectories: true)
+        let before = try snapshot()
+        // A slot naming Kimi Code's own spelling has no credential of its own.
+        try write(Self.baseURL, to: slot.appendingPathComponent("base-url"))
+        try write(Self.oauthHost, to: slot.appendingPathComponent("oauth-host"))
+        isolation.removeSlot(slot)
+        XCTAssertNil(isolation.credentialFile(in: slot))
+        XCTAssertEqual(try snapshot(), before)
+    }
 
-        // A change Kimi Code made in the slot stays until Kimi Code's own
-        // home changes after it.
-        try write("default_model = \"slot\"\n", to: slot.appendingPathComponent("config.toml"))
-        try isolation.prepareSlot(slot)
-        XCTAssertEqual(try String(contentsOf: slot.appendingPathComponent("config.toml"), encoding: .utf8), "default_model = \"slot\"\n")
-        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(60)],
-                                              ofItemAtPath: source.appendingPathComponent("config.toml").path)
-        try isolation.prepareSlot(slot)
-        XCTAssertEqual(try String(contentsOf: slot.appendingPathComponent("config.toml"), encoding: .utf8), sourceConfig)
-        XCTAssertEqual(try String(contentsOf: source.appendingPathComponent("config.toml"), encoding: .utf8), sourceConfig,
-                       "Kimi Code's own home is never written")
+    // MARK: config.toml written by a slot's session
+
+    func testConfigTomlIsPutBackAfterASlotsSessionWroteItsSpelling() throws {
+        let isolation = isolation()
+        let spelling = "https://API.kimi.ai/coding/v1"
+        let slotName = KimiSessionIsolation.credentialName(oauthHost: Self.oauthHost, baseURL: spelling)
+        try write(#"{"access_token":"a1","refresh_token":"","expires_at":1900000000}"#,
+                  to: kimiHome.appendingPathComponent("credentials/\(slotName).json"))
+        try write(Self.config(baseURL: spelling, key: "oauth/" + slotName), to: kimiHome.appendingPathComponent("config.toml"))
+        XCTAssertEqual(isolation.configuredCredentialNames(), [slotName])
+
+        isolation.restoreSharedState()
+        XCTAssertEqual(try String(contentsOf: kimiHome.appendingPathComponent("config.toml"), encoding: .utf8), Self.config(),
+                       "base_url and key go back, and everything else stays as written")
+        XCTAssertEqual(isolation.configuredCredentialNames(), [Self.liveName])
+
+        // Kimi Code's own spelling is left alone.
+        let backup = kimiHome.appendingPathComponent("config.toml.accountdock-hooks-backup")
+        try? FileManager.default.removeItem(at: backup)
+        isolation.restoreSharedState()
+        XCTAssertEqual(try String(contentsOf: kimiHome.appendingPathComponent("config.toml"), encoding: .utf8), Self.config())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+    }
+
+    func testASignInMadeWithAnUpperCaseSpellingIsLeftAlone() throws {
+        let isolation = isolation()
+        let spelling = "https://API.kimi.ai/coding/v1"
+        let name = KimiSessionIsolation.credentialName(oauthHost: Self.oauthHost, baseURL: spelling)
+        try write(stored("signed-in"), to: kimiHome.appendingPathComponent("credentials/\(name).json"))
+        let config = Self.config(baseURL: spelling, key: "oauth/" + name)
+        try write(config, to: kimiHome.appendingPathComponent("config.toml"))
+        isolation.restoreSharedState()
+        XCTAssertEqual(try String(contentsOf: kimiHome.appendingPathComponent("config.toml"), encoding: .utf8), config)
     }
 
     func testTheFooterBadgeReportsRunningWork() {
@@ -423,8 +633,11 @@ final class KimiSessionIsolationTests: XCTestCase {
           [ "$(cat "$spare/account" 2>/dev/null)" = "$account" ] || continue
           if mkdir "$spare/claimed" 2>/dev/null; then
             [ "$tries" -eq 0 ] || rm -f "$request"
-            KIMI_CODE_HOME=$spare
-            export KIMI_CODE_HOME
+            ACCOUNTDOCK_KIMI_SLOT=$spare
+            KIMI_CODE_BASE_URL=$(cat "$spare/base-url" 2>/dev/null) || exec "$real" "$@"
+            KIMI_CODE_OAUTH_HOST=$(cat "$spare/oauth-host" 2>/dev/null) || exec "$real" "$@"
+            [ -n "$KIMI_CODE_BASE_URL" ] && [ -n "$KIMI_CODE_OAUTH_HOST" ] || exec "$real" "$@"
+            export ACCOUNTDOCK_KIMI_SLOT KIMI_CODE_BASE_URL KIMI_CODE_OAUTH_HOST
             exec "$real" "$@"
           fi
         done
@@ -438,8 +651,11 @@ final class KimiSessionIsolationTests: XCTestCase {
     if [ -z "$slot" ] || [ "$slot" = "-" ] || [ ! -d "$slot" ]; then
       exec "$real" "$@"
     fi
-    KIMI_CODE_HOME=$slot
-    export KIMI_CODE_HOME
+    ACCOUNTDOCK_KIMI_SLOT=$slot
+    KIMI_CODE_BASE_URL=$(cat "$slot/base-url" 2>/dev/null) || exec "$real" "$@"
+    KIMI_CODE_OAUTH_HOST=$(cat "$slot/oauth-host" 2>/dev/null) || exec "$real" "$@"
+    [ -n "$KIMI_CODE_BASE_URL" ] && [ -n "$KIMI_CODE_OAUTH_HOST" ] || exec "$real" "$@"
+    export ACCOUNTDOCK_KIMI_SLOT KIMI_CODE_BASE_URL KIMI_CODE_OAUTH_HOST
     exec "$real" "$@"
 
     """#

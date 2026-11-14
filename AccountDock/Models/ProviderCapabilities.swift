@@ -412,6 +412,7 @@ extension AIProviderType {
                                                      timeout: 5, bundledScript: nil),
                 usageRequestBudget: (capacity: 4, refillInterval: 15),
                 supportsWindowWarming: true,
+                sessionIsolation: KimiSessionIsolation(),
                 routeTarget: .kimi,
                 cliExecutableName: "kimi",
                 storageKey: "kimi",

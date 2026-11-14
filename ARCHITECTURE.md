@@ -218,23 +218,31 @@ next request. Kimi renewals of one managed copy run one after another
 (`KimiRenewalQueue`), and one that finds the copy already renewed while it
 waited uses that result instead of presenting the spent refresh token.
 
-`KimiSessionIsolation` is Kimi Code's one-session slot, built but not yet
-set as Kimi's `sessionIsolation`. A slot is a `KIMI_CODE_HOME` directory
-with `config.toml`, `tui.toml`, `mcp.json`, `device_id` and `region` copied
-from `~/.kimi-code`, and `credentials/<name>.json` holding the account's
-access token, its real expiry and an empty refresh token, written by atomic
-rename while holding Kimi Code's own lock (`KimiCredentialLock`). Kimi Code
-reads that file before every request and, with no refresh token, never
-renews in the slot, so AccountDock keeps every slot's token above Kimi
-Code's renewal threshold (`max(300, expires_in / 2)` seconds) plus a
-margin, renewing the active account's credential under the lock in
-`~/.kimi-code` (`KimiService.renewLiveCredentialForSlots`). It stays unset
-because `KIMI_CODE_HOME` also moves the session history, its index, input
-history, workspace trust and project records, which no variable or setting
-points elsewhere: a slot would keep its sessions' history to itself, where
-`kimi -S` from another home and AccountDock's Kimi readers cannot see it,
-and removing the slot would delete it (see
-[provider-cli-facts.md](docs/provider-cli-facts.md)).
+`KimiSessionIsolation` is Kimi Code's one-session slot. Every slot runs in
+`~/.kimi-code` itself, so all sessions share their history, settings and
+hooks. With `KIMI_CODE_BASE_URL` or `KIMI_CODE_OAUTH_HOST` set, Kimi Code
+reads the credential named `kimi-code-env-<first 16 hex of sha256>` of the
+two values, so a slot is a pair: the real OAuth host, and the real API base
+URL with some host letters in upper case, a spelling no other slot holds
+(claimed by creating its credential file with `O_EXCL`). URL parsing
+lower-cases the host, so every spelling reaches the same server, and model
+requests use `config.toml`'s `base_url` anyway. The slot directory holds the
+pair (`base-url`, `oauth-host`) next to the shared bookkeeping; the launcher
+exports it with `ACCOUNTDOCK_KIMI_SLOT`, which the process mapping reads.
+The credential, `~/.kimi-code/credentials/kimi-code-env-<hex>.json`, holds
+the account's access token, its real expiry and an empty refresh token,
+written by atomic rename while holding Kimi Code's own lock
+(`KimiCredentialLock`). Kimi Code reads that file before every request and,
+with no refresh token, never renews it, so AccountDock keeps every slot's
+token above Kimi Code's renewal threshold (`max(300, expires_in / 2)`
+seconds) plus a margin, renewing the active account's credential under the
+lock in `~/.kimi-code` (`KimiService.renewLiveCredentialForSlots`). Removing
+a slot deletes that one file and nothing else in the home. A session that
+finds the server's model list changed writes its own spelling and
+credential name into `config.toml`, which would point sessions outside
+slots at the slot's credential; every slot pass puts `base_url` and `key`
+back (`restoreSharedState`), unless the file that spelling names holds a
+refresh token (see [provider-cli-facts.md](docs/provider-cli-facts.md)).
 
 ## Claude account switching
 
