@@ -20,6 +20,10 @@ struct TranscriptRequest: Equatable, Sendable {
     /// The model the session itself asked; nil for a subagent's request,
     /// which may use another model than its session.
     var model: String? = nil
+    /// The provider's words when it refused the request at a usage limit.
+    /// Such a request used nothing, and `AppState.ingestTranscriptRequests`
+    /// reads the refusing account whole instead of recording it.
+    var limitRefusal: String? = nil
 }
 
 /// Reads each request's token use from the session transcripts a CLI writes
@@ -183,6 +187,10 @@ actor TranscriptRequestFeed {
             case "user":
                 if !subagent, Self.isPrompt(row) { state.awaitingTurn = true }
             case "assistant":
+                if let refusal = Self.limitRefusal(row, session: session, subagent: subagent) {
+                    if refusal.at >= cutoff { requests.append(refusal) }
+                    continue
+                }
                 guard let request = Self.request(row, session: session, startsTurn: state.awaitingTurn,
                                                  subagent: subagent) else { continue }
                 if let key = Self.messageKey(row) {
@@ -255,6 +263,23 @@ actor TranscriptRequestFeed {
             at: at, contextTokens: input + write + read, cacheWriteTokens: write, cacheWriteLongTokens: long,
             outputTokens: int(usage["output_tokens"]), cacheLifetime: lifetime, startsTurn: startsTurn,
             model: subagent ? nil : message["model"] as? String
+        )
+    }
+
+    /// The refusal an `assistant` row records when the provider turned the
+    /// request away at a usage limit: the CLI writes it as a response of its
+    /// own, marked as an API error of the rate-limit kind, with no usage. It
+    /// is credited to a session as `request` credits a row.
+    static func limitRefusal(_ row: [String: Any], session: String, subagent: Bool = false) -> TranscriptRequest? {
+        guard row["isApiErrorMessage"] as? Bool == true, row["error"] as? String == "rate_limit",
+              subagent || row["isSidechain"] as? Bool != true,
+              let stamp = row["timestamp"] as? String, let at = Self.date(stamp) else { return nil }
+        let content = (row["message"] as? [String: Any])?["content"] as? [[String: Any]]
+        let words = content?.compactMap { $0["text"] as? String }.joined(separator: " ") ?? ""
+        return TranscriptRequest(
+            session: subagent ? session : (row["sessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? session,
+            at: at, contextTokens: 0, cacheWriteTokens: 0, cacheWriteLongTokens: 0, outputTokens: 0,
+            cacheLifetime: nil, startsTurn: false, limitRefusal: words
         )
     }
 

@@ -202,6 +202,17 @@ extension AppState {
         return targets
     }
 
+    /// How an event names a session, so two events about different
+    /// sessions never read alike: its folder and the start of its ID, or,
+    /// for a slot no session record names, what that is, a run of the CLI
+    /// that keeps none, as a one-off command does.
+    nonisolated static func eventName(of session: AgentSession?) -> String {
+        guard let session else { return "a run with no session record" }
+        let id = String(session.sessionID.prefix(8))
+        guard let directory = session.workingDirectory else { return "session \(id)" }
+        return "session \(id) in " + (directory as NSString).abbreviatingWithTildeInPath
+    }
+
     /// Spare one-session slots kept filled for each account taking new
     /// sessions: `minimumSpares`, or two more than the most sessions seen
     /// running at once in the last day when that is more, up to
@@ -367,8 +378,7 @@ extension AppState {
                 balanced = true
             }
             if modelSpent, target == nil, let session, let model, sessionsWithoutModelRoom.insert(session.sessionID).inserted {
-                let place = session.workingDirectory.map { " in " + ($0 as NSString).abbreviatingWithTildeInPath } ?? ""
-                failoverEvents.record(provider, "No account has \(CostParser.shortModelName(model)) allowance left for the session\(place); it stays where it is and will be refused until one resets or it changes model.")
+                failoverEvents.record(provider, "No account has \(CostParser.shortModelName(model)) allowance left for \(Self.eventName(of: session)); it stays where it is and will be refused until one resets or it changes model.")
             } else if !modelSpent, let session {
                 sessionsWithoutModelRoom.remove(session.sessionID)
             }
@@ -381,14 +391,20 @@ extension AppState {
             slots.assign(slot.directory, to: target)
             let from = slot.account.flatMap { id in accounts.first { $0.id == id } }.map { messageName($0) } ?? "its account"
             let to = accounts.first { $0.id == target }.map { messageName($0) } ?? "another account"
-            let place = session?.workingDirectory.map { " in " + ($0 as NSString).abbreviatingWithTildeInPath } ?? ""
+            let subject = Self.eventName(of: session)
             slotDirectoryMovedAt[path] = now
-            let why = requested ? "a request asked for it" : modelSpent
-                ? "\(from) has no \(model.map { CostParser.shortModelName($0) } ?? "model") allowance left; its other sessions stay"
-                : "\(from) can no longer serve it"
+            // The model's own limit is named when it is what the account
+            // has run out of, whether or not the account's other sessions
+            // can stay.
+            let spent = slot.account.flatMap { id in
+                model.flatMap { accountUsage[id]?.spentModelLimit(for: $0, within: FailoverPlanner.minimumUsableHeadroom) }
+            }
+            let why = requested ? "a request asked for it"
+                : spent.map { "\(from) has no \($0) allowance left" + (modelSpent ? "; its other sessions stay" : "") }
+                ?? "\(from) can no longer serve it"
             failoverEvents.record(provider, balanced
-                ? "Moved the session\(place) from \(from) to \(to) to balance load; it rebuilds its prompt cache there at its next request."
-                : "Moved the session\(place) from \(from) to \(to): \(why).")
+                ? "Moved \(subject) from \(from) to \(to) to balance load; it rebuilds its prompt cache there at its next request."
+                : "Moved \(subject) from \(from) to \(to): \(why).")
         }
         for id in open where sparesOf[id, default: 0] < spareTarget {
             guard let value = await credential(id) else { continue }

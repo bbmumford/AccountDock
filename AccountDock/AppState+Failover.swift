@@ -225,6 +225,9 @@ extension AppState {
         var attributions: [AIProviderType: (SessionAttribution, [String: Int32])] = [:]
         for observation in observations {
             let provider = observation.source.provider
+            if let session = observation.processKey, let name = observation.sessionName, sessionNames[session] != name {
+                sessionNames[session] = name
+            }
             let noSessionWindow = observation.usage.reportsNoSessionWindow
             // A window whose reset has passed describes the window before it.
             let usage = observation.usage.droppingPassedWindows(at: now)

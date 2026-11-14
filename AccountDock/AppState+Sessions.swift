@@ -25,6 +25,39 @@ extension AppState {
         }
         if live != liveSessions { liveSessions = live }
         if byAccount != accountSessions { accountSessions = byAccount }
+        // Names of sessions that have ended are dropped once there are many.
+        if sessionNames.count > 256 {
+            let running = Set(live.values.flatMap { $0.map(\.sessionID) })
+            sessionNames = sessionNames.filter { running.contains($0.key) }
+        }
+        // A refusal is kept while its session runs.
+        if !sessionRefusals.isEmpty {
+            let running = Set(live.values.flatMap { $0.map(\.sessionID) })
+            let kept = sessionRefusals.filter { running.contains($0.key) }
+            if kept.count != sessionRefusals.count { sessionRefusals = kept }
+        }
+    }
+
+    /// What an account card shows when the pointer rests on its session
+    /// count: one line for each of `sessions`, in name order.
+    func sessionSummary(_ sessions: Set<String>, now: Date = Date()) -> String {
+        let records = liveSessions.values.flatMap { $0 }.reduce(into: [String: AgentSession]()) { $0[$1.sessionID] = $1 }
+        return sessions.map { id in
+            let label = Self.sessionLabel(id: id, name: sessionNames[id], directory: records[id]?.workingDirectory,
+                                          model: sessionModel(id, now: now).map { CostParser.shortModelName($0) })
+            guard let refusal = sessionRefusals[id] else { return label }
+            let by = accounts.first { $0.id == refusal.account }.map { messageName($0) } ?? "its account"
+            return "\(label) — refused at a limit on \(by) at \(refusal.at.formatted(date: .omitted, time: .shortened)), not served since"
+        }.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }.joined(separator: "\n")
+    }
+
+    /// One session as `sessionSummary` lists it: the name it shows for
+    /// itself, else its folder, else the start of its ID, then the model it
+    /// uses when that is known.
+    nonisolated static func sessionLabel(id: String, name: String?, directory: String?, model: String?) -> String {
+        let folder = directory.map { ($0 as NSString).lastPathComponent }.flatMap { $0.isEmpty ? nil : $0 }
+        let label = name ?? folder ?? "session \(id.prefix(8))"
+        return model.map { "\(label) · \($0)" } ?? label
     }
 
     /// The provider's `SessionAttribution` from what AccountDock knows now:

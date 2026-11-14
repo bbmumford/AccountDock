@@ -185,6 +185,14 @@ extension UsageAPIResponse {
             .max { $0.percent < $1.percent }
     }
 
+    /// The name of the model limit `model` draws on, when that limit has
+    /// `headroom` percent or less left: what an event says an account ran
+    /// out of.
+    func spentModelLimit(for model: String, within headroom: Double) -> String? {
+        let name = model.lowercased()
+        return modelWeeklyLimits.first { name.contains($0.model.lowercased()) && $0.percent >= 100 - headroom }?.model
+    }
+
     /// The weekly window as it applies to sessions using `models` together:
     /// the tightest of their windows, and the whole weekly limit when none
     /// of them has a limit of its own.

@@ -44,6 +44,9 @@ struct PassiveUsageObservation: Sendable {
     let limitReached: Bool
     /// Model the reporting session was using, when the source says.
     var model: String? = nil
+    /// The name the reporting session shows for itself, when the source
+    /// says; `AppState.sessionNames` keeps it for the account cards.
+    var sessionName: String? = nil
 
     var accountKey: AccountKey? {
         claudeAccountUUID.map(AccountKey.providerAccountID) ?? codexHome.map(AccountKey.credentialLocation)
@@ -53,7 +56,7 @@ struct PassiveUsageObservation: Sendable {
         PassiveUsageObservation(
             source: source, usage: usage, observedAt: observedAt,
             claudeAccountUUID: claudeAccountUUID, codexHome: codexHome,
-            processKey: processKey, limitReached: limitReached, model: model
+            processKey: processKey, limitReached: limitReached, model: model, sessionName: sessionName
         )
     }
 }
@@ -168,7 +171,8 @@ final class PassiveUsageTelemetry: @unchecked Sendable {
             codexHome: nil,
             processKey: (root["session_id"] as? String) ?? processKey,
             limitReached: [session, weekly].contains { ($0?.utilization ?? 0) >= 100 },
-            model: (root["model"] as? [String: Any]).flatMap { ($0["display_name"] as? String) ?? ($0["id"] as? String) }
+            model: (root["model"] as? [String: Any]).flatMap { ($0["display_name"] as? String) ?? ($0["id"] as? String) },
+            sessionName: (root["session_name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         )
     }
 
