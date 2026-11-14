@@ -680,6 +680,14 @@ the pool weights and which sessions move, each time the pool is rebuilt
 - New sessions go to accounts by unused rate, the pool weight times the
   rate the account can still add without reaching its limit; with none
   left anywhere, by the pool weights alone.
+- An account a threshold switch left with room still on it drains
+  (`AppState.drainingAccounts`): above its thresholds it keeps a pool weight
+  of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when
+  every other account has under `lowWeeklyRoom` (20%) of its week left, and
+  pacing moves none of its sessions off it. The runway rule still applies,
+  so it takes no new session that could not last `newSessionRunway` there.
+  The drain ends when a reading or a refusal shows its limit, when it is
+  active again, or a session window after the switch.
 - A session that starts a turn after its cache has expired is placed again
   like a new session (`RouterState.cacheAwareSessions`), since moving it
   loses nothing.

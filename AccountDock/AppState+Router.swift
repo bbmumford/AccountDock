@@ -474,6 +474,11 @@ extension AppState {
             states[candidate.0.id].flatMap { planner.isForecastAtLimit($0, now: now) ? candidate.0.id : nil }
         })
         let anyOpen = candidates.contains { !forecastAtLimit.contains($0.0.id) }
+        let draining = drainedAccounts(provider, tiers: Dictionary(uniqueKeysWithValues: candidates.map { ($0.0.id, $0.1) }),
+                                       now: now)
+        let othersLowOnWeek = Self.weeklyRoomIsLow(candidates.filter { !draining.contains($0.0.id) }.map { candidate in
+            states[candidate.0.id].flatMap { planner.projection($0, now: now)?.weekly }
+        })
         var members: [RouterPoolMember] = []
         for (account, tier, latestStart) in candidates {
             let name = Self.poolTokenFile(account)
@@ -481,9 +486,11 @@ extension AppState {
                 guard let token = await accessCredential(account, minimumLifetime: 10 * 60) else { continue }
                 RequestRouterController.setToken(name, token: token.0, expiresAt: token.1)
             }
-            let urgent = latestStart.timeIntervalSince(now) < 24 * 60 * 60
-            let weight: Double = forecastAtLimit.contains(account.id) && anyOpen ? 0
-                : tier == .belowTrigger ? (urgent ? 2 : 1) : (anyBelow ? 0 : 1)
+            let weight = Self.poolWeight(
+                tier: tier, urgent: latestStart.timeIntervalSince(now) < 24 * 60 * 60, anyBelow: anyBelow,
+                forecastAtLimit: forecastAtLimit.contains(account.id), anyOpen: anyOpen,
+                draining: draining.contains(account.id), othersLowOnWeeklyRoom: othersLowOnWeek
+            )
             members.append(RouterPoolMember(accountID: account.id.uuidString, tokenFile: name, weight: weight))
         }
         // With every account at its limit, the active account serves every
@@ -502,7 +509,62 @@ extension AppState {
             pacingScopedShedding = []
             return members
         }
-        return paced(provider, members: members, states: states, planner: planner, movesSessions: forRouter, now: now)
+        return paced(provider, members: members, states: states, planner: planner, movesSessions: forRouter,
+                     draining: draining, now: now)
+    }
+
+    /// The pool weight of a draining account: a share of new sessions,
+    /// below an account under its thresholds (1).
+    nonisolated static let drainingShare = 0.5
+    /// A draining account's weight when every other account is low on
+    /// weekly room (`weeklyRoomIsLow`): it is preferred, since the room it
+    /// has left is spent before the others' weeks.
+    nonisolated static let drainingPreferred = 2.0
+    /// Weekly percent left under which an account is low on weekly room.
+    nonisolated static let lowWeeklyRoom = 20.0
+
+    /// An account's weight in the pool `buildPool` writes, before pacing.
+    /// One the forecast has at its limit takes no new session while another
+    /// is not so forecast; a draining one above its thresholds takes
+    /// `drainingShare`, or `drainingPreferred` when the others are low on
+    /// weekly room; one below its thresholds takes 1, or 2 when its
+    /// allowance must start being used within a day; one above them takes
+    /// none while another is below.
+    nonisolated static func poolWeight(tier: QuotaTier, urgent: Bool, anyBelow: Bool, forecastAtLimit: Bool, anyOpen: Bool,
+                                       draining: Bool, othersLowOnWeeklyRoom: Bool) -> Double {
+        if forecastAtLimit && anyOpen { return 0 }
+        if draining && tier == .usable { return othersLowOnWeeklyRoom ? drainingPreferred : drainingShare }
+        return tier == .belowTrigger ? (urgent ? 2 : 1) : (anyBelow ? 0 : 1)
+    }
+
+    /// Whether every one of `weekly` (accounts' long-window use, nil when
+    /// unknown) leaves less than `lowWeeklyRoom`; false for none.
+    nonisolated static func weeklyRoomIsLow(_ weekly: [Double?]) -> Bool {
+        !weekly.isEmpty && weekly.allSatisfy { $0.map { 100 - $0 < lowWeeklyRoom } ?? false }
+    }
+
+    /// The accounts in `drainingAccounts` still draining among the pool's
+    /// candidates (`tiers`). A drain ends when a reading or a refusal shows
+    /// the account at its limit, when it becomes active again, or a session
+    /// window after it began; an account left out of the pool for an old
+    /// reading keeps its drain for when it is read again.
+    func drainedAccounts(_ provider: AIProviderType, tiers: [UUID: QuotaTier], now: Date) -> Set<UUID> {
+        var draining = Set<UUID>()
+        for account in accounts where account.provider == provider {
+            guard let since = drainingAccounts[account.id] else { continue }
+            if account.isActive || now.timeIntervalSince(since) >= FailoverPlanner.sessionWindow
+                || measuredAtLimit(account, now: now) {
+                drainingAccounts[account.id] = nil
+                continue
+            }
+            if tiers[account.id] != nil { draining.insert(account.id) }
+        }
+        return draining
+    }
+
+    private func measuredAtLimit(_ account: Account, now: Date) -> Bool {
+        let planner = FailoverPlanner(settings: plannerSettings(account.provider))
+        return planner.isMeasuredAtLimit(quotaState(for: account, now: now, wholeAllowance: true), now: now)
     }
 
     /// The pool reweighted by `SessionPacer`, which also decides the sessions
@@ -510,16 +572,20 @@ extension AppState {
     /// go to the account they were placed on until they first reach it.
     /// Without `movesSessions` (`SessionSlots`, whose sessions keep the
     /// account they started on) only new sessions follow the weights.
+    /// Sessions on a `draining` account stay on it.
     private func paced(_ provider: AIProviderType, members: [RouterPoolMember], states: [UUID: QuotaAccountState],
-                       planner: FailoverPlanner, movesSessions: Bool, now: Date) -> [RouterPoolMember] {
+                       planner: FailoverPlanner, movesSessions: Bool, draining: Set<UUID>, now: Date) -> [RouterPoolMember] {
         let paced = members.compactMap { member -> SessionPacer.Account? in
             guard let id = UUID(uuidString: member.accountID), let state = states[id] else { return nil }
             return pacerAccount(id, state: state, weight: member.weight, planner: planner, now: now)
         }
-        let plan = SessionPacer().plan(accounts: paced, sessions: pacerSessions(provider, now: now), now: now)
+        let sessions = pacerSessions(provider, now: now)
+        let plan = SessionPacer().plan(accounts: paced, sessions: sessions, now: now)
+        let onDraining = Set(sessions.filter { draining.contains($0.account) }.map(\.id))
         // A session is never moved to an account without allowance for the
-        // model it uses.
+        // model it uses, nor off a draining account before its limit.
         var moves = plan.moves.filter { session, destination in
+            guard !onDraining.contains(session) else { return false }
             guard let model = sessionModel(session, now: now) else { return true }
             return !accountCannotServe(destination, provider: provider, planner: planner, now: now, model: model)
         }
@@ -536,7 +602,7 @@ extension AppState {
             guard let account = accounts.first(where: { $0.id == id }), let limitAt = outlook.limitAt else { continue }
             let time = limitAt.formatted(date: .omitted, time: .shortened)
             let wait = Int((outlook.waitAtLimit / 60).rounded())
-            let moving = plan.moves.keys.filter {
+            let moving = moves.keys.filter {
                 sessionRates.entries[$0]?.account == id && (movable?.contains($0) ?? true)
             }.count
             let outcome = movesSessions || moving > 0

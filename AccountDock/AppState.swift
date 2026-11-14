@@ -179,6 +179,10 @@ final class AppState: ObservableObject {
     /// Accounts a threshold or balancing switch left, whose running sessions
     /// stay on them until `moveSessionsOffLimitedAccounts` moves them.
     var sessionsLeftOn: [AIProviderType: Set<UUID>] = [:]
+    /// Accounts a threshold switch left while they still had room, with
+    /// when: `buildPool` keeps a share of new sessions on each, and its
+    /// sessions where they are, until a reading or a refusal shows its limit.
+    var drainingAccounts: [UUID: Date] = [:]
     /// A locally elapsed reset is useful for clearing a stale 100% display,
     /// but it is not proof that the provider has opened a new quota window.
     /// Never fail over to one of these accounts until a fresh API response
@@ -1052,6 +1056,7 @@ final class AppState: ObservableObject {
         pacingScopedShedding = pacingScopedShedding.filter { !$0.hasPrefix(id.uuidString + "|") }
         for provider in exhaustedFailoverAccounts.keys { exhaustedFailoverAccounts[provider]?.remove(id) }
         for provider in sessionsLeftOn.keys { sessionsLeftOn[provider]?.remove(id) }
+        drainingAccounts[id] = nil
         liveCredentialOwners = liveCredentialOwners.filter { $0.value.account != id }
         lockedSwitchNoted = lockedSwitchNoted.filter { $0.value != id }
         pendingResetRecovery = pendingResetRecovery.filter { $0.value.accountID != id }
