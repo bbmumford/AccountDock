@@ -22,17 +22,20 @@ enum BoundedProcess {
     /// descendants that inherited its pipes and keep them open.
     static let drainGrace: TimeInterval = 1
 
+    /// `input`, when given, is the tool's standard input, written whole and
+    /// closed once it starts: text that must stay off the command line.
     static func run(
         executable: URL,
         arguments: [String],
         environment: [String: String]? = nil,
+        input: Data? = nil,
         timeout: TimeInterval
     ) async throws -> Result {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 continuation.resume(with: Swift.Result(catching: {
                     try runSynchronously(executable: executable, arguments: arguments,
-                                         environment: environment, timeout: timeout)
+                                         environment: environment, input: input, timeout: timeout)
                 }))
             }
         }
@@ -42,13 +45,15 @@ enum BoundedProcess {
         executable: URL,
         arguments: [String],
         environment: [String: String]?,
+        input: Data?,
         timeout: TimeInterval
     ) throws -> Result {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
         if let environment { process.environment = environment }
-        process.standardInput = FileHandle.nullDevice
+        let inputPipe = input.map { _ in Pipe() }
+        process.standardInput = inputPipe ?? FileHandle.nullDevice
         let output = Collector(), errorOutput = Collector()
         process.standardOutput = output.pipe
         process.standardError = errorOutput.pipe
@@ -62,6 +67,12 @@ enum BoundedProcess {
             output.stop()
             errorOutput.stop()
             throw error
+        }
+        if let inputPipe, let input {
+            // A tool that exits without reading it must not end this process.
+            signal(SIGPIPE, SIG_IGN)
+            try? inputPipe.fileHandleForWriting.write(contentsOf: input)
+            try? inputPipe.fileHandleForWriting.close()
         }
 
         var timedOut = false

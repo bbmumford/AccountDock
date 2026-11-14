@@ -326,6 +326,18 @@ Throttling backs off for every account of that provider, from one minute up to
 fifteen. While a provider throttles, `QuotaTrend` projects the active account's
 usage forward from its learned burn rate so failover still acts on time.
 
+A reading a running session reports with a response (the status line, a
+Codex rollout: `PassiveUsageObservation.Source.reportsWithEachResponse`)
+arrives every few seconds while it works, whatever the budget or a cool-down
+allows. While such a reading is the account's newest, under two minutes old,
+below every trigger and not followed by a refusal, it stands over the
+forecast (`FailoverPlanner.liveReadingShowsRoom`): the account is neither
+triggered nor near or forecast at its limit, and a router refusal recorded
+before it is dropped. It carries no model's own weekly limit; that verdict
+stays with the last whole reading, which narrows the long window the planner
+sees, and an account with such limits keeps a router refusal until a whole
+reading after it.
+
 Claude's response includes every limit it applies, including weekly limits
 scoped to one model (`limits[]` with `kind: weekly_scoped`) and the share of the
 weekly allowance each may use. The planner uses the model-scoped window that
@@ -338,6 +350,17 @@ plan: stay, switch, verify (read some accounts, then plan again), wait for a
 reset, or no capacity. `AppState+Failover.swift` runs it on a monitoring cycle
 and carries out the plan. Only one evaluation runs at a time, because a second
 one would plan from a half-switched state.
+
+A plan that every account is at its limit (wait for a reset, or no capacity)
+is not acted on during the first ten minutes after launch while an account
+that can be read has neither a reading from this launch nor a stored one
+still fresh (`AppState.awaitsFirstReadings`). The status the plan's standing
+state shows ("Using … up to its limit", "All accounts exhausted …") is
+restated every cycle; it is recorded as an event only once it has differed
+from the provider's last recorded status for two minutes, the longest quota
+cycle (`StatusEventGate`), so two states alternating from cycle to cycle
+record nothing. The outcome of an action ("Switched to …") is recorded when
+it happens.
 
 ### Tiers
 
@@ -367,17 +390,36 @@ same plan (default 8).
 A destination must stay below its thresholds for the minimum dwell. Its margin
 is the expected burn over the dwell, plus the session percent the move itself
 costs (the moved sessions re-read their context into the new account's cache,
-estimated by `TurnCostModel.switchCost`). Burn rates are taken at their mean
+estimated by `TurnCostModel.switchCost`). Burn rates are taken at their median
 plus one standard deviation, so a noisy account is treated as faster than its
 average.
 
+A burn rate is the median of the account's last five measured intervals
+(`QuotaTrend`), each running until its window has risen a whole point or for
+15 minutes, and its spread is estimated from the median absolute deviation,
+so one burst sets neither the rate nor its uncertainty. Readings in the five
+minutes after a window starts (its reset moves, or an unstarted window gets
+one) or after paused sessions resume (`AppState.endPause`, an admission, or
+a reading taken while the pause holds them) teach no rate: each session's
+first request then re-sends its whole context.
+
 ### Rules, in order
 
-The active account counts as at its limit once its headroom on the upper
-estimate is less than the **in-flight reserve**: one expected request (from
+The active account counts as at its limit once the headroom its last reading
+shows is less than the **in-flight reserve**: one expected request (from
 `TurnCostModel`) for every session active in the last three minutes, capped at
 10%. Requests already under way still spend that much after a switch, so work
-moves while they still fit.
+moves while they still fit. A refusal at the limit, by the router or in a
+session's transcript (`AppState.recordedLimitRefusal`), counts the same until a
+reading answers it.
+
+Only such a measurement marks an account exhausted (`isMeasuredAtLimit`). A
+forecast, the reading grown by the burn over its age, that reaches a limit
+the reading does not show (`isForecastAtLimit`) gives `ServingVerdict.nearLimit`:
+no new session is placed there (pool weight 0) and it crosses the trigger of
+rule 1, but it never makes the exhausted move of rule 3, moves sessions off
+the account, or waits for a reset; the account serves on until a reading or a
+refusal shows the limit.
 
 1. The active account crosses a threshold (or will within the lookahead):
    switch to the first account below its thresholds, in the user's order.
@@ -445,7 +487,7 @@ provider, with or without a forecast.
 
 | Model | Learns | Used for |
 | --- | --- | --- |
-| `QuotaTrend` | burn rate per window and its variance, per account | projection while throttled, trigger timing, uncertainty |
+| `QuotaTrend` | burn rate per window (median of recent intervals) and its spread, per account | projection while throttled, trigger timing, uncertainty |
 | `TurnCostModel` | session percent per million weighted tokens, from router token counts and the readings that follow | expected request cost, switch cost |
 | `DemandForecast` | weekly percent consumed per hour of the week | the simulator's demand |
 
@@ -661,9 +703,60 @@ the pool weights and which sessions move, each time the pool is rebuilt
 - New sessions go to accounts by unused rate, the pool weight times the
   rate the account can still add without reaching its limit; with none
   left anywhere, by the pool weights alone.
+- An account a threshold switch left with room still on it drains
+  (`AppState.drainingAccounts`): above its thresholds it keeps a pool weight
+  of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when
+  every other account has under `lowWeeklyRoom` (20%) of its week left, and
+  pacing moves none of its sessions off it. The runway rule still applies,
+  so it takes no new session that could not last `newSessionRunway` there.
+  The drain ends when a reading or a refusal shows its limit, when it is
+  active again, or a session window after the switch.
 - A session that starts a turn after its cache has expired is placed again
   like a new session (`RouterState.cacheAwareSessions`), since moving it
   loses nothing.
+
+A session whose model's own allowance is spent on every account stays where
+it is and is refused. With the policy's `noRoomModelFallback` (off by
+default, one of the provider's `sessionModelChoices`; none for a CLI that
+cannot change model within a session), `AppState.applyModelFallbacks` types
+`/model <id>` and Enter into the session's terminal once its turn has ended
+(`AgentSession.isIdle`, never mid-turn), through `SessionTerminalInput`:
+`AgtermTerminalInput` finds the agterm session in the process's
+`AGTERM_SESSION_ID` and passes the text to `agtermctl session type --stdin`,
+each call limited to 15 seconds. The switch, or why it could not be made, is
+recorded as an event.
+
+Sessions served from one-session slots start through the launcher, which
+`SessionSlots.installLauncher` puts first on `PATH` from `~/.zshenv`, read by
+every zsh, and again last in `~/.zshrc`, since the login files' `path_helper`
+and Homebrew's `shellenv` put the CLI's own directory ahead of it in a
+terminal's shell. A run started by full path, from an IDE or the desktop app,
+or before the pool was ready reads no slot (no `slotDirectoryByProcess`
+entry): `AppState.noteUnisolatedSessions` lists such sessions on the usage
+tab ("N sessions not isolated") and records each once. At the user's request
+only, one idle in agterm (its last event `Stop`) is restarted in its own slot:
+`/exit`, Enter, then `claude --resume <id>`, Enter, typed into its agterm
+session, so the resumed run goes through the launcher. A session mid-turn or
+outside agterm is never typed into; the list says why.
+
+**Rebalance sessions now** (Settings → Failover and the usage tab, for a
+provider whose sessions run in one-session slots; also the requests action
+`{"action":"rebalance","provider":…,"apply":true|false}`) places the running
+slot sessions so the first account to reach a limit does so as late as
+possible (`SessionPacer.rebalance`). Each session counts at its rate over
+its last hour (at least `defaultSessionRate` with no history) against every
+window and its model's own allowance. A local search moves, one at a time, a
+session off the account that runs out first to the destination that leaves
+the latest earliest run-out, charging the destination the session's cache
+rewrite; a move is made only when the hours it gains at that account's burn
+are worth more than the rewrite, a session moves at most once, and a session
+mid-turn never. The result never runs out earlier than before and every move
+pays for itself; it is a local optimum, not always the best assignment.
+Excluded accounts, those needing sign-in and those at their limit are no
+destination. The moves go through `requestedSlotMoves`, so each is recorded.
+With **Rebalance automatically** (off by default) the quota cycle makes the
+same moves at most once per `balanceMoveInterval`, and only when the first
+account then runs out more than an hour later.
 
 While sessions are served from several accounts, pausing waits for the whole
 pool: sessions pause only when no other included account is below its limit

@@ -179,6 +179,39 @@ final class AppState: ObservableObject {
     /// Accounts a threshold or balancing switch left, whose running sessions
     /// stay on them until `moveSessionsOffLimitedAccounts` moves them.
     var sessionsLeftOn: [AIProviderType: Set<UUID>] = [:]
+    /// Accounts a threshold switch left while they still had room, with
+    /// when: `buildPool` keeps a share of new sessions on each, and its
+    /// sessions where they are, until a reading or a refusal shows its limit.
+    var drainingAccounts: [UUID: Date] = [:]
+    /// When each account's newest reading a running session reported with
+    /// a response (`PassiveUsageObservation.Source.reportsWithEachResponse`)
+    /// was taken; `quotaState` passes it on while it is the newest reading.
+    var liveReadingAt: [UUID: Date] = [:]
+    /// When the router last recorded a refusal at the limit by each account,
+    /// for `routerRefusedUntil`; a newer live reading with room answers it.
+    var routerRefusedAt: [UUID: Date] = [:]
+    /// When each provider's standing status becomes an event (`updateStatus`).
+    var statusEventGates: [AIProviderType: StatusEventGate] = [:]
+    /// Types into the terminals sessions run in (`SessionTerminalActions`).
+    var sessionTerminal: SessionTerminalInput = AgtermTerminalInput()
+    /// Sessions without allowance for their model anywhere, by session ID,
+    /// with the model `applyModelFallbacks` switches each to once it is idle.
+    var pendingModelFallbacks: [String: String] = [:]
+    /// Running sessions that read no slot of their own, by provider
+    /// (`noteUnisolatedSessions`), for the usage tab.
+    @Published var unisolatedSessions: [AIProviderType: [AgentSession]] = [:]
+    /// The terminal session each of those runs in, when
+    /// `sessionTerminal` can reach it.
+    @Published var unisolatedTerminals: [String: String] = [:]
+    /// Unisolated sessions already recorded as an event.
+    var unisolatedNoted: Set<String> = []
+    /// The session each slot directory serves, as its status line reported
+    /// it (`PassiveUsageObservation.slotDirectory`): `serveSessionSlots`
+    /// finds a slot's model by it when the slot's process left no session
+    /// record.
+    var slotSessionsByDirectory: [String: String] = [:]
+    /// When each provider's sessions were last rebalanced (`applyRebalance`).
+    var lastRebalance: [AIProviderType: Date] = [:]
     /// A locally elapsed reset is useful for clearing a stale 100% display,
     /// but it is not proof that the provider has opened a new quota window.
     /// Never fail over to one of these accounts until a fresh API response
@@ -1052,6 +1085,9 @@ final class AppState: ObservableObject {
         pacingScopedShedding = pacingScopedShedding.filter { !$0.hasPrefix(id.uuidString + "|") }
         for provider in exhaustedFailoverAccounts.keys { exhaustedFailoverAccounts[provider]?.remove(id) }
         for provider in sessionsLeftOn.keys { sessionsLeftOn[provider]?.remove(id) }
+        drainingAccounts[id] = nil
+        liveReadingAt[id] = nil
+        routerRefusedAt[id] = nil
         liveCredentialOwners = liveCredentialOwners.filter { $0.value.account != id }
         lockedSwitchNoted = lockedSwitchNoted.filter { $0.value != id }
         pendingResetRecovery = pendingResetRecovery.filter { $0.value.accountID != id }

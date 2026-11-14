@@ -402,6 +402,37 @@ struct FailoverSettingsView: View {
             .help(policy.usesRouter(for: provider)
                 ? "New sessions go to the accounts with the most unused rate for the rest of their 5-hour window. A session keeps its account while its prompt cache lasts. When an account's sessions would reach its limit and stay there for longer than their cache lasts, some of them move to accounts that can carry them, at their next turn. Otherwise they stay; a session that reaches the limit with the reset at most five minutes away, before its cache expires, waits for it on its account. A session idle past its cache's lifetime is placed again at its next turn, as nothing is lost by moving it."
                 : "New sessions go to the accounts with the most unused rate for the rest of their 5-hour window, in proportion to it. A session keeps its account until it exits.")
+            if provider.capabilities.sessionSlots != nil && !policy.usesRouter(for: provider) {
+                HStack {
+                    RebalanceButton(provider: provider)
+                    Toggle("Rebalance automatically", isOn: Binding(
+                        get: { store.policy(for: provider).rebalanceAutomatically },
+                        set: { on in store.update(provider) { $0.rebalanceAutomatically = on } }
+                    ))
+                    .help("Makes the same moves without being asked, at most once every \(Int(AppState.balanceMoveInterval / 60)) minutes, and only when the first account then runs out more than an hour later, so prompt caches are not rewritten for little.")
+                }
+                .padding(.leading, 20)
+                .disabled(!appState.rebalanceAvailable(provider))
+            }
+            let choices = provider.capabilities.sessionModelChoices
+            if let first = choices.first {
+                Toggle("When no account has allowance for a session's model, switch it to another model", isOn: Binding(
+                    get: { store.policy(for: provider).noRoomModelFallback != nil },
+                    set: { on in store.update(provider) { $0.noRoomModelFallback = on ? ($0.noRoomModelFallback ?? first.id) : nil } }
+                ))
+                .padding(.leading, 20)
+                .help("A session whose model has its own weekly allowance, spent on every account, is refused until one resets. With this on, AccountDock types /model and the model below into the session's terminal once its turn has ended, when the session runs in agterm. Each switch, and each session it cannot reach, is recorded in the events.")
+                if let fallback = policy.noRoomModelFallback {
+                    Picker("Switch to", selection: Binding(
+                        get: { fallback },
+                        set: { model in store.update(provider) { $0.noRoomModelFallback = model } }
+                    )) {
+                        ForEach(choices) { choice in Text(choice.label).tag(choice.id) }
+                    }
+                    .padding(.leading, 40)
+                    .frame(maxWidth: 320, alignment: .leading)
+                }
+            }
         }
         if RequestRouterController.isInstalled() {
             Toggle("Keep prompt caches for an hour", isOn: Binding(

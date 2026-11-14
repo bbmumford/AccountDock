@@ -89,12 +89,20 @@ struct UsageDashboardView: View {
 
                     ForEach(visibleProviders) { provider in
                         VStack(alignment: .leading, spacing: 12) {
-                            Label(
-                                provider.capabilities.displayName,
-                                systemImage: provider.iconName
-                            )
-                            .font(.headline)
-                            .foregroundStyle(.brand)
+                            HStack {
+                                Label(
+                                    provider.capabilities.displayName,
+                                    systemImage: provider.iconName
+                                )
+                                .font(.headline)
+                                .foregroundStyle(.brand)
+                                Spacer()
+                                if appState.rebalanceAvailable(provider) {
+                                    RebalanceButton(provider: provider)
+                                        .buttonStyle(.borderless)
+                                        .font(.caption)
+                                }
+                            }
                             .sectionPadding()
 
                             if let routed = appState.routedStatus[provider] {
@@ -106,6 +114,9 @@ struct UsageDashboardView: View {
                             let ungated = appState.sessionsWithoutGate(provider)
                             if !ungated.isEmpty {
                                 UngatedSessionsLine(provider: provider, sessions: ungated)
+                            }
+                            if let unisolated = appState.unisolatedSessions[provider], !unisolated.isEmpty {
+                                UnisolatedSessionsLine(provider: provider, sessions: unisolated)
                             }
                             if appState.agentPauseStatus[provider] == nil, let pace = appState.paceOutlook(provider) {
                                 PaceOutlookLine(outlook: pace)
@@ -679,6 +690,73 @@ private struct UngatedSessionsLine: View {
         sessions.map { session in
             session.workingDirectory.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? session.sessionID
         }.joined(separator: "\n")
+    }
+}
+
+/// Sessions that read no slot of their own (`AppState.unisolatedSessions`).
+/// Resting the pointer on the line lists them (`AppState.sessionSummary`),
+/// each with a restart into its own slot or why it cannot have one now, and
+/// one action restarting every idle one in agterm.
+private struct UnisolatedSessionsLine: View {
+    @EnvironmentObject private var appState: AppState
+    let provider: AIProviderType
+    let sessions: [AgentSession]
+    @State private var overLine = false
+    @State private var overList = false
+
+    var body: some View {
+        Label(sessions.count == 1 ? "1 session not isolated" : "\(sessions.count) sessions not isolated",
+              systemImage: "square.on.square.dashed")
+            .font(.caption)
+            .foregroundStyle(Color.orange)
+            .sectionPadding()
+            .onHover { overLine = $0 }
+            .popover(isPresented: Binding(get: { overLine || overList }, set: { if !$0 { overLine = false; overList = false } }),
+                     arrowEdge: .bottom) {
+                list.onHover { overList = $0 }.environmentObject(appState)
+            }
+    }
+
+    private var list: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Started outside a slot of its own: by full path, from an IDE or the desktop app, or before the pool was ready. These share the sign-in and cannot be moved one at a time.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(sessions, id: \.sessionID) { session in
+                let blocker = AppState.restartBlocker(session, terminal: appState.unisolatedTerminals[session.sessionID])
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: appState.sessionSummary([session.sessionID]))
+                            .font(.caption)
+                        if let blocker {
+                            Text(blocker)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    Button("Restart in its own slot") {
+                        Task { await appState.restartInOwnSlot(session.sessionID) }
+                    }
+                    .controlSize(.small)
+                    .disabled(blocker != nil)
+                }
+            }
+            let ready = sessions.filter {
+                AppState.restartBlocker($0, terminal: appState.unisolatedTerminals[$0.sessionID]) == nil
+            }
+            if sessions.count > 1 {
+                Button("Restart all idle unisolated sessions") {
+                    Task { await appState.restartIdleUnisolatedSessions(provider) }
+                }
+                .controlSize(.small)
+                .disabled(ready.isEmpty)
+            }
+        }
+        .padding(8)
+        .frame(minWidth: 260, maxWidth: 460, alignment: .leading)
     }
 }
 

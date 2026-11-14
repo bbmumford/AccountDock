@@ -57,6 +57,125 @@ final class SessionPacerTests: XCTestCase {
         SessionPacer.Candidate(id: id, tokensPerHour: burn * 1_000_000, contextTokens: 100_000, account: account)
     }
 
+    func testADrainingAccountKeepsAShareOfNewSessionsAndIsPreferredWhenOthersAreLowOnWeeklyRoom() {
+        func weight(_ tier: QuotaTier, draining: Bool = false, low: Bool = false, forecast: Bool = false) -> Double {
+            AppState.poolWeight(tier: tier, urgent: false, anyBelow: true, forecastAtLimit: forecast, anyOpen: true,
+                                draining: draining, othersLowOnWeeklyRoom: low)
+        }
+        XCTAssertEqual(weight(.usable), 0, "above its thresholds an account takes no new session while another is below")
+        XCTAssertEqual(weight(.usable, draining: true), AppState.drainingShare)
+        XCTAssertEqual(weight(.usable, draining: true, low: true), AppState.drainingPreferred)
+        XCTAssertGreaterThan(AppState.drainingPreferred, weight(.belowTrigger))
+        XCTAssertEqual(weight(.usable, draining: true, forecast: true), 0, "a forecast at the limit still keeps new sessions off")
+        XCTAssertEqual(weight(.belowTrigger, draining: true), 1)
+
+        XCTAssertTrue(AppState.weeklyRoomIsLow([85, 95]))
+        XCTAssertFalse(AppState.weeklyRoomIsLow([85, 60]))
+        XCTAssertFalse(AppState.weeklyRoomIsLow([]))
+        XCTAssertFalse(AppState.weeklyRoomIsLow([95, nil]))
+    }
+
+    func testADrainingAccountTakesNewSessionsOnlyWhileOneCanLastTheRunway() {
+        let pacer = SessionPacer()
+        // A new session costs 2% an hour at this ratio.
+        let fresh = account(b, used: 10, resetIn: 4, weight: 1, ratio: 0.1)
+        let draining = account(a, used: 92, resetIn: 2, weight: AppState.drainingShare, ratio: 0.1)
+        let plan = pacer.plan(accounts: [draining, fresh], sessions: [], now: now)
+        XCTAssertGreaterThan(plan.weights[a] ?? 0, 0, "room left before its reset takes a share")
+        XCTAssertGreaterThan(plan.weights[b] ?? 0, 0)
+
+        let nearlySpent = account(a, used: 98.5, resetIn: 2, weight: AppState.drainingShare, ratio: 0.1)
+        let short = pacer.plan(accounts: [nearlySpent, fresh], sessions: [], now: now)
+        XCTAssertEqual(short.weights[a] ?? -1, 0, "a session could not last the runway there")
+        XCTAssertGreaterThan(short.weights[b] ?? 0, 0)
+    }
+
+    private func running(_ id: String, on account: UUID, burn: Double, context: Int = 100_000, model: String? = nil,
+                         movable: Bool = true) -> SessionPacer.RebalanceSession {
+        SessionPacer.RebalanceSession(id: id, account: account, tokensPerHour: burn * 1_000_000, contextTokens: context,
+                                      model: model, movable: movable)
+    }
+
+    func testRebalancingMovesOneOfTwoBusySessionsToAnIdleAccount() {
+        let busy = account(a, used: 50, resetIn: 4)
+        let idle = account(b, used: 10, resetIn: 4)
+        let plan = SessionPacer().rebalance(accounts: [busy, idle],
+                                            sessions: [running("s1", on: a, burn: 20), running("s2", on: a, burn: 20)],
+                                            destinations: [a, b], now: now)
+        XCTAssertEqual(plan.moves.count, 1)
+        XCTAssertEqual(plan.moves.values.first, b)
+        let before = try? XCTUnwrap(plan.earliestRunOutBefore)
+        XCTAssertNotNil(before)
+        XCTAssertGreaterThan(plan.earliestRunOutAfter ?? .distantFuture, before ?? .distantFuture)
+    }
+
+    func testBalancedSessionsAndMidTurnSessionsStayWhereTheyAre() {
+        let first = account(a, used: 10, resetIn: 4)
+        let second = account(b, used: 10, resetIn: 4)
+        let balanced = SessionPacer().rebalance(accounts: [first, second],
+                                                sessions: [running("s1", on: a, burn: 10), running("s2", on: b, burn: 10)],
+                                                destinations: [a, b], now: now)
+        XCTAssertTrue(balanced.moves.isEmpty)
+        XCTAssertNil(balanced.earliestRunOutBefore, "neither runs out before its reset")
+
+        let busy = account(a, used: 50, resetIn: 4)
+        let working = SessionPacer().rebalance(
+            accounts: [busy, second],
+            sessions: [running("s1", on: a, burn: 20, movable: false), running("s2", on: a, burn: 20, movable: false)],
+            destinations: [a, b], now: now)
+        XCTAssertTrue(working.moves.isEmpty, "a session mid-turn keeps its account")
+    }
+
+    func testASessionWhoseModelHasRoomOnlyOnOneAccountGoesThere() {
+        let reset = now.addingTimeInterval(3 * 86_400)
+        var spent = account(a, used: 10, resetIn: 4)
+        spent.scoped = ["fable": SessionPacer.ScopedAllowance(remaining: 0, resetsAt: reset)]
+        var alsoSpent = account(b, used: 10, resetIn: 4)
+        alsoSpent.scoped = ["fable": SessionPacer.ScopedAllowance(remaining: 0, resetsAt: reset)]
+        var room = account(c, used: 10, resetIn: 4)
+        room.scoped = ["fable": SessionPacer.ScopedAllowance(remaining: 60, resetsAt: reset)]
+        let plan = SessionPacer().rebalance(accounts: [spent, alsoSpent, room],
+                                            sessions: [running("s1", on: a, burn: 10, model: "claude-fable-5")],
+                                            destinations: [a, b, c], now: now)
+        XCTAssertEqual(plan.moves, ["s1": c])
+    }
+
+    func testAMoveThatGainsLessThanItsCacheRewriteIsSkipped() {
+        // Moving either session writes 50M tokens of context, about 57% of a
+        // window, far more than the hours gained are worth.
+        let busy = account(a, used: 60, resetIn: 2)
+        let other = account(b, used: 60, resetIn: 2)
+        let plan = SessionPacer().rebalance(
+            accounts: [busy, other],
+            sessions: [running("s1", on: a, burn: 20, context: 50_000_000), running("s2", on: a, burn: 20, context: 50_000_000)],
+            destinations: [a, b], now: now)
+        XCTAssertTrue(plan.moves.isEmpty)
+        XCTAssertTrue(AppState.rebalanceIsWorthIt(AppState.RebalancePreview(
+            moves: [AppState.RebalanceMove(session: "s", from: a, to: b)],
+            earliestRunOutBefore: now, earliestRunOutAfter: now.addingTimeInterval(2 * 3600))))
+        XCTAssertFalse(AppState.rebalanceIsWorthIt(AppState.RebalancePreview(
+            moves: [AppState.RebalanceMove(session: "s", from: a, to: b)],
+            earliestRunOutBefore: now, earliestRunOutAfter: now.addingTimeInterval(30 * 60))), "under an hour is not worth it unasked")
+    }
+
+    func testIdleRunningSessionsDoNotMakeANewSessionLookCheap() {
+        let pacer = SessionPacer()
+        // A session costs 20% an hour at the default rate here, so `a`'s
+        // 14% left lasts under the hour a new session needs.
+        let nearlySpent = account(a, used: 85, resetIn: 3)
+        let roomy = account(b, used: 10, resetIn: 4)
+        let idle = [session("s1", on: b, burn: 0.5, idle: 10), session("s2", on: b, burn: 0.3, idle: 10)]
+        let plan = pacer.plan(accounts: [nearlySpent, roomy], sessions: idle, now: now)
+        XCTAssertEqual(plan.weights[a] ?? -1, 0, "between turns the running sessions' decayed rates are no guide")
+        XCTAssertGreaterThan(plan.weights[b] ?? 0, 0)
+
+        // A session's last hour counts even when its current rate has faded.
+        var busy = session("s3", on: b, burn: 0.1, idle: 10)
+        busy.recentTokensPerHour = 40_000_000
+        XCTAssertEqual(SessionPacer.typicalNewSessionRate([busy]), 40_000_000)
+        XCTAssertEqual(SessionPacer.typicalNewSessionRate(idle), SessionPacer.defaultSessionRate)
+    }
+
     func testNewSessionsGoWhereTheMostRateIsUnused() {
         // a: 59% left over 1 h, using 50/h; b: 89% left over 4 h, idle.
         let plan = SessionPacer().plan(accounts: [account(a, used: 40, resetIn: 1, burn: 50), account(b, used: 10, resetIn: 4)],
