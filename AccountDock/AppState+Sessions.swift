@@ -61,7 +61,14 @@ extension AppState {
     /// What an account card shows when the pointer rests on its session
     /// count: one line for each of `sessions`, in name order.
     func sessionSummary(_ sessions: Set<String>, now: Date = Date()) -> String {
-        let records = liveSessions.values.flatMap { $0 }.reduce(into: [String: AgentSession]()) { $0[$1.sessionID] = $1 }
+        var records = liveSessions.values.flatMap { $0 }.reduce(into: [String: AgentSession]()) { $0[$1.sessionID] = $1 }
+        // A session not running now is named from its last record, so a list
+        // that holds it (pins, refusals) still shows its folder.
+        for id in sessions where records[id] == nil {
+            for provider in AIProviderType.implementedProviders {
+                if let record = AgentSessions.records(provider)[id] { records[id] = record; break }
+            }
+        }
         return sessions.map { id in
             let label = Self.sessionLabel(id: id, name: sessionNames[id], directory: records[id]?.workingDirectory,
                                           model: sessionModel(id, now: now).map { CostParser.shortModelName($0) })

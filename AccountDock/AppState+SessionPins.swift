@@ -54,7 +54,10 @@ extension AppState {
             let account = sessionPins.account(of: session).flatMap { id in accounts.first { $0.id == id } }
             failoverEvents.record(provider, "Pinned \(name) to \(account.map { messageName($0) } ?? "its account"), where it was opened.")
         }
-        for session in sessionPins.prune(provider, recorded: Set(AgentSessions.records(provider).keys), now: now) {
+        // A session whose record says it ended keeps no pin: a resume starts
+        // it on whatever slot the launcher gives it.
+        let open = AgentSessions.records(provider).filter { $0.value.event != "SessionEnd" }
+        for session in sessionPins.prune(provider, recorded: Set(open.keys), now: now) {
             pinnedKeptAtLimit.remove(session)
         }
         if sessionPins != before { sessionPins.save() }
