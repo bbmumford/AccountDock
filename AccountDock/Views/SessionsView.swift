@@ -8,28 +8,35 @@ extension Notification.Name {
 
 /// The main window's Sessions tab: every running session of each provider
 /// with a pause gate or one-session slots (`AppState.sessionControlProviders`),
-/// grouped by provider, one row each with the account serving it, its state
-/// and its controls (`SessionControlButtons`). Each provider heading pauses
-/// or resumes all its sessions and rebalances them. The rows are read again
-/// every few seconds, since the gate changes the pause files on its own.
+/// grouped by provider (`SessionsSection`, from `AppState.sessionsSection`),
+/// one row each with the account serving it, its state and its controls
+/// (`SessionControlButtons`). Each provider heading pauses or resumes all
+/// its sessions and rebalances them. The rows are read again every few
+/// seconds, since the gate changes the pause files on its own.
 struct SessionsView: View {
     @EnvironmentObject private var appState: AppState
     @AppStorage(ProviderVisibility.storageKey) private var hiddenProviders = ""
     /// What the last move chosen from a row's menu did, by provider.
     @State private var moveOutcomes: [AIProviderType: AppState.SessionMoveOutcome] = [:]
+    #if DEBUG
+    /// The screenshot renderer's sample sections, shown in place of the
+    /// live ones; nil in every other launch.
+    @Environment(\.sampleSessionsSections) private var sampleSections
+    #endif
 
     var body: some View {
         ScrollView {
             TimelineView(.periodic(from: .now, by: 3)) { _ in
+                let sections = self.sections
                 VStack(alignment: .leading, spacing: 16) {
-                    if providers.isEmpty {
+                    if sections.isEmpty {
                         Text("No provider here has sessions AccountDock can pause or move.")
                             .font(.caption)
                             .foregroundStyle(.textSecondary)
                             .sectionPadding()
                     }
-                    ForEach(providers) { provider in
-                        providerSection(provider)
+                    ForEach(sections) { section in
+                        providerSection(section)
                     }
                 }
                 .padding(.vertical, 12)
@@ -41,6 +48,15 @@ struct SessionsView: View {
         }
     }
 
+    /// Each shown provider's section: the live ones, or the screenshot
+    /// renderer's samples.
+    private var sections: [SessionsSection] {
+        #if DEBUG
+        if let sampleSections { return sampleSections }
+        #endif
+        return providers.map { appState.sessionsSection($0) }
+    }
+
     private var providers: [AIProviderType] {
         let hidden = ProviderVisibility.hidden(in: hiddenProviders)
         return appState.sessionControlProviders.filter { provider in
@@ -49,17 +65,17 @@ struct SessionsView: View {
     }
 
     @ViewBuilder
-    private func providerSection(_ provider: AIProviderType) -> some View {
-        let rows = appState.sessionRows(provider)
+    private func providerSection(_ section: SessionsSection) -> some View {
+        let provider = section.provider
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Label(provider.capabilities.displayName, systemImage: provider.iconName)
                     .font(.headline)
                     .foregroundStyle(.brand)
                 Spacer()
-                headerControls(provider, rows: rows)
+                headerControls(section)
             }
-            Text(appState.sessionPauseLine(provider, rows: rows))
+            Text(section.pauseLine)
                 .font(.caption)
                 .foregroundStyle(.textSecondary)
             if let outcome = moveOutcomes[provider] {
@@ -68,8 +84,8 @@ struct SessionsView: View {
                     .foregroundStyle(outcome.ok ? Color.secondary : Color.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            ForEach(rows) { row in
-                sessionRow(row)
+            ForEach(section.entries) { entry in
+                sessionRow(entry)
                 Divider()
             }
         }
@@ -77,7 +93,8 @@ struct SessionsView: View {
     }
 
     @ViewBuilder
-    private func headerControls(_ provider: AIProviderType, rows: [SessionRow]) -> some View {
+    private func headerControls(_ section: SessionsSection) -> some View {
+        let provider = section.provider
         HStack(spacing: 10) {
             if provider.capabilities.pauseGate != nil {
                 Button {
@@ -85,7 +102,7 @@ struct SessionsView: View {
                 } label: {
                     Image(systemName: "pause.circle")
                 }
-                .disabled(!appState.canPauseAllSessions(provider, rows: rows))
+                .disabled(!section.canPauseAll)
                 .help("Pause all: every session waits at its next tool call and new turns wait at their start. Sessions continue when you resume them or when an account in the failover order has capacity; an active account that failover excludes does not resume them.")
                 .accessibilityLabel("Pause all sessions")
 
@@ -94,11 +111,11 @@ struct SessionsView: View {
                 } label: {
                     Image(systemName: "play.circle")
                 }
-                .disabled(!appState.canResumeAllSessions(provider))
+                .disabled(!section.canResumeAll)
                 .help("Resume all: every paused session continues now. Sessions may then reach the usage limit.")
                 .accessibilityLabel("Resume all sessions")
             }
-            if appState.rebalanceAvailable(provider) {
+            if section.canRebalance {
                 RebalanceButton(provider: provider)
             }
         }
@@ -106,8 +123,9 @@ struct SessionsView: View {
         .font(.body)
     }
 
-    private func sessionRow(_ row: SessionRow) -> some View {
-        HStack(alignment: .center, spacing: 8) {
+    private func sessionRow(_ entry: SessionsSection.Entry) -> some View {
+        let row = entry.row
+        return HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(verbatim: row.label)
                     .font(.caption.weight(.medium))
@@ -132,7 +150,7 @@ struct SessionsView: View {
             }
             Spacer(minLength: 4)
             SessionControlButtons(provider: row.provider, session: row.id, state: row.state, pinned: row.pinned,
-                                  inSlot: row.inSlot, gated: row.gated) { outcome in
+                                  inSlot: row.inSlot, gated: row.gated, moveMenu: entry.moveMenu) { outcome in
                 moveOutcomes[row.provider] = outcome
             }
         }

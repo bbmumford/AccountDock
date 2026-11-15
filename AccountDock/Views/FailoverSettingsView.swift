@@ -6,6 +6,14 @@ struct FailoverSettingsView: View {
     @AppStorage(ClaudeStatusLineTelemetry.preferenceKey) private var statusLineTelemetry = true
     @State private var routerError: String?
     @State private var routerBusy = false
+    /// The providers given a section: every implemented one in the Settings
+    /// window; the screenshot renderer shows one, so its image ends with
+    /// that provider's failover order instead of cutting the next one off.
+    private let providers: [AIProviderType]
+
+    init(providers: [AIProviderType] = AIProviderType.implementedProviders) {
+        self.providers = providers
+    }
 
     var body: some View {
         Form {
@@ -15,7 +23,7 @@ struct FailoverSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            ForEach(AIProviderType.implementedProviders) { provider in
+            ForEach(providers) { provider in
                 providerSection(provider)
             }
 

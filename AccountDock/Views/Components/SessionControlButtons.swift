@@ -14,6 +14,10 @@ struct SessionControlButtons: View {
     let inSlot: Bool
     /// A pause can hold it (`SessionRow.gated`).
     let gated: Bool
+    /// Its move menu (`AppState.sessionMoveMenu`, through
+    /// `SessionsSection.Entry` on the Sessions page); nil while the
+    /// provider's sessions run in no slots, which dims the move control.
+    let moveMenu: SessionMoveMenu?
     /// Told what a move chosen from the menu did.
     var onMove: (AppState.SessionMoveOutcome) -> Void = { _ in }
 
@@ -88,7 +92,7 @@ struct SessionControlButtons: View {
 
     @ViewBuilder
     private var moveControl: some View {
-        if let menu = appState.sessionMoveMenu(provider, session: session) {
+        if let menu = moveMenu {
             let restartBlocker = menu.kind == .restartInSlot
                 ? appState.unisolatedSessions[provider]?.first(where: { $0.sessionID == session }).flatMap { live in
                     AppState.restartBlocker(live, terminal: appState.unisolatedTerminals[session],

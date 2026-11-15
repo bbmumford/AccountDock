@@ -3,7 +3,11 @@
 #
 # A Debug build is copied and re-identified as app.accountdock.screenshots, so
 # the render runs with its own empty preferences and never touches the
-# installed AccountDock's accounts, failover order or settings.
+# installed AccountDock's accounts, failover order or settings. It runs with
+# an empty temporary home (CFFIXED_USER_HOME, which Foundation reads as the
+# home directory), so the installed app's pause files, session slots and logs,
+# and the CLIs' settings, neither show in the images nor change; the renderer
+# refuses to run with the user's own home.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,8 +32,8 @@ rm -rf "$app/Contents/PlugIns"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier app.accountdock.screenshots" "$app/Contents/Info.plist"
 codesign --force --deep --sign - "$app" >/dev/null
 
-mkdir -p "$output"
-ACCOUNTDOCK_SCREENSHOT_DIR="$output" "$app/Contents/MacOS/AccountDock"
+mkdir -p "$output" "$work/home"
+CFFIXED_USER_HOME="$work/home" ACCOUNTDOCK_SCREENSHOT_DIR="$output" "$app/Contents/MacOS/AccountDock"
 defaults delete app.accountdock.screenshots >/dev/null 2>&1 || true
 echo "Screenshots written to $output"
 ls -1 "$output"
