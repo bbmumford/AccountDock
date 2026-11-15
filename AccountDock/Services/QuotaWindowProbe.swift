@@ -24,7 +24,7 @@ extension AppState {
     /// token it spent when AccountDock holds it.
     func quotaWindowProbe(for account: Account, readsLive: Bool) -> QuotaWindowProbe? {
         let audit = credentialAudit
-        func recorded<T>(_ action: CredentialAuditAction, token: String?,
+        func recorded<T: Sendable>(_ action: CredentialAuditAction, token: String?,
                          _ work: () async throws -> T) async throws -> T {
             do {
                 let value = try await work()

@@ -1,5 +1,84 @@
 # AccountDock release notes
 
+## 1.4.0
+
+Every session in a credential slot of its own, for Claude Code, Codex and
+Kimi Code; balancing that knows each plan's size; and a record of every
+credential AccountDock touches.
+
+### Sessions and slots
+
+- Every Claude Code, Codex and Kimi Code session can start in a credential
+  slot of its own, so AccountDock moves sessions between accounts one at a
+  time. Codex and Kimi slots keep session history in the CLI's usual home,
+  and are used once "Distribute sessions" is on for that provider.
+- Sessions run by Claude Code's background service are recognised, counted
+  on the account they really use, and can be restarted in a slot of their
+  own; the terminal tab attached to one no longer holds a slot.
+- Pin a session to its subscription from the lock in an account card's
+  session list, or open it pinned from the card's session button. Nothing
+  automatic moves a pinned session.
+- "Copy command" copies a command that starts the session in whatever folder
+  it is pasted into.
+
+### Balancing
+
+- Room is compared in tokens, by each plan's size (Max 20x, Max 5x, Pro), so
+  a small plan never receives a session that would empty its window within
+  the hour, and a new account starts from its plan's size until its own
+  readings take over.
+- The sessions on the shared sign-in are counted on the active account and,
+  from the projected switch, on the account failover would move them to.
+- Failover and balancing switch only to an account that can carry the work
+  that moves there for an hour.
+- An allowance that would expire unused before its reset is spent by one
+  light, idle session, never by the shared sign-in's sessions.
+- Sessions moved off an account at its limit are spread across the accounts
+  with room. "Rebalance sessions now" shows and applies the moves that keep
+  every account running longest.
+
+### Readings, warm-ups and refusals
+
+- An account whose limit reset is read again within a minute, and its
+  session window is started then, from an allowance background reads cannot
+  use up.
+- A refusal at a usage limit is credited to the account that served the
+  request, from the reset time it names, and is checked against a fresh
+  reading before anything moves.
+- An account is read as soon as it is signed in, and Refresh reads every
+  account that has no reading yet.
+
+### Signing in
+
+- Adding or re-authenticating a Claude account signs in in a temporary
+  location, so running sessions cannot overwrite the sign-in being saved,
+  and every sign-in is saved only after the provider confirms whose it is.
+- Adding an account leaves the active one in place, and the new account out
+  of failover until you include it.
+
+### Pausing
+
+- The pause hook stays installed for every provider, and "Pause sessions
+  now" is always offered.
+- Any one paused session can be resumed on its own, by name, from the pause
+  banner or its account card.
+
+### Audit
+
+- Every credential read, write, renewal, slot change and switch is recorded,
+  by token fingerprint and never by token, in
+  `~/Library/Logs/AccountDock-credentials.jsonl`. A credential used or saved
+  under the wrong account, and a session still using another account's sign-in,
+  raise an event; Settings → General → Audit opens the record.
+
+### Router and Codex bridge
+
+- Router events reach the app without loss, and the router and the app size
+  sessions by one rule.
+- The Codex bridge sends API-key requests to the OpenAI API, bridges
+  compaction, covers managed Codex homes and slots, and can be served by
+  Claude.
+
 ## 1.3.0
 
 Smarter failover, sessions that survive the last account running out, and a
