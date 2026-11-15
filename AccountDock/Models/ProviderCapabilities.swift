@@ -84,6 +84,12 @@ struct ProviderCapabilities: Sendable {
     var sessionModelChoices: [SessionModelChoice] = []
     /// The CLI's executable name, for finding its running processes.
     var cliExecutableName: String?
+    /// Other names the running CLI's process takes. Kimi Code's executable
+    /// `kimi` runs as a process named `kimi-code`, which the lifecycle hook
+    /// must recognise to record the session's own process.
+    var cliProcessAliases: [String] = []
+    /// Every name the CLI's process may run under.
+    var cliProcessNames: [String] { (cliExecutableName.map { [$0] } ?? []) + cliProcessAliases }
     /// Window percent a request is assumed to cost while the provider has no
     /// per-request usage to learn from.
     var defaultRequestCostPercent: Double = 2
@@ -462,6 +468,7 @@ extension AIProviderType {
                 transcriptSource: KimiTranscriptSource(),
                 routeTarget: .kimi,
                 cliExecutableName: "kimi",
+                cliProcessAliases: ["kimi-code"],
                 storageKey: "kimi",
                 longWindowStorageName: "Monthly",
                 longShortLabel: "MO",

@@ -178,7 +178,7 @@ final class SessionControlsTests: XCTestCase {
             try record(session, event: index.isMultiple(of: 2) ? "UserPromptSubmit" : "Stop", pid: Int32(100 + index), in: records)
         }
         try record("ended", event: "SessionEnd", pid: 200, in: records)
-        let sessions = AgentSessions.live(.claudeCode, directory: records, now: now, isAlive: { _ in true }).map(\.sessionID)
+        let sessions = AgentSessions.live(.claudeCode, directory: records, now: now, isAlive: { _ in true }, startTime: { _ in nil }).map(\.sessionID)
         XCTAssertEqual(Set(sessions), ["waiting", "due", "resumed", "refused", "shared", "plain"], "an ended session is no row")
 
         AgentPauseGate.write(.init(sessions: ["waiting", "due", "resumed"], reason: "paused by you", pausedAt: now,

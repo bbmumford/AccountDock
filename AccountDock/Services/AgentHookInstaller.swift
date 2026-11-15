@@ -109,8 +109,9 @@ enum AgentHookInstaller {
     /// recorder.
     private static func writeShellHookScript(_ provider: AIProviderType) throws {
         guard let recorder = Bundle.main.url(forResource: "accountdock-claude-hook", withExtension: "js")?.path,
-              let executable = provider.capabilities.cliExecutableName,
+              !provider.capabilities.cliProcessNames.isEmpty,
               let key = provider.capabilities.pauseGate?.key else { throw missingResource }
+        let names = provider.capabilities.cliProcessNames.flatMap { ["*/\($0)", $0] }.joined(separator: "|")
         let url = shellHookScriptURL(provider)
         let script = """
         #!/bin/sh
@@ -118,7 +119,7 @@ enum AgentHookInstaller {
         pid="$PPID"; agent="$PPID"; steps=0
         while [ "$pid" -gt 1 ] 2>/dev/null && [ "$steps" -lt 8 ]; do
             name=$(/bin/ps -p "$pid" -o comm= 2>/dev/null)
-            case "$name" in */\(executable)|\(executable)) agent="$pid"; break ;; esac
+            case "$name" in \(names)) agent="$pid"; break ;; esac
             pid=$(/bin/ps -p "$pid" -o ppid= 2>/dev/null | /usr/bin/tr -d ' ')
             steps=$((steps + 1))
         done

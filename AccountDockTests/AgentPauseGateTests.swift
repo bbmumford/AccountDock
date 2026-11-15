@@ -405,12 +405,31 @@ final class AgentPauseGateTests: XCTestCase {
         try record("codex-stale", event: "Stop", pid: 24, at: "2026-10-16T09:00:00Z", provider: "codex")
         let now = ISO8601DateFormatter().date(from: "2026-10-17T09:05:00Z")!
         let alive: (Int32) -> Bool = { $0 != 23 }
-        XCTAssertEqual(AgentSessions.live(.claudeCode, directory: directory, now: now, isAlive: alive).map(\.sessionID), ["claude-live"])
-        let kimi = AgentSessions.live(.kimi, directory: directory, now: now, isAlive: alive)
+        XCTAssertEqual(AgentSessions.live(.claudeCode, directory: directory, now: now, isAlive: alive, startTime: { _ in nil }).map(\.sessionID), ["claude-live"])
+        let kimi = AgentSessions.live(.kimi, directory: directory, now: now, isAlive: alive, startTime: { _ in nil })
         XCTAssertEqual(kimi.map(\.sessionID), ["kimi-working"])
         XCTAssertTrue(kimi[0].isWorking)
-        XCTAssertTrue(AgentSessions.live(.codex, directory: directory, now: now, isAlive: alive).isEmpty)
+        XCTAssertTrue(AgentSessions.live(.codex, directory: directory, now: now, isAlive: alive, startTime: { _ in nil }).isEmpty)
         XCTAssertEqual(AgentSessions.byProcess(.kimi, directory: directory)[22]?.sessionID, "kimi-working")
+    }
+
+    func testARecordWhoseProcessIDWasReusedIsNotLive() throws {
+        try record("kimi-before-restart", event: "UserPromptSubmit", pid: 30, at: "2026-10-17T08:00:00Z", provider: "kimi")
+        try record("kimi-running", event: "UserPromptSubmit", pid: 31, at: "2026-10-17T08:00:00Z", provider: "kimi")
+        let now = ISO8601DateFormatter().date(from: "2026-10-17T09:00:00Z")!
+        // Process 30 belongs to a program started after the record's last
+        // event; process 31 started before it.
+        let started: (Int32) -> Date? = { pid in
+            pid == 30 ? ISO8601DateFormatter().date(from: "2026-10-17T08:30:00Z")
+                : ISO8601DateFormatter().date(from: "2026-10-17T07:00:00Z")
+        }
+        let live = AgentSessions.live(.kimi, directory: directory, now: now, isAlive: { _ in true }, startTime: started)
+        XCTAssertEqual(live.map(\.sessionID), ["kimi-running"])
+    }
+
+    func testKimisHookRecognisesItsKimiCodeProcess() {
+        XCTAssertEqual(AIProviderType.kimi.capabilities.cliProcessNames, ["kimi", "kimi-code"])
+        XCTAssertEqual(AIProviderType.claudeCode.capabilities.cliProcessNames, ["claude"])
     }
 
     func testAManualPauseRoundTrips() {

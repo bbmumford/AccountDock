@@ -181,12 +181,17 @@ enum AgentSessions {
         _ provider: AIProviderType,
         directory: URL = directory,
         now: Date = Date(),
-        isAlive: (Int32) -> Bool = { Darwin.kill($0, 0) == 0 }
+        isAlive: (Int32) -> Bool = { Darwin.kill($0, 0) == 0 },
+        startTime: (Int32) -> Date? = ProcessAncestry.startTime(of:)
     ) -> [AgentSession] {
         records(provider, directory: directory).values.filter { record in
             guard record.event != "SessionEnd", let observedAt = record.observedAt,
-                  now.timeIntervalSince(observedAt) < liveLifetime else { return false }
-            return record.processID.map(isAlive) ?? false
+                  now.timeIntervalSince(observedAt) < liveLifetime,
+                  let process = record.processID, isAlive(process) else { return false }
+            // A process ID is reused once its process ends, after a restart
+            // within minutes: a process that started after the record's last
+            // event is not the session's.
+            return startTime(process).map { $0 <= observedAt.addingTimeInterval(5) } ?? true
         }.sorted { $0.sessionID < $1.sessionID }
     }
 
