@@ -438,8 +438,16 @@ final class RouterService: @unchecked Sendable {
         let trusted = brain.isAllowed(RouterLogic.bearerToken(request.headers).map(RouterLogic.fingerprint))
         let route = trusted ? brain.currentState().passthroughRoutes[key] : nil
         let isResponses = request.method == "POST" && ProviderPassthrough.isResponsesPath(rest)
-        let responses = route != nil && isResponses
+        let isCompact = request.method == "POST" && ProviderPassthrough.isCompactPath(rest)
+        let responses = route != nil && (isResponses || isCompact)
             ? (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any] : nil
+        // A compaction is served whole by the route's backend; when that
+        // fails, the provider's own endpoint compacts instead.
+        func serve(_ route: PassthroughRoute, _ responses: [String: Any]) async -> Bool {
+            isCompact
+                ? await serveCompaction(request, json: responses, route: route, key: key, session: session, writer: writer)
+                : await serveResponses(request, json: responses, route: route, key: key, session: session, writer: writer)
+        }
         let session = ProviderPassthrough.sessionID(request.body, field: entry.sessionField)
             ?? ProviderPassthrough.sessionID(request.headers)
         let streaming = ProviderPassthrough.isStreaming(request.body)
@@ -475,7 +483,7 @@ final class RouterService: @unchecked Sendable {
         var triedRoute = false
         if let route, let responses, route.routed, routeServes(route) {
             triedRoute = true
-            if await serveResponses(request, json: responses, route: route, key: key, session: session, writer: writer) { return }
+            if await serve(route, responses) { return }
         }
         var outgoing = URLRequest(url: url)
         outgoing.httpMethod = request.method
@@ -494,7 +502,7 @@ final class RouterService: @unchecked Sendable {
                 log.write("\(key) refused a request at its limit; serving it from \(route.backend.displayName)")
                 brain.event(RouterEvent(kind: .replayed, at: Date(), session: session, backend: key,
                                         detail: ISO8601DateFormatter().string(from: Date().addingTimeInterval(10 * 60)), client: key))
-                if await serveResponses(request, json: responses, route: route, key: key, session: session, writer: writer) { return }
+                if await serve(route, responses) { return }
                 if heldStream {
                     await writer.chunk(ProviderPassthrough.streamError(status: http.statusCode, body: refusal, responses: isResponses))
                 } else {
@@ -633,6 +641,67 @@ final class RouterService: @unchecked Sendable {
             return true
         } catch {
             log.write("\(backend.id) request for \(key) failed: \(error.localizedDescription); sending it to \(key)")
+            brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id,
+                                    detail: error.localizedDescription, client: key))
+            return false
+        }
+    }
+
+    /// Serves Codex's compaction call from the route's Messages backend: the
+    /// backend summarises the conversation (`ResponsesBridge.compactionRequest`)
+    /// and the reply holds the items that replace it
+    /// (`ResponsesBridge.compactionReply`). False when the backend refused,
+    /// failed or wrote no summary, before anything was written, so the
+    /// provider's own endpoint compacts instead.
+    private func serveCompaction(
+        _ request: HTTPRequest,
+        json: [String: Any],
+        route: PassthroughRoute,
+        key: String,
+        session: String?,
+        writer: ResponseWriter
+    ) async -> Bool {
+        let backend = route.backend
+        guard !writer.headWritten else { return false }
+        let body = ResponsesBridge.compactionRequest(json, model: backend.model)
+        guard let url = backend.messagesURL, let data = try? JSONSerialization.data(withJSONObject: body),
+              let token = brain.token(backend.tokenFile)?.accessToken else {
+            log.write("\(backend.id) has no usable credential for \(key) compaction")
+            return false
+        }
+        var outgoing = URLRequest(url: url)
+        outgoing.httpMethod = "POST"
+        outgoing.setValue(backend.auth == .apiKey ? token : "Bearer \(token)",
+                          forHTTPHeaderField: backend.auth == .apiKey ? "x-api-key" : "Authorization")
+        outgoing.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        outgoing.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        outgoing.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        outgoing.httpBody = data
+        do {
+            let (bytes, response) = try await upstream.open(outgoing, client: ProviderPassthrough.routerSession(key, session))
+            guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+            var reply = Data()
+            for try await byte in bytes { reply.append(byte) }
+            guard http.statusCode == 200, let summary = ResponsesBridge.summaryText(inMessagesReply: reply) else {
+                let headers = Dictionary(Self.headerList(http), uniquingKeysWith: { a, _ in a })
+                if http.statusCode == 429 || RouterLogic.isPlanLimit(status: http.statusCode, headers: headers, body: reply) {
+                    brain.refuseBackend(backend.id, until: RouterLogic.refusedUntil(headers, now: Date()))
+                }
+                brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id,
+                                        detail: "HTTP \(http.statusCode)", client: key))
+                log.write("\(backend.id) did not compact a \(key) conversation (HTTP \(http.statusCode)); sending it to \(key)")
+                return false
+            }
+            await writer.complete(200, json: ResponsesBridge.compactionReply(summary: summary, request: json))
+            if let counts = RouterLogic.usage(inResponse: reply), counts.context > 0 {
+                brain.event(RouterEvent(kind: .turnUsage, at: Date(), session: session, backend: backend.id,
+                                        contextTokens: counts.context, cacheWriteTokens: counts.cacheWrite,
+                                        cacheReadTokens: counts.cacheRead, outputTokens: counts.output,
+                                        cacheWriteLongTokens: counts.cacheWriteLong, startsTurn: false, client: key))
+            }
+            return true
+        } catch {
+            log.write("\(backend.id) compaction for \(key) failed: \(error.localizedDescription); sending it to \(key)")
             brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id,
                                     detail: error.localizedDescription, client: key))
             return false

@@ -288,6 +288,81 @@ enum ResponsesBridge {
         return definitions
     }
 
+    // MARK: - Compaction
+
+    /// The instruction the backend summarises a conversation by.
+    static let compactionInstruction = """
+        Write a handoff summary of the conversation above for another model, which will continue the work from this \
+        summary and the user's messages alone. Cover the task and the user's requirements and preferences; what has \
+        been done, with the files, commands and results that matter; the decisions made and why; what remains, as \
+        concrete next steps; and whatever is needed to continue, such as paths, identifiers, errors or partial output. \
+        Write only the summary.
+        """
+
+    /// The text that introduces the summary in the compacted conversation.
+    static let compactionPreface = "The conversation so far was compacted. This summary of it was written for you to continue from:\n\n"
+
+    /// The most of the user's own messages a compacted conversation keeps,
+    /// newest first, in bytes.
+    static let compactionUserBytes = 80_000
+
+    /// The Messages request that summarises a Codex conversation sent to
+    /// `/responses/compact`: the conversation as `messagesRequest` writes it,
+    /// whole and unstreamed, its tools offered but none called, and the
+    /// summary instruction after it, so the cached conversation is read
+    /// before the instruction.
+    static func compactionRequest(_ request: [String: Any], model: String?) -> [String: Any] {
+        var body = messagesRequest(request, model: model).body
+        body["stream"] = false
+        body["max_tokens"] = 16_000
+        if body["tools"] != nil { body["tool_choice"] = ["type": "none"] }
+        var messages = body["messages"] as? [[String: Any]] ?? []
+        let instruction: [String: Any] = ["type": "text", "text": compactionInstruction]
+        if let last = messages.indices.last, messages[last]["role"] as? String == "user" {
+            messages[last]["content"] = (messages[last]["content"] as? [[String: Any]] ?? []) + [instruction]
+        } else {
+            messages.append(["role": "user", "content": [instruction]])
+        }
+        body["messages"] = messages
+        return body
+    }
+
+    /// The text of an unstreamed Messages reply; nil when it holds none.
+    static func summaryText(inMessagesReply data: Data) -> String? {
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let content = root["content"] as? [[String: Any]] else { return nil }
+        let text = content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+            .joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    /// The reply to `/responses/compact`: the items that replace the
+    /// conversation. The user's own messages, newest kept first up to
+    /// `compactionUserBytes` and in their order, then the summary as a user
+    /// message. Context blocks Codex adds itself, written as tagged text
+    /// (`<environment_context>`), are left for Codex to add again.
+    static func compactionReply(summary: String, request: [String: Any]) -> Data {
+        let items = request["input"] as? [[String: Any]] ?? []
+        var texts: [String] = []
+        for item in items where (item["type"] as? String ?? "message") == "message" && item["role"] as? String == "user" {
+            let text = contentBlocks(item["content"]).compactMap { $0["text"] as? String }.joined(separator: "\n")
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, !trimmed.hasPrefix("<") { texts.append(text) }
+        }
+        var kept: [String] = []
+        var bytes = 0
+        for text in texts.reversed() {
+            bytes += text.utf8.count
+            if bytes > compactionUserBytes, !kept.isEmpty { break }
+            kept.insert(text, at: 0)
+        }
+        func message(_ text: String) -> [String: Any] {
+            ["type": "message", "role": "user", "content": [["type": "input_text", "text": text]]]
+        }
+        let output = kept.map(message) + [message(compactionPreface + summary)]
+        return (try? JSONSerialization.data(withJSONObject: ["output": output], options: [.sortedKeys])) ?? Data()
+    }
+
     /// A `response.failed` event carrying `message`, for an error that
     /// arrives after the stream began.
     static func failedEvent(id: String, code: String, message: String) -> Data {

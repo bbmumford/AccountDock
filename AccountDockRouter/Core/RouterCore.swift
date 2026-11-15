@@ -1001,6 +1001,12 @@ enum ProviderPassthrough {
         (rest.split(separator: "?", omittingEmptySubsequences: false).first.map(String.init) ?? rest) == "/responses"
     }
 
+    /// Whether `rest` is Codex's remote compaction endpoint, which takes the
+    /// conversation and answers with the items that replace it.
+    static func isCompactPath(_ rest: String) -> Bool {
+        (rest.split(separator: "?", omittingEmptySubsequences: false).first.map(String.init) ?? rest) == "/responses/compact"
+    }
+
     /// An error delivered inside an event stream whose 200 head was already
     /// sent while the request was held: a `response.failed` event for a
     /// Responses request, and a chat-completions error chunk otherwise.
