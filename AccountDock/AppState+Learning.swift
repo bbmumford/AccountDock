@@ -78,7 +78,7 @@ extension AppState {
     /// Feeds a new reading into the request-cost and demand models.
     func learnFromReading(_ usage: UsageAPIResponse, previous: UsageAPIResponse?, account: Account, at date: Date) {
         if account.isActive, let session = usage.fiveHour?.utilization {
-            for target in RouteTarget.all where target.provider == account.provider {
+            for target in RouteTarget.every where target.provider == account.provider {
                 routeTargetCosts[target.id, default: RouteTargetCostModel()].recordReading(session: session)
             }
         }

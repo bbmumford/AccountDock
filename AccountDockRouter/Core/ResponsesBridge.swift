@@ -60,9 +60,10 @@ enum ResponsesBridge {
         (request["prompt_cache_key"] as? String).flatMap { $0.isEmpty ? nil : $0 }
     }
 
-    /// The Messages request serving `request` with `model`, and the tool
-    /// names it uses.
-    static func messagesRequest(_ request: [String: Any], model: String?) -> (body: [String: Any], tools: ToolNames) {
+    /// The Messages request serving `request` with `model` in `dialect`, and
+    /// the tool names it uses.
+    static func messagesRequest(_ request: [String: Any], model: String?,
+                                dialect: RouterBackend.MessagesDialect = .compatible) -> (body: [String: Any], tools: ToolNames) {
         var names = ToolNames()
         var system: [String] = []
         if let instructions = request["instructions"] as? String, !instructions.isEmpty { system.append(instructions) }
@@ -119,6 +120,10 @@ enum ResponsesBridge {
             case "function_call_output", "custom_tool_call_output":
                 append("user", [["type": "tool_result", "tool_use_id": item["call_id"] as? String ?? "",
                                  "content": toolResultContent(item["output"])]])
+            case "reasoning" where dialect == .claude:
+                // The backend's own thinking, returned to it where it was
+                // given; OpenAI's encrypted reasoning is left out.
+                if let block = thinkingBlock(fromReasoning: item) { append("assistant", [block]) }
             default:
                 // Reasoning, hosted-tool calls and other OpenAI-only items.
                 continue
@@ -143,8 +148,12 @@ enum ResponsesBridge {
         ]
         let systemText = system.filter { !$0.isEmpty }.joined(separator: "\n\n")
         if !systemText.isEmpty { body["system"] = [["type": "text", "text": systemText, "cache_control": ["type": "ephemeral"]]] }
-        if let temperature = request["temperature"] as? NSNumber { body["temperature"] = temperature }
-        if let topP = request["top_p"] as? NSNumber { body["top_p"] = topP }
+        if dialect == .compatible {
+            if let temperature = request["temperature"] as? NSNumber { body["temperature"] = temperature }
+            if let topP = request["top_p"] as? NSNumber { body["top_p"] = topP }
+        } else if let effort = (request["reasoning"] as? [String: Any])?["effort"] as? String {
+            body["output_config"] = ["effort": claudeEffort(effort)]
+        }
 
         let tools = toolDefinitions(toolList, names: &names)
         if !tools.isEmpty {
@@ -161,12 +170,56 @@ enum ResponsesBridge {
                 }
             default: choice = ["type": "auto"]
             }
+            // Anthropic's current models take no forced tool use; the model
+            // is left to choose.
+            if dialect == .claude, ["any", "tool"].contains(choice["type"] as? String ?? "") { choice = ["type": "auto"] }
             if request["parallel_tool_calls"] as? Bool == false, choice["type"] as? String != "none" {
                 choice["disable_parallel_tool_use"] = true
             }
             body["tool_choice"] = choice
         }
         return (body, names)
+    }
+
+    /// Anthropic's effort for Codex's reasoning effort, which also has
+    /// `minimal`.
+    static func claudeEffort(_ effort: String) -> String {
+        ["low", "medium", "high", "xhigh", "max"].contains(effort) ? effort : effort == "minimal" ? "low" : "medium"
+    }
+
+    /// Marks a reasoning item's `encrypted_content` as a thinking block of
+    /// the bridge's backend, which only the bridge reads back.
+    static let thinkingPrefix = "accountdock-thinking:"
+
+    /// The reasoning item carrying a backend's thinking block to Codex,
+    /// which sends it back with the conversation's later requests.
+    static func reasoningItem(thinking block: [String: Any], id: String) -> [String: Any] {
+        let data = (try? JSONSerialization.data(withJSONObject: block, options: [.sortedKeys])) ?? Data()
+        return ["type": "reasoning", "id": id, "summary": [] as [Any], "encrypted_content": thinkingPrefix + data.base64EncodedString()]
+    }
+
+    /// The thinking block a reasoning item carries back; nil for any other
+    /// reasoning, as OpenAI's own.
+    static func thinkingBlock(fromReasoning item: [String: Any]) -> [String: Any]? {
+        guard let content = item["encrypted_content"] as? String, content.hasPrefix(thinkingPrefix),
+              let data = Data(base64Encoded: String(content.dropFirst(thinkingPrefix.count))),
+              let block = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              ["thinking", "redacted_thinking"].contains(block["type"] as? String ?? "") else { return nil }
+        return block
+    }
+
+    /// The request without thinking blocks, for a backend account that
+    /// rejects another account's signatures.
+    static func withoutThinking(_ body: [String: Any]) -> [String: Any] {
+        guard var messages = body["messages"] as? [[String: Any]] else { return body }
+        for index in messages.indices {
+            guard let blocks = messages[index]["content"] as? [[String: Any]] else { continue }
+            let kept = blocks.filter { !["thinking", "redacted_thinking"].contains($0["type"] as? String ?? "") }
+            if kept.count != blocks.count { messages[index]["content"] = kept.isEmpty ? [["type": "text", "text": "…"]] : kept }
+        }
+        var result = body
+        result["messages"] = messages
+        return result
     }
 
     /// Messages blocks for a Responses message's content: text and images.
@@ -311,8 +364,9 @@ enum ResponsesBridge {
     /// whole and unstreamed, its tools offered but none called, and the
     /// summary instruction after it, so the cached conversation is read
     /// before the instruction.
-    static func compactionRequest(_ request: [String: Any], model: String?) -> [String: Any] {
-        var body = messagesRequest(request, model: model).body
+    static func compactionRequest(_ request: [String: Any], model: String?,
+                                  dialect: RouterBackend.MessagesDialect = .compatible) -> [String: Any] {
+        var body = messagesRequest(request, model: model, dialect: dialect).body
         body["stream"] = false
         body["max_tokens"] = 16_000
         if body["tools"] != nil { body["tool_choice"] = ["type": "none"] }
@@ -398,6 +452,8 @@ final class ResponsesStreamTranslator {
 
     private let tools: ResponsesBridge.ToolNames
     private let responseID: String
+    private let dialect: RouterBackend.MessagesDialect
+    private let makeID: () -> String
     private var buffer = Data()
     private var started = false
     /// Set by the closing event; nothing is written after it.
@@ -412,6 +468,7 @@ final class ResponsesStreamTranslator {
         var toolID = ""
         var toolName = ""
         var arguments = ""
+        var signature = ""
     }
     private var blocks: [Int: Block] = [:]
     private var usage = RouterLogic.StreamUsage()
@@ -425,9 +482,13 @@ final class ResponsesStreamTranslator {
         return false
     }
 
-    init(tools: ResponsesBridge.ToolNames, responseID: String = ResponsesBridge.newResponseID()) {
+    /// `makeID` names each output item; the tests give fixed names.
+    init(tools: ResponsesBridge.ToolNames, responseID: String = ResponsesBridge.newResponseID(),
+         dialect: RouterBackend.MessagesDialect = .compatible, makeID: @escaping () -> String = ResponsesStreamTranslator.shortID) {
         self.tools = tools
         self.responseID = responseID
+        self.dialect = dialect
+        self.makeID = makeID
     }
 
     /// Events for the next part of the backend's stream.
@@ -478,7 +539,7 @@ final class ResponsesStreamTranslator {
             guard let block = event["content_block"] as? [String: Any] else { break }
             switch block["type"] as? String {
             case "text":
-                let item = Block(kind: "text", itemID: "msg_" + Self.shortID(), outputIndex: outputIndex)
+                let item = Block(kind: "text", itemID: "msg_" + makeID(), outputIndex: outputIndex)
                 outputIndex += 1
                 blocks[index] = item
                 output.append(ResponsesBridge.event("response.output_item.added", [
@@ -487,9 +548,9 @@ final class ResponsesStreamTranslator {
                 ]))
                 if let text = block["text"] as? String, !text.isEmpty { output.append(textDelta(index, text)) }
             case "tool_use":
-                var item = Block(kind: "tool", itemID: "fc_" + Self.shortID(), outputIndex: outputIndex)
+                var item = Block(kind: "tool", itemID: "fc_" + makeID(), outputIndex: outputIndex)
                 outputIndex += 1
-                item.toolID = block["id"] as? String ?? "call_" + Self.shortID()
+                item.toolID = block["id"] as? String ?? "call_" + makeID()
                 item.toolName = block["name"] as? String ?? ""
                 if let input = block["input"] as? [String: Any], !input.isEmpty,
                    let data = try? JSONSerialization.data(withJSONObject: input) {
@@ -497,8 +558,17 @@ final class ResponsesStreamTranslator {
                 }
                 blocks[index] = item
                 output.append(ResponsesBridge.event("response.output_item.added", ["output_index": item.outputIndex, "item": toolItem(item, done: false)]))
+            case "thinking" where dialect == .claude, "redacted_thinking" where dialect == .claude:
+                // Reported whole once it stops, as a reasoning item Codex
+                // sends back with the conversation.
+                var item = Block(kind: block["type"] as? String ?? "thinking", itemID: "rs_" + makeID(), outputIndex: outputIndex)
+                outputIndex += 1
+                item.text = block["thinking"] as? String ?? ""
+                item.signature = block["signature"] as? String ?? ""
+                item.arguments = block["data"] as? String ?? ""
+                blocks[index] = item
             default:
-                // Thinking stays with the backend.
+                // Thinking of a compatible backend stays with it.
                 break
             }
         case "content_block_delta":
@@ -508,6 +578,10 @@ final class ResponsesStreamTranslator {
                 if let text = delta["text"] as? String { output.append(textDelta(index, text)) }
             case "input_json_delta":
                 if let partial = delta["partial_json"] as? String { blocks[index]?.arguments += partial }
+            case "thinking_delta":
+                if let thinking = delta["thinking"] as? String { blocks[index]?.text += thinking }
+            case "signature_delta":
+                if let signature = delta["signature"] as? String { blocks[index]?.signature += signature }
             default:
                 break
             }
@@ -556,6 +630,14 @@ final class ResponsesStreamTranslator {
     }
 
     private func itemDone(_ block: Block) -> Data {
+        if block.kind == "thinking" || block.kind == "redacted_thinking" {
+            let thinking: [String: Any] = block.kind == "thinking"
+                ? ["type": "thinking", "thinking": block.text, "signature": block.signature]
+                : ["type": "redacted_thinking", "data": block.arguments]
+            let item = ResponsesBridge.reasoningItem(thinking: thinking, id: block.itemID)
+            return ResponsesBridge.event("response.output_item.added", ["output_index": block.outputIndex, "item": item])
+                + ResponsesBridge.event("response.output_item.done", ["output_index": block.outputIndex, "item": item])
+        }
         if block.kind == "text" {
             return ResponsesBridge.event("response.output_item.done", [
                 "output_index": block.outputIndex,
@@ -598,7 +680,7 @@ final class ResponsesStreamTranslator {
         return output
     }
 
-    private static func shortID() -> String {
+    static func shortID() -> String {
         UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 }

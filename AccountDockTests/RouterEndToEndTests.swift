@@ -139,6 +139,65 @@ final class RouterEndToEndTests: XCTestCase {
         XCTAssertEqual(api.requests.first?.header("authorization"), "Bearer sk-test-not-a-real-key")
     }
 
+    /// A routed Codex request served by Claude through the bridge: the
+    /// first pool account is refused at its limit, the next serves, and
+    /// Codex receives Responses events.
+    func testARoutedCodexRequestIsServedByTheNextClaudePoolAccount() async throws {
+        let claude = Recorder()
+        let claudePort = try listen { request, writer in
+            claude.add(request)
+            if request.header("authorization") == "Bearer pool-a" {
+                await writer.head(429, [("Content-Type", "application/json"), ("anthropic-ratelimit-unified-status", "rejected"),
+                                        ("anthropic-ratelimit-unified-reset", "\(Int(Date().timeIntervalSince1970) + 3600)")])
+                await writer.chunk(Data(#"{"type":"error","error":{"type":"rate_limit_error","message":"limit"}}"#.utf8))
+                await writer.finish()
+                return
+            }
+            await writer.head(200, [("Content-Type", "text/event-stream")])
+            await writer.chunk(Data(ClaudeBridgeTests.stream.utf8))
+            await writer.finish()
+        }
+        let chatGPT = Recorder()
+        let chatGPTPort = try fakeStream(chatGPT, events: ["data: {}\n\n"])
+        try writePassthrough(["codex": ProviderPassthrough.Entry(
+            upstream: "http://127.0.0.1:\(chatGPTPort)/backend-api/codex", sessionField: "prompt_cache_key", holdsRequests: false)])
+        var backend = RouteTarget.claude.backend(model: nil, maxContextTokens: nil)
+        backend.baseURL = "http://127.0.0.1:\(claudePort)"
+        var state = RouterState()
+        state.pool = [RouterPoolMember(accountID: "a", tokenFile: "ta"), RouterPoolMember(accountID: "b", tokenFile: "tb")]
+        state.passthroughRoutes["codex"] = PassthroughRoute(backend: backend, routed: true)
+        try RouterConfig.encoder().encode(state).write(to: directory.appendingPathComponent("state.json"))
+        let router = try startRouter()
+        let hour = Date().addingTimeInterval(3600)
+        router.service.brain.setCredentials(RouterCredentials(
+            tokens: ["ta": RouterToken(accessToken: "pool-a", expiresAt: hour), "tb": RouterToken(accessToken: "pool-b", expiresAt: hour)],
+            allowedCredentials: [RouterLogic.fingerprint(signInToken)]))
+
+        let (status, body, type) = try await post(router.port, path: "/__provider/codex/responses", headers: [
+            ("Authorization", "Bearer \(signInToken)"), ("ChatGPT-Account-ID", "acct-1"),
+        ], body: codexRequest.merging(["reasoning": ["effort": "high"]]) { $1 })
+
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual(type, "text/event-stream")
+        let events = ClaudeBridgeTests.events(Data(body.utf8))
+        XCTAssertEqual(events.map(\.0), ["response.created", "response.output_item.added", "response.output_item.done",
+                                         "response.output_item.added", "response.output_text.delta", "response.output_item.done",
+                                         "response.output_item.added", "response.output_item.done", "response.completed"])
+        XCTAssertEqual((events[7].1["item"] as? NSDictionary)?["arguments"] as? String, #"{"command":["ls"]}"#)
+        XCTAssertTrue(chatGPT.requests.isEmpty, "the route served it")
+        XCTAssertEqual(claude.requests.map { $0.header("authorization") }, ["Bearer pool-a", "Bearer pool-b"])
+        let served = try XCTUnwrap(claude.requests.last)
+        XCTAssertEqual(served.target, "/v1/messages")
+        XCTAssertEqual(served.header("anthropic-beta"), "oauth-2025-04-20")
+        XCTAssertEqual(served.header("anthropic-version"), "2023-06-01")
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: served.body) as? [String: Any])
+        XCTAssertEqual(sent["model"] as? String, "claude-opus-5-5")
+        XCTAssertEqual((sent["output_config"] as? [String: Any])?["effort"] as? String, "high")
+        let reported = RouterEventFeed.read(directory: directory.appendingPathComponent("events"), after: RouterEventCursor(sequence: 0)).events
+        XCTAssertTrue(reported.contains { $0.kind == .replayed && $0.accountID == "a" && $0.client == "codex" })
+        XCTAssertTrue(reported.contains { $0.kind == .turnUsage && $0.accountID == "b" && $0.contextTokens == 420 })
+    }
+
     func testARequestFromAWebPageIsRefused() async throws {
         let router = try startRouter()
         let (status, _, _) = try await post(router.port, path: "/__provider/codex/responses",

@@ -297,6 +297,32 @@ extension RouterLogic {
     ]
 }
 
+extension RouterLogic {
+    /// The credentials a bridged request is tried with, in order: for a
+    /// backend serving from the pool (`RouterBackend.poolCredentials`) the
+    /// pool accounts, the session's own first, as `poolAttempts` orders
+    /// them; otherwise, or with no pool account able to serve, the
+    /// backend's own token. Empty when there is none.
+    static func bridgeCredentials(
+        backend: RouterBackend,
+        state: RouterState,
+        previous: RouterSessionRecord?,
+        startsTurn: Bool,
+        pool: PoolView,
+        ownToken: RouterToken?,
+        now: Date
+    ) -> [(account: String?, token: String)] {
+        if backend.poolCredentials, !state.pool.isEmpty {
+            let pooled = poolAttempts([:], primary: backend, state: state, previous: previous, startsTurn: startsTurn,
+                                      pool: pool, now: now)
+                .compactMap { attempt in attempt.token.map { (account: attempt.account, token: $0) } }
+            if !pooled.isEmpty { return pooled }
+        }
+        guard let ownToken, ownToken.expiresAt > now else { return [] }
+        return [(account: nil, token: ownToken.accessToken)]
+    }
+}
+
 extension ProviderPassthrough {
     /// The router's own key for a passthrough session, apart from the
     /// routed provider's sessions.

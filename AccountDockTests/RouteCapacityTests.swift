@@ -66,7 +66,7 @@ final class RouteCapacityTests: XCTestCase {
         XCTAssertEqual(kimi.defaultMaxContextTokens(model: "k3.1-pro"), Int(1_048_576 * RouteTarget.contextHeadroom))
         XCTAssertGreaterThan(kimi.defaultMaxContextTokens(model: nil), 900_000, "a 900k-token session can be routed")
         XCTAssertEqual(RouteTarget.available(for: .claudeCode).map(\.id), ["kimi"])
-        XCTAssertEqual(RouteTarget.available(for: .codex).map(\.id), ["kimi"], "Codex's requests are bridged to a Messages target")
+        XCTAssertEqual(RouteTarget.available(for: .codex).map(\.id), ["kimi", "claude"], "Codex's requests are bridged to a Messages target")
     }
 
     func testLateUsageInTheStreamIsCounted() {

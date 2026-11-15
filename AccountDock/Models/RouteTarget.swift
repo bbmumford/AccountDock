@@ -45,6 +45,16 @@ struct RouteTarget: Identifiable, Equatable, Sendable {
     /// readings measure it.
     let defaultPercentPerMillion: Double
     let note: String
+    /// The bridge serves with the routed provider's pool accounts while it
+    /// has some (`RouterBackend.poolCredentials`).
+    var poolCredentials = false
+    /// `anthropic-beta` features the target's requests name.
+    var betaFeatures: [String] = []
+    /// How the bridge writes the target's requests.
+    var dialect: RouterBackend.MessagesDialect = .compatible
+    /// Whether replies carry `anthropic-ratelimit-unified-*` usage headers,
+    /// which the router records for the account that sent the request.
+    var reportsUnifiedUsage = false
 
     var tokenFile: String { "target-\(id)" }
 
@@ -72,10 +82,13 @@ struct RouteTarget: Identifiable, Equatable, Sendable {
             tokenFile: tokenFile,
             model: self.model(model)?.id ?? defaultModel,
             validatesThinkingSignatures: validatesThinkingSignatures,
-            reportsUnifiedUsage: false,
+            reportsUnifiedUsage: reportsUnifiedUsage,
             acceptsMessageThreads: acceptsMessageThreads,
             acceptsDeferredTools: acceptsDeferredTools,
-            maxContextTokens: maxContextTokens ?? defaultMaxContextTokens(model: model)
+            maxContextTokens: maxContextTokens ?? defaultMaxContextTokens(model: model),
+            poolCredentials: poolCredentials,
+            betaFeatures: betaFeatures,
+            dialect: dialect
         )
     }
 
@@ -103,9 +116,46 @@ struct RouteTarget: Identifiable, Equatable, Sendable {
         note: "Uses the active Kimi account's login. Kimi counts every routed token against its 5-hour window: one request with a 300k-token conversation uses about 1% of it."
     )
 
+    /// Anthropic's Messages API with the user's Claude accounts, for a
+    /// provider whose requests the router bridges: the router's Claude pool
+    /// serves while it has accounts, the active Claude account otherwise,
+    /// each with its sign-in's access token.
+    static let claude = RouteTarget(
+        id: "claude",
+        displayName: "Claude",
+        baseURL: "https://api.anthropic.com",
+        auth: .bearer,
+        models: [
+            .init(id: "claude-opus-5-5", label: "Claude Opus 5.5", contextTokens: 1_000_000),
+            .init(id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", contextTokens: 1_000_000),
+        ],
+        defaultModel: "claude-opus-5-5",
+        provider: .claudeCode,
+        clientProtocol: .anthropicMessages,
+        validatesThinkingSignatures: true,
+        acceptsMessageThreads: false,
+        acceptsDeferredTools: false,
+        defaultPercentPerMillion: TurnCostModel.defaultPercentPerMillion,
+        note: "Uses your Claude accounts: the router's Claude pool while Claude Code is served from several accounts, otherwise the active Claude account. Routed requests count against that account's limits.",
+        poolCredentials: true,
+        betaFeatures: ["oauth-2025-04-20"],
+        dialect: .claude,
+        reportsUnifiedUsage: true
+    )
+
     static var all: [RouteTarget] {
         AIProviderType.implementedProviders.compactMap { $0.capabilities.routeTarget }
     }
+
+    /// Targets offered only to a provider whose requests the router bridges
+    /// (`RequestHoldSupport.bridgedProtocol`). Their provider is itself the
+    /// routed one, so their models stay that provider's own usage and they
+    /// are not in `all`.
+    static let bridgeTargets: [RouteTarget] = [.claude]
+
+    /// Every target, for learning each one's cost from its account's
+    /// readings.
+    static var every: [RouteTarget] { all + bridgeTargets }
 
     /// Models a session's transcript names when the router served it from a
     /// target of `provider`; their usage belongs to that provider.
@@ -119,7 +169,7 @@ struct RouteTarget: Identifiable, Equatable, Sendable {
 
     static func named(_ id: String?) -> RouteTarget? {
         guard let id else { return nil }
-        return all.first { $0.id == id }
+        return every.first { $0.id == id }
     }
 
     /// Targets for routing `provider`'s requests: other providers' services
@@ -130,6 +180,7 @@ struct RouteTarget: Identifiable, Equatable, Sendable {
     static func available(for provider: AIProviderType) -> [RouteTarget] {
         let capabilities = provider.capabilities
         guard let served = capabilities.requestRouter?.clientProtocol ?? capabilities.requestHold?.bridgedProtocol else { return [] }
-        return all.filter { $0.provider != provider && $0.clientProtocol == served && !$0.routableModels.isEmpty }
+        let candidates = all + (capabilities.requestRouter == nil ? bridgeTargets : [])
+        return candidates.filter { $0.provider != provider && $0.clientProtocol == served && !$0.routableModels.isEmpty }
     }
 }

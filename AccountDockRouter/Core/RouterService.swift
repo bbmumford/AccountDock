@@ -541,9 +541,12 @@ final class RouterService: @unchecked Sendable {
     }
 
     /// Serves a Responses request from the route's Messages backend through
-    /// `ResponsesBridge`. False when the backend refused or could not be
-    /// reached before anything but a held stream's head was written, so the
-    /// provider's own endpoint can answer instead.
+    /// `ResponsesBridge`, with each credential `RouterLogic.bridgeCredentials`
+    /// names in turn: an account refused at its limit gives way to the next,
+    /// and thinking another account signed is sent once more without it.
+    /// False when the backend refused or could not be reached before
+    /// anything but a held stream's head was written, so the provider's own
+    /// endpoint can answer instead.
     private func serveResponses(
         _ request: HTTPRequest,
         json: [String: Any],
@@ -555,96 +558,133 @@ final class RouterService: @unchecked Sendable {
         let backend = route.backend
         let routerSession = ProviderPassthrough.routerSession(key, session)
         let startsTurn = ResponsesBridge.startsTurn(json)
-        let (body, tools) = ResponsesBridge.messagesRequest(json, model: backend.model)
-        guard let url = backend.messagesURL, let data = try? JSONSerialization.data(withJSONObject: body),
-              let token = brain.token(backend.tokenFile)?.accessToken else {
+        var (body, tools) = ResponsesBridge.messagesRequest(json, model: backend.model, dialect: backend.dialect)
+        let credentials = RouterLogic.bridgeCredentials(
+            backend: backend, state: brain.currentState(), previous: brain.session(routerSession), startsTurn: startsTurn,
+            pool: poolView(), ownToken: brain.token(backend.tokenFile), now: Date()
+        )
+        guard let url = backend.messagesURL, !credentials.isEmpty else {
             log.write("\(backend.id) has no usable credential for \(key) requests")
             return false
         }
-        var outgoing = URLRequest(url: url)
-        outgoing.httpMethod = "POST"
-        outgoing.setValue(backend.auth == .apiKey ? token : "Bearer \(token)",
-                          forHTTPHeaderField: backend.auth == .apiKey ? "x-api-key" : "Authorization")
-        outgoing.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        outgoing.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        outgoing.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        outgoing.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        if let agent = request.header("user-agent") { outgoing.setValue(agent, forHTTPHeaderField: "User-Agent") }
-        outgoing.httpBody = data
         let headSent = writer.headWritten
-        do {
-            let (bytes, response) = try await upstream.open(outgoing, client: routerSession)
-            guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
-            guard http.statusCode == 200 else {
-                var reply = Data()
-                for try await byte in bytes { reply.append(byte); if reply.count > 65_536 { break } }
-                bytes.task.cancel()
+        var index = 0
+        var withoutThinking = false
+        while index < credentials.count {
+            let credential = credentials[index]
+            guard let data = try? JSONSerialization.data(withJSONObject: body) else { return false }
+            var outgoing = URLRequest(url: url)
+            outgoing.httpMethod = "POST"
+            outgoing.setValue(backend.auth == .apiKey ? credential.token : "Bearer \(credential.token)",
+                              forHTTPHeaderField: backend.auth == .apiKey ? "x-api-key" : "Authorization")
+            outgoing.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            outgoing.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+            outgoing.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            if !backend.betaFeatures.isEmpty {
+                outgoing.setValue(backend.betaFeatures.joined(separator: ","), forHTTPHeaderField: "anthropic-beta")
+            }
+            outgoing.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+            if let agent = request.header("user-agent") { outgoing.setValue(agent, forHTTPHeaderField: "User-Agent") }
+            outgoing.httpBody = data
+            do {
+                let (bytes, response) = try await upstream.open(outgoing, client: routerSession)
+                guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
                 let headers = Dictionary(Self.headerList(http), uniquingKeysWith: { a, _ in a })
-                if http.statusCode == 429 || RouterLogic.isPlanLimit(status: http.statusCode, headers: headers, body: reply) {
-                    brain.refuseBackend(backend.id, until: RouterLogic.refusedUntil(headers, now: Date()))
+                if backend.reportsUnifiedUsage,
+                   let usage = RouterLogic.unifiedUsage(headers, credential: RouterLogic.fingerprint(credential.token),
+                                                        accountID: credential.account, at: Date()) {
+                    brain.usage(usage)
                 }
+                guard http.statusCode == 200 else {
+                    var reply = Data()
+                    for try await byte in bytes { reply.append(byte); if reply.count > 65_536 { break } }
+                    bytes.task.cancel()
+                    if !withoutThinking, RouterLogic.isInvalidThinkingSignature(status: http.statusCode, body: reply) {
+                        withoutThinking = true
+                        body = ResponsesBridge.withoutThinking(body)
+                        continue
+                    }
+                    let atLimit = http.statusCode == 429 || RouterLogic.isPlanLimit(status: http.statusCode, headers: headers, body: reply)
+                    if atLimit, let account = credential.account {
+                        let until = RouterLogic.refusedUntil(headers, now: Date())
+                        brain.refuse(account, until: until)
+                        brain.event(RouterEvent(kind: .replayed, at: Date(), session: session, backend: backend.id, accountID: account,
+                                                detail: ISO8601DateFormatter().string(from: until), client: key))
+                        index += 1
+                        continue
+                    }
+                    if atLimit { brain.refuseBackend(backend.id, until: RouterLogic.refusedUntil(headers, now: Date())) }
+                    brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id,
+                                            detail: "HTTP \(http.statusCode)", client: key))
+                    log.write("\(backend.id) refused a \(key) request with HTTP \(http.statusCode) (\(RouterLogic.requestShape(body))): \(String(decoding: reply.prefix(300), as: UTF8.self)); sending it to \(key)")
+                    return false
+                }
+                if !headSent {
+                    await writer.head(200, [("Content-Type", "text/event-stream"), ("Cache-Control", "no-cache")])
+                }
+                if startsTurn {
+                    brain.event(RouterEvent(kind: .servedByRoute, at: Date(), session: session, backend: backend.id, client: key))
+                }
+                brain.setSession(routerSession, backend: backend.id, account: credential.account, cacheLifetime: nil)
+                let translator = ResponsesStreamTranslator(tools: tools, dialect: backend.dialect)
+                var pending = Data()
+                do {
+                    for try await byte in bytes {
+                        pending.append(byte)
+                        guard byte == 0x0A else { continue }
+                        let events = translator.feed(pending)
+                        pending.removeAll(keepingCapacity: true)
+                        if !events.isEmpty { await writer.chunk(events) }
+                        if writer.clientGone {
+                            bytes.task.cancel()
+                            throw ClientClosed()
+                        }
+                    }
+                    if !pending.isEmpty { await writer.chunk(translator.feed(pending + Data("\n".utf8))) }
+                    await writer.chunk(translator.finish())
+                } catch is ClientClosed {
+                    throw ClientClosed()
+                } catch {
+                    log.write("\(backend.id) \(key) reply failed mid-response: \(error.localizedDescription)")
+                    await writer.chunk(translator.fail(code: "server_error",
+                                                       message: "\(backend.displayName) stopped replying: \(error.localizedDescription)"))
+                }
+                await writer.finish()
+                if case .failed(let code, let message) = translator.outcome {
+                    // The client has the failure as its reply; the app learns
+                    // of it here, and a backend at its limit is skipped.
+                    if code == "rate_limit_exceeded" {
+                        if let account = credential.account {
+                            brain.refuse(account, until: RouterLogic.refusedUntil([:], now: Date()))
+                        } else {
+                            brain.refuseBackend(backend.id, until: RouterLogic.refusedUntil([:], now: Date()))
+                        }
+                    }
+                    brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id,
+                                            detail: message, client: key))
+                    log.write("\(backend.id) failed a \(key) reply mid-stream (\(code)): \(message.prefix(300))")
+                }
+                let counts = translator.counts
+                if counts.context > 0 {
+                    brain.noteContext(routerSession, tokens: counts.context)
+                    brain.event(RouterEvent(kind: .turnUsage, at: Date(), session: session, backend: backend.id,
+                                            accountID: credential.account,
+                                            contextTokens: counts.context, cacheWriteTokens: counts.cacheWrite,
+                                            cacheReadTokens: counts.cacheRead, outputTokens: counts.output,
+                                            cacheWriteLongTokens: counts.cacheWriteLong, startsTurn: startsTurn, client: key))
+                }
+                return true
+            } catch is ClientClosed {
+                log.write("client closed its connection; stopped the \(backend.id) reply to \(key)")
+                return true
+            } catch {
+                log.write("\(backend.id) request for \(key) failed: \(error.localizedDescription); sending it to \(key)")
                 brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id,
-                                        detail: "HTTP \(http.statusCode)", client: key))
-                log.write("\(backend.id) refused a \(key) request with HTTP \(http.statusCode) (\(RouterLogic.requestShape(body))): \(String(decoding: reply.prefix(300), as: UTF8.self)); sending it to \(key)")
+                                        detail: error.localizedDescription, client: key))
                 return false
             }
-            if !headSent {
-                await writer.head(200, [("Content-Type", "text/event-stream"), ("Cache-Control", "no-cache")])
-            }
-            if startsTurn {
-                brain.event(RouterEvent(kind: .servedByRoute, at: Date(), session: session, backend: backend.id, client: key))
-            }
-            brain.setSession(routerSession, backend: backend.id, account: nil, cacheLifetime: nil)
-            let translator = ResponsesStreamTranslator(tools: tools)
-            var pending = Data()
-            do {
-                for try await byte in bytes {
-                    pending.append(byte)
-                    guard byte == 0x0A else { continue }
-                    let events = translator.feed(pending)
-                    pending.removeAll(keepingCapacity: true)
-                    if !events.isEmpty { await writer.chunk(events) }
-                    if writer.clientGone {
-                        bytes.task.cancel()
-                        throw ClientClosed()
-                    }
-                }
-                if !pending.isEmpty { await writer.chunk(translator.feed(pending + Data("\n".utf8))) }
-                await writer.chunk(translator.finish())
-            } catch is ClientClosed {
-                throw ClientClosed()
-            } catch {
-                log.write("\(backend.id) \(key) reply failed mid-response: \(error.localizedDescription)")
-                await writer.chunk(translator.fail(code: "server_error",
-                                                   message: "\(backend.displayName) stopped replying: \(error.localizedDescription)"))
-            }
-            await writer.finish()
-            if case .failed(let code, let message) = translator.outcome {
-                // The client has the failure as its reply; the app learns
-                // of it here, and a backend at its limit is skipped.
-                if code == "rate_limit_exceeded" { brain.refuseBackend(backend.id, until: RouterLogic.refusedUntil([:], now: Date())) }
-                brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id,
-                                        detail: message, client: key))
-                log.write("\(backend.id) failed a \(key) reply mid-stream (\(code)): \(message.prefix(300))")
-            }
-            let counts = translator.counts
-            if counts.context > 0 {
-                brain.noteContext(routerSession, tokens: counts.context)
-                brain.event(RouterEvent(kind: .turnUsage, at: Date(), session: session, backend: backend.id,
-                                        contextTokens: counts.context, cacheWriteTokens: counts.cacheWrite,
-                                        cacheReadTokens: counts.cacheRead, outputTokens: counts.output,
-                                        cacheWriteLongTokens: counts.cacheWriteLong, startsTurn: startsTurn, client: key))
-            }
-            return true
-        } catch is ClientClosed {
-            log.write("client closed its connection; stopped the \(backend.id) reply to \(key)")
-            return true
-        } catch {
-            log.write("\(backend.id) request for \(key) failed: \(error.localizedDescription); sending it to \(key)")
-            brain.event(RouterEvent(kind: .backendFailed, at: Date(), session: session, backend: backend.id,
-                                    detail: error.localizedDescription, client: key))
-            return false
         }
+        return false
     }
 
     /// Serves Codex's compaction call from the route's Messages backend: the
@@ -663,9 +703,13 @@ final class RouterService: @unchecked Sendable {
     ) async -> Bool {
         let backend = route.backend
         guard !writer.headWritten else { return false }
-        let body = ResponsesBridge.compactionRequest(json, model: backend.model)
+        let body = ResponsesBridge.compactionRequest(json, model: backend.model, dialect: backend.dialect)
+        let routerSession = ProviderPassthrough.routerSession(key, session)
         guard let url = backend.messagesURL, let data = try? JSONSerialization.data(withJSONObject: body),
-              let token = brain.token(backend.tokenFile)?.accessToken else {
+              let token = RouterLogic.bridgeCredentials(
+                  backend: backend, state: brain.currentState(), previous: brain.session(routerSession), startsTurn: false,
+                  pool: poolView(), ownToken: brain.token(backend.tokenFile), now: Date()
+              ).first?.token else {
             log.write("\(backend.id) has no usable credential for \(key) compaction")
             return false
         }
@@ -675,10 +719,13 @@ final class RouterService: @unchecked Sendable {
                           forHTTPHeaderField: backend.auth == .apiKey ? "x-api-key" : "Authorization")
         outgoing.setValue("application/json", forHTTPHeaderField: "Content-Type")
         outgoing.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        if !backend.betaFeatures.isEmpty {
+            outgoing.setValue(backend.betaFeatures.joined(separator: ","), forHTTPHeaderField: "anthropic-beta")
+        }
         outgoing.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         outgoing.httpBody = data
         do {
-            let (bytes, response) = try await upstream.open(outgoing, client: ProviderPassthrough.routerSession(key, session))
+            let (bytes, response) = try await upstream.open(outgoing, client: routerSession)
             guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
             var reply = Data()
             for try await byte in bytes { reply.append(byte) }
