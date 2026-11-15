@@ -71,7 +71,11 @@ struct ClaudeCredentialModule: ProviderCredentialModule, LiveCredentialModule {
     // MARK: - Live credential
 
     func read(reason: String) -> String? {
-        keychain.readClaudeToken(reason: reason).flatMap { AccountBackup.isCompleteCredential($0) ? $0 : nil }
+        read(reason: reason, account: nil)
+    }
+
+    func read(reason: String, account: UUID?) -> String? {
+        keychain.readClaudeToken(reason: reason, account: account).flatMap { AccountBackup.isCompleteCredential($0) ? $0 : nil }
     }
 
     /// Asks the profile endpoint whose `credential` is, and records the

@@ -49,6 +49,10 @@ protocol ProviderCredentialModule {
 protocol LiveCredentialModule {
     /// The live credential, when it can be read and is complete.
     func read(reason: String) -> String?
+    /// `read(reason:)`, recorded in the audit as `account`'s read: a caller
+    /// that knows whose the live credential is now, such as one recording a
+    /// switch before the accounts' active flag has moved, names it.
+    func read(reason: String, account: UUID?) -> String?
     /// The account the credential belongs to. Throws
     /// `LiveCredentialError.rejected` when the provider refuses it.
     func owner(of credential: String, reason: String) async throws -> CredentialOwner
@@ -71,4 +75,8 @@ protocol LiveCredentialModule {
     /// Tells running sessions the live credential changed, so each uses it
     /// from its next request; without this they keep the token they hold.
     func signalRunningSessions(reason: String)
+}
+
+extension LiveCredentialModule {
+    func read(reason: String, account: UUID?) -> String? { read(reason: reason) }
 }

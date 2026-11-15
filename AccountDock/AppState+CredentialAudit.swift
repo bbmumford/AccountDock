@@ -120,6 +120,19 @@ extension AppState {
             return
         }
         let believed = believedCredentialAccount(provider, process: process)
+        // A status line repeats the limits of the session's last reply. When
+        // no turn has started or ended since its slot last moved, plus the
+        // time the CLI takes to read the slot again, that reply came from
+        // before the move and says nothing about the token held now.
+        if source == "statusLineResets", believed.source == "slot", let process,
+           let directory = slotDirectoryByProcess[process],
+           let moved = slotAccountHistory[directory]?.last?.at {
+            let lastTurn = AgentSessions.records(provider)[session]?.observedAt ?? .distantPast
+            if lastTurn < moved.addingTimeInterval(Self.slotMoveSettling) {
+                flaggedCredentialProcesses[session] = nil
+                return
+            }
+        }
         var detail: String?
         if believed.account != observed, believed.source != "slot", let away = lastSwitchedAway[observed] {
             detail = "AccountDock switched away from that account at \(away.formatted(.iso8601)); "

@@ -191,7 +191,8 @@ extension AppState {
     /// Records that the live credential now in place belongs to `account`,
     /// after AccountDock installed or captured it.
     func noteLiveCredentialOwner(_ provider: AIProviderType, account: UUID) {
-        guard let credential = credentialModule(for: provider)?.liveCredential?.read(reason: "noteLiveCredentialOwner") else { return }
+        guard let credential = credentialModule(for: provider)?.liveCredential?.read(reason: "noteLiveCredentialOwner",
+                                                                                         account: account) else { return }
         liveCredentialOwners[provider] = (Self.credentialDigest(credential), account)
     }
 

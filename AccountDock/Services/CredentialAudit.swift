@@ -130,6 +130,16 @@ final class CredentialAudit: @unchecked Sendable {
         var email: String
         var accountID: String?
         var learnedAt: Date
+        /// A digest of the full email, so an owner learned before its
+        /// account was saved (an isolated sign-in names the token's owner
+        /// before the account is added) is matched once it is
+        /// (`updateAccounts`); the file keeps no full email.
+        var emailDigest: String? = nil
+    }
+
+    /// The digest `Owner.emailDigest` keeps of an email.
+    private static func emailDigest(_ email: String) -> String {
+        SHA256.hash(data: Data(email.lowercased().utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 
     /// One request of a session or agent, for `noteRequest`.
@@ -194,7 +204,19 @@ final class CredentialAudit: @unchecked Sendable {
     /// Replaces the accounts entries are attributed to and owners matched
     /// against. Called by `AppState` whenever its accounts change.
     func updateAccounts(_ accounts: [Account]) {
-        lock.withLock { self.accounts = accounts }
+        lock.withLock {
+            self.accounts = accounts
+            loadOwnersIfNeeded()
+            var resolved = false
+            for (fingerprint, owner) in owners where owner.accountID == nil {
+                guard let digest = owner.emailDigest,
+                      let match = accounts.first(where: { $0.provider.rawValue == owner.provider
+                          && Self.emailDigest($0.email) == digest }) else { continue }
+                owners[fingerprint]?.accountID = match.id.uuidString
+                resolved = true
+            }
+            if resolved { saveOwners() }
+        }
     }
 
     /// The provider of a saved account, for a caller that knows only the
@@ -515,7 +537,7 @@ final class CredentialAudit: @unchecked Sendable {
         let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
         let match = accounts.first { $0.provider == provider && $0.email.caseInsensitiveCompare(trimmed) == .orderedSame }
         let owner = Owner(provider: provider.rawValue, email: trimmed.obfuscatedEmail(),
-                          accountID: match?.id.uuidString, learnedAt: now)
+                          accountID: match?.id.uuidString, learnedAt: now, emailDigest: Self.emailDigest(trimmed))
         let previous = owners[fingerprint]
         owners[fingerprint] = owner
         guard previous?.accountID != owner.accountID || previous?.email != owner.email else { return }
