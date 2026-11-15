@@ -768,11 +768,10 @@ enum RouterLogic {
         return body
     }
 
-    /// Context tokens a request is expected to carry: the session's last
-    /// measured context, or the request body's size at about four bytes a
-    /// token when the session has none yet.
+    /// Context tokens a request is expected to carry, by the rule the app
+    /// sizes sessions with (`SessionSizing.contextTokens`).
     static func expectedContext(lastMeasured: Int?, bodyBytes: Int) -> Int {
-        max(lastMeasured ?? 0, bodyBytes / 4)
+        SessionSizing.contextTokens(lastMeasured: lastMeasured, bodyBytes: bodyBytes)
     }
 
     /// An error body in the Messages API format, so the client reports it.

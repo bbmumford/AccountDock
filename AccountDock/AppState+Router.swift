@@ -217,7 +217,10 @@ extension AppState {
         let resumed = AgentPauseGate.resumedSessions(provider)
         let overrides = pauseOverrideUntil[provider].map { $0 > now } ?? false
         let large = overrides || !pausingProviders.contains(provider) ? [] : sessionRates.entries
-            .filter { id, entry in live.contains(id) && !resumed.contains(id) && entry.contextTokens > cap }
+            .filter { id, entry in
+                live.contains(id) && !resumed.contains(id)
+                    && SessionSizing.contextTokens(lastMeasured: entry.contextTokens, bodyBytes: 0) > cap
+            }
             .keys.sorted()
         let continuation = "on \(target.displayName) \(model)"
         if large.isEmpty {

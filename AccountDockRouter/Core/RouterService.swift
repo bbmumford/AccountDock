@@ -151,8 +151,7 @@ final class RouterService: @unchecked Sendable {
             case .refusedAtLimit(let headers):
                 let action = RouterLogic.refusalAction(
                     attempt: attempt, headers: headers, primary: primary, cacheAware: state.cacheAwareSessions,
-                    alreadyHeld: held, streams: plan.streams, previous: previous, cacheLifetime: plan.cacheLifetime,
-                    now: Date()
+                    alreadyHeld: held, streams: plan.streams, previous: previous, now: Date()
                 )
                 switch action {
                 case .hold(let resumeAt):

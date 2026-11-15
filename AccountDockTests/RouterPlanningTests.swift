@@ -128,15 +128,15 @@ final class RouterPlanningTests: XCTestCase {
         let attempt = RouterLogic.Attempt(backend: .anthropic, account: "a", token: "A", body: [:])
         let own = RouterSessionRecord(backend: "anthropic", account: "a", lastServed: now, cacheLifetime: 3600)
         XCTAssertEqual(RouterLogic.refusalAction(attempt: attempt, headers: headers, primary: .anthropic, cacheAware: true,
-                                                 alreadyHeld: false, streams: true, previous: own, cacheLifetime: nil, now: now),
+                                                 alreadyHeld: false, streams: true, previous: own, now: now),
                        .hold(until: reset))
         if case .refuseAccount("a", _) = RouterLogic.refusalAction(
             attempt: attempt, headers: headers, primary: .anthropic, cacheAware: true, alreadyHeld: true, streams: true,
-            previous: own, cacheLifetime: nil, now: now) {} else { XCTFail("held once only") }
+            previous: own, now: now) {} else { XCTFail("held once only") }
         let target = RouterLogic.Attempt(backend: kimi, account: nil, token: nil, body: [:])
         if case .refuseBackend("kimi", _) = RouterLogic.refusalAction(
             attempt: target, headers: [:], primary: .anthropic, cacheAware: false, alreadyHeld: false, streams: true,
-            previous: nil, cacheLifetime: nil, now: now) {} else { XCTFail("the route target is skipped") }
+            previous: nil, now: now) {} else { XCTFail("the route target is skipped") }
     }
 
     func testRepliesAreJudgedAsTheServerDidBeforeTheMove() {

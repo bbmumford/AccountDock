@@ -208,11 +208,14 @@ final class RouterBrain: @unchecked Sendable {
         if contexts.count > 2_000 { contexts = contexts.filter { sessions[$0.key] != nil } }
     }
 
+    /// Records the session's served request. A request without cache marks
+    /// keeps the lifetime asked before, as the app's `SessionRates` does.
     func setSession(_ id: String?, backend: String, account: String?, cacheLifetime: TimeInterval?) {
         guard let id else { return }
         lock.lock(); defer { lock.unlock() }
         let date = now()
-        sessions[id] = RouterSessionRecord(backend: backend, account: account, lastServed: date, cacheLifetime: cacheLifetime)
+        sessions[id] = RouterSessionRecord(backend: backend, account: account, lastServed: date,
+                                           cacheLifetime: cacheLifetime ?? sessions[id]?.cacheLifetime)
         if sessions.count > 2_000 {
             let cutoff = date.addingTimeInterval(-6 * 60 * 60)
             sessions = sessions.filter { $0.value.lastServed > cutoff }

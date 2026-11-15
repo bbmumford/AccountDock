@@ -63,9 +63,11 @@ extension RouterLogic {
         let requestedLifetime = cacheLifetime(json)
         let lifetime = extendCache ? requestedLifetime.map { _ in TimeInterval(60 * 60) } : requestedLifetime
         // A session whose prompt cache has expired has nothing to lose by
-        // moving, so its next turn is placed like a new session's.
+        // moving, so its next turn is placed like a new session's. Expiry
+        // is the app's (`SessionSizing.cacheExpiresAt`), so the router
+        // re-places exactly the sessions the app's pacing counts as cold.
         let cacheExpired = state.cacheAwareSessions && previous.map {
-            now.timeIntervalSince($0.lastServed) > ($0.cacheLifetime ?? lifetime ?? 5 * 60)
+            now > SessionSizing.cacheExpiresAt(lastServed: $0.lastServed, lifetime: $0.cacheLifetime)
         } ?? false
         let move = session.flatMap { state.moves[$0] }
         func serves(_ candidate: RouterBackend) -> Bool {
@@ -156,8 +158,9 @@ extension RouterLogic {
 
     /// A refusal holds the request only once, only for a streamed request
     /// of a cache-aware state, and only on the account that last served
-    /// the session; otherwise the refused account or route target is
-    /// skipped until its reset.
+    /// the session, whose cache lasts as `SessionSizing` counts it;
+    /// otherwise the refused account or route target is skipped until its
+    /// reset.
     static func refusalAction(
         attempt: Attempt,
         headers: [String: String],
@@ -166,13 +169,12 @@ extension RouterLogic {
         alreadyHeld: Bool,
         streams: Bool,
         previous: RouterSessionRecord?,
-        cacheLifetime: TimeInterval?,
         now: Date
     ) -> RefusalAction {
         if cacheAware, !alreadyHeld, streams, let account = attempt.account,
            previous?.backend == primary.id, previous?.account == account,
            let resumeAt = holdUntil(headers, lastServed: previous?.lastServed,
-                                    cacheLifetime: previous?.cacheLifetime ?? cacheLifetime, now: now) {
+                                    cacheLifetime: previous?.cacheLifetime ?? SessionSizing.defaultCacheLifetime, now: now) {
             return .hold(until: resumeAt)
         }
         let until = refusedUntil(headers, now: now)

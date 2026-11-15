@@ -333,8 +333,9 @@ struct SessionPacer {
     /// must be restarted to move, so such a move is made only when clearly
     /// worth it.
     var moveCostFactor: Double = 1
-    /// Assumed when no session on an account said how long its cache lasts.
-    static let defaultCacheLifetime: TimeInterval = 60 * 60
+    /// Assumed when no session on an account said how long its cache lasts;
+    /// the router assumes the same (`SessionSizing`).
+    static let defaultCacheLifetime = SessionSizing.defaultCacheLifetime
     /// Sessions idle longer than this carry no rate worth moving.
     static let activeWithin: TimeInterval = 30 * 60
     /// A turn running longer than this is an autonomous run whose end, and
@@ -520,9 +521,9 @@ struct SessionPacer {
     }
 
     /// Window percent a session spends writing `contextTokens` into the
-    /// cache of the account it moves to.
+    /// cache of the account it moves to (`SessionSizing.moveCost`).
     func moveCost(_ contextTokens: Int, to account: Account) -> Double {
-        Double(contextTokens) * (1.25 - 0.1) / 1_000_000 * account.percentPerMillion * moveCostFactor
+        SessionSizing.moveCost(contextTokens, percentPerMillion: account.percentPerMillion, factor: moveCostFactor)
     }
 
     /// Weighted tokens per hour freed per cache token rewritten, which orders

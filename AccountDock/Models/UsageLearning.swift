@@ -29,10 +29,9 @@ struct TurnCostModel: Codable, Equatable {
     /// two million weighted tokens.
     static let defaultPercentPerMillion = 0.5
 
+    /// Weighted tokens, as the router counts them (`SessionSizing.weighted`).
     static func weighted(context: Int, cacheWrite: Int, output: Int, cacheWriteLong: Int = 0) -> Double {
-        let long = min(max(0, cacheWriteLong), cacheWrite)
-        return Double(max(0, context - cacheWrite)) * 0.1 + Double(cacheWrite - long) * 1.25 + Double(long) * 2
-            + Double(output) * 5
+        SessionSizing.weighted(context: context, cacheWrite: cacheWrite, output: output, cacheWriteLong: cacheWriteLong)
     }
 
     var ratio: Double { percentPerMillion ?? Self.defaultPercentPerMillion }
@@ -136,7 +135,7 @@ struct TurnCostModel: Codable, Equatable {
         let context = sessionContext.filter { key, _ in
             (sessionSeen[key] ?? .distantPast) > cutoff && (sessionAccount[key].map(accounts.contains) ?? false)
         }.values.reduce(0, +)
-        return Double(context) * (1.25 - 0.1) / 1_000_000 * ratio
+        return SessionSizing.moveCost(context, percentPerMillion: ratio)
     }
 
     /// Session percent spent re-reading every active session's context
@@ -146,7 +145,7 @@ struct TurnCostModel: Codable, Equatable {
         let context = sessionContext.filter { key, _ in
             (sessionSeen[key] ?? .distantPast) > cutoff && (account == nil || sessionAccount[key] == account)
         }.values.reduce(0, +)
-        return Double(context) * (1.25 - 0.1) / 1_000_000 * ratio
+        return SessionSizing.moveCost(context, percentPerMillion: ratio)
     }
 }
 
