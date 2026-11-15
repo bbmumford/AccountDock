@@ -292,6 +292,29 @@ struct SessionPacer {
         /// would otherwise expire unused, with that allowance; read by
         /// `AppState` for the event the slot move records.
         var remainders: [String: Remainder] = [:]
+        /// The sessions among `moves` that go to use a session window's room
+        /// that would otherwise expire unused (`spendWindows`); read by
+        /// `AppState` for the event the slot move records.
+        var windowUses: [String: WindowUse] = [:]
+    }
+
+    /// A session window a session moves to use (`Plan.windowUses`): the
+    /// account, and until when its room lasts at the rates placed there,
+    /// at most the window's reset.
+    struct WindowUse: Equatable {
+        var account: UUID
+        var until: Date
+    }
+
+    /// A session `spendWindows` may move: where it runs, what it is expected
+    /// to keep using (`lightRate`), and what its arrival costs.
+    struct WindowCandidate: Equatable {
+        let id: String
+        var account: UUID
+        var tokensPerHour: Double
+        var contextTokens: Int
+        var cacheLifetime: TimeInterval?
+        var model: String?
     }
 
     /// What `plan` may spend on allowances that would otherwise expire:
@@ -496,6 +519,131 @@ struct SessionPacer {
         }.min() ?? 0
     }
 
+    /// Whether `carriers`, the accounts that take sessions for the runway,
+    /// will together have spent what they hold before the first of the
+    /// resets that refills them: each reaches a limit before its binding
+    /// window resets (`Outlook.windowEndsAt`), and their joint run-out
+    /// (`poolRunOut`) comes before the earliest of those resets. Every
+    /// percent they hold is then spent before that reset whatever moves, so
+    /// the work served before it grows only by using room elsewhere that
+    /// would otherwise expire (`spendWindows`). True with no carriers. Read
+    /// by `plan` and `rebalance`.
+    func windowsWorthSpending(carriers: [Account], burn: [UUID: Double], spent: [UUID: Double],
+                              shares: [UUID: SharedShare], sharedGroup: SharedGroup?, now: Date) -> Bool {
+        var refill: Date?
+        for account in carriers {
+            let outlook = outlook(account, spent: spent[account.id] ?? 0, burn: burn[account.id] ?? 0, now: now,
+                                  shared: shares[account.id])
+            guard outlook.limitAt != nil else { return false }
+            refill = min(refill ?? outlook.windowEndsAt, outlook.windowEndsAt)
+        }
+        guard let refill else { return true }
+        // `poolRunOut` counts the accounts that take new sessions; every
+        // carrier does here.
+        let counted = carriers.map { account -> Account in
+            var account = account
+            account.baseWeight = max(account.baseWeight, 1)
+            return account
+        }
+        let ids = Set(carriers.map(\.id))
+        guard let runOut = poolRunOut(counted, burn: burn, spent: spent, shares: shares.filter { ids.contains($0.key) },
+                                      sharedGroup: sharedGroup, now: now) else { return false }
+        return runOut < refill
+    }
+
+    /// Places `candidates` on the session windows of `targets`, for use
+    /// while `windowsWorthSpending` holds. A target's room, in its window
+    /// percent, is what its session window has left at its reset once its
+    /// own rate and `spent` have run (`spare`); the window refills at the
+    /// reset, so room left then expires unused. A target carrying the shared
+    /// group takes none: the group stays where `FailoverPlanner.carries`
+    /// lets it. One session at a time, the session whose arrival costs the
+    /// fewest tokens per hour it then stays goes to the window where that
+    /// is least: a small context and a light rate both lower it, and a heavy
+    /// session stays longest where most tokens are left, so heavy sessions
+    /// spread over the windows by their token room. A session goes only
+    /// where the whole cache write of its arrival (`arrivalCost`) fits in
+    /// the room and the use it then makes of the room, at most the rest of
+    /// it, is worth `remainderWorth` times that write; its model's own
+    /// allowance there must hold both. Sessions on a target stay. Each
+    /// placed session is charged to its target's `spent` and `burn` and
+    /// taken off its own account's `burn`. Its `WindowUse.until` is when the
+    /// sessions placed on the target fill its room, at most the reset.
+    func spendWindows(_ candidates: [WindowCandidate], accounts: [Account], targets: Set<UUID>,
+                      spent: inout [UUID: Double], burn: inout [UUID: Double], shares: [UUID: SharedShare],
+                      now: Date) -> [String: WindowUse] {
+        struct Window {
+            let account: Account
+            let end: Date
+            let initial: Double
+            var room: Double
+            var charged = 0.0
+            var added = 0.0
+            var scoped: [String: Double] = [:]
+            var sessions: [String] = []
+        }
+        var windows: [UUID: Window] = [:]
+        let order = accounts.filter { targets.contains($0.id) && $0.hasSessionWindow && shares[$0.id] == nil }
+        for account in order {
+            let end = account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
+            let room = spare(account, until: end, spent: spent[account.id] ?? 0, burn: burn[account.id] ?? 0,
+                             shared: nil, now: now)
+            if room > 0 { windows[account.id] = Window(account: account, end: end, initial: room, room: room) }
+        }
+        var waiting = candidates.filter { !targets.contains($0.account) }
+        while !waiting.isEmpty {
+            var best: (index: Int, id: UUID, cost: Double, rate: Double, use: Double, score: Double, tokens: Double)?
+            for (index, session) in waiting.enumerated() {
+                for account in order {
+                    guard let window = windows[account.id], window.room > 0 else { continue }
+                    let hours = max(window.end.timeIntervalSince(now), 60) / 3600
+                    let cost = arrivalCost(session.contextTokens, cacheLifetime: session.cacheLifetime, to: account)
+                    let rate = percent(session.tokensPerHour, on: account)
+                    let use = min(window.room - cost, rate * hours)
+                    guard cost < window.room, use > 0, use >= Self.remainderWorth * cost else { continue }
+                    let probe = Session(id: session.id, account: account.id, tokensPerHour: 0, contextTokens: 0,
+                                        lastSeen: now, cacheLifetime: nil, model: session.model)
+                    let modelFits = scopedKeys(probe, on: account).allSatisfy { key in
+                        guard let allowance = account.scoped[key], allowance.resetsAt > now else { return true }
+                        return allowance.remaining - (window.scoped[key] ?? 0) >= cost + use
+                    }
+                    guard modelFits else { continue }
+                    let stays = rate > 0 ? min(hours, use / rate) : hours
+                    let score = millions(cost, on: account) / max(stays, 1.0 / 60)
+                    let tokens = millions(window.room, on: account)
+                    if best.map({ score < $0.score || (score == $0.score && tokens > $0.tokens) }) ?? true {
+                        best = (index, account.id, cost, rate, use, score, tokens)
+                    }
+                }
+            }
+            guard let best, var window = windows[best.id] else { break }
+            let session = waiting.remove(at: best.index)
+            window.room -= best.cost + best.use
+            window.charged += best.cost
+            window.added += best.rate
+            for key in scopedKeys(Session(id: session.id, account: best.id, tokensPerHour: 0, contextTokens: 0,
+                                          lastSeen: now, cacheLifetime: nil, model: session.model), on: window.account) {
+                window.scoped[key, default: 0] += best.cost + best.use
+            }
+            window.sessions.append(session.id)
+            windows[best.id] = window
+            spent[best.id, default: 0] += best.cost
+            burn[best.id, default: 0] += best.rate
+            if let source = accounts.first(where: { $0.id == session.account }) {
+                burn[source.id] = max(0, (burn[source.id] ?? 0) - percent(session.tokensPerHour, on: source))
+            }
+        }
+        var uses: [String: WindowUse] = [:]
+        for window in windows.values where !window.sessions.isEmpty {
+            let fills = window.added > 0
+                ? now.addingTimeInterval(max(0, window.initial - window.charged) / window.added * 3600) : window.end
+            for session in window.sessions {
+                uses[session] = WindowUse(account: window.account.id, until: min(window.end, fills))
+            }
+        }
+        return uses
+    }
+
     /// The allowances of `account` that only `session`'s model draws on.
     func scopedKeys(_ session: Session, on account: Account) -> [String] {
         guard let model = session.model?.lowercased(), !account.scoped.isEmpty else { return [] }
@@ -524,6 +672,16 @@ struct SessionPacer {
     /// cache of the account it moves to (`SessionSizing.moveCost`).
     func moveCost(_ contextTokens: Int, to account: Account) -> Double {
         SessionSizing.moveCost(contextTokens, percentPerMillion: account.percentPerMillion, factor: moveCostFactor)
+    }
+
+    /// Window percent a session's arrival takes from the account it moves
+    /// to: its whole context written into that account's cache
+    /// (`SessionSizing.arrivalTokens`), times `moveCostFactor`. Charged
+    /// where the destination's room decides the placement: `place` and
+    /// `spendWindows`.
+    func arrivalCost(_ contextTokens: Int, cacheLifetime: TimeInterval?, to account: Account) -> Double {
+        Allowance.percent(millions: SessionSizing.arrivalTokens(contextTokens, cacheLifetime: cacheLifetime) / 1_000_000,
+                          percentPerMillion: account.percentPerMillion) * moveCostFactor
     }
 
     /// Weighted tokens per hour freed per cache token rewritten, which orders
@@ -770,6 +928,37 @@ struct SessionPacer {
                 }
             }
         }
+        // While the accounts taking sessions for the runway will together
+        // have spent what they hold before the reset that refills them
+        // (`windowsWorthSpending`), the work served before that reset is
+        // what they hold plus whatever else is used by then: the session
+        // windows of the accounts too small to carry the shared group
+        // (`remainders.accounts`) take slot sessions between turns from the
+        // other accounts, sized to each window's room (`spendWindows`), and
+        // new sessions below. A window that fills leaves its sessions to
+        // `AppState.strandedPlacements`, which moves them on to an account
+        // that can serve them; one that refills at its reset is spent again.
+        var windowsOpen = false
+        if let remainders {
+            let carriers = accounts.filter { $0.baseWeight > 0 && !remainders.accounts.contains($0.id) }
+            windowsOpen = windowsWorthSpending(carriers: carriers, burn: burn, spent: spent, shares: shares,
+                                               sharedGroup: sharedGroup, now: now)
+            if windowsOpen {
+                let candidates = active.filter { session in
+                    remainders.sessions.contains(session.id) && plan.moves[session.id] == nil && !fixed.contains(session.id)
+                        && now.timeIntervalSince(session.lastSeen) > Self.betweenTurns && movable(session, now: now)
+                }.map {
+                    WindowCandidate(id: $0.id, account: $0.account, tokensPerHour: Self.lightRate($0),
+                                    contextTokens: $0.contextTokens, cacheLifetime: $0.cacheLifetime, model: $0.model)
+                }
+                let targets = remainders.accounts.filter { plan.shedding[$0] == nil }
+                for (session, use) in spendWindows(candidates, accounts: accounts, targets: targets, spent: &spent,
+                                                   burn: &burn, shares: shares, now: now) {
+                    plan.moves[session] = use.account
+                    plan.windowUses[session] = use
+                }
+            }
+        }
         // A session started now is expected to use `typicalNewSessionRate`.
         // An account that could not carry one more such session for
         // `newSessionRunway` takes none while another account can: the
@@ -882,6 +1071,45 @@ struct SessionPacer {
                 }
             }
             plan.modelWeights[key] = weights
+        }
+        // With the windows worth spending, new sessions go by the tokens per
+        // hour each account would otherwise leave unused: a small account's
+        // session window until its reset, a carrier's room until the first
+        // carrier's binding reset, which is none once its own sessions spend
+        // it by then. A new session placed on a carrier adds nothing served
+        // before that reset; one placed in a window adds what it uses there.
+        // Applied only while some window has room, and to a model's weights
+        // only where that model's own allowance is not spent.
+        if windowsOpen, let remainders {
+            let carriers = accounts.filter { $0.baseWeight > 0 && !remainders.accounts.contains($0.id) }
+            let refill = carriers.compactMap { account -> Date? in
+                let outlook = current(account)
+                return outlook.limitAt == nil ? nil : outlook.windowEndsAt
+            }.min()
+            var windowRates: [UUID: Double] = [:]
+            for account in accounts where remainders.accounts.contains(account.id) && account.hasSessionWindow
+                && shares[account.id] == nil && plan.shedding[account.id] == nil {
+                let end = account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
+                let room = spare(account, until: end, spent: spent[account.id] ?? 0, burn: burn[account.id] ?? 0,
+                                 shared: nil, now: now)
+                windowRates[account.id] = max(0, millions(room, on: account)) / (max(end.timeIntervalSince(now), 60) / 3600)
+            }
+            if windowRates.values.contains(where: { $0 > 0 }) {
+                var rates = windowRates
+                if let refill {
+                    let hours = max(refill.timeIntervalSince(now), 60) / 3600
+                    for account in carriers {
+                        rates[account.id] = max(0, millions(spareRoom(account, refill), on: account)) / hours
+                    }
+                }
+                plan.weights = accounts.reduce(into: [:]) { $0[$1.id] = rates[$1.id] ?? 0 }
+                for key in plan.modelWeights.keys {
+                    plan.modelWeights[key] = accounts.reduce(into: [:]) { result, account in
+                        let spentHere = account.scoped[key].map { $0.resetsAt > now && $0.remaining <= 0 } ?? false
+                        result[account.id] = spentHere ? 0 : rates[account.id] ?? 0
+                    }
+                }
+            }
         }
         return plan
     }
@@ -1041,6 +1269,9 @@ extension SessionPacer {
         var model: String?
         /// False for a session mid-turn: it keeps its account.
         var movable: Bool
+        /// How long its prompt cache lasts, which sets what its arrival
+        /// elsewhere costs (`arrivalCost`); nil assumes `defaultCacheLifetime`.
+        var cacheLifetime: TimeInterval? = nil
     }
 
     struct Rebalance: Equatable {
@@ -1052,6 +1283,12 @@ extension SessionPacer {
         /// them are left out: they run out when they run out whatever moves.
         var earliestRunOutBefore: Date?
         var earliestRunOutAfter: Date?
+        /// The moves made to use session windows that would otherwise expire
+        /// unused (`spendWindows`), with each window and until when.
+        var windowUses: [String: WindowUse] = [:]
+        /// The moves that take a session off an account that cannot serve
+        /// it (no destination), wherever `place` put it.
+        var unblocked: Set<String> = []
     }
 
     /// How long `account` lasts carrying `sessions` after `spent` percent
@@ -1105,14 +1342,74 @@ extension SessionPacer {
     /// moves: it counts on the active account until the projected switch
     /// and on the next account after it (`shares`), so no session moves
     /// onto room the group will need there.
+    ///
+    /// `windows` are the accounts too small to carry the shared group, as
+    /// `plan` takes them (`RemainderSpending.accounts`). While the other
+    /// destinations will together have spent what they hold before the
+    /// reset that refills them (`windowsWorthSpending`), no move makes the
+    /// first run-out later by more than it costs, and the aim is the work
+    /// served before that reset instead: the movable sessions are placed
+    /// on those accounts' session windows by `plan`'s own rule
+    /// (`spendWindows`), and the local search is not run.
     func rebalance(accounts: [Account], sessions: [RebalanceSession], destinations: Set<UUID>, now: Date,
-                   sharedGroup: SharedGroup? = nil) -> Rebalance {
+                   sharedGroup: SharedGroup? = nil, windows: Set<UUID>? = nil) -> Rebalance {
         var placed = sessions.filter { session in accounts.contains { $0.id == session.account } }
         let shares = shares(sharedGroup, accounts: accounts, now: now)
         let unseen = unseenBurn(accounts, sessions: placed, sharedGroup: sharedGroup, shares: shares)
         var spent: [UUID: Double] = [:]
         var scopedSpent: [UUID: [String: Double]] = [:]
         var moved = Set<String>()
+        // A session on an account that cannot serve it (no destination: at
+        // its limit, or refusing it) gains from any room, however short, so
+        // each movable one goes first where `place` puts it: spread over the
+        // destinations by how long each then lasts, its arrival's cache write
+        // charged there. No other move is weighed for it.
+        let blocked = placed.filter { $0.movable && !destinations.contains($0.account) }
+        let blockedAccounts = Set(blocked.map(\.account))
+        var leaving: [String: UUID] = [:]
+        if !blocked.isEmpty {
+            let blockedIDs = Set(blocked.map(\.id))
+            leaving = place(blocked, accounts: accounts, running: placed.filter { !blockedIDs.contains($0.id) },
+                            destinations: destinations, now: now, sharedGroup: sharedGroup)
+            for (id, to) in leaving {
+                guard let index = placed.firstIndex(where: { $0.id == id }),
+                      let destination = accounts.first(where: { $0.id == to }) else { continue }
+                spent[to, default: 0] += arrivalCost(placed[index].contextTokens, cacheLifetime: placed[index].cacheLifetime,
+                                                     to: destination)
+                placed[index].account = to
+                moved.insert(id)
+            }
+        }
+        if let windows {
+            var burn = accounts.reduce(into: [UUID: Double]()) { result, account in
+                result[account.id] = placed.filter { $0.account == account.id }
+                    .reduce(0) { $0 + percent($1.tokensPerHour, on: account) } + (unseen[account.id] ?? 0)
+            }
+            let carriers = accounts.filter { destinations.contains($0.id) && !windows.contains($0.id) }
+            if windowsWorthSpending(carriers: carriers, burn: burn, spent: spent, shares: shares,
+                                    sharedGroup: sharedGroup, now: now) {
+                func carriersRunOut(_ sessions: [RebalanceSession], spent: [UUID: Double]) -> Date? {
+                    carriers.map { account in
+                        self.runway(account, sessions: sessions.filter { $0.account == account.id }, spent: spent[account.id] ?? 0,
+                               shared: shares[account.id], unseen: unseen[account.id] ?? 0, now: now)
+                    }.min().flatMap { $0.isFinite ? now.addingTimeInterval($0) : nil }
+                }
+                var result = Rebalance(moves: leaving, unblocked: Set(leaving.keys))
+                result.earliestRunOutBefore = carriersRunOut(placed, spent: spent)
+                let candidates = placed.filter { $0.movable && !moved.contains($0.id) }.map {
+                    WindowCandidate(id: $0.id, account: $0.account, tokensPerHour: $0.tokensPerHour,
+                                    contextTokens: $0.contextTokens, cacheLifetime: $0.cacheLifetime, model: $0.model)
+                }
+                result.windowUses = spendWindows(candidates, accounts: accounts, targets: windows.intersection(destinations),
+                                                 spent: &spent, burn: &burn, shares: shares, now: now)
+                for (id, use) in result.windowUses {
+                    result.moves[id] = use.account
+                    if let index = placed.firstIndex(where: { $0.id == id }) { placed[index].account = use.account }
+                }
+                result.earliestRunOutAfter = carriersRunOut(placed, spent: spent)
+                return result
+            }
+        }
         func runway(_ account: Account) -> TimeInterval {
             self.runway(account, sessions: placed.filter { $0.account == account.id }, spent: spent[account.id] ?? 0,
                         scopedSpent: scopedSpent[account.id] ?? [:], shared: shares[account.id],
@@ -1132,7 +1429,7 @@ extension SessionPacer {
             accounts.filter { ids.contains($0.id) }.map { ($0, runway($0)) }.min { $0.1 < $1.1 }
         }
         func date(_ runway: TimeInterval) -> Date? { runway.isFinite ? now.addingTimeInterval(runway) : nil }
-        var result = Rebalance()
+        var result = Rebalance(moves: leaving, unblocked: Set(leaving.keys))
         for _ in 0..<(sessions.count + accounts.count) {
             let open = Set(accounts.map(\.id)).subtracting(settled)
             guard let bottleneck = earliest(among: open), bottleneck.runway.isFinite else { break }
@@ -1183,10 +1480,11 @@ extension SessionPacer {
                 scopedSpent[best.to.id, default: [:]][key, default: 0] += best.cost
             }
             moved.insert(session.id)
-            if result.moves.isEmpty { stuck = settled }
+            if result.moves.count == leaving.count { stuck = settled }
             result.moves[session.id] = best.to.id
         }
-        let reported = Set(accounts.map(\.id)).subtracting(stuck)
+        // An account that cannot serve has run out already, whatever moves.
+        let reported = Set(accounts.map(\.id)).subtracting(stuck).subtracting(blockedAccounts)
         result.earliestRunOutBefore = reported.compactMap { initial[$0] }.min().flatMap(date)
         result.earliestRunOutAfter = earliest(among: reported).flatMap { date($0.runway) }
         return result
@@ -1211,7 +1509,9 @@ extension SessionPacer {
     /// (an account at its limit), goes among `destinations`: one at a time,
     /// the largest rate first, to the destination that leaves the earliest
     /// run-out among the destinations latest once it carries the session
-    /// and its cache rewrite beside `running` and the sessions placed
+    /// and the whole cache write its arrival costs there (`arrivalCost`: a
+    /// small plan's window holds the full write, not only what the move adds
+    /// over staying) beside `running` and the sessions placed
     /// before it; on a tie, to the one that then lasts longest, then to the
     /// one with the most unused rate. This is `rebalance`'s measure, so the
     /// sessions an exhausted account gives up spread over the accounts with
@@ -1244,7 +1544,7 @@ extension SessionPacer {
             for destination in targets {
                 var moved = session
                 moved.account = destination.id
-                let cost = moveCost(session.contextTokens, to: destination)
+                let cost = arrivalCost(session.contextTokens, cacheLifetime: session.cacheLifetime, to: destination)
                 let keys = scopedKeys(Session(id: session.id, account: destination.id, tokensPerHour: 0, contextTokens: 0,
                                               lastSeen: now, cacheLifetime: nil, model: session.model), on: destination)
                 let scoped = Dictionary(uniqueKeysWithValues: keys.map { ($0, cost) })

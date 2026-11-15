@@ -760,7 +760,35 @@ it rebuilds its cache there." (`AppState.remainderMoveEvent`) and offers
 that account again only `balanceMoveInterval` later
 (`AppState.remainderMovedAt`). A session placed so reaches no limit there
 before the reset, so shedding leaves it; if the account reaches its limit
-after all, the session moves on as any stranded slot session does. For new
+after all, the session moves on as any stranded slot session does.
+
+A small plan's 5-hour window is a refilling allowance: room it has left at
+its reset expires, and the window starts again full. While the accounts that
+take sessions for the runway will together have spent what they hold before
+the reset that refills them (`SessionPacer.windowsWorthSpending`: each
+reaches a limit before its binding window resets, and their joint run-out
+comes before the first of those resets), every percent they hold is spent
+before that reset whatever moves, so making the first run-out later gains
+nothing and the work served before that reset is what counts. The pacer then
+spends the session windows of the accounts `remainderSpending` offers
+(`SessionPacer.spendWindows`): each window's room is what its reset would
+leave once its own rate has run; one at a time, the slot session between
+turns whose arrival costs the fewest tokens per hour it then stays goes to
+the window where that is least, so small contexts and light rates go first
+and heavy sessions spread over the windows by their token room. A session
+goes only when its whole arrival write fits and the use it makes of the room
+is worth `remainderWorth` times that write, so an 800k-token session moves
+only into room no cheaper session takes. New sessions go by the tokens per
+hour each account would otherwise leave unused: the windows' room until
+their resets, and a carrier's room until the first carrier's reset, which is
+none once its own sessions spend it. `serveSessionSlots` records "Moved
+session X from Personal to hexorda, using hexorda's session window until
+12:20 pm, …" (`AppState.windowMoveEvent`). A window that fills leaves its
+sessions to the stranded placement above, so they move on to the next
+account with room, or back, and a window spent again once it refills. The
+shared group stays where `FailoverPlanner.carries` lets it.
+
+For new
 sessions, `carriesNewSession` and the pacer's runway rule let such an
 account take one while it can carry a typical session for an hour, and the
 pacer weighs it by the room it has left, a small share beside an account
@@ -1082,10 +1110,18 @@ the pool weights and which sessions move, each time the pool is rebuilt
 - A slot session whose account can no longer serve it goes where the pool
   lasts longest with it (`SessionPacer.place`, through
   `AppState.strandedPlacements`): one at a time, largest rate first, to the
-  account that leaves the earliest run-out among the accounts taking
-  sessions latest, as **Rebalance sessions now** measures it. The sessions
-  an exhausted account gives up spread over the accounts with room instead
-  of all going to the account with the largest pool weight.
+  account that leaves the earliest run-out among every pool account that
+  can serve it (`AppState.strandedDestinations`), whatever its weight for
+  new sessions, as **Rebalance sessions now** measures it. Each destination
+  is charged the whole cache write of the session's arrival
+  (`SessionPacer.arrivalCost`: its context at 2 a token for the one-hour
+  cache, 1.25 for the five-minute one), not only what the move adds over
+  staying. A run whose process left no session record is placed by its
+  slot's path at `defaultSessionRate`. The sessions an exhausted account, or
+  a small plan's filled session window, gives up spread over the accounts
+  with room by how long each then lasts, instead of all going to the account
+  with the largest pool weight: a session that must leave is served rather
+  than refused, even where it lasts less than an hour.
 - An account a threshold switch left with room still on it drains
   (`AppState.drainingAccounts`): above its thresholds it keeps a pool weight
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when
@@ -1228,10 +1264,19 @@ run-outs reported then leave out the accounts settled before the first move.
 The result never runs out earlier than before and every move pays for itself;
 it is a local optimum, not always the best assignment.
 Excluded accounts, those needing sign-in and those at their limit are no
-destination. The moves go through `requestedSlotMoves`, so each is recorded.
-With **Rebalance automatically** (off by default) the quota cycle makes the
-same moves at most once per `balanceMoveInterval`, and only when the first
-account then runs out more than an hour later.
+destination. A movable session on an account that is no destination, one at
+its limit or refusing it, gains from any room however short: before the
+search, each goes where `SessionPacer.place` puts it, spread over the
+destinations as the stranded placement spreads them, and is reported as
+moved off an account that cannot serve it (`Rebalance.unblocked`). While the
+windows are worth spending (`windowsWorthSpending`, for the accounts
+`remainderSpending` offers), the local search is not run and the movable
+sessions are placed on those windows by the pacer's own rule
+(`spendWindows`). The moves go through `requestedSlotMoves`, so each is
+recorded. With **Rebalance automatically** (off by default) the quota cycle
+makes the same moves at most once per `balanceMoveInterval`, and only when
+they move a session off an account that cannot serve it or into a session
+window, or the first account then runs out more than an hour later.
 
 A slot session can be **pinned** to its subscription (`SessionPins`, kept by
 session ID under `app.accountdock.failover.pins`, so `--resume` of the same
