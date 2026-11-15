@@ -167,6 +167,10 @@ final class AppState: ObservableObject {
     /// Sessions `handleExternalRequests` was asked to move, by destination;
     /// `serveSessionSlots` moves each at once and forgets it.
     var requestedSlotMoves: [String: UUID] = [:]
+    /// Sessions the user moved by hand that are pinned once their slot
+    /// serves the destination (`settleMovePins`): a move by restarting
+    /// lands later, and a pinned session is never restarted.
+    var movePins: [String: MovePin] = [:]
     /// Moves of sessions whose CLI moves only by restarting
     /// (`ProviderSessionIsolation.movesNeedRestart`), chosen by
     /// `serveSessionSlots` while each was idle, by session ID; applied by

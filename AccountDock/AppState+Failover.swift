@@ -864,6 +864,9 @@ extension AppState {
 
     private func releaseSuspendedAgents(_ provider: AIProviderType, reason: String) async {
         guard hasPausedAgents(provider) || suspensionContexts[provider] != nil else { return }
+        // Sessions the user paused one at a time wait for the user, while
+        // AccountDock still manages the provider.
+        if AgentPauseGate.read(provider)?.holdsOnlyChosenSessions == true, monitoredProviders.contains(provider) { return }
         let resumed = await releasePausedAgents(provider)
         if resumed > 0 {
             failoverEvents.record(provider, "Resumed \(resumed) paused session(s): \(reason).")
@@ -1256,9 +1259,19 @@ extension AppState {
     /// The user's own override: paused sessions continue now, and no new
     /// pause starts for this provider until the limiting reset has passed.
     func resumePausedAgentsNow(_ provider: AIProviderType) async {
+        // Resuming sessions paused one at a time overrides no limit.
+        let chosenOnly = AgentPauseGate.read(provider)?.holdsOnlyChosenSessions == true
         let resumed = await releasePausedAgents(provider)
-        pauseOverrideUntil[provider] = pendingResetRecovery[provider]?.resetDate ?? Date().addingTimeInterval(30 * 60)
+        if !chosenOnly { notePauseOverride(provider) }
         failoverEvents.record(provider, "Resumed \(resumed) paused session(s) at the user's request.")
+    }
+
+    /// The user resumed every session a pause held: no new pause starts for
+    /// the provider until the limiting reset has passed, or for half an
+    /// hour when none is known. Set by `resumePausedAgentsNow` and by
+    /// `resumeSession` for the last held session.
+    func notePauseOverride(_ provider: AIProviderType) {
+        pauseOverrideUntil[provider] = pendingResetRecovery[provider]?.resetDate ?? Date().addingTimeInterval(30 * 60)
     }
 
     /// Drops sessions that ended after the pause started, and refreshes the
@@ -1597,8 +1610,9 @@ extension AppState {
     ) async {
         guard hasPausedAgents(provider) || suspensionContexts[provider] != nil else { return }
         // An account hold ends when its own account resets
-        // (`holdSessionsForImminentReset`), not on another's capacity.
-        if AgentPauseGate.read(provider)?.account != nil { return }
+        // (`holdSessionsForImminentReset`), not on another's capacity, and
+        // sessions the user paused one at a time when the user plays them.
+        if let pause = AgentPauseGate.read(provider), pause.account != nil || pause.holdsOnlyChosenSessions { return }
         if resumesAsCapacityAllows(provider), AgentPauseGate.isActive(provider) {
             await admitPausedSessions(provider, planner: planner)
             return

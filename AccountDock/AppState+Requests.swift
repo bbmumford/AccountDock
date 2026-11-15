@@ -10,7 +10,9 @@ private let requestLog = FileLog("Requests")
 extension AppState {
     struct ExternalRequest: Codable {
         /// `refresh` reads usage from the provider now; `moveSession` moves
-        /// one running session to another account; `rebalance` plans, and
+        /// one running session to another account and pins it there unless
+        /// balancing would place it there itself (`AppState.moveSession`);
+        /// `rebalance` plans, and
         /// with `apply` makes, the moves that let a provider's slot sessions
         /// last longest (`AppState.applyRebalance`); `pin` pins one running
         /// slot session to the account its slot serves (`SessionPins`), and
@@ -101,68 +103,13 @@ extension AppState {
             await readActiveUsageNow()
             return outcome(true, "Usage read for the active accounts.")
         case "moveSession":
-            guard let sessionID = request.session,
-                  let provider = AIProviderType.implementedProviders.first(where: { provider in
-                      liveSessions[provider]?.contains { $0.sessionID == sessionID } == true
-                  }),
-                  let session = liveSessions[provider]?.first(where: { $0.sessionID == sessionID }) else {
+            // The same move the Sessions page's move menu makes.
+            guard let sessionID = request.session, liveSession(sessionID) != nil else {
                 return outcome(false, "No running session has that ID.")
             }
             if let model = request.model { noteSessionModel(sessionID, model: model, at: now) }
-            let model = sessionModel(sessionID, now: now)
-            let policy = failoverConfig.policy(for: provider)
-            let planner = FailoverPlanner(settings: plannerSettings(provider))
-            let slot = session.processID.flatMap { slotDirectoryByProcess[$0] }
-            let current = sessionAttribution(provider, now: now).decide(session: sessionID, process: session.processID)?.account
-            // The limit the session met is learned before anything is chosen.
-            if let current, let account = accounts.first(where: { $0.id == current }) { await readUsageNow(account) }
-            func hasRoom(_ account: Account) -> Bool {
-                !accountCannotServe(account.id, provider: provider, planner: planner, now: now, model: model)
-            }
-            if sessionPins.isPinned(sessionID) {
-                return outcome(false, "The session is pinned to its account; unpin it first.")
-            }
-            let wanted = named(request.account)
-            // A session on the shared sign-in keeps the token it holds until
-            // it is told to read the sign-in again, so it can still be on an
-            // account that was active earlier. When the active account has
-            // room for its model, reading the sign-in again is the whole move.
-            if slot == nil, let active = activeAccount(for: provider), wanted == nil || wanted?.id == active.id,
-               credentialModule(for: provider)?.liveCredential != nil, hasRoom(active) {
-                moveRunningSessions(provider, reason: "request.moveSession")
-                return outcome(true, "Sessions on the shared sign-in were told to read it again; \(messageName(active)) is the active account and has allowance left.", active)
-            }
-            let target = wanted ?? moveDestination(provider, current: current, model: model, now: now)
-            let modelName = model.map { CostParser.shortModelName($0) } ?? "its model"
-            guard let target else { return outcome(false, "No other account has allowance left for \(modelName).") }
-            guard target.id != current else { return outcome(false, "The session is already on \(messageName(target)).", target) }
-            if let slot, let root = SessionSlots(provider)?.sessionRoot.path, slot.hasPrefix(root + "/") {
-                requestedSlotMoves[sessionID] = target.id
-                await maintainSessionSlots(now: now)
-                if provider.capabilities.sessionMovesNeedRestart {
-                    if slotRestartResumes[sessionID]?.account == target.id {
-                        return outcome(true, "Restarted in a slot on \(messageName(target)): the session was ended between turns and resumed there.", target)
-                    }
-                    return outcome(requestedSlotMoves[sessionID] == target.id,
-                                   "The session moves to \(messageName(target)) by restarting, once it is idle between turns.", target)
-                }
-                let moved = slotDirectoryServing[slot] == target.id
-                return outcome(moved, moved ? "Moved to \(messageName(target)); the session uses it from its next request."
-                                            : "The session's slot could not be written for \(messageName(target)).", target)
-            }
-            // The session reads a credential it shares with others, which
-            // only moves by making the destination the active account.
-            guard provider.capabilities.switchReachesRunningSessions
-                    || credentialModule(for: provider)?.liveCredential != nil else {
-                return outcome(false, "The session's sign-in cannot be changed while it runs.")
-            }
-            if policy.activeAccountLocked { return outcome(false, "The active account is locked, and the session shares its sign-in.") }
-            let previous = activeAccount(for: provider)?.id
-            await switchTo(target, refreshAfter: false)
-            let switched = activeAccount(for: provider)?.id == target.id
-            if switched { moveRunningSessions(provider, from: previous, reason: "request.moveSession") }
-            return outcome(switched, switched ? "Switched the active account to \(messageName(target)); every session on the shared sign-in moves with it."
-                                              : "The switch to \(messageName(target)) did not complete.", target)
+            let moved = await moveSession(sessionID, to: named(request.account), now: now)
+            return outcome(moved.ok, moved.detail, moved.account)
         case "pin", "unpin":
             guard let sessionID = request.session, liveSession(sessionID) != nil || sessionPins.isPinned(sessionID) else {
                 return outcome(false, "No running session has that ID.")

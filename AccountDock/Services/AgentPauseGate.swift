@@ -112,6 +112,13 @@ enum AgentPauseGate {
         /// The listed sessions also wait at the start of a new turn, while
         /// other sessions' new turns go on (`holdsNewTurns` holds them all).
         var holdsListedNewTurns: Bool?
+
+        /// A pause the user started for sessions chosen one at a time
+        /// (`pauseOne`): it holds only its listed sessions, and only the
+        /// user ends it, so `AppState`'s capacity checks leave it alone.
+        var holdsOnlyChosenSessions: Bool {
+            manual == true && holdsNewTurns != true && account == nil
+        }
     }
 
     static func read(_ provider: AIProviderType, directory: URL = pauseDirectory) -> PauseFile? {
@@ -254,6 +261,61 @@ enum AgentPauseGate {
             pause.sessions.append(session)
             write(pause, for: provider, directory: directory)
         }
+    }
+
+    /// Holds one session at the user's request. With no pause in effect it
+    /// writes a pause of the user's that lists only `session`: the gate
+    /// holds it at its next tool call and new turn, and lets every other
+    /// session's tool calls and turns pass (`holdsNewTurns` false,
+    /// `holdsListedNewTurns` true). With a pause in effect the session is
+    /// held by it again (`hold`). Returns whether a new pause was written.
+    @discardableResult
+    static func pauseOne(_ provider: AIProviderType, session: String, at now: Date = Date(),
+                         directory: URL = pauseDirectory) -> Bool {
+        guard key(provider) != nil else { return false }
+        guard read(provider, directory: directory) == nil else {
+            hold(provider, session: session, directory: directory)
+            return false
+        }
+        write(PauseFile(sessions: [session], reason: "paused by you", pausedAt: now, resumeAt: nil,
+                        holdsNewTurns: false, manual: true, holdsListedNewTurns: true),
+              for: provider, directory: directory)
+        return true
+    }
+
+    /// The sessions the provider's pause holds now: those it lists, those
+    /// waiting in the gate and, while it holds new turns, every one of
+    /// `running`, less those the user resumed. Empty with no pause.
+    /// `AppState.pausedSessions` lists them and `playOne` ends a pause
+    /// left holding none.
+    static func heldSessions(_ provider: AIProviderType, running: Set<String>,
+                             directory: URL = pauseDirectory) -> Set<String> {
+        guard let pause = read(provider, directory: directory) else { return [] }
+        let held = Set(pause.sessions).union(waitingSessions(provider, directory: directory))
+        return (pause.holdsNewTurns == true ? held.union(running) : held)
+            .subtracting(resumedSessions(provider, directory: directory))
+    }
+
+    /// Lets one session go on while the pause holds the others (`resume`)
+    /// and drops it from the pause's list. When the pause then holds no
+    /// session that is running or waiting in the gate, it is released with
+    /// `continuation`, so no pause is left in effect that holds nothing.
+    /// Returns whether the pause was released.
+    @discardableResult
+    static func playOne(_ provider: AIProviderType, session: String, running: Set<String>,
+                        continuation: String? = nil, directory: URL = pauseDirectory) -> Bool {
+        guard var pause = read(provider, directory: directory) else { return false }
+        resume(provider, session: session, directory: directory)
+        if pause.sessions.contains(session) {
+            pause.sessions.removeAll { $0 == session }
+            write(pause, for: provider, directory: directory)
+        }
+        // A listed session whose process is gone holds nothing, though the
+        // list keeps it until its record shows it ended.
+        let present = running.union(waitingSessions(provider, directory: directory))
+        guard heldSessions(provider, running: running, directory: directory).isDisjoint(with: present) else { return false }
+        release(provider, continuation: continuation, directory: directory)
+        return true
     }
 
     /// Ends the user's resumes of `sessions`, so the pause holds them again.

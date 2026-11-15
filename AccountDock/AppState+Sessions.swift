@@ -175,15 +175,13 @@ extension AppState {
     /// (`resumeSession`, which the gate honours whether or not the session
     /// has reached it yet).
     func pausedSessions(_ provider: AIProviderType) -> [WaitingSession] {
-        guard let pause = AgentPauseGate.read(provider) else { return [] }
-        let gates = AgentPauseGate.waitingGates(provider)
-        let resumed = AgentPauseGate.resumedSessions(provider)
-        let records = AgentSessions.records(provider)
-        let held = Set(pause.sessions).union(AgentPauseGate.waitingSessions(provider))
         let running = Set((liveSessions[provider] ?? []).map(\.sessionID))
         // A pause that holds new turns holds every running session.
-        let all = pause.holdsNewTurns == true ? held.union(running) : held
-        return all.subtracting(resumed).map { session in
+        let held = AgentPauseGate.heldSessions(provider, running: running)
+        guard !held.isEmpty else { return [] }
+        let gates = AgentPauseGate.waitingGates(provider)
+        let records = AgentSessions.records(provider)
+        return held.map { session in
             WaitingSession(provider: provider, sessionID: session, gateProcess: gates[session],
                            workingDirectory: records[session]?.workingDirectory, name: sessionNames[session])
         }
@@ -209,20 +207,33 @@ extension AppState {
     /// onto an account with room, it is held again once that account nears
     /// its limit (`reholdUserResumedSessions`); resumed onto one already at
     /// its limit, it runs for the rest of the pause and may reach it. A
-    /// later pause holds it again either way.
+    /// later pause holds it again either way. When it was the last session
+    /// the pause held, the pause ends (`AgentPauseGate.playOne`), as
+    /// "Resume all" would end it.
     func resumeSession(_ session: WaitingSession) {
         let provider = session.provider
-        AgentPauseGate.resume(provider, session: session.sessionID)
+        let chosenOnly = AgentPauseGate.read(provider)?.holdsOnlyChosenSessions == true
+        let running = Set((liveSessions[provider] ?? []).map(\.sessionID))
+        let ended = AgentPauseGate.playOne(provider, session: session.sessionID, running: running,
+                                           continuation: continuationDescription(provider))
+        if ended {
+            endPause(provider)
+            if !chosenOnly {
+                suspensionContexts[provider] = nil
+                notePauseOverride(provider)
+            }
+            failoverEvents.record(provider, "Resumed the \(session.label) at the user's request; no session is paused any more, so the pause is over.")
+            objectWillChange.send()
+            return
+        }
         if let account = servingAccount(provider, session: session.sessionID),
            !isNearLimit(account, planner: FailoverPlanner(settings: plannerSettings(provider))) {
             userResumes[provider, default: [:]][session.sessionID] = account.id
         }
-        if var pause = AgentPauseGate.read(provider), pause.sessions.contains(session.sessionID) {
-            pause.sessions.removeAll { $0 == session.sessionID }
-            AgentPauseGate.write(pause, for: provider)
-        }
         refreshPauseStatus(provider)
         failoverEvents.record(provider, "Resumed the \(session.label) at the user's request; other sessions stay paused.")
+        // The pause file changed though the pause's counts may not have.
+        objectWillChange.send()
     }
 
     /// The resume shortcut: resumes the one waiting session shown by the
