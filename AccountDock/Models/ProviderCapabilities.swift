@@ -238,6 +238,10 @@ struct RequestHoldSupport: Sendable {
     /// only forwards them. A bridged hold is installed by the provider's
     /// `ProviderFailoverPolicy.routeThroughBridge` and not by its pause.
     var bridgedProtocol: RouterProtocol?
+    /// Where the CLI sends requests signed with an API key while the key is
+    /// absent, when that differs from `defaultUpstream`, its sign-in's
+    /// (`ProviderPassthrough.Entry.apiKeyUpstream`).
+    var apiKeyUpstream: String?
 }
 
 /// A provider CLI's session lifecycle hooks, installed by
@@ -383,7 +387,8 @@ extension AIProviderType {
                                                 key: "openai_base_url", sessionField: "prompt_cache_key",
                                                 defaultUpstream: "https://chatgpt.com/backend-api/codex",
                                                 keyAbsentByDefault: true, holdsPausedRequests: false,
-                                                bridgedProtocol: .anthropicMessages),
+                                                bridgedProtocol: .anthropicMessages,
+                                                apiKeyUpstream: "https://api.openai.com/v1"),
                 lifecycleHooks: LifecycleHookSupport(events: ["SessionStart", "UserPromptSubmit", "Stop"],
                                                      hookFile: ".codex/hooks.json", format: .jsonHooks,
                                                      timeout: 5, bundledScript: "accountdock-codex-hook"),

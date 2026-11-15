@@ -423,7 +423,7 @@ final class RouterService: @unchecked Sendable {
     /// limit and the route takes the overflow.
     private func passthrough(_ request: HTTPRequest, key: String, rest: String, writer: ResponseWriter) async {
         guard let entry = ProviderPassthrough.entries(at: environment.passthroughURL)[key],
-              let url = ProviderPassthrough.upstreamURL(entry, rest: rest) else {
+              let url = ProviderPassthrough.upstreamURL(entry, rest: rest, headers: request.headers) else {
             await writer.complete(502, json: RouterLogic.errorBody(type: "api_error", message: "AccountDock router has no upstream for \(key)"))
             return
         }

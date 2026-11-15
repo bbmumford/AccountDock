@@ -859,9 +859,16 @@ enum ProviderPassthrough {
         /// its session. False for a CLI whose own hook waits for the whole
         /// pause and which gives up on a reply that stays silent.
         var holdsRequests = true
+        /// Where requests signed with an API key go, when the CLI sends them
+        /// elsewhere than its sign-in's (`upstream`): Codex's built-in
+        /// provider sends a ChatGPT sign-in's requests to the ChatGPT Codex
+        /// endpoint and an OpenAI API key's to the OpenAI API. Nil sends
+        /// every request to `upstream`, as for a base URL the user set.
+        var apiKeyUpstream: String?
 
-        init(upstream: String, sessionField: String, holdsRequests: Bool = true) {
+        init(upstream: String, sessionField: String, holdsRequests: Bool = true, apiKeyUpstream: String? = nil) {
             self.upstream = upstream; self.sessionField = sessionField; self.holdsRequests = holdsRequests
+            self.apiKeyUpstream = apiKeyUpstream
         }
 
         init(from decoder: Decoder) throws {
@@ -869,7 +876,33 @@ enum ProviderPassthrough {
             upstream = try values.decode(String.self, forKey: .upstream)
             sessionField = try values.decode(String.self, forKey: .sessionField)
             holdsRequests = try values.decodeIfPresent(Bool.self, forKey: .holdsRequests) ?? true
+            apiKeyUpstream = try values.decodeIfPresent(String.self, forKey: .apiKeyUpstream)
         }
+    }
+
+    /// The credential a CLI's request is signed with.
+    enum ClientAuth: Equatable {
+        /// A sign-in's access token: a ChatGPT sign-in sends its account as
+        /// `ChatGPT-Account-ID`, and its token is a signed JWT.
+        case signIn
+        /// An API key, which carries neither.
+        case apiKey
+    }
+
+    static func clientAuth(_ headers: [(String, String)]) -> ClientAuth {
+        if headers.contains(where: { $0.0.caseInsensitiveCompare("chatgpt-account-id") == .orderedSame && !$0.1.isEmpty }) {
+            return .signIn
+        }
+        guard let token = RouterLogic.bearerToken(headers) else { return .apiKey }
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        return parts.count == 3 && token.hasPrefix("eyJ") ? .signIn : .apiKey
+    }
+
+    /// The upstream a request goes to: the API's for one signed with an API
+    /// key when the entry names one, else the sign-in's.
+    static func upstream(_ entry: Entry, headers: [(String, String)]) -> String {
+        guard let apiKeyUpstream = entry.apiKeyUpstream, clientAuth(headers) == .apiKey else { return entry.upstream }
+        return apiKeyUpstream
     }
 
     static var entriesURL: URL { RouterConfig.directory.appendingPathComponent("passthrough.json") }
@@ -896,8 +929,9 @@ enum ProviderPassthrough {
         return (String(key), rest.isEmpty ? "/" : rest)
     }
 
-    static func upstreamURL(_ entry: Entry, rest: String) -> URL? {
-        let base = entry.upstream.hasSuffix("/") ? String(entry.upstream.dropLast()) : entry.upstream
+    static func upstreamURL(_ entry: Entry, rest: String, headers: [(String, String)] = []) -> URL? {
+        let upstream = upstream(entry, headers: headers)
+        let base = upstream.hasSuffix("/") ? String(upstream.dropLast()) : upstream
         return URL(string: base + rest)
     }
 

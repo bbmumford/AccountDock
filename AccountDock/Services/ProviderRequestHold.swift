@@ -72,11 +72,11 @@ enum ProviderRequestHold {
                 if wantsRouter(provider, pausing: enabled, routerRunning: routerRunning,
                                policy: FailoverConfigStore.storedPolicy(for: provider),
                                agentInstalled: RequestRouterController.agentInstalled) {
-                    if current != routed || entries[key] == nil {
-                        let previous = current.flatMap { $0 == routed || $0.isEmpty ? nil : $0 }
-                        let upstream = previous ?? entries[key]?.upstream ?? hold.defaultUpstream
-                        entries[key] = ProviderPassthrough.Entry(upstream: upstream, sessionField: hold.sessionField,
-                                                                 holdsRequests: hold.holdsPausedRequests)
+                    let previous = current.flatMap { $0 == routed || $0.isEmpty ? nil : $0 }
+                    let upstream = previous ?? entries[key]?.upstream ?? hold.defaultUpstream
+                    let entry = Self.entry(hold, upstream: upstream)
+                    if current != routed || entries[key] != entry {
+                        entries[key] = entry
                         // The upstream is recorded before the CLI is pointed
                         // at the router, which forwards to it.
                         try writeEntries(entries)
@@ -98,6 +98,14 @@ enum ProviderRequestHold {
                 holdLog.warning("\(provider.rawValue) request hold update failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// The passthrough entry for `upstream`: a base URL the user set takes
+    /// every request, while the default one sends API-key requests to the
+    /// CLI's API-key upstream.
+    static func entry(_ hold: RequestHoldSupport, upstream: String) -> ProviderPassthrough.Entry {
+        ProviderPassthrough.Entry(upstream: upstream, sessionField: hold.sessionField, holdsRequests: hold.holdsPausedRequests,
+                                  apiKeyUpstream: upstream == hold.defaultUpstream ? hold.apiKeyUpstream : nil)
     }
 
     private static func writeEntries(_ entries: [String: ProviderPassthrough.Entry]) throws {
