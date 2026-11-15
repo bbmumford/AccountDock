@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Shown under a provider heading while AccountDock holds sessions, each
-/// because the account it runs on is at or near its usage limit, listing
-/// each held session with that account and when it is expected to serve it
-/// again (`AppState.pausedSessions`).
+/// Shown under a provider heading while AccountDock holds sessions: each
+/// because the account it runs on is at or near its usage limit, or because
+/// the user paused all of them or some one at a time. It lists each held
+/// session with that account and when it is expected to serve it again
+/// (`AppState.pausedSessions`); its icons resume every session, play one
+/// from a menu, and open the Sessions tab.
 struct AgentPauseBanner: View {
     @EnvironmentObject private var appState: AppState
     let provider: AIProviderType
@@ -36,31 +38,51 @@ struct AgentPauseBanner: View {
                 }
             }
             Spacer(minLength: 4)
-            VStack(alignment: .trailing, spacing: 4) {
-                Button("Resume now") {
+            HStack(spacing: 8) {
+                Button {
                     Task { await appState.resumePausedAgentsNow(provider) }
+                } label: {
+                    Image(systemName: "play.circle")
                 }
-                .controlSize(.small)
-                .help("Let the paused sessions continue now. They may then reach the usage limit.")
+                .help("Resume all: let the paused sessions continue now. They may then reach the usage limit.")
+                .accessibilityLabel("Resume all sessions")
                 let paused = appState.pausedSessions(provider)
                 if !paused.isEmpty {
-                    Menu("Resume one") {
+                    Menu {
                         ForEach(paused) { session in
-                            Button(session.isWaiting ? "\(session.label) (waiting)" : session.label) {
+                            Button("Play " + line(session)) {
                                 appState.resumeSession(session)
                             }
                         }
+                    } label: {
+                        Image(systemName: "play.square.stack")
                     }
                     .menuStyle(.borderlessButton)
-                    .controlSize(.small)
+                    .menuIndicator(.hidden)
                     .fixedSize()
-                    .help("Let one session continue while the others stay paused, whether it is waiting now or would stop at its next tool call. \(SessionResumeShortcut.display) resumes the one in the front window.")
+                    .help("Play one session while the others stay paused, whether it is waiting now or would stop at its next tool call. \(SessionResumeShortcut.display) resumes the one in the front window.")
+                    .accessibilityLabel("Play one session")
                 }
+                Button {
+                    NotificationCenter.default.post(name: .accountdockShowSessions, object: nil)
+                } label: {
+                    Image(systemName: "rectangle.stack")
+                }
+                .help("Open the Sessions page to pause, play, pin or move each session.")
+                .accessibilityLabel("Show sessions")
             }
+            .buttonStyle(.borderless)
         }
         .padding(10)
         .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
         .sectionPadding()
+    }
+
+    /// Whether the pause holds only sessions the user paused one at a time,
+    /// which only the user ends and which lets new turns of other sessions
+    /// go on (`AgentPauseGate.PauseFile.holdsOnlyChosenSessions`).
+    private var chosenOnly: Bool {
+        AgentPauseGate.read(provider)?.holdsOnlyChosenSessions == true
     }
 
     /// Held sessions listed by name; the rest are counted.
@@ -88,7 +110,9 @@ struct AgentPauseBanner: View {
 
     private var detail: String {
         var parts: [String] = []
-        if let resumeAt = status.resumeAt {
+        if chosenOnly {
+            parts.append("Held until you play them; other sessions keep running.")
+        } else if let resumeAt = status.resumeAt {
             parts.append("Resumes when capacity returns, expected \(UsageFormat.clock(resumeAt)).")
         } else {
             parts.append("Resumes when an account has capacity again.")
@@ -99,7 +123,9 @@ struct AgentPauseBanner: View {
                 ? "All are waiting before their next request."
                 : "\(waiting) waiting now; the others pause at their next tool call.")
         }
-        parts.append("New turns wait until then. Paused since \(UsageFormat.clock(status.since)).")
+        // Only a pause holding every new turn holds those of other sessions.
+        let holdsNewTurns = AgentPauseGate.read(provider)?.holdsNewTurns == true
+        parts.append((holdsNewTurns ? "New turns wait until then. " : "") + "Paused since \(UsageFormat.clock(status.since)).")
         if status.waiting > 0 {
             parts.append("\(SessionResumeShortcut.display) resumes the session in the front window.")
         }

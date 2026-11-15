@@ -865,6 +865,9 @@ extension AppState {
 
     private func releaseSuspendedAgents(_ provider: AIProviderType, reason: String) async {
         guard hasPausedAgents(provider) || suspensionContexts[provider] != nil else { return }
+        // Sessions the user paused one at a time wait for the user, while
+        // AccountDock still manages the provider.
+        if AgentPauseGate.read(provider)?.holdsOnlyChosenSessions == true, monitoredProviders.contains(provider) { return }
         let resumed = await releasePausedAgents(provider)
         if resumed > 0 {
             failoverEvents.record(provider, "Resumed \(resumed) paused session(s): \(reason).")
@@ -1165,7 +1168,7 @@ extension AppState {
         AgentPauseGate.write(
             .init(sessions: sessions, reason: reason, pausedAt: Date(),
                   resumeAt: pendingResetRecovery[provider]?.resetDate, holdsNewTurns: scope.holdsNewTurns,
-                  holdsListedNewTurns: scope.holdsNewTurns ? nil : true),
+                  holdsListedNewTurns: scope.holdsNewTurns ? nil : true, chosen: existing?.chosen),
             for: provider
         )
         // Agents without the pause hook are stopped, except jobs of an
@@ -1193,11 +1196,17 @@ extension AppState {
     ///
     /// `continuation` names where the sessions go on; by default the route
     /// target serving the provider's requests, or else its active account.
+    /// Sessions the user paused one at a time stay held
+    /// (`AgentPauseGate.narrowToChosen`) unless `keepingChosen` is false,
+    /// as when the user resumes all.
     @discardableResult
-    func endPause(_ provider: AIProviderType, continuation: String? = nil) -> Int {
-        let held = AgentPauseGate.read(provider)?.sessions.count ?? 0
-        AgentPauseGate.release(provider, continuation: continuation ?? continuationDescription(provider))
-        agentPauseStatus[provider] = nil
+    func endPause(_ provider: AIProviderType, continuation: String? = nil, keepingChosen: Bool = true) -> Int {
+        let pause = AgentPauseGate.read(provider)
+        let continuation = continuation ?? continuationDescription(provider)
+        let kept = keepingChosen && AgentPauseGate.narrowToChosen(provider, continuation: continuation)
+        if !kept { AgentPauseGate.release(provider, continuation: continuation) }
+        let held = (pause?.sessions.count ?? 0) - (kept ? pause?.chosenListed.count ?? 0 : 0)
+        if kept { refreshPauseStatus(provider) } else { agentPauseStatus[provider] = nil }
         sessionAdmissions[provider] = nil
         userResumes[provider] = nil
         // Each resumed session's first request re-sends its whole context;
@@ -1220,15 +1229,17 @@ extension AppState {
         AgentPauseGate.isActive(provider) || agentSuspension.hasSuspendedAgents(provider: provider)
     }
 
-    /// Releases every paused session of the provider and ends the pause.
-    /// Returns the number of sessions and processes released.
+    /// Releases every paused session of the provider and ends the pause,
+    /// but for the sessions the user paused one at a time unless
+    /// `keepingChosen` is false (`endPause`). Returns the number of
+    /// sessions and processes released.
     @discardableResult
-    func releasePausedAgents(_ provider: AIProviderType) async -> Int {
-        let held = endPause(provider)
+    func releasePausedAgents(_ provider: AIProviderType, keepingChosen: Bool = true) async -> Int {
+        let held = endPause(provider, keepingChosen: keepingChosen)
         let continued = agentSuspension.hasSuspendedAgents(provider: provider)
             ? await agentSuspension.resume(provider: provider) : 0
         suspensionContexts[provider] = nil
-        agentPauseStatus[provider] = nil
+        refreshPauseStatus(provider)
         let routedBack = routeBack(provider) ? 1 : 0
         return held + continued + routedBack
     }
@@ -1260,7 +1271,8 @@ extension AppState {
         userResumes[provider] = nil
         AgentPauseGate.write(
             .init(sessions: sessions, reason: "paused by you", pausedAt: existing?.pausedAt ?? Date(),
-                  resumeAt: pendingResetRecovery[provider]?.resetDate, holdsNewTurns: true, manual: true),
+                  resumeAt: pendingResetRecovery[provider]?.resetDate, holdsNewTurns: true, manual: true,
+                  chosen: existing?.chosen),
             for: provider
         )
         refreshPauseStatus(provider)
@@ -1270,9 +1282,19 @@ extension AppState {
     /// The user's own override: paused sessions continue now, and no new
     /// pause starts for this provider until the limiting reset has passed.
     func resumePausedAgentsNow(_ provider: AIProviderType) async {
-        let resumed = await releasePausedAgents(provider)
-        pauseOverrideUntil[provider] = pendingResetRecovery[provider]?.resetDate ?? Date().addingTimeInterval(30 * 60)
+        // Resuming sessions paused one at a time overrides no limit.
+        let chosenOnly = AgentPauseGate.read(provider)?.holdsOnlyChosenSessions == true
+        let resumed = await releasePausedAgents(provider, keepingChosen: false)
+        if !chosenOnly { notePauseOverride(provider) }
         failoverEvents.record(provider, "Resumed \(resumed) paused session(s) at the user's request.")
+    }
+
+    /// The user resumed every session a pause held: no new pause starts for
+    /// the provider until the limiting reset has passed, or for half an
+    /// hour when none is known. Set by `resumePausedAgentsNow` and by
+    /// `resumeSession` for the last held session.
+    func notePauseOverride(_ provider: AIProviderType) {
+        pauseOverrideUntil[provider] = pendingResetRecovery[provider]?.resetDate ?? Date().addingTimeInterval(30 * 60)
     }
 
     /// What a pause at a limit holds (`pauseScope`).
@@ -1387,12 +1409,16 @@ extension AppState {
         if pause.holdsNewTurns == true && scope.holdsNewTurns { return }
         requestPauseMoves(provider, scope.moves)
         let held = Set(scope.held)
-        let sessions = pause.holdsNewTurns == true ? held : Set(pause.sessions).intersection(held)
+        // Sessions the user paused one at a time stay held whatever their
+        // account's room (`AgentPauseGate.PauseFile.chosen`).
+        let chosen = Set(pause.chosenListed)
+        let sessions = (pause.holdsNewTurns == true ? held : Set(pause.sessions).intersection(held)).union(chosen)
         let released = pause.holdsNewTurns == true ? [] : Set(pause.sessions).subtracting(sessions)
-        guard !sessions.isEmpty || scope.holdsNewTurns else {
+        guard !sessions.subtracting(chosen).isEmpty || scope.holdsNewTurns else {
             let count = endPause(provider)
             suspensionContexts[provider] = nil
-            failoverEvents.record(provider, "The account each paused session runs on has room again; resumed \(count) session(s) and ended the pause.")
+            failoverEvents.record(provider, "The account each paused session runs on has room again; resumed \(count) session(s) and ended the pause."
+                                  + (chosen.isEmpty ? "" : " The \(chosen.count) session(s) you paused stay paused until you play them."))
             return
         }
         guard sessions != Set(pause.sessions) || pause.holdsNewTurns != scope.holdsNewTurns else { return }
@@ -1752,8 +1778,9 @@ extension AppState {
     ) async {
         guard hasPausedAgents(provider) || suspensionContexts[provider] != nil else { return }
         // An account hold ends when its own account resets
-        // (`holdSessionsForImminentReset`), not on another's capacity.
-        if AgentPauseGate.read(provider)?.account != nil { return }
+        // (`holdSessionsForImminentReset`), not on another's capacity, and
+        // sessions the user paused one at a time when the user plays them.
+        if let pause = AgentPauseGate.read(provider), pause.account != nil || pause.holdsOnlyChosenSessions { return }
         if resumesAsCapacityAllows(provider), AgentPauseGate.isActive(provider) {
             await admitPausedSessions(provider, planner: planner)
             return

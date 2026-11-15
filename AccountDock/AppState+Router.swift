@@ -223,15 +223,19 @@ extension AppState {
             }
             .keys.sorted()
         let continuation = "on \(target.displayName) \(model)"
+        // Sessions the user paused one at a time stay held through a route
+        // (`AgentPauseGate.narrow` keeps them).
+        let chosen = existing?.chosenListed ?? []
         if large.isEmpty {
-            guard AgentPauseGate.isActive(provider) else { return }
+            guard AgentPauseGate.isActive(provider), existing?.holdsOnlyChosenSessions != true else { return }
             let held = endPause(provider, continuation: continuation)
             failoverEvents.record(provider, "\(target.displayName) has capacity; \(held) paused session(s) continue on it.")
             return
         }
-        guard existing?.sessions.sorted() != large || existing?.holdsListedNewTurns != true
+        guard existing?.sessions.sorted() != Array(Set(large).union(chosen)).sorted() || existing?.holdsListedNewTurns != true
             || existing?.holdsNewTurns == true else { return }
-        let released = Set(existing?.sessions ?? []).union(AgentPauseGate.waitingSessions(provider)).subtracting(large)
+        let released = Set(existing?.sessions ?? []).union(AgentPauseGate.waitingSessions(provider))
+            .subtracting(large).subtracting(chosen)
         AgentPauseGate.narrow(provider, to: large,
                               reason: "their context is over \(target.displayName)'s \(cap / 1000)k-token limit",
                               continuation: continuation)

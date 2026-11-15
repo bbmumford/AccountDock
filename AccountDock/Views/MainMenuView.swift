@@ -92,11 +92,12 @@ struct MainMenuView: View {
     @State private var chromeHeight: CGFloat = 180
 
     enum Tab: String, CaseIterable {
-        case usage, costs, accounts
+        case usage, sessions, costs, accounts
 
         var localizedTitle: LocalizedStringKey {
             switch self {
             case .usage: "Usage"
+            case .sessions: "Sessions"
             case .costs: "Costs"
             case .accounts: "Accounts"
             }
@@ -105,6 +106,7 @@ struct MainMenuView: View {
         var iconName: String {
             switch self {
             case .usage: "chart.bar.fill"
+            case .sessions: "rectangle.stack"
             case .costs: "dollarsign.circle.fill"
             case .accounts: "person.2.fill"
             }
@@ -126,6 +128,8 @@ struct MainMenuView: View {
                 switch selectedTab {
                 case .usage:
                     UsageDashboardView()
+                case .sessions:
+                    SessionsView()
                 case .costs:
                     CostDetailView()
                 case .accounts:
@@ -167,6 +171,10 @@ struct MainMenuView: View {
         }
         .onPreferenceChange(ChromeHeightKey.self) { value in
             if value > 0 { chromeHeight = value }
+        }
+        // The pause banner's link to the Sessions tab.
+        .onReceive(NotificationCenter.default.publisher(for: .accountdockShowSessions)) { _ in
+            withAnimation(.easeInOut(duration: 0.15)) { selectedTab = .sessions }
         }
         // Explicitly observe popoverHeight so SwiftUI tracks the computed
         // value as a dependency of the .frame modifier above. Without this,
@@ -274,7 +282,7 @@ struct MainMenuView: View {
                 }
             }
         }
-        .frame(width: 260, height: 44)
+        .frame(width: 340, height: 44)
         .frame(maxWidth: .infinity)
         .padding(.vertical, 4)
     }

@@ -106,9 +106,14 @@ struct FailoverSettingsView: View {
                     .padding(.leading, 20)
                     .help("Paused sessions continue a few at a time as accounts reset, each on an account where its forecast use fits before that account's window resets, instead of all at once on the first account that resets. A session's forecast is its average use in the hour before it paused, so one doing most of the work goes first and small ones fill what is left. A resumed session is paused again if its account nears its limit anyway.")
             }
-            // Pausing by hand works whether or not pausing is automatic.
-            if provider.capabilities.pauseGate != nil {
-                pauseControls(provider)
+            // Pausing, playing, pinning and moving sessions by hand happen
+            // on the main window's Sessions tab.
+            if provider.capabilities.pauseGate != nil || provider.capabilities.sessionIsolation != nil {
+                Label("Manage sessions on the Sessions page", systemImage: "rectangle.stack")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 20)
+                    .help("The Sessions tab of AccountDock's menu lists every running session, with its account and state, and pauses, plays, pins and moves each one, or pauses and resumes them all.")
             }
 
             if provider.capabilities.requestRouter != nil {
@@ -231,39 +236,6 @@ struct FailoverSettingsView: View {
         }
     }
 
-    /// "Pinned sessions": every session pinned to a subscription
-    /// (`AppState.sessionPins`), with the account it is pinned to and a
-    /// button unpinning it.
-    @ViewBuilder
-    private func pinnedSessions(_ provider: AIProviderType) -> some View {
-        let rows = appState.pinnedSessionRows(provider)
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Pinned sessions")
-                .font(.subheadline)
-            if rows.isEmpty {
-                Text("None. Pin a session from the lock beside it in an account card's session list; a session opened from a card's session button is pinned there unless Keep here is unchecked.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            ForEach(rows, id: \.session) { row in
-                HStack(alignment: .firstTextBaseline) {
-                    Image(systemName: "lock.fill")
-                        .foregroundStyle(.secondary)
-                    Text(verbatim: row.label)
-                        .font(.caption)
-                    Spacer()
-                    Text(verbatim: row.account)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Button("Unpin") { appState.unpinSession(row.session) }
-                        .controlSize(.small)
-                }
-            }
-        }
-        .help("Failover, pacing, rebalancing and the model fallback never move a pinned session; at its account's limit it stays and is refused until you unpin it or switch its model.")
-    }
-
     private func switchMethodHelp(_ mode: FailoverSwitchMethod, provider: AIProviderType) -> String {
         switch mode {
         case .safeRestart:
@@ -288,37 +260,6 @@ struct FailoverSettingsView: View {
                 Text("\(Int(threshold.wrappedValue))%")
                     .font(.body.monospacedDigit())
                     .frame(width: 42, alignment: .trailing)
-            }
-            .padding(.leading, 20)
-        }
-    }
-
-    /// Pausing on demand, so work can move onto accounts at or near their
-    /// limits, or off one failover excludes, without a request reaching a
-    /// limit first.
-    @ViewBuilder
-    private func pauseControls(_ provider: AIProviderType) -> some View {
-        if let status = appState.agentPauseStatus[provider] {
-            LabeledContent {
-                Button("Resume now") {
-                    Task { await appState.resumePausedAgentsNow(provider) }
-                }
-                .help("Let the paused sessions continue now. They may then reach the usage limit.")
-            } label: {
-                Label(
-                    "\(status.manual ? "Paused by you" : "Paused at the limit") since \(UsageFormat.clock(status.since))",
-                    systemImage: "pause.circle.fill"
-                )
-                .foregroundStyle(.orange)
-            }
-            .padding(.leading, 20)
-        } else {
-            LabeledContent {
-                Button("Pause sessions now") { appState.pauseSessionsNow(provider) }
-                    .help("Every session waits at its next tool call and new turns wait at their start. Use it before switching to an account at or near its limit. Sessions continue when you resume them or when an account in the failover order has capacity; an active account that failover excludes does not resume them.")
-            } label: {
-                Text("Hold sessions before switching accounts")
-                    .foregroundStyle(.secondary)
             }
             .padding(.leading, 20)
         }
@@ -438,18 +379,13 @@ struct FailoverSettingsView: View {
                 ? "New sessions go to the accounts with the most unused rate for the rest of their 5-hour window. A session keeps its account while its prompt cache lasts. When an account's sessions would reach its limit and stay there for longer than their cache lasts, some of them move to accounts that can carry them, at their next turn. Otherwise they stay; a session that reaches the limit with the reset at most five minutes away, before its cache expires, waits for it on its account. A session idle past its cache's lifetime is placed again at its next turn, as nothing is lost by moving it."
                 : "New sessions go to the accounts with the most unused rate for the rest of their 5-hour window, in proportion to it. A session keeps its account until it exits.")
             if provider.capabilities.sessionIsolation != nil && !policy.usesRouter(for: provider) {
-                HStack {
-                    RebalanceButton(provider: provider)
-                    Toggle("Rebalance automatically", isOn: Binding(
-                        get: { store.policy(for: provider).rebalanceAutomatically },
-                        set: { on in store.update(provider) { $0.rebalanceAutomatically = on } }
-                    ))
-                    .help("Makes the same moves without being asked, at most once every \(Int(AppState.balanceMoveInterval / 60)) minutes, and only when the first account then runs out more than an hour later, so prompt caches are not rewritten for little.")
-                }
+                Toggle("Rebalance automatically", isOn: Binding(
+                    get: { store.policy(for: provider).rebalanceAutomatically },
+                    set: { on in store.update(provider) { $0.rebalanceAutomatically = on } }
+                ))
+                .help("Makes the moves the Sessions page's rebalance offers without being asked, at most once every \(Int(AppState.balanceMoveInterval / 60)) minutes, and only when the first account then runs out more than an hour later, so prompt caches are not rewritten for little.")
                 .padding(.leading, 20)
                 .disabled(!appState.rebalanceAvailable(provider))
-                pinnedSessions(provider)
-                    .padding(.leading, 20)
                 Toggle("Resume sessions left waiting at a limit once their slot has room", isOn: Binding(
                     get: { store.policy(for: provider).resumeSessionsLeftWaiting },
                     set: { on in store.update(provider) { $0.resumeSessionsLeftWaiting = on } }

@@ -23,9 +23,9 @@ private struct StatWithTooltip<Content: View>: View {
 /// An account card's session count, with how many of its sessions are
 /// pinned (`AppState.sessionPins`) and how many were refused at a usage
 /// limit. Clicking it lists the sessions in a popover, one row each
-/// (`AppState.sessionSummary`) with a lock that pins the session to this
-/// subscription or unpins it; resting the pointer on it shows the same list
-/// as text.
+/// (`AppState.sessionSummary`) with the Sessions page's controls (pin,
+/// pause or play, move); resting the pointer on it shows the same list as
+/// text.
 private struct SessionCountLabel: View {
     @EnvironmentObject private var appState: AppState
     let provider: AIProviderType
@@ -71,11 +71,12 @@ private struct SessionCountLabel: View {
     }
 }
 
-/// One row per session of an account card: the session, a lock pinning it
-/// to its subscription (`AppState.pinSession`), and for a pinned session
-/// refused at its account's limit, the ways out: "Unpin and move" and
-/// "Switch model". A session on the shared sign-in cannot be pinned; its
-/// row offers its restart into a slot of its own first.
+/// One row per session of an account card: the session and the icon
+/// controls the Sessions page shows for it (`SessionControlButtons`): the
+/// lock pinning it to its subscription, or for a session on the shared
+/// sign-in its restart into a slot of its own; pause or play; and its move
+/// menu, which for a pinned session refused at its account's limit is the
+/// way out beside switching its model.
 private struct SessionPinList: View {
     @EnvironmentObject private var appState: AppState
     let provider: AIProviderType
@@ -88,61 +89,41 @@ private struct SessionPinList: View {
             }
         }
         .padding(8)
-        .frame(minWidth: 260, maxWidth: 480, alignment: .leading)
+        .frame(minWidth: 300, maxWidth: 520, alignment: .leading)
     }
 
     @ViewBuilder
     private func row(_ id: String) -> some View {
         let pinned = appState.sessionPins.isPinned(id)
         let inSlot = appState.slotAccount(ofSession: id, provider: provider) != nil
+        let ungated = appState.sessionsWithoutGate(provider).contains { $0.sessionID == id }
         VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Button {
-                    if pinned { appState.unpinSession(id) } else { appState.pinSession(id) }
-                } label: {
-                    Image(systemName: pinned ? "lock.fill" : "lock.open")
-                        .foregroundStyle(pinned ? Color.accentColor : Color.secondary)
-                }
-                .buttonStyle(.borderless)
-                .disabled(!pinned && !inSlot)
-                .help(pinned
-                    ? "Pinned: failover, pacing, rebalancing and the model fallback leave it on this subscription. Click to unpin."
-                    : inSlot ? "Pin this session to its subscription, so nothing automatic moves it."
-                    : "It runs on the shared sign-in and moves with the active account, so it cannot be pinned.")
+            HStack(alignment: .center, spacing: 8) {
                 Text(verbatim: appState.sessionSummary([id]))
                     .font(.caption)
                     .fixedSize(horizontal: false, vertical: true)
-                if let held = appState.pausedSessions(provider).first(where: { $0.sessionID == id }) {
-                    Button(held.isWaiting ? "Resume" : "Let it run") { appState.resumeSession(held) }
-                        .controlSize(.small)
-                        .help(held.isWaiting
-                            ? "It is waiting at the pause. Let it continue while the others stay paused."
-                            : "The pause would stop it at its next tool call or turn. Let it keep running while the others stay paused.")
-                }
+                Spacer(minLength: 4)
+                SessionControlButtons(provider: provider, session: id,
+                                      state: appState.sessionRowState(provider, session: id),
+                                      pinned: pinned, inSlot: inSlot,
+                                      gated: provider.capabilities.pauseGate != nil && !ungated)
             }
             if pinned, appState.sessionRefusals[id] != nil {
                 HStack(spacing: 8) {
                     Text("pinned · refused at limit")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.red)
-                    Button("Unpin and move") { Task { await appState.unpinAndMove(id) } }
-                        .controlSize(.small)
                     if let choice = appState.switchModelChoice(for: id, provider: provider) {
-                        Button("Switch model") { Task { await appState.switchSessionModel(id) } }
-                            .controlSize(.small)
-                            .help("Switches this session to \(choice.label) from its terminal once its turn has ended.")
+                        Button {
+                            Task { await appState.switchSessionModel(id) }
+                        } label: {
+                            Image(systemName: "cpu")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Switch model: changes this session to \(choice.label) from its terminal once its turn has ended. The move menu unpins and moves it instead.")
+                        .accessibilityLabel("Switch model to \(choice.label)")
                     }
                 }
-                .padding(.leading, 22)
-            } else if !pinned, !inSlot, let session = appState.unisolatedSessions[provider]?.first(where: { $0.sessionID == id }) {
-                let blocker = AppState.restartBlocker(session, terminal: appState.unisolatedTerminals[id],
-                                                      background: appState.backgroundSessionStates[id],
-                                                      refused: appState.sessionRefusals[id] != nil)
-                Button("Restart in its own slot first") { Task { await appState.restartInOwnSlot(id) } }
-                    .controlSize(.small)
-                    .disabled(blocker != nil)
-                    .help(blocker ?? "Restarts it in a slot of its own, which can then be pinned.")
-                    .padding(.leading, 22)
             }
         }
     }

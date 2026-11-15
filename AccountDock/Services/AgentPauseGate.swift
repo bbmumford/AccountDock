@@ -112,6 +112,23 @@ enum AgentPauseGate {
         /// The listed sessions also wait at the start of a new turn, while
         /// other sessions' new turns go on (`holdsNewTurns` holds them all).
         var holdsListedNewTurns: Bool?
+        /// Sessions the user paused one at a time (`pauseOne`), also listed
+        /// in `sessions`. Whatever ends the pause around them, they stay
+        /// held until the user plays them or resumes all
+        /// (`narrowToChosen`).
+        var chosen: [String]?
+
+        /// A pause the user started for sessions chosen one at a time
+        /// (`pauseOne`): it holds only its listed sessions, and only the
+        /// user ends it, so `AppState`'s capacity checks leave it alone.
+        var holdsOnlyChosenSessions: Bool {
+            manual == true && holdsNewTurns != true && account == nil
+        }
+
+        /// The sessions in `chosen` still listed.
+        var chosenListed: [String] {
+            (chosen ?? []).filter(sessions.contains)
+        }
     }
 
     static func read(_ provider: AIProviderType, directory: URL = pauseDirectory) -> PauseFile? {
@@ -170,7 +187,8 @@ enum AgentPauseGate {
             .prefix(160).map(Character.init))
     }
 
-    /// Keeps the pause on for `sessions` only, each held at its next tool
+    /// Keeps the pause on for `sessions` only, and the sessions the user
+    /// paused one at a time (`PauseFile.chosen`), each held at its next tool
     /// call and new turn. Every other waiting session continues
     /// `continuation`, which the gate tells it.
     static func narrow(
@@ -187,7 +205,7 @@ enum AgentPauseGate {
         let existing = read(provider, directory: directory)
         if existing != nil { note() }
         var pause = existing ?? PauseFile(sessions: [], reason: reason, pausedAt: Date(), resumeAt: nil)
-        pause.sessions = sessions
+        pause.sessions = sessions + (existing?.chosenListed ?? []).filter { !sessions.contains($0) }
         pause.reason = reason
         pause.holdsNewTurns = false
         pause.holdsListedNewTurns = true
@@ -254,6 +272,91 @@ enum AgentPauseGate {
             pause.sessions.append(session)
             write(pause, for: provider, directory: directory)
         }
+    }
+
+    /// Holds one session at the user's request. With no pause in effect it
+    /// writes a pause of the user's that lists only `session`: the gate
+    /// holds it at its next tool call and new turn, and lets every other
+    /// session's tool calls and turns pass (`holdsNewTurns` false,
+    /// `holdsListedNewTurns` true). With a pause in effect, such as one at
+    /// a limit holding the sessions of one account, the session is held by
+    /// it again (`hold`). Either way it is marked `chosen`, so it stays held
+    /// when that pause ends (`narrowToChosen`). Returns whether a new pause
+    /// was written.
+    @discardableResult
+    static func pauseOne(_ provider: AIProviderType, session: String, at now: Date = Date(),
+                         directory: URL = pauseDirectory) -> Bool {
+        guard key(provider) != nil else { return false }
+        guard read(provider, directory: directory) == nil else {
+            hold(provider, session: session, directory: directory)
+            if var pause = read(provider, directory: directory), pause.chosen?.contains(session) != true {
+                pause.chosen = (pause.chosen ?? []) + [session]
+                write(pause, for: provider, directory: directory)
+            }
+            return false
+        }
+        write(PauseFile(sessions: [session], reason: "paused by you", pausedAt: now, resumeAt: nil,
+                        holdsNewTurns: false, manual: true, holdsListedNewTurns: true, chosen: [session]),
+              for: provider, directory: directory)
+        return true
+    }
+
+    /// Ends a pause except for the sessions the user paused one at a time
+    /// (`PauseFile.chosen`): the pause becomes the user's own, listing only
+    /// them, as `pauseOne` writes it, and every other session continues
+    /// `continuation`. A pause holding only such sessions is left as it is.
+    /// Returns whether a pause stays in effect; with none chosen, nothing
+    /// is written and the caller releases the pause. Read by
+    /// `AppState.endPause`, through which every pause ends.
+    static func narrowToChosen(_ provider: AIProviderType, continuation: String?,
+                               directory: URL = pauseDirectory) -> Bool {
+        guard let pause = read(provider, directory: directory) else { return false }
+        if pause.holdsOnlyChosenSessions { return true }
+        let chosen = pause.chosenListed
+        guard !chosen.isEmpty else { return false }
+        if let continuation, let continued = continuationURL(provider, directory: directory) {
+            try? Data(sanitizedForScript(continuation).utf8).write(to: continued, options: .atomic)
+        }
+        write(PauseFile(sessions: chosen, reason: "paused by you", pausedAt: pause.pausedAt, resumeAt: nil,
+                        holdsNewTurns: false, manual: true, holdsListedNewTurns: true, chosen: chosen),
+              for: provider, directory: directory)
+        return true
+    }
+
+    /// The sessions the provider's pause holds now: those it lists, those
+    /// waiting in the gate and, while it holds new turns, every one of
+    /// `running`, less those the user resumed. Empty with no pause.
+    /// `AppState.pausedSessions` lists them and `playOne` ends a pause
+    /// left holding none.
+    static func heldSessions(_ provider: AIProviderType, running: Set<String>,
+                             directory: URL = pauseDirectory) -> Set<String> {
+        guard let pause = read(provider, directory: directory) else { return [] }
+        let held = Set(pause.sessions).union(waitingSessions(provider, directory: directory))
+        return (pause.holdsNewTurns == true ? held.union(running) : held)
+            .subtracting(resumedSessions(provider, directory: directory))
+    }
+
+    /// Lets one session go on while the pause holds the others (`resume`)
+    /// and drops it from the pause's list. When the pause then holds no
+    /// session that is running or waiting in the gate, it is released with
+    /// `continuation`, so no pause is left in effect that holds nothing.
+    /// Returns whether the pause was released.
+    @discardableResult
+    static func playOne(_ provider: AIProviderType, session: String, running: Set<String>,
+                        continuation: String? = nil, directory: URL = pauseDirectory) -> Bool {
+        guard var pause = read(provider, directory: directory) else { return false }
+        resume(provider, session: session, directory: directory)
+        if pause.sessions.contains(session) || pause.chosen?.contains(session) == true {
+            pause.sessions.removeAll { $0 == session }
+            pause.chosen?.removeAll { $0 == session }
+            write(pause, for: provider, directory: directory)
+        }
+        // A listed session whose process is gone holds nothing, though the
+        // list keeps it until its record shows it ended.
+        let present = running.union(waitingSessions(provider, directory: directory))
+        guard heldSessions(provider, running: running, directory: directory).isDisjoint(with: present) else { return false }
+        release(provider, continuation: continuation, directory: directory)
+        return true
     }
 
     /// Ends the user's resumes of `sessions`, so the pause holds them again.

@@ -1,8 +1,8 @@
 import Foundation
 
 /// Pinning a session to its subscription (`SessionPins`): from an account
-/// card's session list, a tile's session button, the requests interface and
-/// Settings → Failover, and the one-click ways out for a pinned session its
+/// card's session list, the Sessions page, a tile's session button and the
+/// requests interface, and the one-click ways out for a pinned session its
 /// account refuses at the limit.
 extension AppState {
     /// The account serving the one-session slot `session` reads; nil when
@@ -19,6 +19,7 @@ extension AppState {
     @discardableResult
     func pinSession(_ sessionID: String, now: Date = Date()) -> SessionPins.Outcome {
         guard let (provider, session) = liveSession(sessionID) else { return .notInSlot }
+        movePins[sessionID] = nil
         let outcome = sessionPins.pin(sessionID, slotAccount: slotAccount(ofSession: sessionID, provider: provider),
                                       provider: provider, at: now)
         if case .pinned(let id) = outcome {
@@ -33,6 +34,7 @@ extension AppState {
     @discardableResult
     func unpinSession(_ sessionID: String) -> SessionPins.Outcome {
         let provider = sessionPins.sessions[sessionID].flatMap { AIProviderType(rawValue: $0.provider) }
+        movePins[sessionID] = nil
         let outcome = sessionPins.unpin(sessionID)
         if case .unpinned = outcome {
             sessionPins.save()
@@ -47,6 +49,7 @@ extension AppState {
     /// sessions whose record is gone. Run by `serveSessionSlots` with the
     /// session reading each slot.
     func maintainPins(_ provider: AIProviderType, sessionsBySlot: [String: String], now: Date) {
+        settleMovePins(provider, now: now)
         guard !sessionPins.sessions.isEmpty || !sessionPins.slots.isEmpty else { return }
         let before = sessionPins
         for session in sessionPins.adopt(sessionsBySlot: sessionsBySlot) {
@@ -78,20 +81,19 @@ extension AppState {
                 < (plannedUsage($1, now: now, model: model)?.sevenDay?.utilization ?? 100) }
     }
 
-    /// Unpins a session and moves its slot to the account with most room
-    /// for its model, through `requestedSlotMoves`. Returns whether it moved.
+    /// Unpins a session and moves it to the account with most room for its
+    /// model, as any move by hand (`moveSession`), which pins it there
+    /// unless balancing would place it there itself. Returns whether it
+    /// moved.
     @discardableResult
     func unpinAndMove(_ sessionID: String, now: Date = Date()) async -> Bool {
         guard let (provider, _) = liveSession(sessionID) else { return false }
         unpinSession(sessionID)
-        let current = slotAccount(ofSession: sessionID, provider: provider)
-        guard let target = moveDestination(provider, current: current, model: sessionModel(sessionID, now: now), now: now) else {
-            failoverEvents.record(provider, "No other account has allowance left for session \(sessionID.prefix(8))'s model; it stays where it is.")
-            return false
+        let outcome = await moveSession(sessionID, to: nil, now: now)
+        if !outcome.ok {
+            failoverEvents.record(provider, "Session \(sessionID.prefix(8)) stays where it is: \(outcome.detail)")
         }
-        requestedSlotMoves[sessionID] = target.id
-        await maintainSessionSlots(now: now)
-        return slotAccount(ofSession: sessionID, provider: provider) == target.id
+        return outcome.ok
     }
 
     /// The model "Switch model" changes a session to: the policy's

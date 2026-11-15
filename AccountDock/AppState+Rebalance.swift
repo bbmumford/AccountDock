@@ -67,21 +67,7 @@ extension AppState {
     /// The plan for the provider's running slot sessions now.
     func rebalancePreview(_ provider: AIProviderType, now: Date = Date()) -> RebalancePreview {
         guard rebalanceAvailable(provider), let slots = SessionSlots(provider) else { return RebalancePreview() }
-        let policy = failoverConfig.policy(for: provider)
-        let planner = FailoverPlanner(settings: plannerSettings(provider))
-        let candidates = accounts.filter {
-            $0.provider == provider && !policy.excludedAccountIDs.contains($0.id) && !needsSignIn($0)
-        }
-        var pacerAccounts: [SessionPacer.Account] = []
-        var destinations = Set<UUID>()
-        for account in candidates {
-            let state = quotaState(for: account, now: now, wholeAllowance: true)
-            pacerAccounts.append(pacerAccount(account.id, state: state, weight: 1, planner: planner, now: now))
-            switch planner.servingVerdict(state, now: now, lead: 0) {
-            case .canServe, .nearLimit: destinations.insert(account.id)
-            case .atLimit, .ineligible: break
-            }
-        }
+        let (pacerAccounts, destinations) = rebalanceAccounts(provider, now: now)
         let pacer = SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
         let sessions = slotRebalanceSessions(provider, slots: slots, now: now)
         // The sessions on the shared sign-in are none of these and never
@@ -107,6 +93,28 @@ extension AppState {
             windowMoves: plan.windowUses.count,
             unblockedMoves: plan.unblocked.count
         )
+    }
+
+    /// The provider's accounts as rebalancing weighs them: each one failover
+    /// includes and that needs no sign-in, judged by its whole allowance,
+    /// and of those the destinations, which can serve or are near their
+    /// limit. Read by `rebalancePreview` and by `balancingChoice`, which
+    /// asks where balancing would place one session.
+    func rebalanceAccounts(_ provider: AIProviderType, now: Date) -> (accounts: [SessionPacer.Account], destinations: Set<UUID>) {
+        let policy = failoverConfig.policy(for: provider)
+        let planner = FailoverPlanner(settings: plannerSettings(provider))
+        var pacerAccounts: [SessionPacer.Account] = []
+        var destinations = Set<UUID>()
+        for account in accounts
+        where account.provider == provider && !policy.excludedAccountIDs.contains(account.id) && !needsSignIn(account) {
+            let state = quotaState(for: account, now: now, wholeAllowance: true)
+            pacerAccounts.append(pacerAccount(account.id, state: state, weight: 1, planner: planner, now: now))
+            switch planner.servingVerdict(state, now: now, lead: 0) {
+            case .canServe, .nearLimit: destinations.insert(account.id)
+            case .atLimit, .ineligible: break
+            }
+        }
+        return (pacerAccounts, destinations)
     }
 
     /// The provider's running slot sessions as `SessionPacer.rebalance` and

@@ -59,23 +59,8 @@ extension AppState {
             if restart.requested { requestedSlotMoves[restart.session] = restart.to }
             return
         }
-        let lifetime: TimeInterval = readsLiveCredential(destination) ? 60 : 2 * 60 * 60
-        guard let credential = await slots.isolation.currentSlotCredential(for: destination, minimumLifetime: lifetime,
-                                                                            from: self) else {
-            restartLog.warning("No credential of \(messageName(destination)) for a restarted session")
-            return
-        }
+        guard await prepareResumeSlot(restart.session, slots: slots, on: destination, reason: "applySlotRestarts") else { return }
         let to = restart.to
-        let sessionID = restart.session
-        let ready = await Task.detached(priority: .userInitiated) { () -> Bool in
-            guard slots.makeSpare(for: to, credential: credential, reason: "applySlotRestarts") else { return false }
-            slots.addResume(session: sessionID, path: slots.directory(for: to).path)
-            return true
-        }.value
-        guard ready else {
-            restartLog.error("No spare slot of \(messageName(destination)) for a restarted session")
-            return
-        }
         slotRestartResumes[restart.session] = SlotRestartResume(provider: provider, account: to, at: now)
         let outcome = await SessionTerminalActions.restartInOwnSlot(session, isolation: slots.isolation,
                                                                     terminal: sessionTerminal)
@@ -93,6 +78,28 @@ extension AppState {
            slotRestartsNoted.insert(restart.session).inserted {
             failoverEvents.record(provider, event)
         }
+    }
+
+    /// Fills a spare slot of `destination` and names it in the resume file
+    /// for `sessionID`, so the launcher starts the session's resumed run
+    /// there. Used before a restart that moves a session: by
+    /// `applySlotRestart`, and by `restartInSlot` for a session on the
+    /// shared sign-in. Returns whether the slot is ready.
+    func prepareResumeSlot(_ sessionID: String, slots: SessionSlots, on destination: Account, reason: String) async -> Bool {
+        let lifetime: TimeInterval = readsLiveCredential(destination) ? 60 : 2 * 60 * 60
+        guard let credential = await slots.isolation.currentSlotCredential(for: destination, minimumLifetime: lifetime,
+                                                                            from: self) else {
+            restartLog.warning("No credential of \(messageName(destination)) for a restarted session")
+            return false
+        }
+        let to = destination.id
+        let ready = await Task.detached(priority: .userInitiated) { () -> Bool in
+            guard slots.makeSpare(for: to, credential: credential, reason: reason) else { return false }
+            slots.addResume(session: sessionID, path: slots.directory(for: to).path)
+            return true
+        }.value
+        if !ready { restartLog.error("No spare slot of \(messageName(destination)) for a restarted session") }
+        return ready
     }
 
     /// The event for a restart that was not made, once per session; nil for
