@@ -199,8 +199,8 @@ renews each account and rewrites its slots.
   hour, so no session is left on a slot nothing renews.
 - **Codex** and **Kimi Code** slots keep session history in the CLI's usual
   home. A session opened from an account card always runs in one, and every
-  terminal session does once that provider's sessions are distributed across
-  accounts; Settings → Failover offers that switch for Claude Code only. A
+  terminal session does once **Serve sessions from several accounts at once**
+  is on for that provider in Settings → Failover. A
   Codex session moves by restarting: once it is idle in agterm and unpinned,
   AccountDock ends it and resumes it with `codex resume` on the new account.
 

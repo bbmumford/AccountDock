@@ -1,5 +1,29 @@
 # AccountDock release notes
 
+## 1.4.1
+
+- A Sessions tab in the menu lists every running session with its account
+  and state, and pauses, plays, pins and moves each one; Pause all, Resume all
+  and Rebalance are always offered. A session moved by hand is pinned where it
+  lands unless balancing would put it there itself.
+- Pausing judges each session by the account it runs on: a session on an
+  account with room keeps running, a session whose account nears its limit
+  moves to one with room before it is paused, and each held session continues
+  as soon as its own account has room again.
+- Sessions on an account that can no longer serve them are spread across every
+  account with room, and Rebalance moves them even when no account can carry
+  a session for a full hour. Small plans' 5-hour windows are spent when the
+  larger accounts would run out first.
+- A session the CLI left waiting for a reset continues once AccountDock has
+  moved its slot to an account with room.
+- The pause banner on the Usage tab is one line, with Resume all and a link
+  to the Sessions tab.
+- Codex and Kimi Code sessions can be served from several accounts at once
+  from Settings → Failover.
+- Kimi Code sessions are recorded by their own process, and a session record
+  whose process ID was reused after a restart no longer counts as running.
+- The window fits the Sessions tab's content.
+
 ## 1.4.0
 
 Every session in a credential slot of its own, for Claude Code, Codex and

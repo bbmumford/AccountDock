@@ -129,6 +129,11 @@ struct FailoverSettingsView: View {
             } else if provider.capabilities.requestHold?.bridgedProtocol != nil, !RouteTarget.available(for: provider).isEmpty {
                 bridgeControls(provider, policy: policy)
             }
+            // A provider AccountDock does not route serves several accounts
+            // through credential slots; Codex has its bridge controls too.
+            if provider.capabilities.requestRouter == nil, provider.capabilities.sessionIsolation != nil {
+                slotControls(provider, policy: policy)
+            }
 
             Toggle("Intelligent long-window balancing", isOn: binding(provider, \.intelligentBalancingEnabled))
                 .help("Spends included accounts in the order their allowances would otherwise expire: an account whose weekly or monthly limit resets sooner, or whose remaining allowance its 5-hour cap could no longer drain in time, is used first. Destinations must be below their thresholds on both windows. An allowance too small to carry the sessions on the shared sign-in is not switched to; with pacing on, the lightest idle session in its own slot moves there to use it before it resets, when that session's use fits in what is left and is worth the cache it rebuilds there, at most once every \(Int(AppState.balanceMoveInterval / 60)) minutes per account.")
@@ -338,6 +343,34 @@ struct FailoverSettingsView: View {
             Text(routerError)
                 .font(.caption)
                 .foregroundStyle(.orange)
+        }
+    }
+
+    /// Serving a provider's sessions from several accounts through credential
+    /// slots, for a provider whose CLI AccountDock does not route: each new
+    /// session starts in a slot of its own on an account balancing picks,
+    /// and pacing and rebalancing then move sessions between accounts.
+    @ViewBuilder
+    private func slotControls(_ provider: AIProviderType, policy: ProviderFailoverPolicy) -> some View {
+        let cli = provider.rawValue
+        Toggle("Serve sessions from several accounts at once", isOn: Binding(
+            get: { store.policy(for: provider).distributeSessions },
+            set: { on in store.update(provider) { $0.distributeSessions = on } }
+        ))
+        .help("Each \(cli) session started from a terminal opened afterwards runs in a credential slot of its own on an account picked from those with room, so several accounts' windows are used at the same time. Sessions started before this was turned on use the active account until they are restarted.")
+        if policy.distributeSessions {
+            Toggle("Pace sessions to each account's window", isOn: Binding(
+                get: { store.policy(for: provider).paceSessions },
+                set: { on in store.update(provider) { $0.paceSessions = on } }
+            ))
+            .padding(.leading, 20)
+            .help("New sessions go to the accounts with the most unused room, in proportion to it, and sessions move off an account that would run out well before the others.")
+            Toggle("Rebalance automatically", isOn: Binding(
+                get: { store.policy(for: provider).rebalanceAutomatically },
+                set: { on in store.update(provider) { $0.rebalanceAutomatically = on } }
+            ))
+            .padding(.leading, 20)
+            .help("Moves sessions between accounts on its own when that keeps every account running longer, as the Rebalance button on the Sessions page would.")
         }
     }
 
