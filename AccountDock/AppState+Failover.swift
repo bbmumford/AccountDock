@@ -113,19 +113,30 @@ extension AppState {
         !monitoring && !credentialWorkBusy && !loggingIn
     }
 
-    /// Keeps the pause hook installed exactly for the providers that pause
-    /// agents. Reading the hook files is cheap; it is still limited to once
-    /// every ten minutes because policy changes are rare.
+    /// Keeps the pause hook installed for every provider that has one
+    /// (`gatedProviders`), and the request hold for the providers that pause
+    /// agents automatically. Reading the hook files is cheap; it is still
+    /// limited to once every ten minutes because policy changes are rare.
     func synchronizePauseGateIfDue(now: Date = Date()) {
         if let last = pauseGateSynchronizedAt, now.timeIntervalSince(last) < 10 * 60 { return }
         pauseGateSynchronizedAt = now
         let enabled = pausingProviders
+        let gated = gatedProviders
         let routerRunning = routerInUse
         // The request hold first: the gate's command depends on it.
         Task.detached(priority: .utility) {
             ProviderRequestHold.synchronize(enabledFor: enabled, routerRunning: routerRunning)
-            AgentPauseGate.synchronize(enabledFor: enabled)
+            AgentPauseGate.synchronize(enabledFor: gated)
         }
+    }
+
+    /// Providers whose sessions carry the pause gate. A CLI reads its hooks
+    /// when it starts, so the gate is kept installed whether or not pausing
+    /// is automatic: a session can then be paused by the user
+    /// (`pauseSessionsNow`) or automatically at any time. The gate does
+    /// nothing while no pause is written for its provider.
+    var gatedProviders: Set<AIProviderType> {
+        Set(AgentPauseGate.providers.filter { $0.capabilities.pauseGate != nil })
     }
 
     /// Providers whose sessions AccountDock pauses at the limit.
@@ -819,7 +830,10 @@ extension AppState {
             // that no longer pauses agents are never left paused. An active
             // account that failover excludes, chosen by hand, resumes nothing:
             // the sessions wait for the user or for capacity in the order.
-            if !monitored.contains(provider) || !policy.suspendAgentsWhenExhausted {
+            // A pause the user took holds whatever the automatic setting, until
+            // the user or capacity ends it.
+            let userPaused = AgentPauseGate.read(provider)?.manual == true
+            if !monitored.contains(provider) || (!policy.suspendAgentsWhenExhausted && !userPaused) {
                 await releaseSuspendedAgents(provider, reason: "AccountDock no longer pauses this provider's agents")
             }
             guard monitored.contains(provider), let current else { continue }
@@ -1212,7 +1226,7 @@ extension AppState {
     /// active now must first reset to count. An active account that failover
     /// excludes does not end it.
     func pauseSessionsNow(_ provider: AIProviderType) {
-        guard pausingProviders.contains(provider) else { return }
+        guard gatedProviders.contains(provider) else { return }
         // The hook may not be installed yet when the setting was just turned on.
         pauseGateSynchronizedAt = nil
         synchronizePauseGateIfDue()
@@ -1250,9 +1264,10 @@ extension AppState {
     /// Drops sessions that ended after the pause started, and refreshes the
     /// paused-session display.
     func prunePausedSessions(_ provider: AIProviderType) {
-        // A pause left behind while pausing is turned off for the provider
-        // has nothing that would end it.
-        if AgentPauseGate.read(provider) != nil, !pausingProviders.contains(provider) {
+        // An automatic pause left behind while pausing is turned off for the
+        // provider has nothing that would end it; a pause the user took ends
+        // when the user resumes or capacity returns.
+        if let pause = AgentPauseGate.read(provider), pause.manual != true, !pausingProviders.contains(provider) {
             let released = endPause(provider)
             failoverEvents.record(provider, "Released \(released) paused session(s): pausing at the limit is turned off for \(provider.capabilities.displayName).")
             return

@@ -120,7 +120,7 @@ extension AppState {
     /// starts, so these run without the gate: a pause cannot hold them, and
     /// they reach the limit until they are restarted.
     func sessionsWithoutGate(_ provider: AIProviderType) -> [AgentSession] {
-        guard pausingProviders.contains(provider), let installed = AgentPauseGate.installedAt(provider) else { return [] }
+        guard gatedProviders.contains(provider), let installed = AgentPauseGate.installedAt(provider) else { return [] }
         return (liveSessions[provider] ?? []).filter { session in
             session.processID.flatMap(ProcessAncestry.startTime(of:)).map { $0 < installed } ?? false
         }

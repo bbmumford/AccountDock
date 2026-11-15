@@ -100,12 +100,14 @@ struct FailoverSettingsView: View {
             Toggle("Pause sessions when all accounts are exhausted", isOn: binding(provider, \.suspendAgentsWhenExhausted))
                 .help("When no other account can take the work, every session waits before its next request, shortly before the active account reaches its limit, so no request fails, and new turns wait at their start. Terminals stay usable, and sessions continue once a verified account has capacity.")
 
-            if policy.suspendAgentsWhenExhausted, provider.capabilities.pauseGate != nil {
-                if provider.capabilities.requestRouter != nil {
-                    Toggle("Resume sessions as capacity allows", isOn: binding(provider, \.resumeAsCapacityAllows))
-                        .padding(.leading, 20)
-                        .help("Paused sessions continue a few at a time as accounts reset, each on an account where its forecast use fits before that account's window resets, instead of all at once on the first account that resets. A session's forecast is its average use in the hour before it paused, so one doing most of the work goes first and small ones fill what is left. A resumed session is paused again if its account nears its limit anyway.")
-                }
+            if policy.suspendAgentsWhenExhausted, provider.capabilities.pauseGate != nil,
+               provider.capabilities.requestRouter != nil {
+                Toggle("Resume sessions as capacity allows", isOn: binding(provider, \.resumeAsCapacityAllows))
+                    .padding(.leading, 20)
+                    .help("Paused sessions continue a few at a time as accounts reset, each on an account where its forecast use fits before that account's window resets, instead of all at once on the first account that resets. A session's forecast is its average use in the hour before it paused, so one doing most of the work goes first and small ones fill what is left. A resumed session is paused again if its account nears its limit anyway.")
+            }
+            // Pausing by hand works whether or not pausing is automatic.
+            if provider.capabilities.pauseGate != nil {
                 pauseControls(provider)
             }
 
