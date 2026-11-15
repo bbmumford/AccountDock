@@ -90,6 +90,12 @@ protocol ProviderSessionIsolation: Sendable {
     func screenAsksAboutRunningWork(_ screen: String) -> Bool
     /// The key that answers that question by keeping the session running.
     var keepRunningKey: String { get }
+    /// Whether the screen shows the CLI waiting on its own for a usage limit
+    /// to reset: its limit dialog, or a footer counting down to continuing
+    /// on its own. `SessionTerminalActions.resumeWaitingAtLimit` reads it.
+    func screenWaitsAtLimit(_ screen: String) -> Bool
+    /// The key that closes that wait and leaves the session at its prompt.
+    var cancelWaitKey: String { get }
     /// What a slot holds for `credential` as AccountDock stores it; nil
     /// when it is not one.
     func slotCredential(from credential: String) -> SlotCredential?
@@ -116,6 +122,11 @@ protocol ProviderSessionIsolation: Sendable {
 }
 
 extension ProviderSessionIsolation {
+    /// A CLI whose limit wait AccountDock does not recognise is never typed
+    /// into for one.
+    func screenWaitsAtLimit(_ screen: String) -> Bool { false }
+    var cancelWaitKey: String { "\u{1B}" }
+
     func launcherExportLines(slot: String) -> [String] {
         ["\(directoryVariable)=\(slot)", "export \(directoryVariable)"]
     }

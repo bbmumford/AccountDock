@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Shown under a provider heading while AccountDock holds sessions: because
-/// every account of that provider reached its usage limit, or because the
-/// user paused all of them or some one at a time. Its icons resume every
-/// session, resume one from a menu, and open the Sessions tab.
+/// Shown under a provider heading while AccountDock holds sessions: each
+/// because the account it runs on is at or near its usage limit, or because
+/// the user paused all of them or some one at a time. It lists each held
+/// session with that account and when it is expected to serve it again
+/// (`AppState.pausedSessions`); its icons resume every session, play one
+/// from a menu, and open the Sessions tab.
 struct AgentPauseBanner: View {
     @EnvironmentObject private var appState: AppState
     let provider: AIProviderType
@@ -21,6 +23,19 @@ struct AgentPauseBanner: View {
                     .font(.caption)
                     .foregroundStyle(.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+                let held = appState.pausedSessions(provider)
+                ForEach(held.prefix(Self.listedSessions)) { session in
+                    Text(line(session))
+                        .font(.caption2)
+                        .foregroundStyle(.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                if held.count > Self.listedSessions {
+                    Text("and \(held.count - Self.listedSessions) more")
+                        .font(.caption2)
+                        .foregroundStyle(.textSecondary)
+                }
             }
             Spacer(minLength: 4)
             HStack(spacing: 8) {
@@ -35,7 +50,7 @@ struct AgentPauseBanner: View {
                 if !paused.isEmpty {
                     Menu {
                         ForEach(paused) { session in
-                            Button("Play " + (session.isWaiting ? "\(session.label) (waiting)" : session.label)) {
+                            Button("Play " + line(session)) {
                                 appState.resumeSession(session)
                             }
                         }
@@ -70,6 +85,22 @@ struct AgentPauseBanner: View {
         AgentPauseGate.read(provider)?.holdsOnlyChosenSessions == true
     }
 
+    /// Held sessions listed by name; the rest are counted.
+    static let listedSessions = 8
+
+    /// One held session: its name, the account it runs on, and when that
+    /// account is expected to serve it again.
+    private func line(_ session: WaitingSession) -> String {
+        var parts = [session.isWaiting ? "\(session.label) (waiting)" : session.label]
+        if let id = session.account, let account = appState.accounts.first(where: { $0.id == id }) {
+            parts.append("on \(appState.messageName(account))")
+        }
+        if let resumeAt = session.resumeAt {
+            parts.append("resumes about \(UsageFormat.clock(resumeAt))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
     private var title: String {
         let count = status.sessions + status.stoppedProcesses
         if status.manual { return count == 1 ? "1 session paused by you" : count == 0 ? "Sessions paused by you" : "\(count) sessions paused by you" }
@@ -92,7 +123,9 @@ struct AgentPauseBanner: View {
                 ? "All are waiting before their next request."
                 : "\(waiting) waiting now; the others pause at their next tool call.")
         }
-        parts.append((chosenOnly ? "" : "New turns wait until then. ") + "Paused since \(UsageFormat.clock(status.since)).")
+        // Only a pause holding every new turn holds those of other sessions.
+        let holdsNewTurns = AgentPauseGate.read(provider)?.holdsNewTurns == true
+        parts.append((holdsNewTurns ? "New turns wait until then. " : "") + "Paused since \(UsageFormat.clock(status.since)).")
         if status.waiting > 0 {
             parts.append("\(SessionResumeShortcut.display) resumes the session in the front window.")
         }

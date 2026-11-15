@@ -386,6 +386,12 @@ struct FailoverSettingsView: View {
                 .help("Makes the moves the Sessions page's rebalance offers without being asked, at most once every \(Int(AppState.balanceMoveInterval / 60)) minutes, and only when the first account then runs out more than an hour later, so prompt caches are not rewritten for little.")
                 .padding(.leading, 20)
                 .disabled(!appState.rebalanceAvailable(provider))
+                Toggle("Resume sessions left waiting at a limit once their slot has room", isOn: Binding(
+                    get: { store.policy(for: provider).resumeSessionsLeftWaiting },
+                    set: { on in store.update(provider) { $0.resumeSessionsLeftWaiting = on } }
+                ))
+                .padding(.leading, 20)
+                .help("When \(cli) stops at a usage limit and waits on its own for the reset, and AccountDock has since moved the session's slot to an account that can serve it, AccountDock closes that wait in the session's agterm tab and tells it to continue, once per limit.")
                 if provider.capabilities.backgroundSessions != nil {
                     Toggle("Restart stuck background sessions in their own slot", isOn: Binding(
                         get: { store.policy(for: provider).restartStuckBackgroundSessions },

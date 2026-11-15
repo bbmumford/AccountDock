@@ -167,14 +167,21 @@ Choose what happens for each provider:
 - **Pause sessions.** Every session waits at its next tool call, including
   subagents and workflow agents, and a turn started during the pause waits
   before its first request, so nothing is sent to an account that would refuse
-  it. **Pause sessions now** in the failover settings starts a pause yourself,
-  for instance before switching to an account at its limit; it holds until you
-  resume or an account in the failover order has capacity. The
+  it. **Pause all** on the Sessions tab starts a pause yourself, for instance
+  before switching to an account at its limit; it holds until you resume or an
+  account in the failover order has capacity. The
   terminal stays attached and usable, and a message shows why. While an account
   still has a little room, paused sessions are let through one step at a time.
   Everything continues on its own when capacity returns, or with
-  **Resume now**. To let one session go on while the rest stay paused, press
-  ⌃⌥⌘R with its terminal in front, or choose it under **Resume one**.
+  **Resume all**. To let one session go on while the rest stay paused, press
+  ⌃⌥⌘R with its terminal in front, or play it on the Sessions tab or from the
+  pause banner.
+- **Sessions tab.** Lists every running session with the account serving it
+  and its state, and pauses, plays, pins or moves each one. Pausing one
+  session while nothing is paused holds only that session until you play it;
+  the others keep running. A session you move by hand is pinned where you put
+  it, so failover and balancing leave it there, unless balancing would place
+  it there itself; the move menu shows each account's room and which applies.
 - **Use extra usage** (Claude Code, combines with the options above). Accounts
   with extra usage enabled keep serving past their plan, up to a monthly
   spending limit you set, before AccountDock routes or pauses.

@@ -760,7 +760,35 @@ it rebuilds its cache there." (`AppState.remainderMoveEvent`) and offers
 that account again only `balanceMoveInterval` later
 (`AppState.remainderMovedAt`). A session placed so reaches no limit there
 before the reset, so shedding leaves it; if the account reaches its limit
-after all, the session moves on as any stranded slot session does. For new
+after all, the session moves on as any stranded slot session does.
+
+A small plan's 5-hour window is a refilling allowance: room it has left at
+its reset expires, and the window starts again full. While the accounts that
+take sessions for the runway will together have spent what they hold before
+the reset that refills them (`SessionPacer.windowsWorthSpending`: each
+reaches a limit before its binding window resets, and their joint run-out
+comes before the first of those resets), every percent they hold is spent
+before that reset whatever moves, so making the first run-out later gains
+nothing and the work served before that reset is what counts. The pacer then
+spends the session windows of the accounts `remainderSpending` offers
+(`SessionPacer.spendWindows`): each window's room is what its reset would
+leave once its own rate has run; one at a time, the slot session between
+turns whose arrival costs the fewest tokens per hour it then stays goes to
+the window where that is least, so small contexts and light rates go first
+and heavy sessions spread over the windows by their token room. A session
+goes only when its whole arrival write fits and the use it makes of the room
+is worth `remainderWorth` times that write, so an 800k-token session moves
+only into room no cheaper session takes. New sessions go by the tokens per
+hour each account would otherwise leave unused: the windows' room until
+their resets, and a carrier's room until the first carrier's reset, which is
+none once its own sessions spend it. `serveSessionSlots` records "Moved
+session X from Personal to hexorda, using hexorda's session window until
+12:20 pm, …" (`AppState.windowMoveEvent`). A window that fills leaves its
+sessions to the stranded placement above, so they move on to the next
+account with room, or back, and a window spent again once it refills. The
+shared group stays where `FailoverPlanner.carries` lets it.
+
+For new
 sessions, `carriesNewSession` and the pacer's runway rule let such an
 account take one while it can carry a typical session for an hour, and the
 pacer weighs it by the room it has left, a small share beside an account
@@ -858,8 +886,76 @@ Token weights follow relative price: context read from cache 0.1, cache writes
 
 When every account is exhausted and no route target is configured, AccountDock
 can pause sessions, so no request fails against a spent account. The user can
-also pause them on demand from Settings → Failover, for example before moving
-work off an account that failover excludes onto accounts at their limits.
+also pause them on demand from the main window's Sessions tab (**Pause all**),
+for example before moving work off an account that failover excludes onto
+accounts at their limits.
+
+The Sessions tab (`SessionsView`, rows from `AppState.sessionRows`) lists every
+running session of each provider with a pause gate or one-session slots, with
+the account serving it, its state (`SessionRowState`, derived from the pause
+files) and icon controls (`SessionControlButtons`, also in the account cards'
+session lists): pin, pause or play, and move.
+
+- **Pausing one session** (`AppState.pauseSession`, `AgentPauseGate.pauseOne`)
+  with no pause in effect writes a pause of the user's that lists only that
+  session, with `holdsNewTurns` false and `holdsListedNewTurns` true: the gate
+  holds it at its next tool call and new turn and lets every other session's
+  tool calls and turns pass. With a pause in effect, such as one at a limit,
+  the pause holds the session again (`hold`). Either way the session is listed
+  in the pause file's `chosen`: whatever ends the pause around it (capacity,
+  a reset, a route, a rescoped limit pause) goes through `AppState.endPause`,
+  which keeps the chosen sessions held as the user's own pause
+  (`AgentPauseGate.narrowToChosen`); a route's narrowing keeps them too.
+  Capacity checks never end a pause that holds only chosen sessions
+  (`PauseFile.holdsOnlyChosenSessions`). **Resume all** releases them.
+- **Playing one session** is `AppState.resumeSession`
+  (`AgentPauseGate.playOne`): the session goes on while the pause holds the
+  others. When it was the last session held, the pause ends, as **Resume
+  all** would end it.
+- **Moving one session by hand** (`AppState.moveSession`, the same path as the
+  requests interface's `moveSession`) moves a slot session with its slot, at
+  once or by restarting, and restarts a session on the shared sign-in in a
+  slot of its own on the destination (`prepareResumeSlot`). The session is
+  then pinned there (`movePins`, settled by `settleMovePins` once its slot
+  serves the destination), so failover and balancing leave it, unless
+  balancing would place it there itself: `SessionMoveRules.balancingChoice`
+  asks `SessionPacer.place` where the session would go among the accounts
+  rebalancing weighs. The move menu (`SessionMoveMenu`) lists every account
+  with its room, why it cannot take the session (needs sign-in, excluded,
+  at its limit), and whether the move pins it. Each move is recorded.
+
+A pause at a limit judges each session by the account it runs on
+(`AppState.pauseScope`, built by `limitPauseScope`): a slot session by its
+slot's account, a session on the shared sign-in by the active account. A
+session waits only when its own account is at or near its limit (refused at
+it, or reaching it within `suspensionLead`) and no move helps: a session on
+the shared sign-in moves only with a failover switch, which `evaluate` found
+none for before pausing; a slot session moves instead, through the slot-move
+path, to an account `SessionPacer.place` picks among those with room that
+carry one more typical session for the runway (`carriesNewSession`). A
+session on an account with room never waits for another account's limit.
+The pause file lists exactly the sessions that wait, and each listed session
+also waits at a new turn (`holdsListedNewTurns`); every new turn waits
+(`holdsNewTurns`) only while no account has room. Every cycle,
+`prunePausedSessions` narrows such a pause (`rescopeLimitPause`): a listed
+session whose own account has room again, by a reset, a reading or its slot
+moving to an account with room, goes on; when an account first has room
+after all were at their limit, the pause stops holding every new turn and
+lists the sessions whose own account is still at its limit; it ends when
+none is left. A pause the user took, an account hold and a pause that
+narrows a route keep their own rules. The pause file and the gate's markers
+are all a pause is, so after a relaunch the same cycle picks the pause up.
+
+The pause banner lists each held session (`AppState.pausedSessions`, read
+from the gate's files alone: the listed sessions, those whose gate wrote a
+`.waiting` marker, or every running one while the pause holds every new
+turn, less those resumed), with the account it runs on and when that account
+is expected to serve it again (`FailoverPlanner.availableAt`), and offers to
+resume each one. The gate of every provider writes its markers under
+`$HOME/Library/Application Support/AccountDock/Pause` named by the gate's
+key and the session ID it reads from the hook's `session_id` (or
+`sessionId`), the names the app reads; Codex's and Kimi Code's slots run in
+the CLI's own home, so they read the same hooks.
 
 Pausing is cooperative. A hook script (`accountdock-gate.sh`) runs after every
 tool call (before every tool call for Kimi Code, whose post-tool hook does not
@@ -867,7 +963,8 @@ wait) and waits while the provider's pause file exists under
 `~/Library/Application Support/AccountDock/Pause/`. The terminal stays attached
 and the session shows a status message and terminal title while it waits.
 
-- While the pause file sets `holdsNewTurns`, as every pause does, every session
+- While the pause file sets `holdsNewTurns`, as a pause the user takes does
+  and a pause at a limit does while no account has room, every session
   waits at its next tool call: also sessions not seen mid-turn when the pause
   began, and the subagents and workflow agents inside a session, which share
   its session ID. The sessions mid-turn at the start are listed for display
@@ -931,7 +1028,7 @@ and the session shows a status message and terminal title while it waits.
   pointer lists the candidates. The waiting session's terminal title names
   the shortcut.
 - No pause ends because the user chose an account that failover excludes:
-  sessions wait for **Resume now** or for capacity on an account in the
+  sessions wait for **Resume all** or for capacity on an account in the
   failover order (the account active when the pause began only after a window
   reset).
 - Every way out of a pause goes through `AppState.endPause`: capacity returned,
@@ -941,7 +1038,7 @@ and the session shows a status message and terminal title while it waits.
 - While the account still has some room, one step at a time is released through
   an `.allow` file, within the remaining headroom.
 - The pause ends when a reading confirms capacity, or when the user chooses
-  **Resume now**.
+  **Resume all**.
 - Every way a pause ends goes through `AppState.endPause`, which records
   where the sessions continue (the route target and model, or the account
   now active). The gate shows it to the user and the agent as each session
@@ -962,6 +1059,27 @@ and the session shows a status message and terminal title while it waits.
   than running on into the limit; a refused new turn tells the user to send
   the message again. `AgentPauseGate.synchronize` rewrites any installed gate
   whose command or timeout differs from the current one.
+
+With pausing off, nothing is paused, but a slot session can still be left
+idle by its CLI: Claude Code stops at a usage limit with a dialog (**Stop
+and wait for limit to reset**, **Wait here, then continue automatically at
+…**, **Add funds …**) or a footer counting down (`Continuing automatically
+at … · esc to cancel`), and waits for the reset of the account it was
+refused on even after AccountDock moved its slot to another account. With
+the policy's **Resume sessions left waiting at a limit once their slot has
+room** (`resumeSessionsLeftWaiting`, on by default; offered for providers
+with slot isolation), each quota cycle looks at the slot sessions refused at
+a limit (from their transcripts) within the last six hours whose slot now
+serves another account that can serve them
+(`AppState.leftWaitingCandidates`). For each one running in agterm whose
+screen shows that wait (`ProviderSessionIsolation.screenWaitsAtLimit`, read
+from the bottom lines so a transcript quoting it does not count),
+`SessionTerminalActions.resumeWaitingAtLimit` types Escape
+(`cancelWaitKey`), which takes the dialog's cancelling choice or cancels the
+countdown, then a prompt telling the session to continue, once per refusal,
+and records "Resumed X, which the CLI had left waiting for a reset, now
+that its slot is on Y." A session whose screen shows no such wait, as one
+mid-turn, is left alone; a slot AccountDock has not moved is never touched.
 
 Stopping a process with `SIGSTOP` is used only for agents that cannot run the
 hook, and never for a job in an interactive shell: a shell treats a stopped
@@ -1082,10 +1200,18 @@ the pool weights and which sessions move, each time the pool is rebuilt
 - A slot session whose account can no longer serve it goes where the pool
   lasts longest with it (`SessionPacer.place`, through
   `AppState.strandedPlacements`): one at a time, largest rate first, to the
-  account that leaves the earliest run-out among the accounts taking
-  sessions latest, as **Rebalance sessions now** measures it. The sessions
-  an exhausted account gives up spread over the accounts with room instead
-  of all going to the account with the largest pool weight.
+  account that leaves the earliest run-out among every pool account that
+  can serve it (`AppState.strandedDestinations`), whatever its weight for
+  new sessions, as **Rebalance sessions now** measures it. Each destination
+  is charged the whole cache write of the session's arrival
+  (`SessionPacer.arrivalCost`: its context at 2 a token for the one-hour
+  cache, 1.25 for the five-minute one), not only what the move adds over
+  staying. A run whose process left no session record is placed by its
+  slot's path at `defaultSessionRate`. The sessions an exhausted account, or
+  a small plan's filled session window, gives up spread over the accounts
+  with room by how long each then lasts, instead of all going to the account
+  with the largest pool weight: a session that must leave is served rather
+  than refused, even where it lasts less than an hour.
 - An account a threshold switch left with room still on it drains
   (`AppState.drainingAccounts`): above its thresholds it keeps a pool weight
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when
@@ -1203,7 +1329,7 @@ session. The audit's `signalSessions` keeps such a session flagged and names
 its restart rather than signalling it.
 
 
-**Rebalance sessions now** (Settings → Failover and the usage tab, for a
+**Rebalance sessions now** (the Sessions and usage tabs' provider headings, for a
 provider whose sessions run in one-session slots; also the requests action
 `{"action":"rebalance","provider":…,"apply":true|false}`) places the running
 slot sessions so the first account to reach a limit does so as late as
@@ -1228,10 +1354,19 @@ run-outs reported then leave out the accounts settled before the first move.
 The result never runs out earlier than before and every move pays for itself;
 it is a local optimum, not always the best assignment.
 Excluded accounts, those needing sign-in and those at their limit are no
-destination. The moves go through `requestedSlotMoves`, so each is recorded.
-With **Rebalance automatically** (off by default) the quota cycle makes the
-same moves at most once per `balanceMoveInterval`, and only when the first
-account then runs out more than an hour later.
+destination. A movable session on an account that is no destination, one at
+its limit or refusing it, gains from any room however short: before the
+search, each goes where `SessionPacer.place` puts it, spread over the
+destinations as the stranded placement spreads them, and is reported as
+moved off an account that cannot serve it (`Rebalance.unblocked`). While the
+windows are worth spending (`windowsWorthSpending`, for the accounts
+`remainderSpending` offers), the local search is not run and the movable
+sessions are placed on those windows by the pacer's own rule
+(`spendWindows`). The moves go through `requestedSlotMoves`, so each is
+recorded. With **Rebalance automatically** (off by default) the quota cycle
+makes the same moves at most once per `balanceMoveInterval`, and only when
+they move a session off an account that cannot serve it or into a session
+window, or the first account then runs out more than an hour later.
 
 A slot session can be **pinned** to its subscription (`SessionPins`, kept by
 session ID under `app.accountdock.failover.pins`, so `--resume` of the same
@@ -1247,13 +1382,12 @@ restart into its own slot first. A session opened from a tile's session
 button is pinned there unless the menu's **Keep here** is unchecked or
 Option is held while choosing; the slot is pinned first and the session
 reading it takes the pin. Clicking an account card's session count ("4
-sessions · 1 pinned") lists its sessions with a lock each; a pinned session
-refused at its account's limit shows "pinned · refused at limit" with
-**Unpin and move** (unpin, then a requested move to the account with most
-room for its model) and **Switch model**. Settings → Failover lists every
-pin with an unpin button, and the requests interface takes
-`{"action":"pin"|"unpin","session":…}`; `moveSession` refuses a pinned
-session.
+sessions · 1 pinned") lists its sessions with the Sessions tab's controls
+(lock, pause or play, move); a pinned session refused at its account's limit
+shows "pinned · refused at limit" with **Switch model**, and its move menu
+unpins and moves it. The Sessions tab shows every session's pin, and the
+requests interface takes `{"action":"pin"|"unpin","session":…}`;
+`moveSession` refuses a pinned session.
 
 While sessions are served from several accounts, pausing waits for the whole
 pool: sessions pause only when no other included account is below its limit

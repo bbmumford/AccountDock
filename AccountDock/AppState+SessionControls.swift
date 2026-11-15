@@ -25,6 +25,12 @@ struct SessionRow: Identifiable, Equatable {
     /// A pause can hold it: its provider has a pause gate and it started
     /// after the gate was installed (`AppState.sessionsWithoutGate`).
     let gated: Bool
+    /// The user paused it one at a time (`AgentPauseGate.PauseFile.chosen`):
+    /// it waits until played, whatever its account's room.
+    var pausedByYou = false
+    /// While a pause holds it for its account's limit, when that account is
+    /// expected to serve it again (`AppState.pausedSessions`).
+    var resumeAt: Date? = nil
 }
 
 /// The per-session controls of the Sessions page and the account cards'
@@ -57,6 +63,10 @@ extension AppState {
         )
         let ungated = Set(sessionsWithoutGate(provider).map(\.sessionID))
         let active = activeAccount(for: provider)
+        // Each held session's account and expected resume, as the pause
+        // banner lists them.
+        let held = pausedSessions(provider).reduce(into: [String: WaitingSession]()) { $0[$1.sessionID] = $1 }
+        let chosen = Set(AgentPauseGate.read(provider)?.chosenListed ?? [])
         func name(_ id: UUID?) -> String? { id.flatMap { id in accounts.first { $0.id == id } }.map { messageName($0) } }
         return sessions.map { session in
             let id = session.sessionID
@@ -75,7 +85,9 @@ extension AppState {
                                          model: sessionModel(id, now: now).map { CostParser.shortModelName($0) }),
                 account: account, state: states[id] ?? .running, pinned: sessionPins.isPinned(id),
                 inSlot: slotAccounts[id] != nil,
-                gated: provider.capabilities.pauseGate != nil && !ungated.contains(id)
+                gated: provider.capabilities.pauseGate != nil && !ungated.contains(id),
+                pausedByYou: chosen.contains(id),
+                resumeAt: chosen.contains(id) ? nil : held[id]?.resumeAt
             )
         }
         .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
@@ -171,7 +183,8 @@ extension AppState {
             return SessionPacer.RebalanceSession(
                 id: sessionID, account: account, tokensPerHour: measured > 0 ? measured : SessionPacer.defaultSessionRate,
                 contextTokens: sessionRates.entries[sessionID]?.contextTokens ?? 0,
-                model: sessionModel(sessionID, now: now), movable: true)
+                model: sessionModel(sessionID, now: now), movable: true,
+                cacheLifetime: sessionRates.entries[sessionID]?.cacheLifetime)
         }
         guard let session = running.first(where: { $0.id == sessionID }) ?? shared() else { return nil }
         let shared = sharedGroup(provider, sessions: pacerSessions(provider, now: now).filter { $0.id != sessionID },

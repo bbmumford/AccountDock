@@ -223,15 +223,19 @@ extension AppState {
             }
             .keys.sorted()
         let continuation = "on \(target.displayName) \(model)"
+        // Sessions the user paused one at a time stay held through a route
+        // (`AgentPauseGate.narrow` keeps them).
+        let chosen = existing?.chosenListed ?? []
         if large.isEmpty {
-            guard AgentPauseGate.isActive(provider) else { return }
+            guard AgentPauseGate.isActive(provider), existing?.holdsOnlyChosenSessions != true else { return }
             let held = endPause(provider, continuation: continuation)
             failoverEvents.record(provider, "\(target.displayName) has capacity; \(held) paused session(s) continue on it.")
             return
         }
-        guard existing?.sessions.sorted() != large || existing?.holdsListedNewTurns != true
+        guard existing?.sessions.sorted() != Array(Set(large).union(chosen)).sorted() || existing?.holdsListedNewTurns != true
             || existing?.holdsNewTurns == true else { return }
-        let released = Set(existing?.sessions ?? []).union(AgentPauseGate.waitingSessions(provider)).subtracting(large)
+        let released = Set(existing?.sessions ?? []).union(AgentPauseGate.waitingSessions(provider))
+            .subtracting(large).subtracting(chosen)
         AgentPauseGate.narrow(provider, to: large,
                               reason: "their context is over \(target.displayName)'s \(cap / 1000)k-token limit",
                               continuation: continuation)
@@ -672,7 +676,7 @@ extension AppState {
         }
         sessionSlotStates[provider, default: SessionSlotState()].sessionMoves = movesSessions ? [:] : moves
         sessionSlotStates[provider, default: SessionSlotState()].remainderMoves = movesSessions ? [:]
-            : plan.remainders.reduce(into: [:]) { result, entry in
+            : plan.remainders.reduce(into: [String: RemainderMove]()) { result, entry in
                 let (session, remainder) = entry
                 guard moves[session] == remainder.account else { return }
                 let weekly = states[remainder.account].flatMap { planner.projection($0, now: now)?.weekly }
@@ -680,6 +684,13 @@ extension AppState {
                                                 percentLeft: max(1, Int((100 - (weekly ?? 99)).rounded())),
                                                 resetsAt: remainder.resetsAt)
             }
+            .merging(plan.windowUses.reduce(into: [String: RemainderMove]()) { result, entry in
+                let (session, use) = entry
+                guard moves[session] == use.account else { return }
+                let used = states[use.account].flatMap { planner.projection($0, now: now)?.session }
+                result[session] = RemainderMove(account: use.account, percentLeft: max(1, Int((100 - (used ?? 99)).rounded())),
+                                                resetsAt: use.until, window: true)
+            }) { $1 }
         for (id, outlook) in plan.shedding where !pacingShedding.contains(id) {
             guard let account = accounts.first(where: { $0.id == id }), let limitAt = outlook.limitAt,
                   let reason = plan.shedReasons[id] else { continue }
@@ -765,6 +776,10 @@ extension AppState {
         var account: UUID
         var percentLeft: Int
         var resetsAt: Date
+        /// The move uses the account's session window until `resetsAt`
+        /// (`SessionPacer.Plan.windowUses`), for `windowMoveEvent`, rather
+        /// than its weekly remainder.
+        var window = false
     }
 
     /// What `SessionPacer.plan` may spend on allowances that would
@@ -793,6 +808,16 @@ extension AppState {
         guard !small.isEmpty else { return nil }
         let working = Set((liveSessions[provider] ?? []).filter(\.isWorking).map(\.sessionID))
         return SessionPacer.RemainderSpending(accounts: small, sessions: slotted.subtracting(working))
+    }
+
+    /// The event for a slot session moved to use an account's session
+    /// window (`RemainderMove.window`), recorded by `serveSessionSlots`:
+    /// from where, and until when the room placed there lasts.
+    nonisolated static func windowMoveEvent(session: String, from: String, account: String, until: Date,
+                                            now: Date) -> String {
+        "Moved \(session) from \(from) to \(account), using \(account)'s session window until "
+            + "\(UsageFormat.clock(until, now: now)), which would otherwise go unused before \(from)'s room returns; "
+            + "it rebuilds its cache there."
     }
 
     /// The event for a slot session moved to spend what an account has

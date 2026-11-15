@@ -499,13 +499,24 @@ extension AppState {
         }.flatMap { UUID(uuidString: $0.accountID) } ?? activeID
         // The pool's accounts, the one taking most new sessions first.
         let byWeight = members.sorted { $0.weight > $1.weight }.compactMap { UUID(uuidString: $0.accountID) }
-        // Sessions on an account that can no longer serve them, each placed
-        // where the pool lasts longest with it.
-        let placements = members.isEmpty ? [:] : strandedPlacements(provider, slots: slots, members: members, now: now)
         let byProcess = sessionSlotStates[provider]?.directoryByProcess ?? [:]
         let sessionsByDirectory: [String: AgentSession] = (liveSessions[provider] ?? []).reduce(into: [:]) { result, session in
             if let pid = session.processID, let directory = byProcess[pid] { result[directory] = session }
         }
+        let slotList = await Task.detached(priority: .utility, operation: { slots.sessionSlots() }).value
+        // Runs in claimed slots whose process left no session record, by
+        // slot, so they are placed with the sessions rather than all sent to
+        // `fallback`.
+        let unrecorded = slotList.compactMap { slot -> (path: String, account: UUID)? in
+            guard slot.claimedAt != nil, inUse.contains(slot.directory.path),
+                  sessionsByDirectory[slot.directory.path] == nil, let account = slot.account else { return nil }
+            return (slot.directory.path, account)
+        }
+        // Sessions on an account that can no longer serve them, each placed
+        // where the pool lasts longest with it, keyed by session ID, or by
+        // slot path for a run without a session record.
+        let placements = members.isEmpty ? [:]
+            : strandedPlacements(provider, slots: slots, members: members, unrecorded: unrecorded, now: now)
         maintainPins(provider, sessionsBySlot: sessionsByDirectory.mapValues(\.sessionID), now: now)
         var credentials: [UUID: SlotCredential] = [:]
         func credential(_ id: UUID) async -> SlotCredential? {
@@ -529,7 +540,7 @@ extension AppState {
         var sparesOf: [UUID: Int] = [:]
         var remove: [URL] = []
         var removeSpares: [URL] = []
-        for slot in await Task.detached(priority: .utility, operation: { slots.sessionSlots() }).value {
+        for slot in slotList {
             let path = slot.directory.path
             guard let claimedAt = slot.claimedAt else {
                 guard let id = slot.account, open.contains(id), sparesOf[id, default: 0] < spareTarget,
@@ -578,7 +589,7 @@ extension AppState {
             let choice = Self.slotChoice(current: slot.account, pinned: pinned,
                                          requested: session.flatMap { requestedSlotMoves.removeValue(forKey: $0.sessionID) },
                                          balance: balance, cannotServe: cannotServe, modelSpent: modelSpent,
-                                         byWeight: byWeight, placed: session.flatMap { placements[$0.sessionID] },
+                                         byWeight: byWeight, placed: session.map { placements[$0.sessionID] } ?? placements[path],
                                          fallback: fallback)
             let target = choice.target
             let balanced = choice.balanced
@@ -659,9 +670,10 @@ extension AppState {
             if balanced, let session, let remainder = sessionSlotStates[provider]?.remainderMoves[session.sessionID],
                remainder.account == target {
                 remainderMovedAt[target] = now
-                failoverEvents.record(provider, Self.remainderMoveEvent(session: subject, account: to,
-                                                                        percentLeft: remainder.percentLeft,
-                                                                        resetsAt: remainder.resetsAt, now: now))
+                failoverEvents.record(provider, remainder.window
+                    ? Self.windowMoveEvent(session: subject, from: from, account: to, until: remainder.resetsAt, now: now)
+                    : Self.remainderMoveEvent(session: subject, account: to, percentLeft: remainder.percentLeft,
+                                              resetsAt: remainder.resetsAt, now: now))
                 continue
             }
             failoverEvents.record(provider, balanced

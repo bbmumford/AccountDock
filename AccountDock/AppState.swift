@@ -225,6 +225,10 @@ final class AppState: ObservableObject {
     /// Sessions without allowance for their model anywhere, by session ID,
     /// with the model `applyModelFallbacks` switches each to once it is idle.
     var pendingModelFallbacks: [String: String] = [:]
+    /// The refusal each session was last resumed from a CLI wait for
+    /// (`resumeSessionsLeftWaiting`), by its time, so one refusal resumes a
+    /// session once.
+    var leftWaitingResumed: [String: Date] = [:]
     /// Running sessions that read no slot of their own, by provider
     /// (`noteUnisolatedSessions`), for the usage tab.
     @Published var unisolatedSessions: [AIProviderType: [AgentSession]] = [:]

@@ -48,7 +48,7 @@ enum SessionRowState: Equatable {
         let waiting = pause == nil ? [] : AgentPauseGate.waitingSessions(provider, directory: directory)
         let resumed = pause == nil ? [] : AgentPauseGate.resumedSessions(provider, directory: directory)
         return sessions.reduce(into: [:]) { states, id in
-            states[id] = if held.contains(id) {
+            let state: SessionRowState = if held.contains(id) {
                 waiting.contains(id) ? .waiting : .stopsAtNextStep
             } else if resumed.contains(id) {
                 .resumedWhileOthersPaused
@@ -59,6 +59,7 @@ enum SessionRowState: Equatable {
             } else {
                 .running
             }
+            states[id] = state
         }
     }
 }

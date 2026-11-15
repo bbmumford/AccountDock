@@ -121,6 +121,47 @@ final class SessionControlsTests: XCTestCase {
         XCTAssertTrue(waitForExit(held, within: 5))
     }
 
+    func testASessionPausedByHandStaysHeldWhenThePauseAroundItEnds() throws {
+        // A pause at a limit holding one account's session.
+        AgentPauseGate.write(.init(sessions: ["limited"], reason: "limit", pausedAt: now, resumeAt: nil,
+                                   holdsNewTurns: false, holdsListedNewTurns: true),
+                             for: .claudeCode, directory: pauseDirectory)
+        XCTAssertFalse(AgentPauseGate.pauseOne(.claudeCode, session: "mine", at: now, directory: pauseDirectory),
+                       "it joins the pause in effect")
+        var pause = try XCTUnwrap(AgentPauseGate.read(.claudeCode, directory: pauseDirectory))
+        XCTAssertEqual(Set(pause.sessions), ["limited", "mine"])
+        XCTAssertEqual(pause.chosenListed, ["mine"])
+        XCTAssertFalse(pause.holdsOnlyChosenSessions)
+
+        // A route narrowing the pause keeps it too.
+        AgentPauseGate.narrow(.claudeCode, to: ["large"], reason: "too large", continuation: nil, directory: pauseDirectory)
+        pause = try XCTUnwrap(AgentPauseGate.read(.claudeCode, directory: pauseDirectory))
+        XCTAssertEqual(Set(pause.sessions), ["large", "mine"])
+
+        // The account's room returns: the pause ends but for the session
+        // paused by hand, which waits for the user alone.
+        XCTAssertTrue(AgentPauseGate.narrowToChosen(.claudeCode, continuation: "on account Work", directory: pauseDirectory))
+        pause = try XCTUnwrap(AgentPauseGate.read(.claudeCode, directory: pauseDirectory))
+        XCTAssertEqual(pause.sessions, ["mine"])
+        XCTAssertTrue(pause.holdsOnlyChosenSessions)
+        XCTAssertEqual(pause.pausedAt, now)
+        XCTAssertEqual(AgentPauseGate.continuation(.claudeCode, directory: pauseDirectory), "on account Work",
+                       "the sessions let go are told where they continue")
+        XCTAssertTrue(AgentPauseGate.narrowToChosen(.claudeCode, continuation: nil, directory: pauseDirectory),
+                      "nothing automatic ends the user's own pause")
+        XCTAssertEqual(AgentPauseGate.read(.claudeCode, directory: pauseDirectory), pause)
+
+        // Played, it no longer counts as chosen, and the pause ends.
+        XCTAssertTrue(AgentPauseGate.playOne(.claudeCode, session: "mine", running: ["mine"], directory: pauseDirectory))
+
+        // A pause with no session paused by hand is left for the caller to
+        // release.
+        AgentPauseGate.write(.init(sessions: ["limited"], reason: "limit", pausedAt: now, resumeAt: nil, holdsNewTurns: true),
+                             for: .claudeCode, directory: pauseDirectory)
+        XCTAssertFalse(AgentPauseGate.narrowToChosen(.claudeCode, continuation: nil, directory: pauseDirectory))
+        XCTAssertEqual(AgentPauseGate.read(.claudeCode, directory: pauseDirectory)?.sessions, ["limited"])
+    }
+
     // MARK: - Row states
 
     private func record(_ session: String, event: String, pid: Int32, in directory: URL) throws {

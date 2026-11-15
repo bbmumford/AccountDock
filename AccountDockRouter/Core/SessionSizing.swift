@@ -27,6 +27,17 @@ enum SessionSizing {
         Double(max(0, contextTokens)) * rewritePerContextToken
     }
 
+    /// Weighted tokens the first request of a session arriving on another
+    /// account costs there: its whole context written into that account's
+    /// cache, at 2 a token for the one-hour cache and 1.25 for the
+    /// five-minute one (`weighted`). `rewriteTokens` is what a move adds over
+    /// staying; this is what the destination's window must hold, which
+    /// `SessionPacer.arrivalCost` charges where a window's room decides a
+    /// placement.
+    static func arrivalTokens(_ contextTokens: Int, cacheLifetime: TimeInterval?) -> Double {
+        Double(max(0, contextTokens)) * ((cacheLifetime ?? defaultCacheLifetime) > 5 * 60 ? 2 : 1.25)
+    }
+
     /// Window percent a move of a session of `contextTokens` costs on the
     /// account it moves to, whose token cost is `percentPerMillion`, times
     /// `factor` for a CLI that must be restarted to move.

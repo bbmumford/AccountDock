@@ -95,6 +95,11 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     /// While off, AccountDock offers the restart in the events and the
     /// usage tab.
     var restartStuckBackgroundSessions = false
+    /// Resumes a slot session its CLI left waiting for a usage limit to
+    /// reset, once AccountDock has moved its slot to an account that can
+    /// serve it (`AppState.resumeSessionsLeftWaiting`). Acts only on slot
+    /// sessions, so only for a provider with slot isolation.
+    var resumeSessionsLeftWaiting = true
     var switchMethod = FailoverSwitchMethod.safeRestart
     var accountOrder: [UUID] = []
     var excludedAccountIDs: Set<UUID> = []
@@ -126,7 +131,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         case routeToKimiWhenExhausted, routeKimiModel
         case switchMethod, accountOrder, excludedAccountIDs, activeAccountLocked
         case codexSwitchMode
-        case noRoomModelFallback, rebalanceAutomatically, restartStuckBackgroundSessions
+        case noRoomModelFallback, rebalanceAutomatically, restartStuckBackgroundSessions, resumeSessionsLeftWaiting
     }
 
     init() {}
@@ -163,6 +168,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         try values.encodeIfPresent(noRoomModelFallback, forKey: .noRoomModelFallback)
         try values.encode(rebalanceAutomatically, forKey: .rebalanceAutomatically)
         try values.encode(restartStuckBackgroundSessions, forKey: .restartStuckBackgroundSessions)
+        try values.encode(resumeSessionsLeftWaiting, forKey: .resumeSessionsLeftWaiting)
         try values.encode(switchMethod, forKey: .switchMethod)
         try values.encode(accountOrder, forKey: .accountOrder)
         try values.encode(excludedAccountIDs, forKey: .excludedAccountIDs)
@@ -200,6 +206,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         noRoomModelFallback = try values.decodeIfPresent(String.self, forKey: .noRoomModelFallback)
         rebalanceAutomatically = try values.decodeIfPresent(Bool.self, forKey: .rebalanceAutomatically) ?? false
         restartStuckBackgroundSessions = try values.decodeIfPresent(Bool.self, forKey: .restartStuckBackgroundSessions) ?? false
+        resumeSessionsLeftWaiting = try values.decodeIfPresent(Bool.self, forKey: .resumeSessionsLeftWaiting) ?? true
 
         // Settings saved when routing could only target Kimi.
         if routeTarget == nil, try values.decodeIfPresent(Bool.self, forKey: .routeToKimiWhenExhausted) == true {

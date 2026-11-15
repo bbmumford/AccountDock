@@ -513,7 +513,11 @@ final class BalancingTests: XCTestCase {
                                               switchAt: now.addingTimeInterval(17 * 3600), sessionCount: 4)
         let plan = SessionPacer().rebalance(accounts: accounts, sessions: sessions,
                                             destinations: [hstlesBrandon, personal, backup], now: now, sharedGroup: shared)
-        let toPersonal = plan.moves.filter { $0.value == personal }.keys
+        // ORBTR (brandon), at its limit, is no destination: its slot sessions
+        // leave it first, wherever the pool lasts longest with them.
+        XCTAssertEqual(plan.unblocked, ["o1", "o2", "o3"])
+        XCTAssertFalse(plan.moves.filter { $0.key.hasPrefix("o") }.values.contains(orbtrBrandon))
+        let toPersonal = plan.moves.filter { $0.value == personal && !plan.unblocked.contains($0.key) }.keys
         XCTAssertFalse(toPersonal.isEmpty, "ORBTR (brandon) at its limit and Backup's held session no longer end the search")
         XCTAssertTrue(toPersonal.allSatisfy { $0.hasPrefix("h") }, "slot sessions leave HSTLES (brandon) for Personal")
         XCTAssertNil(plan.moves["b1"])

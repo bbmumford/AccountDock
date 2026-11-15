@@ -24,11 +24,31 @@ extension AppState {
         /// The room kept on the account the sessions on the shared sign-in
         /// move to (`AppState.sharedGroupNote`); nil while they stay.
         var sharedNote: String?
+        /// How many of `moves` go to use session windows that would
+        /// otherwise expire unused (`SessionPacer.Rebalance.windowUses`).
+        var windowMoves = 0
+        /// How many of `moves` take a session off an account that cannot
+        /// serve it (`SessionPacer.Rebalance.unblocked`).
+        var unblockedMoves = 0
 
         /// How the earliest run-out changes, in words.
         var outcome: String {
             func when(_ date: Date?) -> String {
                 date.map { UsageFormat.clock($0) } ?? "not before the resets"
+            }
+            if unblockedMoves > 0 || windowMoves > 0 {
+                var parts: [String] = []
+                if unblockedMoves > 0 {
+                    parts.append("\(unblockedMoves) session(s) move off an account that cannot serve them, spread over the accounts with room.")
+                }
+                if windowMoves > 0 {
+                    parts.append("\(windowMoves) session(s) move to use session windows that would otherwise go unused.")
+                }
+                let balanced = moves.count - unblockedMoves - windowMoves
+                if balanced > 0 {
+                    parts.append("\(balanced) more move(s); the first account runs out \(when(earliestRunOutAfter)) instead of \(when(earliestRunOutBefore)).")
+                }
+                return parts.joined(separator: " ")
             }
             guard !moves.isEmpty else {
                 return "No move would make the sessions last longer; the first account runs out \(when(earliestRunOutBefore))."
@@ -53,16 +73,25 @@ extension AppState {
         // The sessions on the shared sign-in are none of these and never
         // move; they count where the active account is and will be.
         let shared = sharedGroup(provider, sessions: pacerSessions(provider, now: now), now: now)?.group
+        // The accounts `plan` may spend the session windows of, so both
+        // follow one rule while those windows are worth spending.
+        let windows = remainderSpending(provider, pooled: destinations, slotted: Set(sessions.map(\.id)), now: now)?.accounts
         let plan = pacer.rebalance(accounts: pacerAccounts, sessions: sessions, destinations: destinations, now: now,
-                                   sharedGroup: shared)
+                                   sharedGroup: shared, windows: windows)
         let from = sessions.reduce(into: [String: UUID]()) { $0[$1.id] = $1.account }
         let moves = plan.moves.compactMap { id, to in from[id].map { RebalanceMove(session: id, from: $0, to: to) } }
             .sorted { $0.session < $1.session }
         func name(_ id: UUID) -> String { accounts.first { $0.id == id }.map { messageName($0) } ?? "an account" }
         return RebalancePreview(
             moves: moves, earliestRunOutBefore: plan.earliestRunOutBefore, earliestRunOutAfter: plan.earliestRunOutAfter,
-            lines: moves.map { "\(sessionSummary([$0.session], now: now)): \(name($0.from)) → \(name($0.to))" },
-            sharedNote: sharedGroupNote(shared)
+            lines: moves.map { move in
+                let window = plan.windowUses[move.session]
+                    .map { " (its session window until \(UsageFormat.clock($0.until, now: now)))" } ?? ""
+                return "\(sessionSummary([move.session], now: now)): \(name(move.from)) → \(name(move.to))\(window)"
+            },
+            sharedNote: sharedGroupNote(shared),
+            windowMoves: plan.windowUses.count,
+            unblockedMoves: plan.unblocked.count
         )
     }
 
@@ -110,32 +139,35 @@ extension AppState {
             return SessionPacer.RebalanceSession(
                 id: id, account: account, tokensPerHour: measured > 0 ? measured : SessionPacer.defaultSessionRate,
                 contextTokens: entry?.contextTokens ?? 0, model: model,
-                movable: !session.isWorking && pacer.movable(pacing, now: now) && !sessionPins.isPinned(id)
+                movable: !session.isWorking && pacer.movable(pacing, now: now) && !sessionPins.isPinned(id),
+                cacheLifetime: entry?.cacheLifetime
             )
         }
     }
 
     /// Where `serveSessionSlots` sends each slot session whose account can
-    /// no longer serve it (`SessionPacer.place`), among the pool's accounts
-    /// that can: those taking new sessions, or every one that can serve
-    /// when none does. Pinned sessions stay where they are pinned and are
-    /// left out.
+    /// no longer serve it (`SessionPacer.place`), among every pool account
+    /// that can (`strandedDestinations`), with the `unrecorded` runs, which
+    /// are keyed by their slot's path. Pinned sessions stay where they are
+    /// pinned and are left out.
     func strandedPlacements(_ provider: AIProviderType, slots: SessionSlots, members: [RouterPoolMember],
-                            now: Date) -> [String: UUID] {
+                            unrecorded: [(path: String, account: UUID)] = [], now: Date) -> [String: UUID] {
         let planner = FailoverPlanner(settings: plannerSettings(provider))
         let running = slotRebalanceSessions(provider, slots: slots, now: now)
-        let stranded = running.filter { session in
+        // A run without a session record is placed by its slot's path at a
+        // new session's assumed rate.
+        let unnamed = unrecorded.map { slot in
+            SessionPacer.RebalanceSession(id: slot.path, account: slot.account, tokensPerHour: SessionPacer.defaultSessionRate,
+                                          contextTokens: 0, model: nil, movable: true)
+        }
+        let stranded = (running + unnamed).filter { session in
             !sessionPins.isPinned(session.id)
                 && accountCannotServe(session.account, provider: provider, planner: planner, now: now, wholeAllowance: true)
         }
         guard !stranded.isEmpty else { return [:] }
-        let serving = members.filter { member in
-            UUID(uuidString: member.accountID).map {
-                !accountCannotServe($0, provider: provider, planner: planner, now: now, wholeAllowance: true)
-            } ?? false
+        let chosen = Self.strandedDestinations(members) { id in
+            !accountCannotServe(id, provider: provider, planner: planner, now: now, wholeAllowance: true)
         }
-        let open = serving.filter { $0.weight > 0 }
-        let chosen = open.isEmpty ? serving : open
         var pacerAccounts: [SessionPacer.Account] = []
         for member in chosen {
             guard let id = UUID(uuidString: member.accountID),
@@ -147,6 +179,19 @@ extension AppState {
         let shared = sharedGroup(provider, sessions: pacerSessions(provider, now: now), now: now)?.group
         return SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor).place(stranded, accounts: pacerAccounts, running: running.filter { !strandedIDs.contains($0.id) },
                                     destinations: Set(pacerAccounts.map(\.id)), now: now, sharedGroup: shared)
+    }
+
+    /// The pool members a session whose account can no longer serve it may
+    /// go to: every one that can serve it (`canServe`), whatever its weight
+    /// for new sessions. A weight of 0 keeps new sessions off an account a
+    /// typical session would take to its limit within the runway, or one
+    /// giving sessions up; a session that must leave its account is served
+    /// there rather than refused, and `SessionPacer.place` spreads such
+    /// sessions over all of them by how long each then lasts, so they do not
+    /// all go to the one account with weight.
+    nonisolated static func strandedDestinations(_ members: [RouterPoolMember],
+                                                 canServe: (UUID) -> Bool) -> [RouterPoolMember] {
+        members.filter { member in UUID(uuidString: member.accountID).map(canServe) ?? false }
     }
 
     /// Makes the moves of `rebalancePreview` through the slot-move path
@@ -168,9 +213,14 @@ extension AppState {
     /// made without being asked for.
     nonisolated static let automaticRebalanceGain: TimeInterval = 60 * 60
 
-    /// Whether `preview` is worth making unasked: it moves something and
-    /// makes the earliest run-out more than `automaticRebalanceGain` later.
+    /// Whether `preview` is worth making unasked: it moves a session off an
+    /// account that cannot serve it or into a session window, or it moves
+    /// something and makes the earliest run-out more than
+    /// `automaticRebalanceGain` later.
     nonisolated static func rebalanceIsWorthIt(_ preview: RebalancePreview) -> Bool {
+        // A blocked session served again, or one using a session window,
+        // adds work that no run-out time shows.
+        if preview.windowMoves > 0 || preview.unblockedMoves > 0 { return true }
         guard !preview.moves.isEmpty, let before = preview.earliestRunOutBefore else { return false }
         guard let after = preview.earliestRunOutAfter else { return true }
         return after.timeIntervalSince(before) > automaticRebalanceGain

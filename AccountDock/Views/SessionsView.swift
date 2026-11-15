@@ -119,6 +119,10 @@ struct SessionsView: View {
                     Text(verbatim: row.state.label)
                         .foregroundStyle(stateColor(row.state))
                         .lineLimit(1)
+                    if row.state.isPaused, let when = pauseNote(row) {
+                        Text(verbatim: "· " + when)
+                            .lineLimit(1)
+                    }
                 }
                 .font(.caption2)
                 .foregroundStyle(.textSecondary)
@@ -130,6 +134,13 @@ struct SessionsView: View {
             }
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /// When a held session goes on: when its account is expected to serve
+    /// it again, or, paused by the user, when the user plays it.
+    private func pauseNote(_ row: SessionRow) -> String? {
+        if row.pausedByYou { return "until you play it" }
+        return row.resumeAt.map { "resumes about \(UsageFormat.clock($0))" }
     }
 
     private func stateColor(_ state: SessionRowState) -> Color {
