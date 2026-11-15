@@ -179,6 +179,36 @@ enum SessionTerminalActions {
         return await SessionTerminalCommand.send([resume], into: target, through: terminal) ? .typed : .refused
     }
 
+    /// What `resumeWaitingAtLimit` did.
+    enum LimitWaitOutcome: Equatable {
+        /// The wait was closed and the session told to go on.
+        case resumed
+        /// The screen shows no wait at a limit, as for a session mid-turn.
+        case notWaiting
+        /// It runs in no terminal `SessionTerminalInput` can type into, or
+        /// its screen cannot be read.
+        case notInTerminal
+        /// The terminal refused the keys.
+        case refused
+    }
+
+    /// Closes the CLI's own wait for a usage limit to reset
+    /// (`ProviderSessionIsolation.screenWaitsAtLimit`) with its
+    /// `cancelWaitKey`, then types `prompt` so the session goes on now. A
+    /// session the CLI is not waiting in is left alone, whatever its last
+    /// lifecycle event: a turn refused at a limit records no `Stop`. `pause`
+    /// lets the CLI close the wait before the prompt is typed.
+    static func resumeWaitingAtLimit(_ session: AgentSession, isolation: any ProviderSessionIsolation,
+                                     terminal: SessionTerminalInput, prompt: String,
+                                     pause: TimeInterval = 1) async -> LimitWaitOutcome {
+        guard let pid = session.processID, let target = await terminal.terminalSession(ofProcess: pid),
+              let screen = await terminal.screenText(target: target) else { return .notInTerminal }
+        guard isolation.screenWaitsAtLimit(screen) else { return .notWaiting }
+        guard await terminal.type(isolation.cancelWaitKey, into: target) else { return .refused }
+        if pause > 0 { try? await Task.sleep(nanoseconds: UInt64(pause * 1_000_000_000)) }
+        return await SessionTerminalCommand.send([prompt], into: target, through: terminal) ? .resumed : .refused
+    }
+
     /// The terminal session to type into: nil while the session is not
     /// idle, or when it runs in no terminal the input reaches.
     private static func reachable(_ session: AgentSession, terminal: SessionTerminalInput) async -> String? {

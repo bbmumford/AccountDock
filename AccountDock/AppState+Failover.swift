@@ -98,6 +98,7 @@ extension AppState {
         await ingestTranscriptRequests()
         await maintainSessionSlots(processesRead: true)
         await applyModelFallbacks()
+        await resumeSessionsLeftWaiting()
         await noteUnisolatedSessions()
         await handleStuckBackgroundSessions()
         await rebalanceAutomaticallyIfDue()
@@ -1142,18 +1143,29 @@ extension AppState {
             sessionBurnPerHour: state.sessionBurnPerHour,
             weeklyBurnPerHour: state.weeklyBurnPerHour
         )
+        // Each session is judged by the account it runs on: only those whose
+        // own account is at or near its limit, with no move that helps, wait.
+        let scope = limitPauseScope(provider, current: current, now: Date())
+        requestPauseMoves(provider, scope.moves)
+        let existing = AgentPauseGate.read(provider)
+        guard !scope.held.isEmpty || scope.holdsNewTurns || existing != nil else {
+            // Nothing waits: the next cycle judges again.
+            suspensionContexts[provider] = nil
+            return
+        }
         // An account hold's sessions stay listed under the wider pause.
-        let sessions = Array(Set(AgentPauseGate.turningSessions(provider))
-            .union(AgentPauseGate.read(provider)?.sessions ?? [])).sorted()
+        let sessions = Array(Set(scope.held).union(existing?.sessions ?? [])).sorted()
         // A resume lasts for the pause it was given in; a pause file left
         // from before this limit, as after a restart, keeps its markers.
         AgentPauseGate.clearResumed(provider, sessions: sessions)
         userResumes[provider] = nil
-        // Turns that start during the pause wait at their start too, so no
-        // request is sent to an account known to refuse it.
+        // While no account has room, every turn that starts waits too, so no
+        // request is sent to an account known to refuse it; otherwise only
+        // the listed sessions' new turns do.
         AgentPauseGate.write(
             .init(sessions: sessions, reason: reason, pausedAt: Date(),
-                  resumeAt: pendingResetRecovery[provider]?.resetDate, holdsNewTurns: true),
+                  resumeAt: pendingResetRecovery[provider]?.resetDate, holdsNewTurns: scope.holdsNewTurns,
+                  holdsListedNewTurns: scope.holdsNewTurns ? nil : true),
             for: provider
         )
         // Agents without the pause hook are stopped, except jobs of an
@@ -1165,7 +1177,9 @@ extension AppState {
             failoverEvents.record(provider, "\(ungated) running session(s) started before the pause hook was installed cannot be held by this pause; restart them so later pauses reach them.")
         }
         if sessions.count + stopped > 0 {
-            failoverEvents.record(provider, "Paused \(sessions.count + stopped) running session(s) before they reached a usage limit: \(reason). New turns wait until capacity returns.")
+            failoverEvents.record(provider, scope.holdsNewTurns
+                ? "Paused \(sessions.count + stopped) running session(s) before they reached a usage limit: \(reason). New turns wait until capacity returns."
+                : "Paused \(sessions.count + stopped) session(s) whose own account is at or near its limit with no account to move to: \(reason). Sessions on accounts with room keep running; each paused one continues once its own account has room.")
         } else {
             failoverEvents.record(provider, "Every account reached its limit (\(reason)); new turns wait until capacity returns.")
         }
@@ -1261,6 +1275,139 @@ extension AppState {
         failoverEvents.record(provider, "Resumed \(resumed) paused session(s) at the user's request.")
     }
 
+    /// What a pause at a limit holds (`pauseScope`).
+    struct PauseScope: Equatable {
+        /// The sessions that wait, sorted.
+        var held: [String] = []
+        /// Every new turn waits, as no account has room.
+        var holdsNewTurns = false
+        /// Slot sessions that go on by moving to an account with room
+        /// instead of waiting, with that account.
+        var moves: [String: UUID] = [:]
+    }
+
+    /// Which of `sessions` a pause at a limit holds, each judged by the
+    /// account it runs on: its slot's account, or the active account for a
+    /// session on the shared sign-in (nil). A session waits only when its
+    /// own account is at or near its limit (`atOrNearLimit`) and no move
+    /// helps: a session on the shared sign-in moves only with a failover
+    /// switch, which `evaluate` found none for before pausing; a slot
+    /// session goes on instead on the account `destination` moves it to
+    /// while some account has room (`anyRoom`). A session on an account with
+    /// room never waits for another account's limit. Every new turn waits
+    /// (`holdsNewTurns`) only while no account has room. Read by
+    /// `suspendAgents` and `rescopeLimitPause`.
+    nonisolated static func pauseScope(sessions: [String: UUID?], active: UUID, atOrNearLimit: (UUID) -> Bool,
+                                       anyRoom: Bool, destination: (String) -> UUID?) -> PauseScope {
+        var scope = PauseScope(holdsNewTurns: !anyRoom)
+        for (session, slot) in sessions.sorted(by: { $0.key < $1.key }) {
+            guard atOrNearLimit(slot ?? active) else { continue }
+            if slot != nil, anyRoom, let target = destination(session) {
+                scope.moves[session] = target
+                continue
+            }
+            scope.held.append(session)
+        }
+        return scope
+    }
+
+    /// `pauseScope` for the provider's running sessions now. An account is
+    /// at or near its limit as `evaluate` judges the active one: refused at
+    /// it, or reaching it within `suspensionLead`. An account has room when
+    /// it is in the failover order, signed in and neither. A slot session on
+    /// an account at or near its limit moves where `SessionPacer.place`
+    /// puts it among the accounts that also carry one more typical session
+    /// for `SessionPacer.newSessionRunway` (`carriesNewSession`); with none,
+    /// it waits.
+    func limitPauseScope(_ provider: AIProviderType, current: Account, now: Date) -> PauseScope {
+        let policy = failoverConfig.policy(for: provider)
+        let planner = FailoverPlanner(settings: plannerSettings(provider))
+        var verdicts: [UUID: Bool] = [:]
+        func atOrNearLimit(_ id: UUID) -> Bool {
+            if let known = verdicts[id] { return known }
+            guard let account = accounts.first(where: { $0.id == id }) else { return true }
+            let state = quotaState(for: account, now: now)
+            let value = state.refusedAtLimit
+                || planner.servingVerdict(planner.servingView(state), now: now, lead: Self.suspensionLead).atOrNearLimit
+            verdicts[id] = value
+            return value
+        }
+        let ladder = accounts.filter {
+            $0.provider == provider && !policy.excludedAccountIDs.contains($0.id) && !needsSignIn($0)
+        }
+        let roomy = ladder.filter { !atOrNearLimit($0.id) }
+        let live = liveSessions[provider] ?? []
+        var sessions: [String: UUID?] = [:]
+        for session in live { sessions[session.sessionID] = slotAccount(forSession: session.sessionID, provider: provider) }
+        // Where the slot sessions on an account at or near its limit can go.
+        let typical = SessionPacer.typicalNewSessionRate(pacerSessions(provider, now: now))
+        let destinations = Set(roomy.filter { account in
+            let state = quotaState(for: account, now: now)
+            guard let projection = planner.projection(state, now: now) else { return false }
+            return Self.carriesNewSession(headroom: planner.headroom(state, projection),
+                                          burn: planner.expectedSessionBurn(of: state),
+                                          newSessionBurn: typical / 1_000_000 * accountRatio(account.id))
+        }.map(\.id))
+        var placements: [String: UUID] = [:]
+        if !destinations.isEmpty, let slots = SessionSlots(provider) {
+            let running = slotRebalanceSessions(provider, slots: slots, now: now)
+            let leaving = running.filter { $0.movable && atOrNearLimit($0.account) }
+            let ids = Set(leaving.map(\.id))
+            let pacerAccounts = ladder.map { account in
+                pacerAccount(account.id, state: quotaState(for: account, now: now, wholeAllowance: true), weight: 1,
+                             planner: planner, now: now)
+            }
+            placements = SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
+                .place(leaving, accounts: pacerAccounts, running: running.filter { !ids.contains($0.id) },
+                       destinations: destinations, now: now)
+        }
+        return Self.pauseScope(sessions: sessions, active: current.id, atOrNearLimit: atOrNearLimit,
+                               anyRoom: !roomy.isEmpty, destination: { placements[$0] })
+    }
+
+    /// Sends each of `moves` to its account through the slot-move path,
+    /// which records each move, and says so once.
+    private func requestPauseMoves(_ provider: AIProviderType, _ moves: [String: UUID]) {
+        let fresh = moves.filter { requestedSlotMoves[$0.key] != $0.value }
+        guard !fresh.isEmpty else { return }
+        for (session, target) in fresh { requestedSlotMoves[session] = target }
+        let names = Set(fresh.values).compactMap { id in accounts.first { $0.id == id }.map { messageName($0) } }.sorted()
+        failoverEvents.record(provider, "Moving \(fresh.count) session(s) off accounts at or near their limit to \(names.joined(separator: ", ")), which have room, instead of pausing them.")
+    }
+
+    /// Narrows a pause at a limit to `limitPauseScope` now: each listed
+    /// session whose own account has room again (a reset, a reading, or its
+    /// slot moved to an account with room) goes on, and once some account
+    /// has room the pause stops holding every new turn and lists the
+    /// sessions that must still wait. Ends the pause when none must. Run
+    /// every cycle by `prunePausedSessions`, also for a pause file found
+    /// after a relaunch.
+    func rescopeLimitPause(_ provider: AIProviderType, pause: AgentPauseGate.PauseFile, current: Account, now: Date) {
+        let scope = limitPauseScope(provider, current: current, now: now)
+        if pause.holdsNewTurns == true && scope.holdsNewTurns { return }
+        requestPauseMoves(provider, scope.moves)
+        let held = Set(scope.held)
+        let sessions = pause.holdsNewTurns == true ? held : Set(pause.sessions).intersection(held)
+        let released = pause.holdsNewTurns == true ? [] : Set(pause.sessions).subtracting(sessions)
+        guard !sessions.isEmpty || scope.holdsNewTurns else {
+            let count = endPause(provider)
+            suspensionContexts[provider] = nil
+            failoverEvents.record(provider, "The account each paused session runs on has room again; resumed \(count) session(s) and ended the pause.")
+            return
+        }
+        guard sessions != Set(pause.sessions) || pause.holdsNewTurns != scope.holdsNewTurns else { return }
+        var narrowed = pause
+        narrowed.sessions = sessions.sorted()
+        narrowed.holdsNewTurns = scope.holdsNewTurns
+        narrowed.holdsListedNewTurns = scope.holdsNewTurns ? nil : true
+        AgentPauseGate.write(narrowed, for: provider)
+        if pause.holdsNewTurns == true {
+            failoverEvents.record(provider, "An account has room again: sessions on accounts with room continue, and \(sessions.count) session(s) whose own account is still at its limit keep waiting.")
+        } else if !released.isEmpty {
+            failoverEvents.record(provider, "Resumed \(released.count) paused session(s): the account each runs on has room again.")
+        }
+    }
+
     /// Drops sessions that ended after the pause started, and refreshes the
     /// paused-session display.
     func prunePausedSessions(_ provider: AIProviderType) {
@@ -1282,10 +1429,18 @@ extension AppState {
                     AgentPauseGate.write(pause, for: provider)
                 }
             }
+            // A pause at a limit lets each session go on once its own account
+            // has room; a pause the user took, an account hold or one that
+            // narrows a route ends by its own rule.
+            if pause.manual != true, pause.account == nil, routedStatus[provider] == nil,
+               let current = activeAccount(for: provider), AgentPauseGate.read(provider) != nil {
+                rescopeLimitPause(provider, pause: pause, current: current, now: Date())
+            }
             // Resuming as capacity allows already uses what is left before a
             // reset, with whole sessions.
-            if AgentPauseGate.isActive(provider), !resumesAsCapacityAllows(provider) {
-                releaseStepsWithinHeadroom(provider, pause: pause)
+            if AgentPauseGate.isActive(provider), !resumesAsCapacityAllows(provider),
+               let current = AgentPauseGate.read(provider) {
+                releaseStepsWithinHeadroom(provider, pause: current)
             }
         }
         refreshPauseStatus(provider)

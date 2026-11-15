@@ -889,13 +889,47 @@ can pause sessions, so no request fails against a spent account. The user can
 also pause them on demand from Settings → Failover, for example before moving
 work off an account that failover excludes onto accounts at their limits.
 
+A pause at a limit judges each session by the account it runs on
+(`AppState.pauseScope`, built by `limitPauseScope`): a slot session by its
+slot's account, a session on the shared sign-in by the active account. A
+session waits only when its own account is at or near its limit (refused at
+it, or reaching it within `suspensionLead`) and no move helps: a session on
+the shared sign-in moves only with a failover switch, which `evaluate` found
+none for before pausing; a slot session moves instead, through the slot-move
+path, to an account `SessionPacer.place` picks among those with room that
+carry one more typical session for the runway (`carriesNewSession`). A
+session on an account with room never waits for another account's limit.
+The pause file lists exactly the sessions that wait, and each listed session
+also waits at a new turn (`holdsListedNewTurns`); every new turn waits
+(`holdsNewTurns`) only while no account has room. Every cycle,
+`prunePausedSessions` narrows such a pause (`rescopeLimitPause`): a listed
+session whose own account has room again, by a reset, a reading or its slot
+moving to an account with room, goes on; when an account first has room
+after all were at their limit, the pause stops holding every new turn and
+lists the sessions whose own account is still at its limit; it ends when
+none is left. A pause the user took, an account hold and a pause that
+narrows a route keep their own rules. The pause file and the gate's markers
+are all a pause is, so after a relaunch the same cycle picks the pause up.
+
+The pause banner lists each held session (`AppState.pausedSessions`, read
+from the gate's files alone: the listed sessions, those whose gate wrote a
+`.waiting` marker, or every running one while the pause holds every new
+turn, less those resumed), with the account it runs on and when that account
+is expected to serve it again (`FailoverPlanner.availableAt`), and offers to
+resume each one. The gate of every provider writes its markers under
+`$HOME/Library/Application Support/AccountDock/Pause` named by the gate's
+key and the session ID it reads from the hook's `session_id` (or
+`sessionId`), the names the app reads; Codex's and Kimi Code's slots run in
+the CLI's own home, so they read the same hooks.
+
 Pausing is cooperative. A hook script (`accountdock-gate.sh`) runs after every
 tool call (before every tool call for Kimi Code, whose post-tool hook does not
 wait) and waits while the provider's pause file exists under
 `~/Library/Application Support/AccountDock/Pause/`. The terminal stays attached
 and the session shows a status message and terminal title while it waits.
 
-- While the pause file sets `holdsNewTurns`, as every pause does, every session
+- While the pause file sets `holdsNewTurns`, as a pause the user takes does
+  and a pause at a limit does while no account has room, every session
   waits at its next tool call: also sessions not seen mid-turn when the pause
   began, and the subagents and workflow agents inside a session, which share
   its session ID. The sessions mid-turn at the start are listed for display
@@ -990,6 +1024,27 @@ and the session shows a status message and terminal title while it waits.
   than running on into the limit; a refused new turn tells the user to send
   the message again. `AgentPauseGate.synchronize` rewrites any installed gate
   whose command or timeout differs from the current one.
+
+With pausing off, nothing is paused, but a slot session can still be left
+idle by its CLI: Claude Code stops at a usage limit with a dialog (**Stop
+and wait for limit to reset**, **Wait here, then continue automatically at
+…**, **Add funds …**) or a footer counting down (`Continuing automatically
+at … · esc to cancel`), and waits for the reset of the account it was
+refused on even after AccountDock moved its slot to another account. With
+the policy's **Resume sessions left waiting at a limit once their slot has
+room** (`resumeSessionsLeftWaiting`, on by default; offered for providers
+with slot isolation), each quota cycle looks at the slot sessions refused at
+a limit (from their transcripts) within the last six hours whose slot now
+serves another account that can serve them
+(`AppState.leftWaitingCandidates`). For each one running in agterm whose
+screen shows that wait (`ProviderSessionIsolation.screenWaitsAtLimit`, read
+from the bottom lines so a transcript quoting it does not count),
+`SessionTerminalActions.resumeWaitingAtLimit` types Escape
+(`cancelWaitKey`), which takes the dialog's cancelling choice or cancels the
+countdown, then a prompt telling the session to continue, once per refusal,
+and records "Resumed X, which the CLI had left waiting for a reset, now
+that its slot is on Y." A session whose screen shows no such wait, as one
+mid-turn, is left alone; a slot AccountDock has not moved is never touched.
 
 Stopping a process with `SIGSTOP` is used only for agents that cannot run the
 hook, and never for a job in an interactive shell: a shell treats a stopped

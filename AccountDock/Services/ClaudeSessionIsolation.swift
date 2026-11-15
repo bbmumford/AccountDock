@@ -62,6 +62,27 @@ struct ClaudeSessionIsolation: ProviderSessionIsolation {
     /// Escape keeps the session running, its third choice.
     let keepRunningKey = "\u{1B}"
 
+    /// Claude Code waiting for a usage limit to reset: its footer counting
+    /// down to continuing on its own (`Continuing automatically at 12:00 pm
+    /// · esc to cancel`, also after `Usage limit reached ·`), or its limit
+    /// dialog, whose choices include `Stop and wait for limit to reset` and
+    /// `Wait here, then continue automatically …`. The footer is read only
+    /// at the bottom, where the transcript cannot quote it.
+    func screenWaitsAtLimit(_ screen: String) -> Bool {
+        let footer = Self.bottomLines(screen, count: Self.footerLines)
+        if footer.contains(where: { line in
+            line.range(of: "continuing automatically", options: .caseInsensitive) != nil
+                && line.range(of: "esc to cancel", options: .caseInsensitive) != nil
+        }) { return true }
+        return Self.bottomLines(screen, count: Self.exitQuestionLines).contains { line in
+            line.contains("Stop and wait for limit to reset") || line.contains("Wait here, then continue automatically")
+        }
+    }
+
+    /// Escape takes the dialog's cancelling choice and cancels the countdown
+    /// the footer shows, leaving the session at its prompt.
+    let cancelWaitKey = "\u{1B}"
+
     static func bottomLines(_ screen: String, count: Int) -> [Substring] {
         Array(screen.split(separator: "\n").filter { !$0.allSatisfy(\.isWhitespace) }.suffix(count))
     }

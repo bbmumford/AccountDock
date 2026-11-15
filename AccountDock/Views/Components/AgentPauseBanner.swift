@@ -1,7 +1,9 @@
 import SwiftUI
 
-/// Shown under a provider heading while AccountDock holds sessions because
-/// every account of that provider reached its usage limit.
+/// Shown under a provider heading while AccountDock holds sessions, each
+/// because the account it runs on is at or near its usage limit, listing
+/// each held session with that account and when it is expected to serve it
+/// again (`AppState.pausedSessions`).
 struct AgentPauseBanner: View {
     @EnvironmentObject private var appState: AppState
     let provider: AIProviderType
@@ -19,6 +21,19 @@ struct AgentPauseBanner: View {
                     .font(.caption)
                     .foregroundStyle(.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+                let held = appState.pausedSessions(provider)
+                ForEach(held.prefix(Self.listedSessions)) { session in
+                    Text(line(session))
+                        .font(.caption2)
+                        .foregroundStyle(.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                if held.count > Self.listedSessions {
+                    Text("and \(held.count - Self.listedSessions) more")
+                        .font(.caption2)
+                        .foregroundStyle(.textSecondary)
+                }
             }
             Spacer(minLength: 4)
             VStack(alignment: .trailing, spacing: 4) {
@@ -46,6 +61,22 @@ struct AgentPauseBanner: View {
         .padding(10)
         .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
         .sectionPadding()
+    }
+
+    /// Held sessions listed by name; the rest are counted.
+    static let listedSessions = 8
+
+    /// One held session: its name, the account it runs on, and when that
+    /// account is expected to serve it again.
+    private func line(_ session: WaitingSession) -> String {
+        var parts = [session.isWaiting ? "\(session.label) (waiting)" : session.label]
+        if let id = session.account, let account = appState.accounts.first(where: { $0.id == id }) {
+            parts.append("on \(appState.messageName(account))")
+        }
+        if let resumeAt = session.resumeAt {
+            parts.append("resumes about \(UsageFormat.clock(resumeAt))")
+        }
+        return parts.joined(separator: " · ")
     }
 
     private var title: String {

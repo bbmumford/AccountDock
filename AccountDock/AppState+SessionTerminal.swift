@@ -51,6 +51,69 @@ extension AppState {
         }
     }
 
+    // MARK: - Sessions the CLI left waiting at a limit
+
+    /// What a session left waiting at a limit is told once the wait is
+    /// closed.
+    nonisolated static let leftWaitingPrompt = "Continue where you stopped: the usage limit that stopped this session no longer applies, as its slot now serves an account with room."
+
+    /// How long after a refusal its session is still looked at.
+    nonisolated static let leftWaitingWindow: TimeInterval = 6 * 60 * 60
+
+    /// The slot sessions to look at for a wait their CLI keeps at a limit:
+    /// each refused at a usage limit (`refusals`, from the transcripts)
+    /// within `leftWaitingWindow`, whose slot now serves another account
+    /// (`slotAccount`) that can serve it (`canServe`), and not already
+    /// resumed for that refusal (`handled`, by the refusal's time). With
+    /// the account each now runs on.
+    nonisolated static func leftWaitingCandidates(sessions: [String], refusals: [String: SessionRefusal],
+                                                  slotAccount: (String) -> UUID?, canServe: (UUID) -> Bool,
+                                                  handled: [String: Date], now: Date) -> [String: UUID] {
+        sessions.reduce(into: [:]) { result, session in
+            guard let refusal = refusals[session], now.timeIntervalSince(refusal.at) < leftWaitingWindow,
+                  handled[session] != refusal.at, let serving = slotAccount(session),
+                  serving != refusal.account, canServe(serving) else { return }
+            result[session] = serving
+        }
+    }
+
+    /// Resumes the slot sessions whose CLI was left waiting for a usage
+    /// limit to reset after AccountDock moved their slot to an account that
+    /// can serve them (`leftWaitingCandidates`): the CLI's own wait would
+    /// keep each idle until the reset of an account it no longer reads. In
+    /// agterm, the wait is closed and the session told to go on
+    /// (`SessionTerminalActions.resumeWaitingAtLimit`), once per refusal,
+    /// and recorded. A session whose screen shows no such wait, as one
+    /// mid-turn, is left alone. With the policy's
+    /// `resumeSessionsLeftWaiting`, for providers with slot isolation. Runs
+    /// on every quota cycle after `maintainSessionSlots`, which moves the
+    /// slots.
+    func resumeSessionsLeftWaiting(now: Date = Date()) async {
+        for provider in AIProviderType.implementedProviders {
+            guard let isolation = SessionSlots(provider)?.isolation,
+                  failoverConfig.policy(for: provider).resumeSessionsLeftWaiting else { continue }
+            let planner = FailoverPlanner(settings: plannerSettings(provider))
+            let live = liveSessions[provider] ?? []
+            let candidates = Self.leftWaitingCandidates(
+                sessions: live.map(\.sessionID), refusals: sessionRefusals,
+                slotAccount: { self.slotAccount(forSession: $0, provider: provider) },
+                canServe: { !self.accountCannotServe($0, provider: provider, planner: planner, now: now, wholeAllowance: true) },
+                handled: leftWaitingResumed, now: now
+            )
+            for (sessionID, serving) in candidates {
+                guard let session = live.first(where: { $0.sessionID == sessionID }),
+                      let refusal = sessionRefusals[sessionID] else { continue }
+                let outcome = await SessionTerminalActions.resumeWaitingAtLimit(
+                    session, isolation: isolation, terminal: sessionTerminal, prompt: Self.leftWaitingPrompt)
+                guard outcome == .resumed else { continue }
+                leftWaitingResumed[sessionID] = refusal.at
+                let name = sessionNames[sessionID].map { "\($0) (\(Self.eventName(of: session)))" } ?? Self.eventName(of: session)
+                let on = accounts.first { $0.id == serving }.map { messageName($0) } ?? "another account"
+                failoverEvents.record(provider, "Resumed \(name), which the CLI had left waiting for a reset, now that its slot is on \(on).")
+            }
+        }
+    }
+
     // MARK: - Sessions outside a slot
 
     /// The sessions among `sessions` whose process reads no slot of its own
