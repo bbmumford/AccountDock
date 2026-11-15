@@ -1,8 +1,9 @@
 import XCTest
 @testable import AccountDock
 
-/// Where the router sends a Codex request it does not bridge, and how it
-/// bridges Codex's compaction call.
+/// Where the router sends a Codex request it does not bridge, how it
+/// bridges Codex's compaction call, and which Codex homes the bridge's
+/// base URL is written to.
 final class CodexBridgeTests: XCTestCase {
     private let chatGPT = "https://chatgpt.com/backend-api/codex"
     private let openAI = "https://api.openai.com/v1"
@@ -94,5 +95,21 @@ final class CodexBridgeTests: XCTestCase {
         }
         XCTAssertEqual(texts.count, 3, "the newest long message, the last and the summary")
         XCTAssertEqual(texts[1], "last")
+    }
+
+    // MARK: - Managed homes
+
+    func testTheHoldCoversEveryManagedCodexHome() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("hold-home-\(UUID().uuidString)", isDirectory: true)
+        let root = home.appendingPathComponent(try XCTUnwrap(hold.managedHomes), isDirectory: true)
+        for name in ["b-home", "a-home"] {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent(name), withIntermediateDirectories: true)
+        }
+        FileManager.default.createFile(atPath: root.appendingPathComponent("stray.txt").path, contents: Data())
+        XCTAssertEqual(ProviderRequestHold.settingsURLs(hold, home: home).map {
+            $0.deletingLastPathComponent().lastPathComponent + "/" + $0.lastPathComponent
+        }, [".codex/config.toml", "a-home/config.toml", "b-home/config.toml"])
+        let kimi = try XCTUnwrap(AIProviderType.kimi.capabilities.requestHold)
+        XCTAssertEqual(ProviderRequestHold.settingsURLs(kimi, home: home).count, 1)
     }
 }

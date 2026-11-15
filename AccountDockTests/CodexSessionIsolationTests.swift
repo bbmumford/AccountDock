@@ -55,8 +55,34 @@ final class CodexSessionIsolationTests: XCTestCase {
             #"ACCOUNTDOCK_CODEX_ACCOUNT_ID=$(/usr/bin/plutil -extract account_id raw -o - "$spare/credential.json" 2>/dev/null) || exec "$real" "$@""#,
             #"[ -n "$ACCOUNTDOCK_CODEX_ACCOUNT_ID" ] || exec "$real" "$@""#,
             "export ACCOUNTDOCK_CODEX_SLOT ACCOUNTDOCK_CODEX_ACCOUNT_ID",
-            "set -- " + expectedArguments.map(SessionSlots.shellQuoted).joined(separator: " ") + #" "$@""#,
+            #"b=$(/usr/bin/sed -n 's/^[[:space:]]*openai_base_url[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$HOME/.codex/config.toml" 2>/dev/null | /usr/bin/head -n 1)"#,
+            #"[ "$b" = '"# + RouterConfig.baseURL + #"/__provider/codex' ] || b='https://chatgpt.com/backend-api/codex'"#,
+            "set -- " + expectedArguments.map {
+                $0.hasPrefix("model_providers.accountdock.base_url=") ? #""model_providers.accountdock.base_url=\"$b\"""#
+                    : SessionSlots.shellQuoted($0)
+            }.joined(separator: " ") + #" "$@""#,
         ])
+    }
+
+    /// A slot session reads its provider's base URL, not Codex's
+    /// `openai_base_url`, so while that key sends Codex's own sessions to
+    /// the router, the launcher sends the slot's there too.
+    func testTheLauncherSendsASlotSessionToTheRouterWhileCodexsConfigDoes() throws {
+        let home = try temporaryDirectory()
+        let config = home.appendingPathComponent(".codex/config.toml")
+        try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "model = \"gpt-5\"\nopenai_base_url = \"\(CodexSessionIsolation.routedBaseURL)\" # accountdock-router\n"
+            .write(to: config, atomically: true, encoding: .utf8)
+        let slots = SessionSlots(isolation: isolation, home: home)
+        let account = UUID()
+        let credential = try XCTUnwrap(isolation.slotCredential(from: Self.auth(account: "acct-1", expires: Date().addingTimeInterval(3600))))
+        XCTAssertTrue(slots.serve(slots.directory(for: account), credential: credential, account: account, reason: "test"))
+        slots.writePool([(slots.directory(for: account).path, 1)])
+
+        let lines = try runLauncher(home: home, arguments: ["exec", "say ok"]).split(separator: "\n").map(String.init)
+        XCTAssertEqual(Array(lines.dropFirst()),
+                       (CodexSessionIsolation.arguments(baseURL: CodexSessionIsolation.routedBaseURL) + ["exec", "say ok"]).map { "arg=" + $0 })
+        XCTAssertTrue(lines.contains("arg=" + #"model_providers.accountdock.base_url=""# + CodexSessionIsolation.routedBaseURL + #"""#))
     }
 
     /// Runs the installed launcher in front of a stand-in `codex` that

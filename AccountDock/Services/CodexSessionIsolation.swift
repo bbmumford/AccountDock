@@ -74,7 +74,18 @@ struct CodexSessionIsolation: ProviderSessionIsolation {
 
     /// The `-c` overrides that make Codex read the slot, the same for every
     /// slot: the slot is named by the environment.
-    static let slotArguments: [String] = [
+    static let slotArguments = arguments(baseURL: baseURL)
+
+    /// The base URL of Codex's requests while AccountDock's router bridges
+    /// them: the `openai_base_url` `ProviderRequestHold` writes into
+    /// Codex's config. A slot session reads the slot provider's base URL
+    /// instead of that key, so it is given this one while the key is set,
+    /// and reaches the bridge as a session on Codex's own sign-in does.
+    static var routedBaseURL: String { ProviderPassthrough.baseURL(key: AIProviderType.codex.capabilities.pauseGate?.key ?? "codex") }
+
+    /// `slotArguments` with the slot provider's requests going to `baseURL`.
+    static func arguments(baseURL: String) -> [String] {
+        [
         providerArgument,
         #"model_providers.\#(providerID).name="OpenAI""#,
         #"model_providers.\#(providerID).base_url="\#(baseURL)""#,
@@ -85,19 +96,39 @@ struct CodexSessionIsolation: ProviderSessionIsolation {
         #"model_providers.\#(providerID).auth.refresh_interval_ms=\#(tokenRereadMilliseconds)"#,
         #"model_providers.\#(providerID).env_http_headers.ChatGPT-Account-ID="\#(accountVariable)""#,
         #"cli_auth_credentials_store="ephemeral""#,
-    ].flatMap { ["-c", $0] }
+        ].flatMap { ["-c", $0] }
+    }
+
+    /// The launcher line that sets `b` to the slot provider's base URL as
+    /// the session starts: `routedBaseURL` when Codex's config names it as
+    /// `openai_base_url`, the ChatGPT Codex endpoint otherwise.
+    static var baseURLLines: [String] {
+        let config = "$HOME/" + (AIProviderType.codex.capabilities.requestHold?.settingsFile ?? ".codex/config.toml")
+        return [
+            #"b=$(/usr/bin/sed -n 's/^[[:space:]]*openai_base_url[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' ""# + config
+                + #"" 2>/dev/null | /usr/bin/head -n 1)"#,
+            "[ \"$b\" = \(SessionSlots.shellQuoted(routedBaseURL)) ] || b=\(SessionSlots.shellQuoted(baseURL))",
+        ]
+    }
 
     /// Exports the slot directory and the account its credential names,
     /// then puts `slotArguments` before the user's; a slot whose credential
     /// names no account runs the CLI unchanged.
     func launcherExportLines(slot: String) -> [String] {
         let account = Self.accountVariable
+        // Stands for the base URL the launcher reads as the session starts.
+        let marker = "\u{1}"
         return [
             "\(directoryVariable)=\(slot)",
             "\(account)=$(/usr/bin/plutil -extract account_id raw -o - \"\(slot)/\(Self.credentialFile)\" 2>/dev/null) || exec \"$real\" \"$@\"",
             "[ -n \"$\(account)\" ] || exec \"$real\" \"$@\"",
             "export \(directoryVariable) \(account)",
-            "set -- " + Self.slotArguments.map(SessionSlots.shellQuoted).joined(separator: " ") + " \"$@\"",
+        ] + Self.baseURLLines + [
+            "set -- " + Self.arguments(baseURL: marker).map { argument in
+                argument.contains(marker)
+                    ? "\"" + argument.replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: marker, with: "$b") + "\""
+                    : SessionSlots.shellQuoted(argument)
+            }.joined(separator: " ") + " \"$@\"",
         ]
     }
 
@@ -109,7 +140,11 @@ struct CodexSessionIsolation: ProviderSessionIsolation {
         return assignments
     }
 
-    func launchArguments(forSlot directory: URL) -> [String] { Self.slotArguments }
+    /// The arguments of a session AccountDock starts in a slot, with the
+    /// router's base URL while `ProviderRequestHold` bridges Codex.
+    func launchArguments(forSlot directory: URL) -> [String] {
+        Self.arguments(baseURL: ProviderRequestHold.isRouted(.codex) ? Self.routedBaseURL : Self.baseURL)
+    }
 
     /// `codex resume <id>` and `codex exec resume <id>`: the first argument
     /// after `resume` that is no option.
