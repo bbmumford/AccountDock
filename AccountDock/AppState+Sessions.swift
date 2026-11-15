@@ -150,6 +150,10 @@ struct WaitingSession: Identifiable, Equatable {
     let workingDirectory: String?
     /// The name the session shows for itself (`AppState.sessionNames`).
     var name: String? = nil
+    /// The account the session runs on: its slot's, else the active one.
+    var account: UUID? = nil
+    /// When that account is expected to serve it again; nil when unknown.
+    var resumeAt: Date? = nil
 
     var id: String { "\(provider.capabilities.storageKey)-\(sessionID)" }
 
@@ -175,17 +179,41 @@ extension AppState {
     /// (`resumeSession`, which the gate honours whether or not the session
     /// has reached it yet).
     func pausedSessions(_ provider: AIProviderType) -> [WaitingSession] {
-        guard let pause = AgentPauseGate.read(provider) else { return [] }
-        let gates = AgentPauseGate.waitingGates(provider)
-        let resumed = AgentPauseGate.resumedSessions(provider)
-        let records = AgentSessions.records(provider)
-        let held = Set(pause.sessions).union(AgentPauseGate.waitingSessions(provider))
-        let running = Set((liveSessions[provider] ?? []).map(\.sessionID))
+        let now = Date()
+        let planner = FailoverPlanner(settings: plannerSettings(provider))
+        let active = activeAccount(for: provider)?.id
+        return Self.pausedSessions(
+            provider, pause: AgentPauseGate.read(provider), gates: AgentPauseGate.waitingGates(provider),
+            resumed: AgentPauseGate.resumedSessions(provider), records: AgentSessions.records(provider),
+            running: Set((liveSessions[provider] ?? []).map(\.sessionID)), names: sessionNames,
+            account: { self.slotAccount(forSession: $0, provider: provider) ?? active },
+            resumeAt: { id in
+                self.accounts.first { $0.id == id }.flatMap { planner.availableAt(self.quotaState(for: $0, now: now), now: now) }
+            }
+        )
+    }
+
+    /// The sessions `pause` holds, from the gate's own files: those waiting
+    /// in it now (`gates`, by the process ID each `.waiting` marker holds)
+    /// and those listed, or every `running` one while the pause holds every
+    /// new turn, less those resumed. Each names the account it runs on
+    /// (`account`) and when that account serves it again (`resumeAt`, else
+    /// the pause's own estimate). Reads no state of the app's, so a pause
+    /// found after a relaunch is shown the same way.
+    nonisolated static func pausedSessions(
+        _ provider: AIProviderType, pause: AgentPauseGate.PauseFile?, gates: [String: Int32], resumed: Set<String>,
+        records: [String: AgentSession], running: Set<String>, names: [String: String],
+        account: (String) -> UUID?, resumeAt: (UUID) -> Date?
+    ) -> [WaitingSession] {
+        guard let pause else { return [] }
+        let held = Set(pause.sessions).union(gates.keys)
         // A pause that holds new turns holds every running session.
         let all = pause.holdsNewTurns == true ? held.union(running) : held
         return all.subtracting(resumed).map { session in
-            WaitingSession(provider: provider, sessionID: session, gateProcess: gates[session],
-                           workingDirectory: records[session]?.workingDirectory, name: sessionNames[session])
+            let on = account(session)
+            return WaitingSession(provider: provider, sessionID: session, gateProcess: gates[session],
+                                  workingDirectory: records[session]?.workingDirectory, name: names[session],
+                                  account: on, resumeAt: on.flatMap(resumeAt) ?? pause.resumeAt)
         }
         .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
     }
