@@ -186,13 +186,24 @@ enum AgentSessions {
     ) -> [AgentSession] {
         records(provider, directory: directory).values.filter { record in
             guard record.event != "SessionEnd", let observedAt = record.observedAt,
-                  now.timeIntervalSince(observedAt) < liveLifetime,
-                  let process = record.processID, isAlive(process) else { return false }
-            // A process ID is reused once its process ends, after a restart
-            // within minutes: a process that started after the record's last
-            // event is not the session's.
-            return startTime(process).map { $0 <= observedAt.addingTimeInterval(5) } ?? true
+                  now.timeIntervalSince(observedAt) < liveLifetime else { return false }
+            return isRunning(record, isAlive: isAlive, startTime: startTime)
         }.sorted { $0.sessionID < $1.sessionID }
+    }
+
+    /// Whether the session's own process runs now. A process ID is reused
+    /// once its process ends, after a restart within minutes: a process that
+    /// started after the record's last event is not the session's. Read by
+    /// `live` and by the pause (`AgentPauseGate.stillHeld`), so a session
+    /// that ended without saying so is neither listed nor counted as held.
+    static func isRunning(
+        _ record: AgentSession,
+        isAlive: (Int32) -> Bool = { Darwin.kill($0, 0) == 0 },
+        startTime: (Int32) -> Date? = ProcessAncestry.startTime(of:)
+    ) -> Bool {
+        guard let process = record.processID, isAlive(process) else { return false }
+        guard let observedAt = record.observedAt else { return true }
+        return startTime(process).map { $0 <= observedAt.addingTimeInterval(5) } ?? true
     }
 
     /// The newest record of each process, for matching running processes to
