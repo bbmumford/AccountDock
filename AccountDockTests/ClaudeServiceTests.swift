@@ -91,6 +91,17 @@ final class ClaudeServiceTests: XCTestCase {
         )
     }
 
+    func testAnUpgradedAccountsPlanAndTierComeFromItsOrganisation() {
+        let profile: [String: Any] = [
+            "account": ["has_claude_max": true, "has_claude_pro": false],
+            "organization": ["organization_type": "claude_max", "rate_limit_tier": "default_claude_max_5x"]
+        ]
+        XCTAssertEqual(
+            ClaudeService.liveSubscription(fromProfileJSON: profile),
+            ClaudeSubscriptionSnapshot(planType: "max", isInactive: false, rateLimitTier: "default_claude_max_5x")
+        )
+    }
+
     func testExpiredLiveProfileClearsStaleSubscription() {
         let profile: [String: Any] = [
             "subscription": ["status": "expired", "endsAt": "2026-08-28T00:00:00Z"],
