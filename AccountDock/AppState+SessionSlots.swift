@@ -777,10 +777,12 @@ extension AppState {
 
     /// With `pinned`, the session the command starts is pinned to the
     /// account (`SessionPins.pinSlot`), so nothing automatic moves it.
-    func sessionLaunch(on account: Account, in directory: URL, pinned: Bool = true) async -> String? {
+    /// With a `directory` the command first changes to it; without one it
+    /// starts the session wherever it is run, as the copied command does.
+    func sessionLaunch(on account: Account, in directory: URL?, pinned: Bool = true) async -> String? {
         guard !needsSignIn(account), let slots = SessionSlots(account.provider),
               let cli = slots.realExecutable(preferred: slots.isolation.preferredExecutable) else { return nil }
-        let start = "cd \(Self.shellQuoted(directory.path)) && "
+        let start = directory.map { "cd \(Self.shellQuoted($0.path)) && " } ?? ""
         let lifetime: TimeInterval = readsLiveCredential(account) ? 60 : 2 * 60 * 60
         let id = account.id
         let credential = await slots.isolation.currentSlotCredential(for: account, minimumLifetime: lifetime, from: self)

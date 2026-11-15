@@ -550,12 +550,21 @@ struct UsageDashboardView: View {
             sessionLaunchError = blocker
             return
         }
-        guard let directory = chooseSessionDirectory() else { return }
+        // The copied command runs in whatever folder it is pasted into; a
+        // terminal started here needs its folder chosen.
+        let directory: URL?
+        if terminal == .clipboard {
+            directory = nil
+        } else {
+            guard let chosen = chooseSessionDirectory() else { return }
+            directory = chosen
+        }
         guard let command = await appState.sessionLaunch(on: account, in: directory, pinned: pinned) else {
             sessionLaunchError = "\(appState.messageName(account)) cannot start a session right now. Check that it is signed in."
             return
         }
-        if let message = await terminal.start(command, in: directory, name: appState.messageName(account)) {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        if let message = await terminal.start(command, in: directory ?? home, name: appState.messageName(account)) {
             sessionLaunchError = message
         }
     }
