@@ -34,6 +34,9 @@ struct SessionsView: View {
                 }
                 .padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // The window's height follows this list, as it follows the
+                // other tabs' content (MainMenuView.popoverHeight).
+                .measureUsageContentHeight()
             }
         }
     }

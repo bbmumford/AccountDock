@@ -123,11 +123,13 @@ extension AppState {
     }
 
     /// Live sessions of a provider AccountDock pauses whose CLI started
-    /// before the pause hook was installed. A CLI reads its hooks when it
-    /// starts, so these run without the gate: a pause cannot hold them, and
-    /// they reach the limit until they are restarted.
+    /// before the pause hook was installed. A CLI that reads its hooks only
+    /// when it starts runs these without the gate: a pause cannot hold them,
+    /// and they reach the limit until they are restarted. None for a CLI that
+    /// picks up hooks while running (`PauseGateSupport.readsHooksLive`).
     func sessionsWithoutGate(_ provider: AIProviderType) -> [AgentSession] {
-        guard gatedProviders.contains(provider), let installed = AgentPauseGate.installedAt(provider) else { return [] }
+        guard gatedProviders.contains(provider), provider.capabilities.pauseGate?.readsHooksLive != true,
+              let installed = AgentPauseGate.installedAt(provider) else { return [] }
         return (liveSessions[provider] ?? []).filter { session in
             session.processID.flatMap(ProcessAncestry.startTime(of:)).map { $0 < installed } ?? false
         }

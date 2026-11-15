@@ -294,6 +294,11 @@ struct PauseGateSupport: Sendable {
     /// takes any. Kimi Code drops its whole `[[hooks]]` section when one
     /// entry exceeds its limit, so the gate is installed within it.
     var maximumHookTimeout: Int? = nil
+    /// Whether a running CLI picks up hooks added to its hook file after it
+    /// started. Claude Code watches its settings file and runs a hook added
+    /// there from its next event, so its sessions started before the gate
+    /// was installed are held by it too (`AppState.sessionsWithoutGate`).
+    var readsHooksLive = false
 
     enum HookReply: Sendable {
         /// `systemMessage` shown to the user and
@@ -334,7 +339,7 @@ extension AIProviderType {
                 pricingPrefixes: ["anthropic/", "anthropic."],
                 pauseGate: PauseGateSupport(key: "claude", hookFile: ".claude/settings.json", format: .jsonHooks,
                                             gateEvent: "PostToolUse", continuationEvents: ["PreCompact", "SessionStart"],
-                                            reply: .systemMessageAndContext),
+                                            reply: .systemMessageAndContext, readsHooksLive: true),
                 lifecycleHooks: LifecycleHookSupport(events: ["SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"],
                                                      hookFile: ".claude/settings.json", format: .jsonHooks,
                                                      timeout: 0, bundledScript: "accountdock-claude-hook"),
