@@ -8,7 +8,7 @@ final class ProviderCapabilitiesTests: XCTestCase {
         XCTAssertEqual(AIProviderType.routedProvider, .claudeCode)
         XCTAssertEqual(RouteTarget.all.map(\.id), ["kimi"])
         XCTAssertEqual(RouteTarget.available(for: .claudeCode).map(\.id), ["kimi"])
-        XCTAssertEqual(RouteTarget.available(for: .codex).map(\.id), ["kimi"], "served through the Responses bridge")
+        XCTAssertEqual(RouteTarget.available(for: .codex).map(\.id), ["kimi", "claude"], "served through the Responses bridge")
         XCTAssertTrue(RouteTarget.available(for: .kimi).isEmpty)
     }
 

@@ -39,7 +39,8 @@ enum RouterConfig {
     static var controlKeyURL: URL { directory.appendingPathComponent("control.key") }
     static let controlHeader = "X-AccountDock-Control"
     static var usageDirectory: URL { directory.appendingPathComponent("usage", isDirectory: true) }
-    static var eventsURL: URL { directory.appendingPathComponent("events.jsonl") }
+    /// The router's events for the app (`RouterEventLog`).
+    static var eventsDirectory: URL { directory.appendingPathComponent("events", isDirectory: true) }
     static var signaturesURL: URL { directory.appendingPathComponent("signatures.txt") }
     static var logURL: URL {
         if ProcessInfo.processInfo.environment["ACCOUNTDOCK_ROUTER_DIRECTORY"] != nil {
@@ -96,17 +97,42 @@ struct RouterBackend: Codable, Equatable, Sendable {
     /// Sessions whose context exceeds this many tokens are not sent to the
     /// backend; nil sends every session.
     var maxContextTokens: Int?
+    /// Bridged requests are sent with the routed provider's pool accounts'
+    /// credentials (`RouterState.pool`), each session on one account, a
+    /// refusal at its limit going to the next; with no pool, with
+    /// `tokenFile`'s.
+    var poolCredentials = false
+    /// `anthropic-beta` features every bridged request names, such as the
+    /// one a sign-in's access token needs.
+    var betaFeatures: [String] = []
+    /// How `ResponsesBridge` writes requests for the backend and reads its
+    /// replies.
+    var dialect: MessagesDialect = .compatible
+
+    /// The Messages variants `ResponsesBridge` writes.
+    enum MessagesDialect: String, Codable, Sendable {
+        /// An Anthropic-compatible service: sampling and forced tool use are
+        /// passed on, and its thinking stays with it.
+        case compatible
+        /// Anthropic's own API: forced tool use and sampling are left out,
+        /// Codex's reasoning effort becomes the request's effort, and the
+        /// reply's thinking returns to the backend in later requests inside
+        /// Codex's reasoning items.
+        case claude
+    }
 
     init(
         id: String, displayName: String, baseURL: String, auth: Auth = .passthrough, tokenFile: String? = nil,
         model: String? = nil, validatesThinkingSignatures: Bool = false, reportsUnifiedUsage: Bool = false,
-        acceptsMessageThreads: Bool = false, acceptsDeferredTools: Bool = false, maxContextTokens: Int? = nil
+        acceptsMessageThreads: Bool = false, acceptsDeferredTools: Bool = false, maxContextTokens: Int? = nil,
+        poolCredentials: Bool = false, betaFeatures: [String] = [], dialect: MessagesDialect = .compatible
     ) {
         self.id = id; self.displayName = displayName; self.baseURL = baseURL; self.auth = auth
         self.tokenFile = tokenFile; self.model = model
         self.validatesThinkingSignatures = validatesThinkingSignatures; self.reportsUnifiedUsage = reportsUnifiedUsage
         self.acceptsMessageThreads = acceptsMessageThreads; self.acceptsDeferredTools = acceptsDeferredTools
         self.maxContextTokens = maxContextTokens
+        self.poolCredentials = poolCredentials; self.betaFeatures = betaFeatures; self.dialect = dialect
     }
 
     /// Optional fields may be absent, so a state written by a newer or older
@@ -127,6 +153,9 @@ struct RouterBackend: Codable, Equatable, Sendable {
         acceptsMessageThreads = try values.decodeIfPresent(Bool.self, forKey: .acceptsMessageThreads) ?? isAnthropic
         acceptsDeferredTools = try values.decodeIfPresent(Bool.self, forKey: .acceptsDeferredTools) ?? isAnthropic
         maxContextTokens = try values.decodeIfPresent(Int.self, forKey: .maxContextTokens)
+        poolCredentials = try values.decodeIfPresent(Bool.self, forKey: .poolCredentials) ?? false
+        betaFeatures = try values.decodeIfPresent([String].self, forKey: .betaFeatures) ?? []
+        dialect = try values.decodeIfPresent(MessagesDialect.self, forKey: .dialect) ?? .compatible
     }
 
     var messagesURL: URL? { url("v1/messages") }
@@ -299,6 +328,9 @@ struct RouterEvent: Codable, Equatable, Sendable {
     /// The pause-gate key of the passthrough provider whose request this
     /// was; nil for the routed provider's own requests.
     var client: String?
+    /// The event's place in the router's log, assigned as it is written
+    /// (`RouterEventLog.append`); the app reads on after the last it applied.
+    var sequence: UInt64?
 }
 
 enum RouterLogic {
@@ -764,11 +796,10 @@ enum RouterLogic {
         return body
     }
 
-    /// Context tokens a request is expected to carry: the session's last
-    /// measured context, or the request body's size at about four bytes a
-    /// token when the session has none yet.
+    /// Context tokens a request is expected to carry, by the rule the app
+    /// sizes sessions with (`SessionSizing.contextTokens`).
     static func expectedContext(lastMeasured: Int?, bodyBytes: Int) -> Int {
-        max(lastMeasured ?? 0, bodyBytes / 4)
+        SessionSizing.contextTokens(lastMeasured: lastMeasured, bodyBytes: bodyBytes)
     }
 
     /// An error body in the Messages API format, so the client reports it.
@@ -856,9 +887,16 @@ enum ProviderPassthrough {
         /// its session. False for a CLI whose own hook waits for the whole
         /// pause and which gives up on a reply that stays silent.
         var holdsRequests = true
+        /// Where requests signed with an API key go, when the CLI sends them
+        /// elsewhere than its sign-in's (`upstream`): Codex's built-in
+        /// provider sends a ChatGPT sign-in's requests to the ChatGPT Codex
+        /// endpoint and an OpenAI API key's to the OpenAI API. Nil sends
+        /// every request to `upstream`, as for a base URL the user set.
+        var apiKeyUpstream: String?
 
-        init(upstream: String, sessionField: String, holdsRequests: Bool = true) {
+        init(upstream: String, sessionField: String, holdsRequests: Bool = true, apiKeyUpstream: String? = nil) {
             self.upstream = upstream; self.sessionField = sessionField; self.holdsRequests = holdsRequests
+            self.apiKeyUpstream = apiKeyUpstream
         }
 
         init(from decoder: Decoder) throws {
@@ -866,7 +904,33 @@ enum ProviderPassthrough {
             upstream = try values.decode(String.self, forKey: .upstream)
             sessionField = try values.decode(String.self, forKey: .sessionField)
             holdsRequests = try values.decodeIfPresent(Bool.self, forKey: .holdsRequests) ?? true
+            apiKeyUpstream = try values.decodeIfPresent(String.self, forKey: .apiKeyUpstream)
         }
+    }
+
+    /// The credential a CLI's request is signed with.
+    enum ClientAuth: Equatable {
+        /// A sign-in's access token: a ChatGPT sign-in sends its account as
+        /// `ChatGPT-Account-ID`, and its token is a signed JWT.
+        case signIn
+        /// An API key, which carries neither.
+        case apiKey
+    }
+
+    static func clientAuth(_ headers: [(String, String)]) -> ClientAuth {
+        if headers.contains(where: { $0.0.caseInsensitiveCompare("chatgpt-account-id") == .orderedSame && !$0.1.isEmpty }) {
+            return .signIn
+        }
+        guard let token = RouterLogic.bearerToken(headers) else { return .apiKey }
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        return parts.count == 3 && token.hasPrefix("eyJ") ? .signIn : .apiKey
+    }
+
+    /// The upstream a request goes to: the API's for one signed with an API
+    /// key when the entry names one, else the sign-in's.
+    static func upstream(_ entry: Entry, headers: [(String, String)]) -> String {
+        guard let apiKeyUpstream = entry.apiKeyUpstream, clientAuth(headers) == .apiKey else { return entry.upstream }
+        return apiKeyUpstream
     }
 
     static var entriesURL: URL { RouterConfig.directory.appendingPathComponent("passthrough.json") }
@@ -893,8 +957,9 @@ enum ProviderPassthrough {
         return (String(key), rest.isEmpty ? "/" : rest)
     }
 
-    static func upstreamURL(_ entry: Entry, rest: String) -> URL? {
-        let base = entry.upstream.hasSuffix("/") ? String(entry.upstream.dropLast()) : entry.upstream
+    static func upstreamURL(_ entry: Entry, rest: String, headers: [(String, String)] = []) -> URL? {
+        let upstream = upstream(entry, headers: headers)
+        let base = upstream.hasSuffix("/") ? String(upstream.dropLast()) : upstream
         return URL(string: base + rest)
     }
 
@@ -962,6 +1027,12 @@ enum ProviderPassthrough {
     /// endpoint, whose streams carry Responses events.
     static func isResponsesPath(_ rest: String) -> Bool {
         (rest.split(separator: "?", omittingEmptySubsequences: false).first.map(String.init) ?? rest) == "/responses"
+    }
+
+    /// Whether `rest` is Codex's remote compaction endpoint, which takes the
+    /// conversation and answers with the items that replace it.
+    static func isCompactPath(_ rest: String) -> Bool {
+        (rest.split(separator: "?", omittingEmptySubsequences: false).first.map(String.init) ?? rest) == "/responses/compact"
     }
 
     /// An error delivered inside an event stream whose 200 head was already

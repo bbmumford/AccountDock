@@ -55,14 +55,21 @@ final class ResponseWriter: @unchecked Sendable {
     }
 }
 
+/// Serves the requests of one client connection in turn, each through
+/// `handler`, closing the connection when the client asks or goes away.
 final class ClientConnection: @unchecked Sendable {
+    typealias Handler = @Sendable (HTTPRequest, ResponseWriter) async -> Void
     private let connection: NWConnection
+    private let handler: Handler
     private let queue = DispatchQueue(label: "app.accountdock.router.connection")
     // Read and written on `queue` only.
     private var buffer = Data()
     private var peerClosed = false
 
-    init(_ connection: NWConnection) { self.connection = connection }
+    init(_ connection: NWConnection, handler: @escaping Handler) {
+        self.connection = connection
+        self.handler = handler
+    }
 
     func start() {
         connection.stateUpdateHandler = { [connection] state in
@@ -93,8 +100,9 @@ final class ClientConnection: @unchecked Sendable {
             }
             buffer.removeSubrange(buffer.startIndex..<(buffer.startIndex + used))
             let writer = ResponseWriter(connection)
+            let handler = handler
             Task {
-                await Router.handle(request, writer)
+                await handler(request, writer)
                 queue.async {
                     if request.keepAlive, !writer.clientGone { self.process() } else { self.connection.cancel() }
                 }
@@ -103,4 +111,42 @@ final class ClientConnection: @unchecked Sendable {
             connection.cancel()
         }
     }
+}
+
+/// Accepts connections on `127.0.0.1` and serves each through
+/// `ClientConnection`. Port 0 takes any free port, which `start` returns;
+/// the tests run the router and fake upstreams this way.
+final class RouterListener: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "app.accountdock.router.listener")
+
+    init(port: UInt16, handler: @escaping ClientConnection.Handler) throws {
+        let parameters = NWParameters.tcp
+        parameters.allowLocalEndpointReuse = true
+        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port) ?? .any)
+        listener = try NWListener(using: parameters)
+        listener.newConnectionHandler = { connection in ClientConnection(connection, handler: handler).start() }
+    }
+
+    /// Starts listening; `onState` hears every state change.
+    func start(onState: @escaping @Sendable (NWListener.State) -> Void) {
+        listener.stateUpdateHandler = onState
+        listener.start(queue: queue)
+    }
+
+    /// Starts listening and waits until the port is bound; nil when the
+    /// listener failed or `timeout` passed first.
+    func startAndWait(timeout: TimeInterval = 5) -> UInt16? {
+        let ready = DispatchSemaphore(value: 0)
+        start { state in
+            switch state {
+            case .ready, .failed, .cancelled: ready.signal()
+            default: break
+            }
+        }
+        guard ready.wait(timeout: .now() + timeout) == .success else { return nil }
+        return listener.port?.rawValue
+    }
+
+    func cancel() { listener.cancel() }
 }

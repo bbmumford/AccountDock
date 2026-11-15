@@ -27,6 +27,35 @@ enum ProviderRequestHold {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(hold.settingsFile)
     }
 
+    /// The config file of every home the CLI's sessions start from: its own
+    /// and, for a hold naming `managedHomes`, the same file in each home
+    /// AccountDock keeps for an account, created when the home has none.
+    static func settingsURLs(_ hold: RequestHoldSupport,
+                             home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [URL] {
+        let own = home.appendingPathComponent(hold.settingsFile)
+        guard let managed = hold.managedHomes else { return [own] }
+        let root = home.appendingPathComponent(managed, isDirectory: true)
+        let homes = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey],
+                                                                  options: [.skipsHiddenFiles])) ?? []
+        let file = (hold.settingsFile as NSString).lastPathComponent
+        return [own] + homes.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .sorted { $0.path < $1.path }
+            .map { $0.appendingPathComponent(file) }
+    }
+
+    /// Providers whose CLI the last `synchronize` pointed at the router, for
+    /// sessions AccountDock starts with their own base URL
+    /// (`CodexSessionIsolation.launchArguments`).
+    private static let routedProviders = RoutedProviders()
+    private final class RoutedProviders: @unchecked Sendable {
+        let lock = NSLock()
+        var providers: Set<AIProviderType> = []
+    }
+
+    static func isRouted(_ provider: AIProviderType) -> Bool {
+        routedProviders.lock.withLock { routedProviders.providers.contains(provider) }
+    }
+
     static func routedURL(_ provider: AIProviderType) -> String? {
         provider.capabilities.pauseGate.map { ProviderPassthrough.baseURL(key: $0.key) }
     }
@@ -69,14 +98,19 @@ enum ProviderRequestHold {
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
             let current = TOMLHookConfig.value(at: url, table: hold.table, key: hold.key)
             do {
-                if wantsRouter(provider, pausing: enabled, routerRunning: routerRunning,
-                               policy: FailoverConfigStore.storedPolicy(for: provider),
-                               agentInstalled: RequestRouterController.agentInstalled) {
-                    if current != routed || entries[key] == nil {
-                        let previous = current.flatMap { $0 == routed || $0.isEmpty ? nil : $0 }
-                        let upstream = previous ?? entries[key]?.upstream ?? hold.defaultUpstream
-                        entries[key] = ProviderPassthrough.Entry(upstream: upstream, sessionField: hold.sessionField,
-                                                                 holdsRequests: hold.holdsPausedRequests)
+                let wanted = wantsRouter(provider, pausing: enabled, routerRunning: routerRunning,
+                                         policy: FailoverConfigStore.storedPolicy(for: provider),
+                                         agentInstalled: RequestRouterController.agentInstalled)
+                Self.routedProviders.lock.withLock {
+                    if wanted { Self.routedProviders.providers.insert(provider) } else { Self.routedProviders.providers.remove(provider) }
+                    return
+                }
+                if wanted {
+                    let previous = current.flatMap { $0 == routed || $0.isEmpty ? nil : $0 }
+                    let upstream = previous ?? entries[key]?.upstream ?? hold.defaultUpstream
+                    let entry = Self.entry(hold, upstream: upstream)
+                    if current != routed || entries[key] != entry {
+                        entries[key] = entry
                         // The upstream is recorded before the CLI is pointed
                         // at the router, which forwards to it.
                         try writeEntries(entries)
@@ -85,19 +119,34 @@ enum ProviderRequestHold {
                         try TOMLHookConfig.setValue(at: url, table: hold.table, key: hold.key, value: routed, comment: marker)
                         holdLog.info("\(provider.rawValue) model requests now go through the router, for sessions started from now")
                     }
-                } else if current == routed {
-                    let upstream = entries[key]?.upstream ?? hold.defaultUpstream
-                    if hold.keyAbsentByDefault, upstream == hold.defaultUpstream {
-                        try TOMLHookConfig.removeValue(at: url, table: hold.table, key: hold.key)
-                    } else {
-                        try TOMLHookConfig.setValue(at: url, table: hold.table, key: hold.key, value: upstream, comment: nil)
+                    for managed in settingsURLs(hold).dropFirst()
+                    where TOMLHookConfig.value(at: managed, table: hold.table, key: hold.key) != routed {
+                        try TOMLHookConfig.setValue(at: managed, table: hold.table, key: hold.key, value: routed, comment: marker)
                     }
-                    holdLog.info("\(provider.rawValue) model requests go to \(upstream) again")
+                } else {
+                    let upstream = entries[key]?.upstream ?? hold.defaultUpstream
+                    for (index, file) in settingsURLs(hold).enumerated()
+                    where (index == 0 ? current : TOMLHookConfig.value(at: file, table: hold.table, key: hold.key)) == routed {
+                        if hold.keyAbsentByDefault, upstream == hold.defaultUpstream {
+                            try TOMLHookConfig.removeValue(at: file, table: hold.table, key: hold.key)
+                        } else {
+                            try TOMLHookConfig.setValue(at: file, table: hold.table, key: hold.key, value: upstream, comment: nil)
+                        }
+                        if index == 0 { holdLog.info("\(provider.rawValue) model requests go to \(upstream) again") }
+                    }
                 }
             } catch {
                 holdLog.warning("\(provider.rawValue) request hold update failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// The passthrough entry for `upstream`: a base URL the user set takes
+    /// every request, while the default one sends API-key requests to the
+    /// CLI's API-key upstream.
+    static func entry(_ hold: RequestHoldSupport, upstream: String) -> ProviderPassthrough.Entry {
+        ProviderPassthrough.Entry(upstream: upstream, sessionField: hold.sessionField, holdsRequests: hold.holdsPausedRequests,
+                                  apiKeyUpstream: upstream == hold.defaultUpstream ? hold.apiKeyUpstream : nil)
     }
 
     private static func writeEntries(_ entries: [String: ProviderPassthrough.Entry]) throws {

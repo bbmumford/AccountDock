@@ -238,6 +238,15 @@ struct RequestHoldSupport: Sendable {
     /// only forwards them. A bridged hold is installed by the provider's
     /// `ProviderFailoverPolicy.routeThroughBridge` and not by its pause.
     var bridgedProtocol: RouterProtocol?
+    /// Where the CLI sends requests signed with an API key while the key is
+    /// absent, when that differs from `defaultUpstream`, its sign-in's
+    /// (`ProviderPassthrough.Entry.apiKeyUpstream`).
+    var apiKeyUpstream: String?
+    /// The directory, relative to the home directory, of the homes
+    /// AccountDock keeps for the provider's accounts. A session started
+    /// with one as its home reads that home's config, so the hold sets the
+    /// key in each of them too (`ProviderRequestHold.settingsURLs`).
+    var managedHomes: String?
 }
 
 /// A provider CLI's session lifecycle hooks, installed by
@@ -383,7 +392,9 @@ extension AIProviderType {
                                                 key: "openai_base_url", sessionField: "prompt_cache_key",
                                                 defaultUpstream: "https://chatgpt.com/backend-api/codex",
                                                 keyAbsentByDefault: true, holdsPausedRequests: false,
-                                                bridgedProtocol: .anthropicMessages),
+                                                bridgedProtocol: .anthropicMessages,
+                                                apiKeyUpstream: "https://api.openai.com/v1",
+                                                managedHomes: "Library/Application Support/AccountDock/managed-codex-homes"),
                 lifecycleHooks: LifecycleHookSupport(events: ["SessionStart", "UserPromptSubmit", "Stop"],
                                                      hookFile: ".codex/hooks.json", format: .jsonHooks,
                                                      timeout: 5, bundledScript: "accountdock-codex-hook"),

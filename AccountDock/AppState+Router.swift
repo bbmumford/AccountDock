@@ -217,7 +217,10 @@ extension AppState {
         let resumed = AgentPauseGate.resumedSessions(provider)
         let overrides = pauseOverrideUntil[provider].map { $0 > now } ?? false
         let large = overrides || !pausingProviders.contains(provider) ? [] : sessionRates.entries
-            .filter { id, entry in live.contains(id) && !resumed.contains(id) && entry.contextTokens > cap }
+            .filter { id, entry in
+                live.contains(id) && !resumed.contains(id)
+                    && SessionSizing.contextTokens(lastMeasured: entry.contextTokens, bodyBytes: 0) > cap
+            }
             .keys.sorted()
         let continuation = "on \(target.displayName) \(model)"
         if large.isEmpty {
@@ -997,7 +1000,6 @@ extension AppState {
     }
 
     static let credentialFingerprintsKey = "app.accountdock.router.fingerprints.v1"
-    static let routerEventsAppliedKey = "app.accountdock.router.eventsAppliedThrough.v1"
     static let credentialFingerprintLifetime: TimeInterval = 24 * 60 * 60
 
     private func loadCredentialFingerprints(now: Date) {
@@ -1045,17 +1047,16 @@ extension AppState {
         let bridgedByKey = Dictionary(bridgedProviders.compactMap { provider in
             provider.capabilities.pauseGate.map { ($0.key, provider) }
         }, uniquingKeysWith: { first, _ in first })
-        // The first read after launch starts at the top of the file; events
-        // applied before the restart are skipped, or their token counts would
-        // be learned twice and old failures reported again. With no record
-        // yet, only events since launch count.
-        let appliedThrough = routerEventOffset == 0
-            ? (UserDefaults.standard.object(forKey: Self.routerEventsAppliedKey) as? Date ?? launchedAt) : nil
-        let (events, offset) = RequestRouterController.events(after: routerEventOffset)
-        routerEventOffset = offset
-        if let last = events.last?.at { UserDefaults.standard.set(last, forKey: Self.routerEventsAppliedKey) }
+        // The first read after launch starts after the last event applied
+        // before the restart, which the app acknowledged, so no token count
+        // is learned twice and no old failure reported again. With nothing
+        // acknowledged yet, only events since launch count.
+        let sinceLaunch = routerEventCursor == nil && RequestRouterController.acknowledgedEvent() == nil ? launchedAt : nil
+        let (events, cursor) = RequestRouterController.events(after: routerEventCursor)
+        routerEventCursor = cursor
+        defer { if !events.isEmpty { RequestRouterController.acknowledgeEvents(through: cursor.sequence) } }
         for event in events {
-            if let appliedThrough, event.at <= appliedThrough { continue }
+            if let sinceLaunch, event.at <= sinceLaunch { continue }
             if let client = event.client {
                 if let provider = bridgedByKey[client] { applyBridgeEvent(event, provider: provider, now: now) }
                 continue
