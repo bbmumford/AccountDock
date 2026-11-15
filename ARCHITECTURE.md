@@ -1411,8 +1411,25 @@ Anthropic until the app pushes credentials again.
 9. Record usage headers, token counts (cache reads separately) and events for
    the app.
 
-`RouterLogic` holds every decision as pure functions, which the tests cover
-directly.
+`RouterLogic` holds every decision as pure functions (`planMessages`,
+`poolAttempts`, `refusalAction`, `replyVerdict`, `preparedBody`,
+`bridgeCredentials`), which the tests cover directly. `RouterService`
+forwards and reports on a `RouterEnvironment` (directory and port); the
+launchd router runs one on the standard environment, and the tests run one
+on a temporary directory against local fake upstreams.
+
+Events reach the app through `RouterEventLog`: each carries a sequence and
+is appended to segment files in `Router/events/`; the app reads whole lines
+from its cursor and writes the last sequence it applied to
+`events/acknowledged`, and the router removes a segment only once every
+event in it is acknowledged, or past 32 MB while the app is away. A slow
+app, a rotation or a restart of either side loses nothing.
+
+Both sides size a session by `SessionSizing`: its last measured context
+(the request's size at four bytes a token only before any measurement), a
+cache lifetime of an hour when none was asked for, and a move costing its
+context's rewrite at 1.15 weighted tokens per token, so the router routes
+exactly the sessions the app does not hold.
 
 ### Adding a route target
 
@@ -1447,7 +1464,12 @@ turns on **Send Codex requests through AccountDock's router**
   asks for a websocket; the router answers 426 and Codex uses HTTP for the
   rest of the session. Its requests carry the session as `prompt_cache_key`
   and the `thread-id` header. Only sessions started after the key is set
-  reach the router, and those started from another `CODEX_HOME` do not.
+  reach the router. The key is also set in every home AccountDock manages
+  for a Codex account (`RequestHoldSupport.managedHomes`), and a slot
+  session, whose provider names its own base URL, is started with the
+  router's whenever Codex's config points there. A request signed with an
+  API key goes to `https://api.openai.com/v1` instead of the ChatGPT
+  endpoint when the key was absent (`ProviderPassthrough.clientAuth`).
 - **Until a route starts** every request is forwarded unchanged to the
   upstream with the client's own credential (`ProviderPassthrough`). Codex's
   entry has `holdsRequests: false`: its gate hook waits for a whole pause, and
@@ -1460,7 +1482,18 @@ turns on **Send Codex requests through AccountDock's router**
   account of the provider could (the router holds no pool of its accounts,
   so the refusal otherwise reaches the CLI and failover switches). The route is used
   only for a client whose credential fingerprint is one of the user's
-  accounts, and only for `POST /responses`; every other path goes upstream.
+  accounts, and only for `POST /responses` and `POST /responses/compact`;
+  every other path goes upstream. A compaction is answered whole: the
+  backend summarises the conversation and the reply holds the user's newest
+  messages and the summary, or, when the backend fails, the provider
+  compacts.
+- **Claude as the target.** `RouteTarget.claude` (offered only to a bridged
+  provider, so Claude Code's own usage keeps its models) sends Anthropic's
+  Messages API the pool accounts' sign-in tokens while the router has a
+  Claude pool, a refusal at an account's limit going to the next, and the
+  active Claude account's otherwise. Its dialect leaves out sampling and
+  forced tool use, turns Codex's reasoning effort into `output_config.effort`,
+  and returns Claude's thinking to it inside Codex's reasoning items.
 - **The request.** `instructions` and leading developer messages become the
   system prompt; function, namespace and free-form tools become Messages
   tools (`ToolNames` maps flat names back; a free-form tool takes one `input`
