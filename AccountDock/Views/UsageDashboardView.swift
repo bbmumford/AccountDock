@@ -112,6 +112,13 @@ private struct SessionPinList: View {
                 Text(verbatim: appState.sessionSummary([id]))
                     .font(.caption)
                     .fixedSize(horizontal: false, vertical: true)
+                if let held = appState.pausedSessions(provider).first(where: { $0.sessionID == id }) {
+                    Button(held.isWaiting ? "Resume" : "Let it run") { appState.resumeSession(held) }
+                        .controlSize(.small)
+                        .help(held.isWaiting
+                            ? "It is waiting at the pause. Let it continue while the others stay paused."
+                            : "The pause would stop it at its next tool call or turn. Let it keep running while the others stay paused.")
+                }
             }
             if pinned, appState.sessionRefusals[id] != nil {
                 HStack(spacing: 8) {

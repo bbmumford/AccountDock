@@ -27,17 +27,19 @@ struct AgentPauseBanner: View {
                 }
                 .controlSize(.small)
                 .help("Let the paused sessions continue now. They may then reach the usage limit.")
-                let waiting = appState.waitingSessions(provider)
-                if !waiting.isEmpty {
+                let paused = appState.pausedSessions(provider)
+                if !paused.isEmpty {
                     Menu("Resume one") {
-                        ForEach(waiting) { session in
-                            Button(session.label) { appState.resumeSession(session) }
+                        ForEach(paused) { session in
+                            Button(session.isWaiting ? "\(session.label) (waiting)" : session.label) {
+                                appState.resumeSession(session)
+                            }
                         }
                     }
                     .menuStyle(.borderlessButton)
                     .controlSize(.small)
                     .fixedSize()
-                    .help("Let one waiting session continue while the others stay paused. \(SessionResumeShortcut.display) resumes the one in the front window.")
+                    .help("Let one session continue while the others stay paused, whether it is waiting now or would stop at its next tool call. \(SessionResumeShortcut.display) resumes the one in the front window.")
                 }
             }
         }

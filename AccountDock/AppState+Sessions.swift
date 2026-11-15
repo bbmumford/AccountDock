@@ -138,21 +138,51 @@ struct WaitingSession: Identifiable, Equatable {
     let provider: AIProviderType
     let sessionID: String
     /// The gate process holding it; its ancestors include the terminal app
-    /// showing the session.
+    /// showing the session. Nil while it has not yet reached the gate.
     let gateProcess: Int32?
     let workingDirectory: String?
+    /// The name the session shows for itself (`AppState.sessionNames`).
+    var name: String? = nil
 
     var id: String { "\(provider.capabilities.storageKey)-\(sessionID)" }
 
-    /// The provider and the folder the session works in, as menus show it.
+    /// Whether it is held in the gate now rather than due to stop at its
+    /// next tool call or turn.
+    var isWaiting: Bool { gateProcess != nil }
+
+    /// The session's own name, else the provider and its folder, as menus
+    /// show it.
     var label: String {
-        let name = provider.capabilities.displayName
-        guard let workingDirectory else { return "\(name) session \(sessionID.prefix(8))" }
-        return "\(name) session in \((workingDirectory as NSString).abbreviatingWithTildeInPath)"
+        if let name { return name }
+        let provider = provider.capabilities.displayName
+        guard let workingDirectory else { return "\(provider) session \(sessionID.prefix(8))" }
+        return "\(provider) session in \((workingDirectory as NSString).abbreviatingWithTildeInPath)"
     }
 }
 
 extension AppState {
+    /// Every session the provider's current pause holds: those waiting in
+    /// the gate now and those it stops at their next tool call or turn,
+    /// excluding those already resumed. The pause banner and each account
+    /// card's session list offer to resume each one on its own
+    /// (`resumeSession`, which the gate honours whether or not the session
+    /// has reached it yet).
+    func pausedSessions(_ provider: AIProviderType) -> [WaitingSession] {
+        guard let pause = AgentPauseGate.read(provider) else { return [] }
+        let gates = AgentPauseGate.waitingGates(provider)
+        let resumed = AgentPauseGate.resumedSessions(provider)
+        let records = AgentSessions.records(provider)
+        let held = Set(pause.sessions).union(AgentPauseGate.waitingSessions(provider))
+        let running = Set((liveSessions[provider] ?? []).map(\.sessionID))
+        // A pause that holds new turns holds every running session.
+        let all = pause.holdsNewTurns == true ? held.union(running) : held
+        return all.subtracting(resumed).map { session in
+            WaitingSession(provider: provider, sessionID: session, gateProcess: gates[session],
+                           workingDirectory: records[session]?.workingDirectory, name: sessionNames[session])
+        }
+        .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+    }
+
     /// Sessions waiting in the gate now, for `provider` or for every provider
     /// with a pause gate, excluding those already resumed.
     func waitingSessions(_ provider: AIProviderType? = nil) -> [WaitingSession] {
