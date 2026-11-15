@@ -670,6 +670,7 @@ final class AppState: ObservableObject {
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 8_000_000_000)
                 guard let self else { return }
+                AgentHookInstaller.refreshInstalledShellHookScripts()
                 AgentHookInstaller.promptIfMissing(pausingProviders: self.pausingProviders)
             }
         }

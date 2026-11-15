@@ -104,6 +104,17 @@ enum AgentHookInstaller {
         return home.appendingPathComponent("Library/Application Support/AccountDock/bin/accountdock-\(key)-hook.sh")
     }
 
+    /// Rewrites each installed shell hook wrapper whose text differs from
+    /// what this build writes, so a wrapper installed by an earlier build
+    /// gets its process-name and recorder changes without a reinstall. A
+    /// wrapper not installed is left absent. Called once at launch.
+    static func refreshInstalledShellHookScripts() {
+        for provider in AIProviderType.implementedProviders where provider.capabilities.lifecycleHooks?.format == .tomlHooks {
+            guard FileManager.default.fileExists(atPath: shellHookScriptURL(provider).path) else { continue }
+            try? writeShellHookScript(provider)
+        }
+    }
+
     /// A CLI that runs hooks through a shell gets a wrapper that finds the
     /// CLI process above it and records the session with the bundled
     /// recorder.
