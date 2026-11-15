@@ -14,9 +14,13 @@ permissions:
 
 jobs:
   test:
-    runs-on: macos-15
+    # The newest image, whose Xcode matches the one releases are built with
+    # (scripts/publish-release.sh), so CI compiles what is shipped.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+      - name: Show Xcode
+        run: xcodebuild -version
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate project
