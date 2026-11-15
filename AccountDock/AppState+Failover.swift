@@ -918,11 +918,14 @@ extension AppState {
             if !verified { canVerify = false }
             (plan, planner) = self.plan(provider: provider, ladder: ladder, current: current, canVerify: canVerify)
         }
+        // Each switch of the active account follows its own setting: a
+        // switch at a threshold or at the limit is failover's, so with
+        // failover off the active account stays even when it runs out; a
+        // balancing switch is intelligent balancing's.
         plan = await planWithUsableDestination(plan, actsOn: { reason in
             switch reason {
             case .balance: policy.intelligentBalancingEnabled
-            case .threshold: policy.enabled
-            default: policy.enabled || policy.intelligentBalancingEnabled
+            default: policy.enabled
             }
         }) {
             self.plan(provider: provider, ladder: ladder, current: current, canVerify: false).0
@@ -943,7 +946,7 @@ extension AppState {
         if pooled {
             await holdSessionsForImminentReset(provider, policy: policy, ladder: ladder, planner: planner)
         }
-        let fallbackAvailable = poolHasRoom || (policy.enabled || policy.intelligentBalancingEnabled)
+        let fallbackAvailable = poolHasRoom || policy.enabled
             && planner.hasFallback(
                 current: currentState,
                 ladder: ladder.map { quotaState(for: $0, now: now) },
@@ -991,8 +994,8 @@ extension AppState {
         case .switchTo(let targetID, let reason):
             guard let target = accounts.first(where: { $0.id == targetID }) else { return }
             if case .balance = reason, !policy.intelligentBalancingEnabled { return }
-            if case .threshold = reason, !policy.enabled { return }
-            guard policy.enabled || policy.intelligentBalancingEnabled else {
+            // Switching at a threshold or at the limit is failover's alone.
+            if !reason.isBalance, !policy.enabled {
                 if exhaustionSoon { await holdWork(provider, policy: policy, current: current, because: "automatic switching is disabled") }
                 return
             }
@@ -1018,7 +1021,7 @@ extension AppState {
             let target = accounts.first(where: { $0.id == accountID })
             if accountID != current.id, !provider.capabilities.switchReachesRunningSessions,
                credentialModule(for: provider)?.liveCredential == nil,
-               policy.enabled || policy.intelligentBalancingEnabled, let target {
+               policy.enabled, let target {
                 updateStatus(provider, "All accounts exhausted. Preparing \(messageName(target)), which resets at \(resetText).\(signInNote(ladder))", settles: true)
                 await performAutomaticSwitch(provider: provider, policy: policy, from: current, to: target, reason: .exhausted)
             } else {
