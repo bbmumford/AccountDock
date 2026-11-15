@@ -81,11 +81,15 @@ Tools/render_screenshots.sh [output-directory]   # default: docs/images
 
 The script builds a Debug app, copies it under the bundle identifier
 `app.accountdock.screenshots` and runs it with `ACCOUNTDOCK_SCREENSHOT_DIR`
-set. `AccountDock/Debug/ScreenshotRenderer.swift` (Debug builds only) loads
-sample accounts, renders each view off screen and exits. The separate bundle
-identifier gives the render its own empty preferences, so it cannot change the
-installed app's accounts, failover order or settings, and it refuses to run
-under the production identifier.
+set and an empty temporary home directory (`CFFIXED_USER_HOME`).
+`AccountDock/Debug/ScreenshotRenderer.swift` (Debug builds only) loads
+sample accounts, sessions, usage and costs, renders each view off screen and
+exits. The separate bundle identifier gives the render its own empty
+preferences, so it cannot change the installed app's accounts, failover order
+or settings; the temporary home keeps the installed app's pause files,
+session slots, logs and the CLIs' settings out of the images and out of its
+reach. The renderer refuses to run under the production identifier or with
+the user's own home directory.
 
 ## Versioning
 

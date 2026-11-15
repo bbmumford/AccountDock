@@ -33,6 +33,33 @@ struct SessionRow: Identifiable, Equatable {
     var resumeAt: Date? = nil
 }
 
+/// One provider's part of the Sessions page: its running sessions, each
+/// with its move menu, the heading's status line and which heading
+/// controls apply. `AppState.sessionsSection` builds it from the live
+/// sessions and the pause files, and `SessionsView` draws it; the
+/// screenshot renderer hands that view sample sections instead.
+struct SessionsSection: Identifiable, Equatable {
+    struct Entry: Identifiable, Equatable {
+        let row: SessionRow
+        /// Its move menu (`AppState.sessionMoveMenu`); nil while the
+        /// provider's sessions run in no slots.
+        let moveMenu: SessionMoveMenu?
+        var id: String { row.id }
+    }
+
+    let provider: AIProviderType
+    let entries: [Entry]
+    /// How many sessions are paused and since when
+    /// (`AppState.sessionPauseLine`).
+    let pauseLine: String
+    let canPauseAll: Bool
+    let canResumeAll: Bool
+    /// Its sessions run in one-session slots, so they can be rebalanced
+    /// (`AppState.rebalanceAvailable`).
+    let canRebalance: Bool
+    var id: AIProviderType { provider }
+}
+
 /// The per-session controls of the Sessions page and the account cards'
 /// session lists: pausing and playing one session or all of a provider's,
 /// moving one by hand, and the pins those moves leave.
@@ -103,14 +130,34 @@ extension AppState {
                                       isolated: isolated)[session] ?? .running
     }
 
+    /// The Sessions page's part for `provider` (`SessionsSection`).
+    func sessionsSection(_ provider: AIProviderType, now: Date = Date()) -> SessionsSection {
+        let rows = sessionRows(provider, now: now)
+        return SessionsSection(
+            provider: provider,
+            entries: rows.map { SessionsSection.Entry(row: $0, moveMenu: sessionMoveMenu(provider, session: $0.id, now: now)) },
+            pauseLine: sessionPauseLine(provider, rows: rows),
+            canPauseAll: canPauseAllSessions(provider, rows: rows),
+            canResumeAll: canResumeAllSessions(provider),
+            canRebalance: rebalanceAvailable(provider)
+        )
+    }
+
     /// The provider header's status line: how many of `rows` are paused
     /// and since when, or that none is.
     func sessionPauseLine(_ provider: AIProviderType, rows: [SessionRow]) -> String {
-        guard let pause = AgentPauseGate.read(provider) else {
+        Self.sessionPauseLine(pausedAt: AgentPauseGate.read(provider)?.pausedAt, rows: rows)
+    }
+
+    /// The status line for `rows` under a pause that began at `pausedAt`,
+    /// nil while no pause is in effect; shared with the screenshot
+    /// renderer's sample sections so both read alike.
+    static func sessionPauseLine(pausedAt: Date?, rows: [SessionRow]) -> String {
+        guard let pausedAt else {
             return rows.isEmpty ? "No running sessions" : "\(rows.count) running · none paused"
         }
         let paused = rows.filter(\.state.isPaused).count
-        return "\(paused) of \(rows.count) paused · since \(UsageFormat.clock(pause.pausedAt))"
+        return "\(paused) of \(rows.count) paused · since \(UsageFormat.clock(pausedAt))"
     }
 
     /// Whether "Pause all" would hold anything not held already: no pause

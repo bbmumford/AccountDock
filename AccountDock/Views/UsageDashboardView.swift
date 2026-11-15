@@ -106,7 +106,8 @@ private struct SessionPinList: View {
                 SessionControlButtons(provider: provider, session: id,
                                       state: appState.sessionRowState(provider, session: id),
                                       pinned: pinned, inSlot: inSlot,
-                                      gated: provider.capabilities.pauseGate != nil && !ungated)
+                                      gated: provider.capabilities.pauseGate != nil && !ungated,
+                                      moveMenu: appState.sessionMoveMenu(provider, session: id))
             }
             if pinned, appState.sessionRefusals[id] != nil {
                 HStack(spacing: 8) {

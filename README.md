@@ -6,24 +6,26 @@ AccountDock is a native macOS menu-bar app for people who run Claude Code,
 Codex and Kimi Code on more than one account. It keeps each account's
 credentials apart, switches the account each CLI uses, shows every account's
 quota, cost and activity in one place, and moves work between accounts on its
-own before a limit stops you.
+own before a limit stops you, one session at a time when each session runs on
+an account of its own.
 
 <p align="center">
   <img src="docs/images/menu-bar.png" width="331" alt="AccountDock in the menu bar: quota rings for Claude, Codex and Kimi, the session reset countdown and today's cost">
 </p>
 
 <p align="center">
-  <img src="docs/images/menu-usage.png" width="300" alt="Usage tab: today's activity, every account's session and weekly quota, and the limit resets each holds">
+  <img src="docs/images/menu-usage.png" width="300" alt="Usage tab: today's activity, then each account's session and weekly quota, its limit resets and how many sessions it serves">
   <img src="docs/images/menu-costs.png" width="300" alt="Costs tab: today's cost and tokens by provider and model, period summaries and daily history">
-  <img src="docs/images/menu-accounts.png" width="300" alt="Accounts tab: accounts grouped by provider, with switch, re-authenticate and remove">
+  <img src="docs/images/menu-accounts.png" width="300" alt="Accounts tab: accounts grouped by provider, with switch, re-authenticate, remove and a lock on each active account">
 </p>
 
 ## Highlights
 
 - **Every account in one place.** Add, label, reorder, re-authenticate, remove
   and switch Claude Code, Codex and Kimi Code accounts. Each keeps an isolated
-  credential, and switching never writes an incomplete or dead credential into
-  a CLI's live slot.
+  credential, a sign-in is saved only once the provider confirms whose it is,
+  and switching never writes an incomplete or dead credential into a CLI's
+  live slot.
 - **Quota at a glance.** Session, weekly and monthly windows for every account,
   with reset times, in the menu and the menu bar. Model-scoped weekly limits
   are read and planned for.
@@ -33,19 +35,26 @@ own before a limit stops you.
 - **Limit resets.** Every subscription shows the limit resets it holds (an
   all-models reset, a Fable reset, Codex reset credits), how many are left and
   the last day to use them.
-- **A session on the subscription you choose.** Start Claude Code on one
-  subscription from its card, in agterm, Terminal or as a copied command; it
-  stays there until failover or balancing moves it.
-- **Automatic failover.** Each provider rotates through its own accounts on
-  thresholds you set, plans ahead with learned usage rates, and never switches
-  to an account that would run out straight away.
-- **No failed requests at the limit.** When every account is spent, Claude Code
-  sessions can keep running on a route target such as Kimi and return when
-  Claude has capacity, or sessions can pause and resume on their own.
-- **Several accounts at once.** Claude Code sessions can each be served by
-  their own account, so several 5-hour windows are used in parallel.
+- **One session, one account.** Claude Code, Codex and Kimi Code sessions can
+  each run in a credential slot of their own, so AccountDock moves sessions
+  between accounts one at a time and several 5-hour windows are used at once.
+- **Every session in reach.** The Sessions tab lists every running session with
+  the account serving it, and pins, pauses, plays or moves each one.
+- **Failover that knows plan sizes.** Each provider rotates through its own
+  accounts on thresholds you set, compares room in tokens so a Pro plan is not
+  mistaken for a Max 20x one, and switches only to an account that can carry
+  the work for an hour.
+- **No failed requests at the limit.** When an account is spent, the sessions
+  on it pause and continue on their own, or Claude Code's requests are served
+  by a route target such as Kimi until Claude has capacity again.
+- **A record of every credential.** Every credential AccountDock reads, writes,
+  renews or hands to a session is recorded by fingerprint, never by token, and
+  a session found on the wrong account is flagged.
 - **Configurable menu bar.** Rings, bars, percentages, countdowns, account and
   cost modules, in any order.
+- **Scriptable.** Another program can ask for fresh readings, move, pin or
+  rebalance sessions, or query the credential record through JSON request
+  files.
 - **Private by design.** No prompts or transcripts are stored or sent anywhere.
   Credentials stay in the macOS Keychain and in memory.
 - **Updates in one click.** AccountDock finds new releases, checks each
@@ -57,6 +66,13 @@ The **Usage** tab lists every account by provider, in the order you set in
 **Accounts**: its plan, the session (5-hour) window, the weekly or monthly
 window, and when each resets, then the limit resets the account holds and
 whether Extra usage is on. Today's activity across all providers sits on top.
+Each card counts the sessions the account serves now, how many of them are
+pinned and how many were refused at a limit; click the count to list them with
+the Sessions tab's controls. Under each provider heading, a pace line says when
+the active account reaches its limit at the current pace, and a line names any
+sessions that run outside a slot of their own or started before the pause hook
+was installed.
+
 The **Costs** tab totals today's API-equivalent spend by provider and model,
 with 7-day, 30-day and all-time summaries and a daily history; every figure
 shows the input, output and cache tokens it was priced from.
@@ -80,33 +96,143 @@ AccountDock logs the field's structure, never its values.
 
 ### Opening a session on one subscription
 
-The button beside a Claude card's plan opens a session on that subscription:
-choose agterm (when it is installed), Terminal or **Copy command**, then the
-folder to start in. The session reads a slot of its own holding that
-account's sign-in, so it stays on the subscription until failover or
-balancing moves it, the same rule every distributed session follows. The
-button is dimmed, with the reason on hover, while the subscription needs
-signing in or is at its limit, since failover would move the session straight
-away. A session opened on the active account uses the CLI's own sign-in and
-follows the active account.
+The button at the right of each account card's heading opens a session on
+that subscription, for Claude Code, Codex and Kimi Code alike. Choose agterm
+(when it is installed) or Terminal, then the folder to start in, or **Copy
+command**, which copies a command that starts the session in whatever folder
+it is pasted into. The session reads a slot of its own holding that account's
+sign-in and is pinned there, so nothing automatic moves it. Uncheck **Keep
+here** in the same menu, or hold Option while choosing, to open it unpinned;
+it then stays until failover or balancing moves it. The button is dimmed, with
+the reason on hover, while the subscription needs signing in or is at its
+limit.
+
+### Where the numbers come from
 
 Usage comes first from what the CLIs already record (Claude Code's status line
 and cache, Codex rollouts, the router's response headers). Provider usage
 endpoints are called sparingly within a per-provider request allowance: the
-active account whenever a decision depends on it, idle accounts every half
-hour. Costs are computed from local session logs and Claude totals match
+active account whenever a decision depends on it, the accounts sessions run on
+next, idle accounts every half hour. An account is read as soon as it is
+signed in, and **Refresh** reads every account that has no reading yet. Costs
+are computed from local session logs and Claude totals match
 [ccusage](https://github.com/ryoppippi/ccusage); see
 [COST_VERIFICATION.md](COST_VERIFICATION.md).
+
+## Sessions
+
+<p align="center">
+  <img src="docs/images/menu-sessions.png" width="330" alt="Sessions tab: Claude, Codex and Kimi sessions, each with the account serving it and its state (running, paused and waiting, paused at its next step, resumed while others are paused, refused at a limit, on the shared sign-in), pin, pause or play and move icons, and pause all, resume all and rebalance icons per provider">
+</p>
+
+The **Sessions** tab lists every running Claude Code, Codex and Kimi Code
+session, grouped by provider, by its name or folder and model, with the
+account serving it and its state:
+
+- **running**;
+- **paused (waiting)**: held now, before its next request;
+- **paused (stops at its next step)**: a pause holds it, and it stops at its
+  next tool call or new turn;
+- **resumed while others paused**: you let it go on while the pause holds the
+  rest;
+- **refused at a limit**: its last request was refused at a usage limit and
+  nothing has served it since;
+- **not isolated**: it reads the shared sign-in rather than a slot of its own,
+  so it follows the active account.
+
+A paused session also says when it goes on: about when its account is expected
+to serve it again or, if you paused it, when you play it. Each provider
+heading says how many sessions are paused and since when.
+
+Each row has three icons:
+
+- **Lock.** Pins the session to its subscription, so failover, pacing,
+  rebalancing and the model fallback leave it there. A session on the shared
+  sign-in cannot be pinned; its row offers a restart into a slot of its own
+  instead, for a session idle in agterm.
+- **Pause or play.** Pausing a session while nothing is paused holds only that
+  one, at its next tool call and at the start of its next turn, until you play
+  it; the others keep running. Pausing it while a pause is in effect holds it
+  again. Playing a paused session lets it go on while the others stay paused,
+  and playing the last one ends the pause. ⌃⌥⌘R plays the waiting session in
+  the front window. A session started before the pause hook was installed
+  cannot be held until it is restarted.
+- **Move.** Lists every account of the provider with the room left in its
+  windows, or why it cannot take the session (it runs there now, needs signing
+  in, is excluded from failover or is at its limit). A session you move by
+  hand is pinned where you put it, so failover and balancing do not move it
+  straight back, unless balancing would have placed it there itself; the menu
+  says which applies. Moving a pinned session unpins it first. A session on
+  the shared sign-in moves by restarting in a slot of its own on the account
+  chosen, and a Codex session moves by restarting once it is idle.
+
+The icons in each provider heading pause every session (**Pause all**), let
+every paused session continue (**Resume all**) and, for sessions in slots of
+their own, **Rebalance sessions now**: it shows which sessions would move and
+when the first account would then run out, and makes the moves once you
+confirm. A move is made only when it pays for the prompt cache it rewrites,
+and never mid-turn. **Pause all** holds every session at its next tool call
+and every new turn at its start, for instance before switching to an account
+at its limit; the sessions continue when you resume them or when an account in
+the failover order has capacity.
+
+An account card's session list has the same controls. There a pinned session
+refused at its account's limit shows **pinned · refused at limit** with
+**Switch model**, which changes the session to another model from its terminal
+once its turn has ended; its move menu unpins and moves it instead.
+
+### Sessions in slots of their own
+
+A slot holds one account's sign-in for one session. The CLI reads its
+credential from the slot instead of from its usual place and keeps everything
+else (settings, hooks, history, transcripts) where it always does, so a
+session in a slot can be moved, pinned and paused by itself without switching
+the account the others use. A slot holds an access token only; AccountDock
+renews each account and rewrites its slots.
+
+- **Claude Code** runs every session started from a terminal in a slot once
+  **Serve sessions from several accounts at once** is on and no route target is
+  chosen. AccountDock puts a small launcher first on `PATH`, from `~/.zshenv`
+  and again last in `~/.zshrc` so a terminal's shell finds it ahead of the CLI,
+  and the launcher starts each session in a slot of an account picked for it.
+  If AccountDock stops, the launcher starts the CLI unchanged within half an
+  hour, so no session is left on a slot nothing renews.
+- **Codex** and **Kimi Code** slots keep session history in the CLI's usual
+  home. A session opened from an account card always runs in one, and every
+  terminal session does once that provider's sessions are distributed across
+  accounts; Settings → Failover offers that switch for Claude Code only. A
+  Codex session moves by restarting: once it is idle in agterm and unpinned,
+  AccountDock ends it and resumes it with `codex resume` on the new account.
+
+Sessions started by full path, from an IDE or the desktop app, or before the
+slots were ready read the shared sign-in and move only with the active
+account. The usage tab counts them ("2 sessions not isolated"), and one idle
+in agterm can be restarted in its own slot: AccountDock types `/exit`, then the
+CLI's resume command, so it continues through the launcher. A session mid-turn
+or outside agterm is never typed into.
+
+Claude Code's background service (`claude --bg`) runs sessions in worker
+processes that read the shared sign-in. AccountDock recognises them, counts
+each on the account it really uses, and can restart one in a slot of its own
+once it is idle: it stops it with `claude stop` and resumes it in the agterm
+tab of its attach client, which holds no slot itself. A worker keeps the token
+it read, so one whose account can no longer serve it is stuck; AccountDock
+offers to restart it, and with **Restart stuck background sessions in their own
+slot** does so itself, at most once every ten minutes per session.
+
+Pins are kept by session ID, so a pinned session that is resumed
+(`claude --resume`) goes back to the account it was pinned to.
 
 ## Automatic failover
 
 <p align="center">
-  <img src="docs/images/settings-failover.png" width="560" alt="Failover settings for Claude Code: thresholds, ordering, routing to Kimi and balancing">
+  <img src="docs/images/settings-failover.png" width="560" alt="Failover settings for Claude Code: thresholds, pausing sessions, serving sessions from several accounts with pacing and rebalancing, balancing and the failover order">
 </p>
 
 Settings → Failover configures Claude Code, Codex and Kimi Code independently.
-Work never moves from one provider's accounts to another's, apart from the
-request router's route target below.
+Work never moves from one provider's accounts to another's, apart from a route
+target below. An account you add starts outside failover; include it in the
+provider's failover order when it should take work.
 
 - **Thresholds.** A session and a long-window threshold per provider. Crossing
   either moves work to the next account, in your order, that is below **both**
@@ -115,27 +241,53 @@ request router's route target below.
   account keeps working up to the provider's 100% limit, then moves to the
   account with the most room left. An account that is merely less full than its
   threshold is never chosen.
+- **Only where the work fits.** A switch goes only to an account that can
+  carry the work moving there for an hour, or until its window resets when
+  that is sooner, on every window it has. When the active account is at its
+  limit, work moves only to an account with room for at least ten minutes of
+  the current use; a sliver of allowance would be gone before the move paid
+  for itself.
+- **Plans of different sizes.** Room is compared in tokens rather than
+  percent: one percent of a Pro week is about a twentieth of one percent of a
+  Max 20x week. Each account's cost is learned from its own readings, and a
+  new account starts from its plan's size (Pro, Max 5x, Max 20x) until they
+  take over, so a small plan never receives a session that would empty its
+  window within the hour.
+- **The shared sign-in.** The sessions on the shared sign-in all move with the
+  active account. AccountDock counts them on the active account and, from the
+  switch failover expects to make, on the account they will move to, so no
+  session in a slot is placed on room they will need.
 - **Fresh data.** An account other sessions may still be using is read again
   before AccountDock switches to it.
 - **Ahead of time.** Decisions look 30 seconds ahead and use each account's
   learned usage rate plus its variability, so several agents finishing the last
   few percent between two checks cannot overrun a limit. Work also moves while
   there is still room for the requests already under way.
-- **Worthwhile destinations.** When the active account is at its limit, work
-  moves only to an account with room for at least ten minutes of the current
-  use; a sliver of allowance would be gone before the move paid for itself.
+- **Refusals checked.** A request refused at a usage limit is credited to the
+  account that served it, by the reset time the refusal names, and checked
+  against a fresh reading before anything moves for it.
 - **Reset-aware.** Hold briefly when a limit resets before the account would
-  run out, and optionally prefer an account whose limit has just reset.
-- **Keep windows warm.** Optionally make one minimal request right after a reset
-  is confirmed, so the next countdown starts immediately. The probe never
-  becomes a resumable session.
+  run out, and optionally prefer an account whose limit has just reset. Once a
+  reset time passes, the account is read again within a minute and takes no
+  work until a reading confirms the reset; it is never assumed to be at 0%.
+- **Keep windows warm.** Optionally start each window as soon as its reset is
+  confirmed, with one minimal request that never becomes a resumable session,
+  so the next countdown starts immediately. The reading and the warm-up use a
+  share of the provider's request allowance that background reads cannot use
+  up.
 - **Intelligent balancing.** Optionally spend accounts in the order their weekly
   allowance would otherwise expire unused. Once AccountDock has learned a day of
   your usage pattern, it simulates the coming week to choose, and shows a
-  one-line outlook for the week.
+  one-line outlook for the week. An allowance too small to carry the sessions
+  on the shared sign-in is not switched to; with pacing on, one light, idle
+  session in a slot of its own moves there to use it before it resets, when
+  that session's use fits and is worth the prompt cache it rebuilds there.
 - **Pace estimate.** Under each provider, while its active account is in use:
   when that account reaches its limit at the current pace, and when every
   included account would be used up and sessions paused.
+- **Lock the active account.** The lock beside the active account on the
+  Accounts tab keeps failover from switching away from it; sessions in slots
+  of their own still move.
 - **Quarantine.** An account whose stored credential fails verification is left
   out of automatic switching until you re-authenticate it.
 
@@ -145,43 +297,36 @@ The planning rules and the maths behind them are in
 ### When every account is exhausted
 
 <p align="center">
-  <img src="docs/images/failover-banners.png" width="440" alt="Banners: requests served by Kimi with a Return now button, and two sessions paused with a Resume now button">
+  <img src="docs/images/failover-banners.png" width="440" alt="Banners: requests served by Kimi with a Return now button, and a one-line notice of two paused sessions with icons to resume them all and to open the Sessions tab">
 </p>
 
 Choose what happens for each provider:
 
+- **Pause sessions.** A session waits when the account it runs on is at or
+  near its limit and no move helps: a session in a slot of its own moves to an
+  account with room first, and a session on an account with room never waits
+  for another account's limit. A waiting session holds at its next tool call,
+  including its subagents and workflow agents, and once no account has room,
+  every turn started waits before its first request, so nothing is sent to an
+  account that would refuse it. The terminal stays attached and usable, and a
+  message shows why. While an account still has a little room, paused
+  sessions are let through one step at a time. Each continues on its own when
+  its account has room again, or with **Resume all**. A one-line banner under
+  the provider heading counts the paused sessions and says when they are
+  expected to continue; its icons resume them all or open the Sessions tab.
 - **Serve requests from a route target** (Claude Code). Claude Code's requests
   go to the target through AccountDock's local router and come back to Claude
   as soon as an account has capacity. Sessions stay open the whole time. Kimi
   is the available target; pick the Kimi model. Only models with a context
   window of at least 1M tokens are offered (K3, K3.1 Pro, K3.1 Pro high speed
   and Kimi for Coding), since a session moves with its whole conversation.
-  Kimi counts every routed token
-  against its 5-hour window, so AccountDock routes only sessions up to a
-  context size you set, keeps a share of Kimi's window for your own Kimi
-  sessions, and routes only when Kimi would last a set time at the current
-  demand. Sessions larger than that context size (90% of the model's window
-  unless you set another) are paused while the rest run on Kimi, including at their next
-  prompt, and resume on Claude as capacity returns. **Return now** sends
-  requests back at once.
-- **Pause sessions.** Every session waits at its next tool call, including
-  subagents and workflow agents, and a turn started during the pause waits
-  before its first request, so nothing is sent to an account that would refuse
-  it. **Pause all** on the Sessions tab starts a pause yourself, for instance
-  before switching to an account at its limit; it holds until you resume or an
-  account in the failover order has capacity. The
-  terminal stays attached and usable, and a message shows why. While an account
-  still has a little room, paused sessions are let through one step at a time.
-  Everything continues on its own when capacity returns, or with
-  **Resume all**. To let one session go on while the rest stay paused, press
-  ⌃⌥⌘R with its terminal in front, or play it on the Sessions tab or from the
-  pause banner.
-- **Sessions tab.** Lists every running session with the account serving it
-  and its state, and pauses, plays, pins or moves each one. Pausing one
-  session while nothing is paused holds only that session until you play it;
-  the others keep running. A session you move by hand is pinned where you put
-  it, so failover and balancing leave it there, unless balancing would place
-  it there itself; the move menu shows each account's room and which applies.
+  Kimi counts every routed token against its 5-hour window, so AccountDock
+  routes only sessions up to a context size you set, keeps a share of Kimi's
+  window for your own Kimi sessions, and routes only when Kimi would last a
+  set time at the current demand. Sessions larger than that context size (90%
+  of the model's window unless you set another) are paused while the rest run
+  on Kimi, including at their next prompt, and resume on Claude as capacity
+  returns. **Return now** sends requests back at once.
 - **Use extra usage** (Claude Code, combines with the options above). Accounts
   with extra usage enabled keep serving past their plan, up to a monthly
   spending limit you set, before AccountDock routes or pauses.
@@ -191,33 +336,62 @@ Choose what happens for each provider:
 ### Serving sessions from several accounts
 
 With **Serve sessions from several accounts at once**, each Claude Code session
-is served by its own account through the router and keeps it while that account
-has room. Several accounts' 5-hour windows are used in parallel instead of one
-after another. The account cards show how many sessions each account served in
-the last ten minutes.
+runs on an account of its own, so several accounts' 5-hour windows are used in
+parallel instead of one after another. Without a route target the sessions run
+in slots of their own (above); with one, the request router serves each
+session from a pool of the accounts and keeps it on its account while that
+account has room.
 
 **Pace sessions to each account's 5-hour window**, on by default, spreads them
 by how fast each account is being used. New sessions go to the accounts with
-the most unused rate for the rest of their window. A session stays on its
-account while its prompt cache lasts. When an account's sessions would reach
-its limit and stay there for longer than their cache lasts, some of them move
-at their next turn to accounts that can carry them. Otherwise they stay, and
-a session that reaches the limit with the reset at most five minutes away
-waits for it on its own account and continues with its cache. When the reset
-is further away but still comes before the working sessions' caches expire,
-those sessions wait at their next tool call and continue on their account
-after it resets, instead of writing their whole context again elsewhere.
-Sessions whose next turn comes soon move before one deep in a long turn.
+the most unused rate for the rest of their window. When an account's sessions
+would reach its limit and stay there for longer than their prompt cache lasts,
+some of them move to accounts that can carry them; sessions whose next turn
+comes soon move before one deep in a long turn. Sessions an account at its
+limit gives up are spread over the accounts with room, by how long each then
+lasts.
 
-**Keep prompt caches for an hour**, on by default, extends Claude Code's own
-one-hour prompt cache. On a subscription Claude Code already uses the hour
-for its main conversation, but five minutes for subagents, workflow agents and
-background requests, and for everything while the account is on extra usage.
-The router asks for the hour on every request, so one that comes after a
-longer gap reads its context back cheaply instead of writing it again. The
-setting shows what the hour saved and cost over the last week. Claude Code's
-own `promptCacheTtl` and `subagentPromptCacheTtl` settings, set to `"1h"`, do
-the same for sessions started after they are set.
+When the router serves the sessions, a session also stays on its account while
+its prompt cache lasts, and one that reaches the limit with the reset at most
+five minutes away waits for it on its own account and continues with its
+cache. When the reset is further away but still comes before the working
+sessions' caches expire, those sessions wait at their next tool call and
+continue on their account after it resets, instead of writing their whole
+context again elsewhere.
+
+While the accounts taking sessions will have spent what they hold before
+their reset anyway, AccountDock also spends smaller plans' 5-hour windows,
+whose unused room would expire at their reset: sessions between turns with
+small contexts and light use move into them first, and a window that fills
+passes its sessions on to the next account with room.
+
+**When no account has allowance for a session's model, switch it to another
+model** (off by default): a session whose model's own weekly allowance is spent
+on every account is changed to the model you choose, by typing `/model` into
+its agterm tab once its turn has ended.
+
+With slots, two more settings apply:
+
+- **Rebalance automatically** (off by default) makes the moves **Rebalance
+  sessions now** would, at most once every half hour, and only when they move a
+  session off an account that cannot serve it or into a session window, or the
+  first account then runs out more than an hour later.
+- **Resume sessions left waiting at a limit once their slot has room** (on by
+  default). When Claude Code stops at a usage limit and waits for the reset on
+  its own, and AccountDock has since moved the session's slot to an account
+  that can serve it, AccountDock closes that wait in the session's agterm tab
+  and tells it to continue, once per limit.
+
+While the router serves Claude Code, **Keep prompt caches for an hour**, on by
+default, extends Claude Code's own one-hour prompt cache. On a subscription
+Claude Code already uses the hour for its main conversation, but five minutes
+for subagents, workflow agents and background requests, and for everything
+while the account is on extra usage. The router asks for the hour on every
+request, so one that comes after a longer gap reads its context back cheaply
+instead of writing it again. The setting shows what the hour saved and cost
+over the last week. Claude Code's own `promptCacheTtl` and
+`subagentPromptCacheTtl` settings, set to `"1h"`, do the same for sessions
+started after they are set.
 
 ### Resuming paused sessions as capacity allows
 
@@ -233,34 +407,58 @@ anyway.
 ### The request router
 
 The router is a small helper that AccountDock installs, updates and removes on
-its own. It runs while Claude Code failover, a route target or several-account
-serving is on. A running Claude Code session keeps the credential it already
-holds, so without the router a switch reaches running sessions only late; with
-it, every session moves to the newly active account at its next turn, and a
-request an account refuses at its limit is sent again on the next account
-instead of failing. It listens on `127.0.0.1` only,
-refuses requests from web pages, and serves your accounts only to clients that
-already hold one of your credentials. Credentials are passed to it from the
-Keychain over an authenticated local connection and kept in memory, never on
-disk. Requests that lose their connection to Anthropic before any reply are sent
-again on a fresh connection. When the route target reaches its own limit,
-sessions return to Claude at once; with every option out, a session gets
-Claude's own limit reply, so Claude Code waits for the reset and continues by
-itself. An interrupted turn stops the upstream reply. Claude Code sessions started before the router was
-enabled keep talking to Anthropic directly until they are restarted. Details are in
+its own. It runs only while a setting needs it: a route target for Claude Code,
+or the Codex bridge below. Failover, balancing, pausing and session slots work
+without it. While it serves Claude Code, every session on the shared sign-in
+moves to the newly active account at its next turn, and a request an account
+refuses at its limit is sent again on the next account instead of failing. It
+listens on `127.0.0.1` only, refuses requests from web pages, and serves your
+accounts only to clients that already hold one of your credentials.
+Credentials are passed to it from the Keychain over an authenticated local
+connection and kept in memory, never on disk. Requests that lose their
+connection to Anthropic before any reply are sent again on a fresh connection.
+When the route target reaches its own limit, sessions return to Claude at
+once; with every option out, a session gets Claude's own limit reply, so Claude
+Code waits for the reset and continues by itself. An interrupted turn stops the
+upstream reply. Claude Code sessions started before the router was enabled
+keep talking to Anthropic directly until they are restarted. Details are in
 [ARCHITECTURE.md](ARCHITECTURE.md#request-router).
+
+### Serving Codex from a route target
+
+Codex speaks OpenAI's Responses API, which no route target accepts, so the
+router can translate. With **Send Codex requests through AccountDock's router**
+(off by default) and a service chosen under **When every account is
+exhausted**, AccountDock points `openai_base_url` in `~/.codex/config.toml`,
+and in the Codex homes it manages, at the router. The router forwards every
+request to Codex unchanged until every included Codex account is exhausted.
+Then it rewrites Codex's requests for the chosen service, Kimi or Claude, and
+the replies back for Codex, compaction included, so sessions keep running;
+requests return to Codex at each session's next turn once an account has
+capacity. With Claude as the service, the requests use your Claude accounts'
+sign-ins and count against their limits. A request signed with an API key goes
+to the OpenAI API. Codex's own reasoning records and hosted tools, such as web
+search, are not carried over. Only Codex sessions started after the setting is
+turned on reach the router, and turning it off restores the config. Details are
+in [ARCHITECTURE.md](ARCHITECTURE.md#serving-a-responses-cli-from-a-route-target).
 
 ## Agent hooks
 
 AccountDock adds a few hooks to each CLI's settings, alongside your own:
 
-- session lifecycle records, used to recover sessions after a Codex switch;
+- session lifecycle records, used to count each account's sessions, to
+  recover sessions after a Codex switch and to restart sessions in slots;
 - Claude Code's status line, so every response's quota reaches AccountDock
   without an extra request (your own status line keeps working);
-- the pause gate;
-- `ANTHROPIC_BASE_URL`, only while the router is in use.
+- the pause gate, for Claude Code, Codex and Kimi Code;
+- `ANTHROPIC_BASE_URL`, only while the router serves Claude Code;
+- `openai_base_url` in `~/.codex/config.toml`, only while the Codex bridge is
+  on.
+While sessions are served from slots, AccountDock also adds one marked line
+putting the slot launcher on `PATH` to `~/.zshenv` and `~/.zshrc`, and removes
+it once they are not.
 
-On launch, AccountDock asks to install any that are missing.
+On launch, AccountDock asks to install any hooks that are missing.
 Settings → General → Agent hooks shows each one and can reinstall them. Each
 settings file is backed up once before the first change, for example
 `~/.claude/settings.json.accountdock-backup`. Session records hold the session
@@ -270,8 +468,11 @@ ID, working directory, state, host and time, never prompt or transcript content.
 
 **Claude Code.** Switching replaces the credential Claude Code uses and asks
 Claude whose the new credential is, rolling back if it is another account's or
-rejected.
-Running sessions are never terminated or restarted.
+rejected. Running sessions are never terminated or restarted. A switch away
+from an account at its limit tells the sessions on the shared sign-in to read
+it again, so each moves at its next request; a threshold or balancing switch
+leaves them to use what is left there and moves them once it runs out.
+Sessions in slots of their own stay on their accounts.
 
 **Codex** has three switch methods for automatic failover:
 
@@ -290,13 +491,69 @@ session is closed, so when one cannot be, none is closed and the switch reports
 why. Codex lifecycle hooks need a Codex build that supports them
 (the `bbmumford/codex` fork); on other builds they are inert.
 
-**Kimi Code.** The Accounts tab can capture the current Kimi Code login or run
-`kimi login`. Each subscription keeps an isolated credential, and Kimi's
+**Kimi Code.** Each subscription keeps an isolated credential, and Kimi's
 rotating refresh tokens are written back before use.
+
+### Adding accounts and signing in
+
+**Add Provider** on the Accounts tab signs in a new account (**Login new
+account**) or saves the one the CLI is signed in to (**Capture current
+account**). Adding an account leaves the active one active, so no running
+session moves, and leaves the new account out of failover until you include
+it; the first account of a provider becomes the active one.
+
+Adding or re-authenticating a Claude account signs in in a temporary
+location, so running sessions cannot overwrite the sign-in being saved. Every
+sign-in AccountDock saves, including the active account's own token before a
+switch, is saved only after the provider confirms whose it is, and a saved
+sign-in whose owner the provider has not confirmed yet reads no usage for its
+account. When Claude rejects an idle account's saved sign-in even after
+renewing it, the account is left out of failover and a notification asks you to
+re-authenticate it.
+
+## Credential audit
+
+Every credential read, write, renewal, ownership check, switch, session
+signal, warm-up and slot change, for every provider, adds one line to
+`~/Library/Logs/AccountDock-credentials.jsonl`. Each entry names the action,
+the account AccountDock attributes it to and the code path that made it, and
+identifies the token only by a fingerprint: the first 12 hexadecimal digits of
+the SHA-256 of its access token. No token text and nothing of a refresh token
+is written. The file is readable only by you and is rotated at 20 MB, keeping
+three older files.
+
+AccountDock learns whose each fingerprint is from the providers' answers, so a
+credential used or saved under the wrong account is marked and raises an
+event. The record also notes which account served each session, and a running
+session found holding another account's sign-in than the one AccountDock
+expects is flagged. Settings → General → Audit opens the file in Console or
+Finder, lists the flagged sessions and can tell them to read their sign-in
+again; the `audit` request below queries the record.
+
+## Requests from other programs
+
+A script or agent can drive AccountDock without the menu by leaving a JSON
+file in `~/Library/Application Support/AccountDock/Requests/`. AccountDock
+handles it at its next quota check, usually within a minute or two, removes it
+and writes the outcome under the same name in `Requests/Done/`. An account is named by
+its ID, label or email, and a provider by its name.
+
+| Request | What it does |
+| --- | --- |
+| `{"action":"refresh","account":"Work"}` | Reads that account's usage now; without `account`, the active accounts' |
+| `{"action":"moveSession","session":"<id>","account":"Work"}` | Moves one running session as its move menu does; without `account`, to the account with most room for its model (`model` names the model when the caller knows it better) |
+| `{"action":"pin","session":"<id>"}` | Pins a session in a slot of its own to the account its slot serves; `unpin` frees it |
+| `{"action":"rebalance","provider":"Claude","apply":false}` | Returns the moves **Rebalance sessions now** would make; with `"apply":true`, makes them |
+| `{"action":"audit","since":"<ISO 8601 time>","account":"Work","limit":100}` | Returns credential audit entries, oldest first; every field but `action` is optional, and without `limit` the newest 1,000 come back |
+| `{"action":"signalSessions","provider":"Claude"}` | Tells the sessions the audit flagged, of that provider or all, to read their sign-in again |
+
+Each outcome holds `ok`, `detail`, the account and when it was handled, with
+`moves` for `rebalance` and `entries` for `audit`. A pinned session is not
+moved until it is unpinned.
 
 ## Failover log
 
-Settings → Log records switches, waits, routing, pauses, recoveries and
+Settings → Log records switches, waits, routing, pauses, moves, recoveries and
 failures. Account identity is obfuscated, entries are capped at 500 and stored
 locally at `~/Library/Logs/AccountDock-failover.json`, and the log can be
 cleared from the app.
@@ -305,6 +562,9 @@ cleared from the app.
 
 - macOS 14 or newer
 - Claude Code, Codex or Kimi Code installed for the providers you use
+- Optionally agterm, which AccountDock needs to restart a session in a slot of
+  its own, to move a Codex session and for the settings that type into a
+  session's terminal
 - For development: Xcode 16 or newer and XcodeGen (`brew install xcodegen`)
 
 ## Install
@@ -365,7 +625,8 @@ built, signed and published from a Mac with one command:
 Packaging, signing and versioning are in [BUILD_GUIDE.md](BUILD_GUIDE.md).
 
 The screenshots above are rendered from the app's own views with sample
-accounts, never real ones:
+accounts and sessions, never real ones, in a temporary home directory so the
+installed app's state cannot reach them:
 
 ```bash
 Tools/render_screenshots.sh   # writes docs/images/*.png
@@ -382,7 +643,7 @@ Tools/render_screenshots.sh   # writes docs/images/*.png
 | `Shared/` | Widget data shared by the app and the widget |
 | `Tools/` | Cost verification, pricing refresh and screenshot rendering |
 | `scripts/` | Release helper, hook configurators and installer scripts |
-| `docs/` | Images, the Kimi provider design and archived upstream docs |
+| `docs/` | Images, provider notes and archived upstream docs |
 | `project.yml` | XcodeGen project definition and version source |
 
 ## Extending
@@ -390,12 +651,14 @@ Tools/render_screenshots.sh   # writes docs/images/*.png
 **A provider.** Every provider is declared once in
 `AccountDock/Models/ProviderCapabilities.swift`: identity, quota windows,
 workload eligibility, pricing, how switching reaches running sessions, its
-pause gate and lifecycle hooks, a live usage feed, whether the router serves
-it and whether it offers a route target. Add a service for authentication,
-credential storage, plan discovery, usage and CLI switching, give each adapter
-in [ARCHITECTURE.md](ARCHITECTURE.md#providers) its case, then register the
-capabilities. Accounts, usage reading, failover, pausing, routing, hooks, costs,
-the menu bar and the settings pick it up from the registry.
+pause gate and lifecycle hooks, its session slots and background service, a
+live usage feed, whether the router serves it and whether it offers a route
+target. Add a service for authentication, credential storage, plan discovery,
+usage and CLI switching, give each adapter in
+[ARCHITECTURE.md](ARCHITECTURE.md#providers) its case, then register the
+capabilities. Accounts, usage reading, failover, pausing, session slots,
+routing, hooks, costs, the Sessions tab, the menu bar and the settings pick it
+up from the registry.
 
 **A route target.** Set a `RouteTarget` as its provider's `routeTarget`
 capability and supply its token in `AppState.accessCredential`. The router
@@ -403,13 +666,18 @@ needs no change.
 
 ## Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md): components, credentials, failover
-  planning, pausing, the request router, hooks and files.
-- [BUILD_GUIDE.md](BUILD_GUIDE.md): building, versioning, CI and releases.
+- [ARCHITECTURE.md](ARCHITECTURE.md): components, credentials, the credential
+  audit, failover planning, pausing, session slots, the request router, hooks
+  and files.
+- [BUILD_GUIDE.md](BUILD_GUIDE.md): building, versioning, screenshots, CI and
+  releases.
 - [RELEASE_NOTES.md](RELEASE_NOTES.md): what changed in each version.
 - [COST_VERIFICATION.md](COST_VERIFICATION.md): keeping costs aligned with ccusage.
 - [docs/KIMI_PROVIDER_ASSESSMENT.md](docs/KIMI_PROVIDER_ASSESSMENT.md): the Kimi
   provider design.
+- [docs/provider-cli-facts.md](docs/provider-cli-facts.md): what the Codex and
+  Kimi Code CLIs do with their home and credential, as their session slots rely
+  on it.
 
 ## License
 
