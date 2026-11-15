@@ -939,6 +939,18 @@ none for before pausing; a slot session moves instead, through the slot-move
 path, to an account `SessionPacer.place` picks among those with room that
 carry one more typical session for the runway (`carriesNewSession`). A
 session on an account with room never waits for another account's limit.
+A pinned session never moves, so it waits instead once its own account is
+past its failover threshold or at its limit (`AppState.pinnedHold`), whether
+or not the active account is: every cycle `holdPinnedSessionsAtLimit` adds
+it to the pause in effect, or writes a pause at a limit listing it alone
+(`pinnedHoldPause`), and records "Paused X, pinned to Y, which reached its
+threshold (or limit); it continues when Y has room." The same rule in
+`pauseScope` lets it go on once its account has room, by a reset or a
+reading, or once it is unpinned or moved; a pinned session the user plays
+there runs on until the account has room again (`pinnedHoldsPlayed`). Such
+a pause ends session by session, never because the active account has room
+(`capacityEndsPause`), and neither paced resume nor steps within the active
+account's headroom release a session pinned elsewhere.
 The pause file lists exactly the sessions that wait, and each listed session
 also waits at a new turn (`holdsListedNewTurns`); every new turn waits
 (`holdsNewTurns`) only while no account has room. Every cycle,

@@ -432,6 +432,11 @@ final class AppState: ObservableObject {
     /// serving them had room: the account each was on, by provider and
     /// session. Each is held again when that account nears its limit.
     var userResumes: [AIProviderType: [String: UUID]] = [:]
+    /// Pinned sessions the user played while a pause held them for their
+    /// account's threshold or limit, with that account. `limitPauseScope`
+    /// and `holdPinnedSessionsAtLimit` leave each running until the account
+    /// has room again or the session is no longer pinned to it.
+    var pinnedHoldsPlayed: [String: UUID] = [:]
     /// The reset each provider's last account hold waited for, so one reset
     /// holds its account's sessions once.
     var accountHoldResets: [AIProviderType: Date] = [:]

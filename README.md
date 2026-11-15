@@ -147,7 +147,10 @@ heading says how many sessions are paused and since when.
 Each row has three icons:
 
 - **Lock.** Pins the session to its subscription, so failover, pacing,
-  rebalancing and the model fallback leave it there. A session on the shared
+  rebalancing and the model fallback leave it there. With **Pause sessions**
+  chosen for the provider, a pinned session pauses when its subscription
+  reaches its failover threshold or limit, and continues when it has room
+  again. A session on the shared
   sign-in cannot be pinned; its row offers a restart into a slot of its own
   instead, for a session idle in agterm.
 - **Pause or play.** Pausing a session while nothing is paused holds only that
@@ -315,7 +318,10 @@ Choose what happens for each provider:
   account that would refuse it. The terminal stays attached and usable, and a
   message shows why. While an account still has a little room, paused
   sessions are let through one step at a time. Each continues on its own when
-  its account has room again, or with **Resume all**. A one-line banner under
+  its account has room again, or with **Resume all**. A pinned session is
+  never moved, so it pauses as soon as its own account reaches its failover
+  threshold or its limit, and continues once that account has room, or when
+  you unpin, move or play it. A one-line banner under
   the provider heading counts the paused sessions and says when they are
   expected to continue; its icons resume them all or open the Sessions tab.
 - **Serve requests from a route target** (Claude Code). Claude Code's requests

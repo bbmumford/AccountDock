@@ -69,6 +69,79 @@ final class PauseScopeTests: XCTestCase {
         XCTAssertEqual(two.held, ["c1", "c2"])
     }
 
+    // MARK: - Pinned sessions
+
+    func testAPinnedSessionWaitsWhenItsOwnAccountReachesItsThresholdAndNeverMoves() {
+        // b1 is pinned to the second account, past its failover threshold
+        // though not near its limit; a1 is pinned to the first, at its limit,
+        // where a destination exists; c1 is pinned to the third, which has room.
+        let pinned: [String: UUID] = ["a1": first, "b1": second, "c1": third]
+        let threshold: Set<UUID> = [first, second]
+        let scope = AppState.pauseScope(
+            sessions: sessions, active: first, atOrNearLimit: { $0 == self.first }, anyRoom: true,
+            destination: { _ in self.third },
+            pinnedHeld: { session in pinned[session].map { threshold.contains($0) } })
+        XCTAssertEqual(scope.held, ["a1", "b1", "shared"], "pinned sessions wait for their own account, whatever the active one")
+        XCTAssertEqual(scope.moves, ["a2": third], "an unpinned slot session moves; a pinned one never does")
+        XCTAssertFalse(scope.held.contains("c1"))
+        XCTAssertFalse(scope.held.contains("b2"), "an unpinned session on an account merely past its threshold runs on")
+
+        // Played by the user while its account is at its limit, it runs on.
+        let played = AppState.pauseScope(
+            sessions: sessions, active: first, atOrNearLimit: { $0 == self.first }, anyRoom: true,
+            destination: { _ in nil },
+            pinnedHeld: { session in session == "a1" ? false : pinned[session].map { threshold.contains($0) } })
+        XCTAssertEqual(played.held, ["a2", "b1", "shared"])
+
+        // Once the second account has room again, b1 goes on.
+        let reset = AppState.pauseScope(
+            sessions: sessions, active: first, atOrNearLimit: { _ in false }, anyRoom: true,
+            destination: { _ in nil }, pinnedHeld: { session in pinned[session].map { _ in false } })
+        XCTAssertTrue(reset.held.isEmpty)
+    }
+
+    func testAPinnedSessionAtItsLimitJoinsOrStartsAPauseThatOnlyItsAccountEnds() throws {
+        let alone = try XCTUnwrap(AppState.pinnedHoldPause(existing: nil, adding: ["p1"], at: now))
+        XCTAssertEqual(alone.sessions, ["p1"])
+        XCTAssertEqual(alone.holdsNewTurns, false, "every other session runs on")
+        XCTAssertEqual(alone.holdsListedNewTurns, true, "its new turns wait too")
+        XCTAssertNil(alone.manual)
+        XCTAssertNil(alone.account)
+        XCTAssertFalse(AppState.capacityEndsPause(alone), "the active account's room does not end it")
+        XCTAssertTrue(AppState.capacityEndsPause(alone, routed: true), "ending it brings routed requests back")
+
+        // A pause of sessions the user chose keeps them chosen.
+        let chosen = AgentPauseGate.PauseFile(sessions: ["mine"], reason: "paused by you", pausedAt: now, resumeAt: nil,
+                                              holdsNewTurns: false, manual: true, holdsListedNewTurns: true, chosen: ["mine"])
+        let joined = try XCTUnwrap(AppState.pinnedHoldPause(existing: chosen, adding: ["p1"], at: now))
+        XCTAssertEqual(joined.sessions, ["mine", "p1"])
+        XCTAssertEqual(joined.chosenListed, ["mine"])
+        XCTAssertNil(joined.manual, "the pinned session is judged by its account")
+        XCTAssertEqual(joined.pausedAt, now)
+
+        let directory = home.appendingPathComponent("Pause")
+        AgentPauseGate.write(joined, for: .claudeCode, directory: directory)
+        XCTAssertTrue(AgentPauseGate.narrowToChosen(.claudeCode, continuation: nil, directory: directory),
+                      "when the pinned session's account has room, the chosen one stays held")
+        XCTAssertEqual(AgentPauseGate.read(.claudeCode, directory: directory)?.sessions, ["mine"])
+
+        // Nothing changes for a session already listed, or under a pause holding every turn.
+        XCTAssertNil(AppState.pinnedHoldPause(existing: alone, adding: [], at: now))
+        var all = alone
+        all.holdsNewTurns = true
+        XCTAssertNil(AppState.pinnedHoldPause(existing: all, adding: ["p2"], at: now))
+        let accountHold = AgentPauseGate.PauseFile(sessions: ["h"], reason: "reset", pausedAt: now, resumeAt: nil, account: first)
+        XCTAssertEqual(AppState.pinnedHoldPause(existing: accountHold, adding: ["p1"], at: now)?.sessions, ["h", "p1"])
+        XCTAssertFalse(AppState.capacityEndsPause(accountHold))
+    }
+
+    func testThePinnedHoldIsRecordedWithItsAccountAndReason() {
+        XCTAssertEqual(AppState.pinnedHoldEvent(session: "api (4f2a)", account: "Work", hold: .threshold),
+                       "Paused api (4f2a), pinned to Work, which reached its threshold; it continues when Work has room.")
+        XCTAssertEqual(AppState.pinnedHoldEvent(session: "api (4f2a)", account: "Work", hold: .limit),
+                       "Paused api (4f2a), pinned to Work, which reached its limit; it continues when Work has room.")
+    }
+
     // MARK: - The paused list from the gate's files
 
     private func runGate(_ provider: AIProviderType, session: String) throws -> Process {
