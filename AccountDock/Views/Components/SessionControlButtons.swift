@@ -110,8 +110,17 @@ struct SessionControlButtons: View {
                 ForEach(menu.options) { option in
                     let detail = menu.detail(option, sessionWindow: provider.capabilities.sessionQuotaLabel,
                                              longWindow: provider.capabilities.weeklyQuotaLabel)
-                    Button(menu.title(option) + " — " + detail) {
+                    // A destination the user may choose but should know
+                    // about (excluded, or at or near its limit) carries a
+                    // warning sign; one that cannot serve is disabled.
+                    Button {
                         Task { onMove(await appState.moveSessionByHand(session, to: option.account)) }
+                    } label: {
+                        if option.warning != nil {
+                            Label(menu.title(option) + " — " + detail, systemImage: "exclamationmark.triangle")
+                        } else {
+                            Text(menu.title(option) + " — " + detail)
+                        }
                     }
                     .disabled(option.blocker != nil)
                 }

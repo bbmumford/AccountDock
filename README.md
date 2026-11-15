@@ -158,8 +158,12 @@ Each row has three icons:
   the front window. A session started before the pause hook was installed
   cannot be held until it is restarted.
 - **Move.** Lists every account of the provider with the room left in its
-  windows, or why it cannot take the session (it runs there now, needs signing
-  in, is excluded from failover or is at its limit). A session you move by
+  windows. A move by hand can go to any account that can serve the CLI: one
+  excluded from failover, at its limit or near it is offered with a warning
+  (an excluded account always pins the session there; at its limit, the
+  session waits there until the account has room). Only an account that
+  needs signing in, whose plan or organisation does not allow the CLI, or
+  that the session runs on now is greyed out. A session you move by
   hand is pinned where you put it, so failover and balancing do not move it
   straight back, unless balancing would have placed it there itself; the menu
   says which applies. Moving a pinned session unpins it first. A session on

@@ -255,17 +255,23 @@ extension AppState {
         }
         let candidates = accounts.filter { $0.provider == provider }.map { account in
             let usage = plannedUsage(account, now: now, model: model)
+            let state = quotaState(for: account, now: now, model: model)
+            let atLimit = accountCannotServe(account.id, provider: provider, planner: planner, now: now, model: model)
             return SessionMoveCandidate(
                 account: account.id, name: messageName(account),
                 sessionUsed: usage?.fiveHour?.utilization, weeklyUsed: usage?.sevenDay?.utilization,
                 needsSignIn: needsSignIn(account),
-                atLimit: accountCannotServe(account.id, provider: provider, planner: planner, now: now, model: model),
-                excluded: policy.excludedAccountIDs.contains(account.id)
+                atLimit: atLimit,
+                excluded: policy.excludedAccountIDs.contains(account.id),
+                cannotServe: account.cliUnavailableReason,
+                nearLimit: !atLimit && (planner.isTriggered(state, now: now)
+                    || planner.servingVerdict(state, now: now, lead: Self.suspensionLead).atOrNearLimit)
             )
         }
         return SessionMoveMenu.build(candidates: candidates, current: slot ?? servingDecision(provider, session: sessionID, now: now)?.account,
                                      pinnedTo: pinned, shared: slot == nil,
-                                     balancingChoice: balancingChoice(sessionID, provider: provider, now: now))
+                                     balancingChoice: balancingChoice(sessionID, provider: provider, now: now),
+                                     pausesAtLimit: policy.suspendAgentsWhenExhausted)
     }
 
     /// A move chosen from a move menu: a pinned session is unpinned first,
@@ -288,7 +294,10 @@ extension AppState {
     /// Moves one running session to `wanted`, or without one to the
     /// account with most room for its model (`moveDestination`): the
     /// requests interface's `moveSession` and the move menus. A pinned
-    /// session is refused; only unpinning frees it.
+    /// session is refused; only unpinning frees it. `wanted` may be any
+    /// account that can serve the CLI (`SessionMoveRules.blocker`): one
+    /// failover excludes, or one at or near its limit, takes the session
+    /// as the user asked.
     ///
     /// A session in a slot moves with its slot (`requestedSlotMoves`): at
     /// once for a CLI that reads its slot again, by restarting once idle for
@@ -302,7 +311,8 @@ extension AppState {
     ///
     /// A session moved into a slot is pinned there, so failover and
     /// balancing do not move it straight back, unless balancing would place
-    /// it there itself (`SessionMoveRules`); a move by restarting is pinned
+    /// it there itself (`SessionMoveRules`; never on an account failover
+    /// excludes, which it always pins to); a move by restarting is pinned
     /// once it lands (`movePins`). Each move made is recorded.
     func moveSession(_ sessionID: String, to wanted: Account?, now: Date = Date()) async -> SessionMoveOutcome {
         func outcome(_ ok: Bool, _ detail: String, _ account: Account? = nil) -> SessionMoveOutcome {
@@ -345,8 +355,14 @@ extension AppState {
             return outcome(false, "The session is already on \(messageName(target)).", target)
         }
         let name = messageName(target)
+        // A move by hand may go anywhere that can serve the CLI, an account
+        // failover excludes or one at its limit included.
+        if let blocker = SessionMoveRules.blocker(needsSignIn: needsSignIn(target), cannotServe: target.cliUnavailableReason) {
+            return outcome(false, "\(name) cannot take the session: \(blocker).", target)
+        }
         let pins = SessionMoveRules.pins(destination: target.id,
-                                         balancingChoice: balancingChoice(sessionID, provider: provider, now: now))
+                                         balancingChoice: balancingChoice(sessionID, provider: provider, now: now),
+                                         excluded: policy.excludedAccountIDs.contains(target.id))
         func record(_ how: HandMove) {
             failoverEvents.record(provider, Self.handMoveEvent(how, session: subject, to: name, pins: pins))
         }

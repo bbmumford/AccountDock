@@ -77,6 +77,12 @@ struct SessionMoveCandidate: Equatable {
     let atLimit: Bool
     /// Failover leaves it out (`ProviderFailoverPolicy.excludedAccountIDs`).
     let excluded: Bool
+    /// Why it cannot serve the provider's CLI at all, such as a plan that
+    /// does not include it (`Account.cliUnavailableReason`); nil when it can.
+    var cannotServe: String? = nil
+    /// It has room by its last reading but is past its failover threshold
+    /// or forecast to reach its limit soon (`AppState.sessionMoveMenu`).
+    var nearLimit = false
 }
 
 /// A session's move menu: one entry per account of its provider, each
@@ -104,6 +110,9 @@ struct SessionMoveMenu: Equatable {
         let blocker: String?
         /// Whether the move pins the session there (`SessionMoveRules.pins`).
         let pins: Bool
+        /// What the user should know before moving it there, when it can
+        /// take it: failover excludes it, or it is at or near its limit.
+        var warning: String? = nil
         var id: UUID { account }
     }
 
@@ -118,28 +127,48 @@ struct SessionMoveMenu: Equatable {
     /// now (`SessionMoveRules.balancingChoice`): a move anywhere else pins
     /// it. A session on the shared sign-in may be restarted in a slot of
     /// the account it follows; any other session is already on `current`.
+    ///
+    /// A move by hand may go to any account that can serve the CLI: one
+    /// failover excludes, or one at or near its limit, is offered with a
+    /// `warning`, since the user chose it. Only an account that cannot
+    /// serve at all (it needs signing in, or `cannotServe`) and the one the
+    /// session runs on are refused. `pausesAtLimit` is the provider's
+    /// pausing at the limit, which decides what a session pinned to an
+    /// account at its limit does there.
     static func build(candidates: [SessionMoveCandidate], current: UUID?, pinnedTo: (id: UUID, name: String)?,
-                      shared: Bool, balancingChoice: UUID?) -> SessionMoveMenu {
+                      shared: Bool, balancingChoice: UUID?, pausesAtLimit: Bool = true) -> SessionMoveMenu {
         let kind: Kind = shared ? .restartInSlot : pinnedTo != nil ? .unpinAndMove : .move
         let options = candidates.map { candidate -> Option in
             let blocker: String? = if !shared, candidate.account == current {
                 pinnedTo?.id == candidate.account ? "pinned here" : "it runs here now"
-            } else if candidate.needsSignIn {
-                "needs signing in"
-            } else if candidate.excluded {
-                "excluded from failover"
-            } else if candidate.atLimit {
-                "at its limit"
             } else {
-                nil
+                SessionMoveRules.blocker(needsSignIn: candidate.needsSignIn, cannotServe: candidate.cannotServe)
             }
             return Option(account: candidate.account, name: candidate.name,
                           sessionLeft: candidate.sessionUsed.map { max(0, 100 - $0) },
                           weeklyLeft: candidate.weeklyUsed.map { max(0, 100 - $0) },
                           blocker: blocker,
-                          pins: SessionMoveRules.pins(destination: candidate.account, balancingChoice: balancingChoice))
+                          pins: SessionMoveRules.pins(destination: candidate.account, balancingChoice: balancingChoice,
+                                                      excluded: candidate.excluded),
+                          warning: blocker == nil ? warning(candidate, pausesAtLimit: pausesAtLimit) : nil)
         }
         return SessionMoveMenu(kind: kind, pinnedTo: pinnedTo?.name, options: options)
+    }
+
+    /// What a move onto `candidate` brings with it: failover excludes the
+    /// account, so the move pins the session there, or the account is at
+    /// or near its limit, where the pinned session waits until it has room
+    /// (paused by AccountDock when `pausesAtLimit`).
+    static func warning(_ candidate: SessionMoveCandidate, pausesAtLimit: Bool) -> String? {
+        var parts: [String] = []
+        if candidate.excluded { parts.append("excluded from failover — the move pins it there") }
+        let waits = pausesAtLimit ? "pauses" : "waits"
+        if candidate.atLimit {
+            parts.append("at its limit — it \(waits) there until the account has room")
+        } else if candidate.nearLimit {
+            parts.append("near its limit — it \(waits) there once the account reaches it")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "; ")
     }
 
     /// The menu item's action, naming the account.
@@ -160,7 +189,11 @@ struct SessionMoveMenu: Equatable {
         if let left = option.sessionLeft { parts.append("\(Int(left.rounded()))% of \(sessionWindow.lowercased()) left") }
         if let left = option.weeklyLeft { parts.append("\(Int(left.rounded()))% of \(longWindow.lowercased()) left") }
         if parts.isEmpty { parts.append("not read yet") }
-        parts.append(option.pins ? "pins it here" : "balancing agrees; stays unpinned")
+        if let warning = option.warning { parts.append(warning) }
+        // An excluded account's warning already says the move pins it.
+        if option.warning?.contains("pins it there") != true {
+            parts.append(option.pins ? "pins it here" : "balancing agrees; stays unpinned")
+        }
         return parts.joined(separator: " · ")
     }
 }
@@ -183,8 +216,19 @@ enum SessionMoveRules {
     }
 
     /// Whether a move to `destination` pins the session: unless balancing
-    /// would place it there too.
-    static func pins(destination: UUID, balancingChoice: UUID?) -> Bool {
-        balancingChoice != destination
+    /// would place it there too. A move onto an account failover excludes
+    /// (`excluded`) always pins it: balancing never places a session there,
+    /// and would move an unpinned one straight off.
+    static func pins(destination: UUID, balancingChoice: UUID?, excluded: Bool = false) -> Bool {
+        excluded || balancingChoice != destination
+    }
+
+    /// Why a move by hand cannot go to an account, or nil when it can: the
+    /// account needs signing in, or cannot serve the provider's CLI at all
+    /// (`cannotServe`, from `Account.cliUnavailableReason`). Room, limits
+    /// and failover's exclusion never refuse a move by hand. Read by
+    /// `SessionMoveMenu.build` and `AppState.moveSession`.
+    static func blocker(needsSignIn: Bool, cannotServe: String?) -> String? {
+        needsSignIn ? "needs signing in" : cannotServe
     }
 }

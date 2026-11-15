@@ -920,9 +920,14 @@ session lists): pin, pause or play, and move.
   serves the destination), so failover and balancing leave it, unless
   balancing would place it there itself: `SessionMoveRules.balancingChoice`
   asks `SessionPacer.place` where the session would go among the accounts
-  rebalancing weighs. The move menu (`SessionMoveMenu`) lists every account
-  with its room, why it cannot take the session (needs sign-in, excluded,
-  at its limit), and whether the move pins it. Each move is recorded.
+  rebalancing weighs; a move onto an account failover excludes always
+  pins. The move menu (`SessionMoveMenu`) lists every account with its
+  room and whether the move pins it. A move by hand may go to any account
+  that can serve the CLI: excluded, at its limit or near it is a warning
+  (`SessionMoveMenu.warning`), and only an account that needs signing in or
+  cannot serve the CLI (`Account.cliUnavailableReason`), or the one the
+  session runs on, is refused (`SessionMoveRules.blocker`, which
+  `moveSession` applies too). Each move is recorded.
 
 A pause at a limit judges each session by the account it runs on
 (`AppState.pauseScope`, built by `limitPauseScope`): a slot session by its

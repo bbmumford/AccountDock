@@ -93,6 +93,14 @@ struct Account: Identifiable, Codable, Hashable {
         return label
     }
 
+    /// Why the account cannot serve the provider's CLI at all, in the words
+    /// a move menu shows beside it (`SessionMoveRules.blocker`); nil when
+    /// it can.
+    var cliUnavailableReason: String? {
+        guard !supportsProviderWorkloads else { return nil }
+        return "its plan does not include \(provider.rawValue)"
+    }
+
     var obfuscatedEmail: String {
         return email.obfuscatedEmail()
     }

@@ -232,8 +232,11 @@ final class SessionControlsTests: XCTestCase {
         let byAccount = Dictionary(uniqueKeysWithValues: menu.options.map { ($0.account, $0) })
         XCTAssertEqual(byAccount[current]?.blocker, "it runs here now")
         XCTAssertEqual(byAccount[signIn]?.blocker, "needs signing in")
-        XCTAssertEqual(byAccount[excluded]?.blocker, "excluded from failover")
-        XCTAssertEqual(byAccount[atLimit]?.blocker, "at its limit")
+        // A move by hand may go to an excluded account or one at its limit.
+        XCTAssertNil(byAccount[excluded]?.blocker)
+        XCTAssertEqual(byAccount[excluded]?.warning, "excluded from failover — the move pins it there")
+        XCTAssertNil(byAccount[atLimit]?.blocker)
+        XCTAssertEqual(byAccount[atLimit]?.warning, "at its limit — it pauses there until the account has room")
         XCTAssertNil(byAccount[roomy]?.blocker)
         XCTAssertNil(byAccount[other]?.blocker)
         XCTAssertEqual(byAccount[roomy]?.sessionLeft, 80)
@@ -247,7 +250,42 @@ final class SessionControlsTests: XCTestCase {
                        "80% of session left · 60% of weekly limit left · balancing agrees; stays unpinned")
         XCTAssertEqual(menu.detail(team, sessionWindow: "Session", longWindow: "Weekly limit"),
                        "40% of session left · pins it here")
-        XCTAssertEqual(menu.detail(byAccount[atLimit]!, sessionWindow: "Session", longWindow: "Weekly limit"), "at its limit")
+        XCTAssertEqual(menu.detail(byAccount[atLimit]!, sessionWindow: "Session", longWindow: "Weekly limit"),
+                       "0% of session left · 30% of weekly limit left · at its limit — it pauses there until the account has room · pins it here")
+        XCTAssertEqual(menu.detail(byAccount[excluded]!, sessionWindow: "Session", longWindow: "Weekly limit"),
+                       "90% of session left · 90% of weekly limit left · excluded from failover — the move pins it there")
+    }
+
+    func testAMoveByHandIsRefusedOnlyWhereTheAccountCannotServeTheCLI() {
+        let plan = UUID(), near = UUID()
+        let more = candidates + [
+            SessionMoveCandidate(account: plan, name: "Free", sessionUsed: nil, weeklyUsed: nil, needsSignIn: false,
+                                 atLimit: true, excluded: true, cannotServe: "its plan does not include Claude Code"),
+            SessionMoveCandidate(account: near, name: "Busy", sessionUsed: 85, weeklyUsed: 20, needsSignIn: false,
+                                 atLimit: false, excluded: false, nearLimit: true),
+        ]
+        // Balancing would place it on the excluded account: it is pinned there all the same.
+        let menu = SessionMoveMenu.build(candidates: more, current: current, pinnedTo: nil, shared: false,
+                                         balancingChoice: excluded, pausesAtLimit: false)
+        let byAccount = Dictionary(uniqueKeysWithValues: menu.options.map { ($0.account, $0) })
+        XCTAssertEqual(byAccount[plan]?.blocker, "its plan does not include Claude Code")
+        XCTAssertNil(byAccount[plan]?.warning, "a refused account carries its reason, not a warning")
+        XCTAssertEqual(byAccount[near]?.warning, "near its limit — it waits there once the account reaches it")
+        XCTAssertEqual(byAccount[atLimit]?.warning, "at its limit — it waits there until the account has room")
+        XCTAssertTrue(byAccount[excluded]?.pins == true, "balancing never keeps a session on an excluded account")
+        XCTAssertTrue(SessionMoveRules.pins(destination: excluded, balancingChoice: excluded, excluded: true))
+        XCTAssertFalse(SessionMoveRules.pins(destination: roomy, balancingChoice: roomy))
+        XCTAssertEqual(SessionMoveRules.blocker(needsSignIn: true, cannotServe: "x"), "needs signing in")
+        XCTAssertNil(SessionMoveRules.blocker(needsSignIn: false, cannotServe: nil))
+    }
+
+    func testAnAccountWhosePlanLacksTheCLIGivesItsReason() {
+        let free = Account(id: UUID(), email: "f@example.com", displayName: "F", provider: .claudeCode,
+                           subscriptionType: "free", isActive: false)
+        XCTAssertEqual(free.cliUnavailableReason, "its plan does not include Claude Code")
+        var pro = free
+        pro.subscriptionType = "pro"
+        XCTAssertNil(pro.cliUnavailableReason)
     }
 
     func testAPinnedSessionsMenuUnpinsAndASharedSignInSessionsRestartsInASlot() {
