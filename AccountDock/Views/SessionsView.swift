@@ -110,7 +110,7 @@ struct SessionsView: View {
                     Image(systemName: "pause.circle")
                 }
                 .disabled(!section.canPauseAll)
-                .help("Pause all: every session waits at its next tool call and new turns wait at their start. Sessions continue when you resume them or when an account in the failover order has capacity; an active account that failover excludes does not resume them.")
+                .hoverExplanation("Pause all", "Every session waits at its next tool call and new turns wait at their start. Sessions continue when you resume them or when an account in the failover order has capacity; an active account that failover excludes does not resume them.")
                 .accessibilityLabel("Pause all sessions")
 
                 Button {
@@ -119,7 +119,7 @@ struct SessionsView: View {
                     Image(systemName: "play.circle")
                 }
                 .disabled(!section.canResumeAll)
-                .help("Resume all: every paused session continues now. Sessions may then reach the usage limit.")
+                .hoverExplanation("Resume all", "Every paused session continues now. Sessions may then reach the usage limit.")
                 .accessibilityLabel("Resume all sessions")
             }
             ProviderFailoverSwitch(provider: provider, place: "the Sessions page")

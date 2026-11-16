@@ -17,7 +17,7 @@ struct RebalanceButton: View {
             Image(systemName: "arrow.triangle.branch")
         }
         .accessibilityLabel("Rebalance sessions")
-        .help("Places the running sessions on the accounts so that the first account to run out does so as late as possible, using each session's own rate and model. A move rewrites the session's prompt cache on its new account, so a session moves only when that pays for itself, and never mid-turn.")
+        .hoverExplanation("Rebalance sessions", "Places the running sessions on the accounts so that the first account to run out does so as late as possible, using each session's own rate and model. A move rewrites the session's prompt cache on its new account, so a session moves only when that pays for itself, and never mid-turn.")
         .alert(
             preview.map { $0.moves.isEmpty ? "Sessions are balanced" : "Rebalance \(provider.capabilities.displayName) sessions?" } ?? "",
             isPresented: Binding(get: { preview != nil }, set: { if !$0 { preview = nil } }),

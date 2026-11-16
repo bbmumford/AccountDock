@@ -52,7 +52,12 @@ struct FooterSwitches: View {
         }
         .buttonStyle(.plain)
         .focusable(false)
-        .help("Failover: \(summary(failoverProviders) { store.policy(for: $0).movesActiveAccountAutomatically }). On, failover and weekly balancing move the active account at a threshold or its limit, and early to use weekly allowances before they reset; off, it stays where you put it. Click to turn it \(AppState.toggleTarget(failover) ? "on" : "off") for every provider.")
+        .hoverExplanation(
+            "Failover — \(text(failover).lowercased())",
+            "Moves the active account automatically: at a threshold or its limit, and for weekly balancing. "
+                + "\(summary(failoverProviders) { store.policy(for: $0).movesActiveAccountAutomatically }). "
+                + (failover == .on ? "Click to keep each provider's active account where it is." : "Click to turn it on for every provider.")
+        )
         .accessibilityLabel("Failover")
         .accessibilityValue(text(failover))
 
@@ -68,7 +73,12 @@ struct FooterSwitches: View {
             }
             .buttonStyle(.plain)
             .focusable(false)
-            .help("Session balancing: \(summary(balancingProviders) { store.policy(for: $0).distributeSessions }). On, sessions run in slots of their own on several accounts and move between them one at a time; off, new sessions use the shared sign-in. Pacing and Rebalance automatically keep their settings. Click to turn it \(AppState.toggleTarget(balancing) ? "on" : "off") for every provider.")
+            .hoverExplanation(
+                "Session balancing — \(text(balancing).lowercased())",
+                "Runs sessions in slots of their own on several accounts and moves them between accounts one at a time. "
+                    + "\(summary(balancingProviders) { store.policy(for: $0).distributeSessions }). "
+                    + (balancing == .on ? "Click to turn it off; your pacing and rebalance settings are kept." : "Click to turn it on for every provider.")
+            )
             .accessibilityLabel("Session balancing")
             .accessibilityValue(text(balancing))
         }
@@ -106,9 +116,11 @@ struct ProviderFailoverSwitch: View {
         } label: {
             SwitchGlyph.failover(on ? .on : .off)
         }
-        .help(on
-            ? "Failover for \(name): on — the active account moves at a threshold or its limit, and for weekly balancing. Click to keep it where it is."
-            : "Failover for \(name): off — the active account stays where it is. Click to let failover and weekly balancing move it.")
+        .hoverExplanation(
+            "Failover for \(name) — \(on ? "on" : "off")",
+            on ? "The active account moves at a threshold or its limit, and for weekly balancing. Click to keep it where it is."
+               : "The active account stays where it is; session balancing still moves sessions. Click to let failover and weekly balancing move it."
+        )
         .accessibilityLabel("Failover for \(name)")
         .accessibilityValue(on ? "On" : "Off")
     }
