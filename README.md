@@ -165,13 +165,16 @@ through the next 7 days at the current rate." Click it to open:
 The Outlook plays each session's use over its last hour forward (a session
 idle for that hour counts at nearly nothing; one a limit paused counts at its
 use before the pause, one you paused at nothing) over every account's 5-hour
-window, weekly allowance and resets, spending first the allowance that would
-otherwise go unused soonest. Accounts excluded from failover or needing sign-in
-never count, and an account at its limit counts from the reset that frees it.
-The cache rewrite of moving a session and use outside the router are left out.
-It is worked out again after each usage refresh, or every minute, and stays
-open or closed per provider. The usage tab shows the same line under each
-provider heading; clicking it opens the Sessions tab.
+window, weekly allowance and resets, in the order session balancing uses the
+accounts: first an account whose week would otherwise expire unused, to its
+5-hour limit, then by how soon each week must start being spent. Accounts
+excluded from failover or needing sign-in never count, and an account at its
+limit counts from the reset that frees it. The cache rewrite of moving a
+session and use outside the router are left out. It is worked out again after
+each usage refresh, or every minute, and stays open or closed per provider.
+The notes on single accounts (an account whose week would expire unused, a
+small plan's window that takes no session) follow it. The usage tab shows the
+same line under each provider heading; clicking it opens the Sessions tab.
 
 Each row has three icons:
 

@@ -11,10 +11,12 @@ import Foundation
 /// or for `horizon`. Each step:
 /// - every 5-hour window whose reset has passed starts again empty, and every
 ///   weekly allowance whose reset has passed starts again full;
-/// - the demand of the step is served from the accounts with room, the
-///   allowance that would go unused soonest first (`deadline`), each up to
-///   what its 5-hour window and weekly allowance still hold (`roomBy`), with
-///   the pacer's limit leaving in-flight turns their room;
+/// - the demand of the step is served from the accounts with room in the
+///   order session balancing spends them (`priority`): first those whose
+///   weekly allowance would expire unused (`SessionPacer.useBy`), then by
+///   weekly balancing's latest start; each up to what its 5-hour window and
+///   weekly allowance still hold (`roomBy`), with the pacer's limit leaving
+///   in-flight turns their room;
 /// - what no account can serve pauses; within a step the served part runs
 ///   first, so a step where the last room runs out splits at that moment.
 ///
@@ -213,14 +215,16 @@ struct CapacityOutlook: Equatable {
             var served = 0.0
             if wanted > 0 {
                 let order = states.indices
-                    .map { index -> (index: Int, deadline: Date, tokens: Double) in
+                    .map { index -> (index: Int, rank: (free: Bool, by: Date, window: Date), tokens: Double) in
                         let left = room(states[index], at: time, pacer: pacer)
-                        return (index, deadline(states[index], at: time, pacer: pacer),
+                        return (index, priority(states[index], at: time, pacer: pacer),
                                 left > 1e-9 ? pacer.millions(left, on: states[index].account.pacer) * 1_000_000 : 0)
                     }
                     .filter { $0.tokens > 0 }
                     .sorted { lhs, rhs in
-                        if lhs.deadline != rhs.deadline { return lhs.deadline < rhs.deadline }
+                        if lhs.rank.free != rhs.rank.free { return lhs.rank.free }
+                        if lhs.rank.by != rhs.rank.by { return lhs.rank.by < rhs.rank.by }
+                        if lhs.rank.window != rhs.rank.window { return lhs.rank.window < rhs.rank.window }
                         if lhs.tokens != rhs.tokens { return lhs.tokens > rhs.tokens }
                         return states[lhs.index].id.uuidString < states[rhs.index].id.uuidString
                     }
@@ -352,32 +356,26 @@ struct CapacityOutlook: Equatable {
         return weekly <= pacer.remaining(account, now: time) + 1e-9 ? .weekSpent : .windowSpent
     }
 
-    /// When the account's room would start going unused: the allowance used
-    /// soonest is the one that would otherwise expire soonest. An account
-    /// whose 5-hour windows cannot spend its weekly allowance before that
-    /// renews loses its window's room at the window's reset; one whose weekly
-    /// allowance binds first loses it from the latest moment spending at a
-    /// whole window per five hours still uses it up by its reset
-    /// (`Allowance.latestStart`'s measure); one without a session window at
-    /// its weekly reset.
-    private static func deadline(_ state: State, at time: Date, pacer: SessionPacer) -> Date {
+    /// Where the account comes in the order the step's demand is served in,
+    /// as session balancing spends allowances: first the accounts whose
+    /// weekly allowance would expire unused even with every 5-hour window
+    /// filled (`SessionPacer.useBy`), soonest use-by time first, each up to
+    /// its window's limit; then the rest by the latest moment continuous use
+    /// still spends their week before it resets
+    /// (`Allowance.latestStart`, weekly balancing's order), and on a tie the
+    /// 5-hour window that resets first.
+    private static func priority(_ state: State, at time: Date,
+                                 pacer: SessionPacer) -> (free: Bool, by: Date, window: Date) {
         let account = state.account.pacer
-        let windowEnd = account.hasSessionWindow
-            ? account.resetsAt.flatMap { $0 > time ? $0 : nil } ?? time.addingTimeInterval(pacer.window) : nil
+        let windowEnd = account.resetsAt.flatMap { $0 > time ? $0 : nil } ?? time.addingTimeInterval(pacer.window)
+        if let useBy = pacer.useBy(account, now: time) { return (true, useBy, windowEnd) }
         guard let weekly = account.weeklyRemaining, let weeklyEnd = account.weeklyResetsAt, weeklyEnd > time else {
-            return windowEnd ?? .distantFuture
+            return (false, .distantFuture, windowEnd)
         }
-        guard let windowEnd else { return weeklyEnd }
-        var deliverable = pacer.remaining(account, now: time)
-        var reset = windowEnd
-        var windows = 0
-        while reset < weeklyEnd && windows < 64 {
-            deliverable += pacer.limit
-            reset = reset.addingTimeInterval(pacer.window)
-            windows += 1
-        }
-        guard deliverable > weekly else { return windowEnd }
-        return weeklyEnd.addingTimeInterval(-weekly / max(pacer.limit, 1) * pacer.window)
+        let perWeekly = max(state.account.sessionPerWeekly, 1e-9)
+        let start = Allowance.latestStart(weeklyUsed: pacer.limit - weekly / perWeekly, resetsAt: weeklyEnd,
+                                          sessionPerWeekly: account.hasSessionWindow ? perWeekly : nil)
+        return (false, start, windowEnd)
     }
 
     private static func append(_ segments: inout [Segment], _ segment: Segment) {

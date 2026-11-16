@@ -110,6 +110,22 @@ final class CapacityOutlookTests: XCTestCase {
         XCTAssertTrue(refills.contains { $0.name == "cybrio" && $0.kind == .windowRefill })
     }
 
+    func testAllowanceThatWouldExpireUnusedIsSpentFirst() throws {
+        // bytrix's week renews at 1 am with more left than its window lets
+        // through by then (`SessionPacer.useBy`): it is filled first, to its
+        // window's limit, before cybrio, whose week lasts until tomorrow night.
+        XCTAssertNotNil(SessionPacer().useBy(tonight()[1].pacer, now: now))
+        let outlook = project()
+        let spent = try XCTUnwrap(outlook.events.first { $0.kind == .windowSpent || $0.kind == .weekSpent })
+        XCTAssertEqual(spent.name, "bytrix")
+        XCTAssertEqual(spent.kind, .windowSpent)
+        XCTAssertEqual(try XCTUnwrap(spent.back).timeIntervalSince(hours(4.5)), 0, accuracy: 1)
+        // Its window's last 53% hold 212M tokens: 47 minutes at 270M an hour.
+        XCTAssertEqual(spent.at.timeIntervalSince(now) / 60, 212.0 / 270 * 60, accuracy: 1)
+        let cybrio = try XCTUnwrap(outlook.events.first { $0.name == "cybrio" && $0.kind == .windowSpent })
+        XCTAssertGreaterThan(cybrio.at, spent.at)
+    }
+
     func testAWindowRefillWithWeeklyRoomLeftRunsAShortBurst() throws {
         let outlook = project()
         let paused = try XCTUnwrap(outlook.allPausedAt)

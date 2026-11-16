@@ -88,15 +88,24 @@ struct SessionsView: View {
             Text(section.pauseLine)
                 .font(.caption)
                 .foregroundStyle(.textSecondary)
-            if showsOutlook, !section.entries.isEmpty, let outlook = appState.capacityOutlook(provider) {
-                CapacityOutlookView(provider: provider, outlook: outlook)
-            }
-            // Why a small plan's window with room takes no running session.
-            ForEach(appState.laneNotes[provider] ?? [], id: \.self) { note in
-                Label(note, systemImage: "info.circle")
-                    .font(.caption2)
-                    .foregroundStyle(.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            // The Outlook for the pool as a whole, then the pacer's notes on
+            // single accounts: what an account with free room does with it
+            // (`useByNotes`) and why a small plan's window with room takes
+            // no running session.
+            let outlook = showsOutlook && !section.entries.isEmpty ? appState.capacityOutlook(provider) : nil
+            let notes = appState.laneNotes[provider] ?? []
+            if outlook != nil || !notes.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let outlook {
+                        CapacityOutlookView(provider: provider, outlook: outlook)
+                    }
+                    ForEach(notes, id: \.self) { note in
+                        Label(note, systemImage: "info.circle")
+                            .font(.caption2)
+                            .foregroundStyle(.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
             if let outcome = moveOutcomes[provider] {
                 Label(outcome.detail, systemImage: outcome.ok ? "checkmark.circle" : "exclamationmark.triangle")

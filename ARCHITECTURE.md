@@ -1898,10 +1898,11 @@ session's rate.
 The projection steps forward five minutes at a time, and to every reset in
 between. At each step a passed 5-hour window starts again empty, a passed week
 starts again full a week on, and the step's demand is served from the
-accounts with room (`roomBy` at that moment) in order of when their room would
-start going unused: the window's reset for an account whose windows cannot
-spend its week before it renews, else the latest start that still spends the
-week at a window per five hours. Within a step the served part runs first, so
+accounts with room (`roomBy` at that moment) in the order session balancing
+spends them: first the accounts whose week would expire unused even with
+every window filled (`SessionPacer.useBy`), soonest use-by time first, each up
+to its window's limit, then the rest by weekly balancing's latest start
+(`Allowance.latestStart`). Within a step the served part runs first, so
 the moment the last room goes is exact to the step's share. The first step
 with demand left over is the pause (`allPausedAt`); after it, a running stretch
 of at least `resumeRun` is the resume, named by the refill that frees the most
