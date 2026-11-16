@@ -43,6 +43,9 @@ struct AccountStatus: Equatable {
     /// A provider whose credentials are files has none saved for the
     /// account.
     var needsCapture: Bool
+    /// The account's organisation refuses its CLI
+    /// (`Account.cliAccessNotice`); shown on the card above its reading.
+    var accessNotice: Notice? = nil
 
     /// The card header's badge beside the account's name: Active.
     var cardTitleBadges: [Badge] {
@@ -88,10 +91,15 @@ struct AccountStatus: Equatable {
                                           bundle: L10n.bundle),
                              tone: .caution)
         }
+        // The organisation's refusal is its own notice, which says more.
+        if account.cliAccessRefusedAt != nil { problem = nil }
         return AccountStatus(
             isActive: account.isActive, needsSignIn: signInRejected, plan: account.displaySubscriptionType,
             planUnavailable: unavailable, readingProblem: problem, staleReading: stale,
-            needsCapture: account.provider.capabilities.credentialStore == .files && account.credentialLocation == nil
+            needsCapture: account.provider.capabilities.credentialStore == .files && account.credentialLocation == nil,
+            accessNotice: account.cliAccessNotice.map {
+                Notice(symbol: "building.2", text: $0, tone: .failure, since: account.cliAccessRefusedAt)
+            }
         )
     }
 }

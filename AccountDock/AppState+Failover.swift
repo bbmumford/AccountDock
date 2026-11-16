@@ -85,6 +85,7 @@ extension AppState {
             }
         }
         await verifyPassedResets(now: now)
+        await recheckCLIAccessIfDue(now: now)
         await refreshLimitResetsIfDue(now: now)
         if let routed = AIProviderType.routedProvider, routedStatus[routed] != nil {
             await refreshRouteTargetReading(maximumAge: 60)

@@ -104,6 +104,13 @@ final class AppState: ObservableObject {
     var isRefreshing = false
     private var unavailablePlanCheckedAt: [UUID: Date] = [:]
     private let unavailablePlanCheckInterval: TimeInterval = 15 * 60
+    /// When each account a re-check found serving again was cleared, so a
+    /// refusal read afterwards from an older transcript does not mark it
+    /// again (`noteCLIAccessRefused`).
+    private var cliAccessClearedAt: [UUID: Date] = [:]
+    /// When a re-check that failed for a reason other than the refusal is
+    /// tried again (`recheckCLIAccessIfDue`).
+    private var cliAccessRetryAt: [UUID: Date] = [:]
     var failoverMonitorTimer: Timer?
     private var usageResetTimer: Timer?
     var isMonitoringFailover = false
@@ -591,6 +598,8 @@ final class AppState: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
         await credentialGate.run { await self.performRefresh(forceUnavailablePlanCheck: forceUnavailablePlanCheck) }
+        // The user's refresh asks every account its organisation refused again.
+        if forceUnavailablePlanCheck { await recheckCLIAccessIfDue(forced: true) }
     }
 
     private func performRefresh(forceUnavailablePlanCheck: Bool) async {
@@ -1758,6 +1767,10 @@ final class AppState: ObservableObject {
         } catch ClaudeService.UsageError.subscriptionUnavailable {
             markClaudeCodeUnavailable(accountID: account.id)
             return .workloadUnavailable(unavailableMessage(for: account.provider))
+        } catch ClaudeService.UsageError.organizationDisabled {
+            noteCLIAccessRefused(account.id, words: ClaudeService.UsageError.organizationDisabled.localizedDescription)
+            return .workloadUnavailable(accounts.first { $0.id == account.id }?.cliAccessNotice
+                                        ?? unavailableMessage(for: account.provider))
         } catch ClaudeService.UsageError.rateLimited(let retryAt) {
             return .throttled(retryAt: retryAt)
         } catch {
@@ -1806,6 +1819,10 @@ final class AppState: ObservableObject {
             _ = await refreshClaudeSubscriptionMetadata(accountID: account.id, accessToken: accessToken)
             log.info("[fetchUsage] Recovered \(account.email) after renewing its credential.")
             return .reading(usage)
+        } catch ClaudeService.UsageError.organizationDisabled {
+            noteCLIAccessRefused(account.id, words: ClaudeService.UsageError.organizationDisabled.localizedDescription)
+            return .workloadUnavailable(accounts.first { $0.id == account.id }?.cliAccessNotice
+                                        ?? unavailableMessage(for: account.provider))
         } catch ClaudeService.UsageError.rateLimited(let retryAt) {
             return .throttled(retryAt: retryAt)
         } catch ClaudeService.UsageError.expired {
@@ -1847,7 +1864,117 @@ final class AppState: ObservableObject {
     }
 
     private func unavailableUsageState(for account: Account) -> UsageErrorState {
-        UsageErrorState(isExpired: true, isRateLimited: false, message: unavailableMessage(for: account.provider), cachedAt: nil)
+        UsageErrorState(isExpired: true, isRateLimited: false,
+                        message: account.cliAccessNotice ?? unavailableMessage(for: account.provider), cachedAt: nil)
+    }
+
+    // MARK: - An organisation refusing the CLI
+
+    /// How long after a transcript's refusal it still marks the account: a
+    /// refusal read back from an older transcript, as at launch, says
+    /// nothing about the account now.
+    nonisolated static let cliAccessRefusalWindow: TimeInterval = 30 * 60
+    /// How often an account the organisation refused is tried again, unless
+    /// the user refreshes, as access returns when an admin restores the
+    /// seat or licence.
+    nonisolated static let cliAccessRecheckInterval: TimeInterval = 24 * 60 * 60
+    /// How soon a re-check that failed for another reason, such as the
+    /// network, is tried again.
+    nonisolated static let cliAccessRetryInterval: TimeInterval = 60 * 60
+
+    /// Whether a refusal at `at` marks the account: it is recent
+    /// (`cliAccessRefusalWindow`) and later than the last time the account
+    /// was found serving again (`clearedAt`).
+    nonisolated static func cliAccessRefusalCounts(at: Date, clearedAt: Date?, now: Date) -> Bool {
+        now.timeIntervalSince(at) < cliAccessRefusalWindow && clearedAt.map { at > $0 } ?? true
+    }
+
+    /// Whether an account the organisation refused (`refusedAt`) is due a
+    /// re-check: on the user's refresh (`forced`), else once
+    /// `cliAccessRecheckInterval` has passed since the refusal was last
+    /// seen, and never sooner than `retryAt`, set after a re-check that
+    /// failed for another reason.
+    nonisolated static func cliAccessRecheckDue(refusedAt: Date?, retryAt: Date?, forced: Bool, now: Date) -> Bool {
+        guard let refusedAt else { return false }
+        if forced { return true }
+        if let retryAt, now < retryAt { return false }
+        return retryAt != nil || now.timeIntervalSince(refusedAt) >= cliAccessRecheckInterval
+    }
+
+    /// Marks an account whose organisation refused its CLI
+    /// (`Account.cliAccessRefusedAt`), from a transcript's refusal, a usage
+    /// reply or a probe: it serves no workload from then on, so no session
+    /// is placed, warmed or moved there, and failover and the slot pass
+    /// move its sessions to accounts that can serve them. Sessions pinned
+    /// to it are unpinned, since it can never serve them. The quota cycle is
+    /// brought forward so they move at once. A refusal older than the last
+    /// time the account served again is ignored.
+    func noteCLIAccessRefused(_ accountID: UUID, words: String, at: Date = Date(), now: Date = Date()) {
+        guard let index = accounts.firstIndex(where: { $0.id == accountID }),
+              Self.cliAccessRefusalCounts(at: at, clearedAt: cliAccessClearedAt[accountID], now: now) else { return }
+        let first = accounts[index].cliAccessRefusedAt == nil
+        if let seen = accounts[index].cliAccessRefusedAt, seen >= at { return }
+        accounts[index].cliAccessRefusedAt = at
+        saveAccounts(refreshWidget: true)
+        guard first else { return }
+        let account = accounts[index]
+        accountUsageErrors[accountID] = unavailableUsageState(for: account)
+        for (session, pin) in sessionPins.pinned(account.provider) where pin.account == accountID {
+            unpinSession(session)
+        }
+        failoverEvents.record(account.provider, "\(messageName(account))'s organisation has disabled \(account.provider.rawValue) subscription access (\(words.trimmingCharacters(in: .whitespacesAndNewlines))). Its seat or licence may have been removed. AccountDock moves its sessions to accounts that can serve them, places, warms and moves none there, and checks it again daily and when you refresh.")
+        refreshAccountStatuses()
+        bringQuotaCycleForward(to: now)
+    }
+
+    /// Ends the mark of an account its organisation refused, once a probe
+    /// was served (`recheckCLIAccessIfDue`).
+    private func clearCLIAccessRefusal(_ accountID: UUID, now: Date) {
+        guard let index = accounts.firstIndex(where: { $0.id == accountID }),
+              accounts[index].cliAccessRefusedAt != nil else { return }
+        accounts[index].cliAccessRefusedAt = nil
+        cliAccessClearedAt[accountID] = now
+        cliAccessRetryAt[accountID] = nil
+        unavailablePlanCheckedAt[accountID] = nil
+        accountUsageErrors[accountID] = nil
+        saveAccounts(refreshWidget: true)
+        let account = accounts[index]
+        failoverEvents.record(account.provider, "\(messageName(account)) can serve \(account.provider.rawValue) again: its organisation's subscription access is back.")
+        refreshAccountStatuses()
+        bringQuotaCycleForward(to: now)
+    }
+
+    /// Tries each account its organisation refused again, with the
+    /// smallest request the CLI makes (`QuotaWindowProbe.startWindow`, the
+    /// warm-up's): served, the mark ends; refused again, it stays until the
+    /// next re-check; failed for another reason, it is tried within
+    /// `cliAccessRetryInterval`. Due daily (`cliAccessRecheckDue`), and for
+    /// every such account on the user's refresh (`forced`). Run by
+    /// `runQuotaCycle` and `refresh`.
+    func recheckCLIAccessIfDue(now: Date = Date(), forced: Bool = false) async {
+        for account in accounts where account.cliAccessRefusedAt != nil && !needsSignIn(account) {
+            guard Self.cliAccessRecheckDue(refusedAt: account.cliAccessRefusedAt, retryAt: cliAccessRetryAt[account.id],
+                                           forced: forced, now: now),
+                  !accountWarmupsInFlight.contains(account.id),
+                  let probe = quotaWindowProbe(for: account, readsLive: readsLiveCredential(account)) else { continue }
+            accountWarmupsInFlight.insert(account.id)
+            defer { accountWarmupsInFlight.remove(account.id) }
+            do {
+                try await probe.startWindow()
+                lastWarmupProbeAt[account.id] = Date()
+                clearCLIAccessRefusal(account.id, now: Date())
+            } catch let error where ClaudeService.refusesCLIAccess(error.localizedDescription) {
+                cliAccessRetryAt[account.id] = nil
+                if let index = accounts.firstIndex(where: { $0.id == account.id }) {
+                    accounts[index].cliAccessRefusedAt = Date()
+                    saveAccounts(refreshWidget: true)
+                }
+                log.info("[cliAccess] \(account.email) is still refused by its organisation")
+            } catch {
+                cliAccessRetryAt[account.id] = Date().addingTimeInterval(Self.cliAccessRetryInterval)
+                log.warning("[cliAccess] Re-check of \(account.email) failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     /// Returns true only when Anthropic explicitly reports an inactive plan.
@@ -2431,6 +2558,11 @@ final class AppState: ObservableObject {
                 "Could not start the \(labels) reset countdown for \(messageName(account)): \(error.localizedDescription)"
             )
             log.warning("[warmup] Probe failed for \(account.id.uuidString): \(error.localizedDescription)")
+            // An organisation refusing the CLI is no failure to retry.
+            if ClaudeService.refusesCLIAccess(error.localizedDescription) {
+                noteCLIAccessRefused(accountID, words: error.localizedDescription)
+                return true
+            }
             scheduleWarmupRetry(accountID: accountID, windows: requested, after: Self.warmupDeferral(for: error, now: Date()))
         }
         return true

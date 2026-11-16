@@ -427,4 +427,78 @@ final class AccountModelTests: XCTestCase {
         XCTAssertEqual(reloaded.reading.windows, old.reading.windows)
         XCTAssertEqual(reloaded.resetUnverified, true)
     }
+
+    // MARK: - An organisation refusing the CLI
+
+    /// What Claude Code shows, and the reply behind it, when a team admin
+    /// turned off the account's subscription access.
+    private let organisationRefusal = "API Error: Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access"
+    private let organisationReply = #"{"type":"error","error":{"type":"oauth_org_not_allowed","message":"Your organization has disabled Claude subscription access for Claude Code"}}"#
+
+    func testTheOrganisationsRefusalIsKnownByItsWordsAndItsErrorType() {
+        XCTAssertTrue(ClaudeService.refusesCLIAccess(organisationRefusal))
+        XCTAssertTrue(ClaudeService.refusesCLIAccess(organisationReply))
+        XCTAssertTrue(ClaudeService.refusesCLIAccess(
+            "Usage request failed: warm-up request exited 1: \(organisationRefusal)"), "the probe's failure carries the CLI's words")
+        XCTAssertFalse(ClaudeService.refusesCLIAccess("API Error: Rate limit reached"))
+        XCTAssertFalse(ClaudeService.refusesCLIAccess(#"{"type":"error","error":{"type":"permission_error"}}"#))
+    }
+
+    func testAnAccountItsOrganisationRefusesCannotServeTheCLI() throws {
+        var account = Account(email: "bowens@example.com", displayName: "Bowens", provider: .claudeCode,
+                              orgName: "Bowens", subscriptionType: "team")
+        XCTAssertTrue(account.supportsProviderWorkloads)
+        XCTAssertNil(account.cliUnavailableReason)
+        XCTAssertNil(account.cliAccessNotice)
+
+        let refusedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        account.cliAccessRefusedAt = refusedAt
+        XCTAssertFalse(account.supportsProviderWorkloads, "no session is placed, warmed or moved there")
+        XCTAssertEqual(account.providerUnavailableLabel, "Claude Code disabled by organisation")
+        XCTAssertEqual(account.cliUnavailableReason, "its organisation has disabled Claude Code subscription access")
+        XCTAssertEqual(SessionMoveRules.blocker(needsSignIn: false, cannotServe: account.cliUnavailableReason),
+                       "its organisation has disabled Claude Code subscription access", "a move by hand is refused with the reason")
+        let notice = try XCTUnwrap(account.cliAccessNotice)
+        XCTAssertTrue(notice.hasPrefix("Organisation has disabled Claude Code subscription access."))
+        XCTAssertTrue(notice.contains("seat or licence"), "a removed seat or licence is the usual cause")
+
+        let status = AccountStatus.make(account, hasReading: false,
+                                        error: AppState.UsageErrorState(isExpired: true, isRateLimited: false,
+                                                                        message: notice, cachedAt: nil),
+                                        signInRejected: false)
+        XCTAssertEqual(status.accessNotice?.text, notice)
+        XCTAssertEqual(status.accessNotice?.since, refusedAt)
+        XCTAssertNil(status.readingProblem, "the card says it once")
+        XCTAssertEqual(status.cardPlanBadges.last?.text, "Claude Code disabled by organisation")
+
+        // The mark is kept with the account, and an account saved before it loads without one.
+        let saved = try JSONDecoder().decode(Account.self, from: JSONEncoder().encode(account))
+        XCTAssertEqual(saved.cliAccessRefusedAt, refusedAt)
+        var plain = account
+        plain.cliAccessRefusedAt = nil
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(plain)) as? [String: Any])
+        object["cliAccessRefusedAt"] = nil
+        let old = try JSONDecoder().decode(Account.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(old.cliAccessRefusedAt)
+        XCTAssertTrue(old.supportsProviderWorkloads)
+    }
+
+    func testARefusalMarksTheAccountOnlyWhileRecentAndItIsCheckedAgainDaily() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        XCTAssertTrue(AppState.cliAccessRefusalCounts(at: now.addingTimeInterval(-60), clearedAt: nil, now: now))
+        XCTAssertFalse(AppState.cliAccessRefusalCounts(at: now.addingTimeInterval(-3 * 3600), clearedAt: nil, now: now),
+                       "a refusal read back from an old transcript says nothing now")
+        XCTAssertFalse(AppState.cliAccessRefusalCounts(at: now.addingTimeInterval(-120), clearedAt: now.addingTimeInterval(-60), now: now),
+                       "a refusal from before the account served again")
+
+        let refused = now.addingTimeInterval(-3600)
+        XCTAssertFalse(AppState.cliAccessRecheckDue(refusedAt: nil, retryAt: nil, forced: true, now: now))
+        XCTAssertFalse(AppState.cliAccessRecheckDue(refusedAt: refused, retryAt: nil, forced: false, now: now))
+        XCTAssertTrue(AppState.cliAccessRecheckDue(refusedAt: refused, retryAt: nil, forced: true, now: now),
+                      "the user's refresh checks it at once")
+        XCTAssertTrue(AppState.cliAccessRecheckDue(refusedAt: now.addingTimeInterval(-25 * 3600), retryAt: nil, forced: false, now: now))
+        XCTAssertFalse(AppState.cliAccessRecheckDue(refusedAt: refused, retryAt: now.addingTimeInterval(600), forced: false, now: now))
+        XCTAssertTrue(AppState.cliAccessRecheckDue(refusedAt: refused, retryAt: now.addingTimeInterval(-1), forced: false, now: now),
+                      "a re-check that failed on the network is tried again within the hour")
+    }
 }

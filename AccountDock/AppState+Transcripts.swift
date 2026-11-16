@@ -112,6 +112,12 @@ extension AppState {
                 decision = SessionAttribution.Decision(account: then, source: .slot, observedAt: request.at)
             }
             recordTranscriptRequest(provider, request, decision: decision)
+            // The account cannot serve the CLI at all: it is marked, and the
+            // slot pass that follows moves its sessions off.
+            if let words = request.accessRefusal {
+                if let account = decision?.account { noteCLIAccessRefused(account, words: words, at: request.at, now: now) }
+                continue
+            }
             let attributedBefore = decision?.account
             // A refusal is the account's whose window its stated reset
             // matches, when that is not the attributed account's.

@@ -780,6 +780,7 @@ extension AppState {
     /// where failover would move the session as soon as it starts.
     func sessionLaunchBlocker(_ account: Account, now: Date = Date()) -> String? {
         if needsSignIn(account) { return "\(messageName(account)) needs signing in again." }
+        if let reason = account.cliUnavailableReason { return "\(messageName(account)) cannot serve a session: \(reason)." }
         let planner = FailoverPlanner(settings: plannerSettings(account.provider))
         if accountCannotServe(account.id, provider: account.provider, planner: planner, now: now) {
             return "\(messageName(account)) is at its usage limit, so failover would move the session to another account straight away. Choose a subscription with room, or use one of its resets first."

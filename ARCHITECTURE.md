@@ -585,6 +585,27 @@ scoped to one model (`limits[]` with `kind: weekly_scoped`) and the share of the
 weekly allowance each may use. The planner uses the model-scoped window that
 applies to the model the sessions are using, read from the status line.
 
+An account whose plan does not include the CLI (a free or ended plan) has a
+`subscriptionType` that `Account.workloadAvailability` reports unavailable,
+and the planner treats it as ineligible. An account whose organisation has
+turned off subscription access for Claude Code, as a team admin does by
+removing its seat or licence, is refused with HTTP 403 `oauth_org_not_allowed`,
+which Claude Code shows as "API Error: Your organization has disabled Claude
+subscription access for Claude Code · Use an Anthropic API key instead, or ask
+your admin to enable access" (`ClaudeService.refusesCLIAccess`). That refusal,
+read from a session's transcript (`ClaudeTranscriptSource.accessRefusal`, at
+most `cliAccessRefusalWindow` old), a usage reply (`UsageError.organizationDisabled`)
+or a warm-up probe, marks the account (`AppState.noteCLIAccessRefused`,
+`Account.cliAccessRefusedAt`, saved with the account), which reuses the
+unavailable plan's state: `workloadAvailability` is unavailable ("Claude Code
+disabled by organisation"), so failover, slots, pacing and warm-ups leave it
+and move its sessions off at once (the quota cycle is brought forward; pinned
+sessions are unpinned), a move by hand is refused with the reason
+(`Account.cliUnavailableReason`), and the card shows `Account.cliAccessNotice`,
+which asks the user to check the seat or licence. `recheckCLIAccessIfDue` tries
+the account again with the warm-up's request daily and on the user's refresh;
+served, the mark ends.
+
 ## Failover planning
 
 `FailoverPlanner` is a pure function from accounts, readings and settings to a

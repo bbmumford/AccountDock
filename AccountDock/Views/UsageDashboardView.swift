@@ -274,6 +274,17 @@ struct UsageDashboardView: View {
             if status.needsSignIn {
                 signInPrompt(account)
             }
+            if let access = status.accessNotice {
+                HStack(alignment: .top) {
+                    Image(systemName: access.symbol)
+                        .foregroundStyle(access.tone.color)
+                    Text(access.text)
+                        .font(.caption)
+                        .foregroundStyle(.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                }
+            }
             if let usage = appState.accountUsage[account.id] {
                 usageBars(usage, provider: account.provider, hasSessionWindow: account.planHasSessionWindow == true)
                 if account.provider.capabilities.supportsExtraUsage {

@@ -36,6 +36,12 @@ struct Account: Identifiable, Codable, Hashable {
     /// The provider's rate-limit tier from the account's credential, which
     /// tells apart plans sharing one stored plan name.
     var rateLimitTier: String?
+    /// When the provider last refused the account's CLI because its
+    /// organisation has turned off subscription access, as a team admin
+    /// does by removing a seat or licence; nil while it has not. The account
+    /// then serves no workload (`workloadAvailability`) until a re-check
+    /// (`AppState.recheckCLIAccessIfDue`) is served again.
+    var cliAccessRefusedAt: Date?
 
     /// The plan's name: the provider's name for its plan and tier, or else
     /// the subscription type with first letter capitalized ("pro" → "Pro").
@@ -81,7 +87,16 @@ struct Account: Identifiable, Codable, Hashable {
     }
 
     var workloadAvailability: ProviderWorkloadAvailability {
-        Self.workloadAvailability(provider: provider, subscriptionType: subscriptionType)
+        if cliAccessRefusedAt != nil { return .unavailable(label: "\(provider.rawValue) disabled by organisation") }
+        return Self.workloadAvailability(provider: provider, subscriptionType: subscriptionType)
+    }
+
+    /// What the account card says while the organisation refuses the CLI
+    /// (`cliAccessRefusedAt`). Its seat or licence may have been removed,
+    /// so it says where to look, and that AccountDock checks again.
+    var cliAccessNotice: String? {
+        guard cliAccessRefusedAt != nil else { return nil }
+        return "Organisation has disabled \(provider.rawValue) subscription access. Check this account's seat or licence with its organisation's admin; AccountDock checks again daily and when you refresh."
     }
 
     static func supportsProviderWorkloads(
@@ -115,6 +130,7 @@ struct Account: Identifiable, Codable, Hashable {
     /// a move menu shows beside it (`SessionMoveRules.blocker`); nil when
     /// it can.
     var cliUnavailableReason: String? {
+        if cliAccessRefusedAt != nil { return "its organisation has disabled \(provider.rawValue) subscription access" }
         guard !supportsProviderWorkloads else { return nil }
         return "its plan does not include \(provider.rawValue)"
     }

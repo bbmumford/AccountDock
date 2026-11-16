@@ -73,7 +73,8 @@ struct ClaudeTranscriptSource: ProviderTranscriptSource {
         case "user":
             return !file.subagent && Self.isPrompt(row) ? .prompt : .none
         case "assistant":
-            if var refusal = Self.limitRefusal(row, session: file.session, subagent: file.subagent) {
+            if var refusal = Self.accessRefusal(row, session: file.session, subagent: file.subagent)
+                ?? Self.limitRefusal(row, session: file.session, subagent: file.subagent) {
                 refusal.agent = file.agent
                 return .refusal(refusal)
             }
@@ -150,6 +151,26 @@ struct ClaudeTranscriptSource: ProviderTranscriptSource {
             session: subagent ? session : (row["sessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? session,
             at: at, contextTokens: 0, cacheWriteTokens: 0, cacheWriteLongTokens: 0, outputTokens: 0,
             cacheLifetime: nil, startsTurn: false, limitRefusal: words, agent: subagent ? "" : nil
+        )
+    }
+
+    /// The refusal an `assistant` row records when Anthropic turned the
+    /// request away because the account's organisation has disabled its
+    /// subscription access for Claude Code (`ClaudeService.refusesCLIAccess`):
+    /// the CLI writes it as an API error of its own, whatever its error kind,
+    /// with no usage. Credited to a session as `limitRefusal` credits one.
+    static func accessRefusal(_ row: [String: Any], session: String, subagent: Bool = false) -> TranscriptRequest? {
+        guard row["isApiErrorMessage"] as? Bool == true,
+              subagent || row["isSidechain"] as? Bool != true,
+              let stamp = row["timestamp"] as? String, let at = Self.date(stamp) else { return nil }
+        let content = (row["message"] as? [String: Any])?["content"] as? [[String: Any]]
+        let words = content?.compactMap { $0["text"] as? String }.joined(separator: " ") ?? ""
+        guard ClaudeService.refusesCLIAccess(words) || (row["error"] as? String).map(ClaudeService.refusesCLIAccess) == true
+        else { return nil }
+        return TranscriptRequest(
+            session: subagent ? session : (row["sessionId"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? session,
+            at: at, contextTokens: 0, cacheWriteTokens: 0, cacheWriteLongTokens: 0, outputTokens: 0,
+            cacheLifetime: nil, startsTurn: false, accessRefusal: words, agent: subagent ? "" : nil
         )
     }
 }

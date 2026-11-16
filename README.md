@@ -276,6 +276,16 @@ provider's failover order when it should take work.
 - **Refusals checked.** A request refused at a usage limit is credited to the
   account that served it, by the reset time the refusal names, and checked
   against a fresh reading before anything moves for it.
+- **Accounts their organisation turned off.** When a team's admin removes an
+  account's seat or licence, Anthropic refuses every request with "Your
+  organization has disabled Claude subscription access for Claude Code"
+  (`oauth_org_not_allowed`). AccountDock reads that refusal from the session's
+  transcript, a usage reply or a warm-up, and treats the account like a plan
+  without the CLI: its card says the organisation has disabled access and to
+  check the seat or licence, its sessions move at once to accounts that can
+  serve them (pinned ones are unpinned), and nothing is placed, warmed or moved
+  there by hand. It is tried again once a day, and when you refresh, in case
+  access is restored.
 - **Reset-aware.** Hold briefly when a limit resets before the account would
   run out, and optionally prefer an account whose limit has just reset. Once a
   reset time passes, the account is read again within a minute and takes no
