@@ -620,7 +620,17 @@ the refusal, and, when that reading shows no window resetting at the time the
 refusal states, the accounts in use whose readings predate it are read too,
 and the refusal moves to the account whose window does. While the reset it
 states is no window of the account it names and the reading that would
-settle it is held back, it does not count, for up to five minutes. An account
+settle it is held back, it does not count, for up to five minutes. A refusal
+is the account's that served the request when it was refused: the slot's
+account at that time by its history (`servingSlotAccount`), unless the reset
+the refusal states is none of that account's windows; it is then the one
+account the slot may have served the request with whose window it matches
+(`servingSlotCandidates`: the settled account and any moved to within
+`slotMoveSettling` before the request, kept as `SessionRefusal.served` for
+the checks that follow), or else the one account of all whose window it
+matches (`refusingAccount`). Two accounts resetting at the same time (bytrix
+and cybrio at 1:30 am) leave the slot's history to tell them apart, so a
+refusal is never put down to the account the slot left. An account
 whose reading is older than its pool lifetime is read before it takes a new
 session (`FailoverPlanner.poolReadingIsCurrent`) and takes none while that
 reading cannot be made.
