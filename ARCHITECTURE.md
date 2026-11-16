@@ -1428,6 +1428,30 @@ the pool weights and which sessions move, each time the pool is rebuilt
   shorter than staying would. The router moves it at its next turn
   (`RouterState.moves`). The event names the reason ("… while the other
   accounts still have room (together they last until …)").
+- An account whose weekly allowance its session windows could not drain
+  before its weekly reset even filled to the limit one after another
+  (`SessionPacer.useBy`: its weekly room exceeds what its windows hold until
+  that reset, `sessionCapacity`, by `minimumLeftover`; weekly balancing's
+  latest start for it has passed) has free room: every percent its windows
+  serve until the earlier of its session window's reset and its weekly reset
+  is weekly allowance that would otherwise expire unused. Reaching its
+  session window's limit is then the goal, not a run-out: `plan` sheds
+  nothing from it for its whole allowance and moves none of its sessions to
+  spend a remainder or a window, and `rebalance` neither moves a session off
+  it nor takes its run-out for a bottleneck or reports it. Its room left at
+  that time at its own rate (`freeRoom`) is the first destination of a
+  session the shedding rule moves, the stranded placement (`place`) places or
+  a rebalance moves, when the session's arrival and its rate until then, or
+  for `newSessionRunway` when that is later, fit `windowFitShare` of that
+  room (`fitsFreeRoom`) and it reaches no limit there within the hour: a
+  session sized to the room, so a heavy one does not push the account's own
+  sessions to its limit early. Once at its limit its sessions wait for a reset within
+  their cache or move on, as from any limit. The 5-hour window is the cap:
+  with 68% of a Max 5x week left 3 h 48 min before its weekly reset and 37%
+  of its window used, the window resetting half an hour after the week, at
+  most the window's 63% can be used before the week resets, about 8% of
+  the week at eight windows to the week, of the 68% it shows; one session at 52M weighted tokens an hour
+  fills it by 10:25 pm, and more sessions there would only fill it sooner.
 - An account that would reach its limit only shortly before its reset keeps
   its sessions. When one of them is refused at the limit and the reset the
   refusal names comes within five minutes and at least a minute before the

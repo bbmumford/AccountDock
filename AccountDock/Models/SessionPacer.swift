@@ -659,6 +659,81 @@ struct SessionPacer {
         return millions(room, on: account) / (max(end.timeIntervalSince(now), 60) / 3600)
     }
 
+    /// Until when the account's room is free, for an account whose weekly
+    /// allowance would still have at least `minimumLeftover` left at its
+    /// weekly reset even with its session window and every one after it
+    /// until then filled to `limit` (`sessionCapacity`): its session
+    /// windows cap what it can use before that reset, so every percent they
+    /// serve is weekly allowance that would otherwise expire unused. The
+    /// time is the earlier of its session window's reset and its weekly
+    /// reset: the room of the window running now counts until then. Nil for
+    /// any other account, and for one without a session window, which
+    /// nothing stops from spending its whole week.
+    ///
+    /// Filling such an account to its session window's limit before that
+    /// time is the goal rather than a run-out: `plan` sheds nothing from it
+    /// for its whole allowance and moves none of its sessions to spend room
+    /// elsewhere, `rebalance` neither moves a session off it nor counts its
+    /// run-out, and its room left at that time (`freeRoom`) is the first
+    /// place a session shed or stranded elsewhere goes when it carries the
+    /// session for `newSessionRunway`. A session moves off it once it
+    /// reaches the limit, by the rules for any account at its limit. Read
+    /// by those.
+    func useBy(_ account: Account, spent: Double = 0, now: Date) -> Date? {
+        guard account.hasSessionWindow, let weeklyLeft = account.weeklyRemaining,
+              let weeklyEnd = account.weeklyResetsAt, weeklyEnd > now else { return nil }
+        guard weeklyLeft - spent - sessionCapacity(account, until: weeklyEnd, spent: spent, now: now)
+                >= Self.minimumLeftover else { return nil }
+        let sessionEnd = account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
+        return min(sessionEnd, weeklyEnd)
+    }
+
+    /// Window percent the account's session windows can serve before
+    /// `horizon` after `spent`: the rest of the window running now (a whole
+    /// one when none runs) and `limit` for each window that starts again
+    /// before it, whatever the weekly allowance holds. How many windows
+    /// refill on the way is `refills`. Read by `useBy`.
+    func sessionCapacity(_ account: Account, until horizon: Date, spent: Double, now: Date) -> Double {
+        remaining(account, now: now) - spent + Double(refills(account, before: horizon, now: now)) * limit
+    }
+
+    /// How many times the account's session window starts again full
+    /// before `horizon`, from its next reset (five hours from now when no
+    /// window runs) every `window`. Read by `sessionCapacity`.
+    func refills(_ account: Account, before horizon: Date, now: Date) -> Int {
+        var reset = account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
+        var count = 0
+        while reset < horizon && count < 64 {
+            count += 1
+            reset = reset.addingTimeInterval(window)
+        }
+        return count
+    }
+
+    /// Window percent of the account's free room (`useBy`) still unused at
+    /// its use-by time once its own `burn`, `spent` and the shared group's
+    /// share have run until then; 0 for an account with no use-by time or
+    /// whose own sessions fill that room first. Read by `plan`, `rebalance`
+    /// and `place` to send work there first.
+    func freeRoom(_ account: Account, spent: Double, burn: Double, shared: SharedShare?, now: Date) -> Double {
+        guard let end = useBy(account, spent: spent, now: now) else { return 0 }
+        return max(0, spare(account, until: end, spent: spent, burn: burn, shared: shared, now: now))
+    }
+
+    /// Whether work spending `rate` window percent an hour, whose arrival
+    /// costs `cost`, fits `room` of free room lasting until `end`: the room
+    /// is at least `minimumLeftover`, and the arrival and the rate until
+    /// `end`, or for `newSessionRunway` when `end` is later, fit
+    /// `windowFitShare` of it, as `spendWindows` sizes a session to a
+    /// window's room. Work sized so stays there at least that hour and uses
+    /// the room without pushing the account's own sessions to its limit far
+    /// sooner; a heavy session that would fill the room within the hour
+    /// goes elsewhere. Read by `plan`, `rebalance` and `place`.
+    static func fitsFreeRoom(rate: Double, cost: Double, room: Double, until end: Date, now: Date) -> Bool {
+        let hours = min(max(0, end.timeIntervalSince(now)), newSessionRunway) / 3600
+        return room >= minimumLeftover && cost + rate * hours <= room * windowFitShare
+    }
+
     /// Whether `carriers`, the accounts that take sessions for the runway,
     /// will together have spent what they hold before the first of the
     /// resets that refills them: each reaches a limit before its binding
@@ -993,10 +1068,37 @@ struct SessionPacer {
             }
             return !relieving.isEmpty && relieving.allSatisfy { held.contains($0.id) }
         }
+        // The accounts whose room is free until their use-by time
+        // (`useBy`): what they serve before then is weekly allowance that
+        // would otherwise expire unused, so reaching their session window's
+        // limit is the goal, not a run-out. None of them gives sessions up
+        // for its whole allowance, no rule here moves a session off one to
+        // spend room elsewhere, and their free room is the first place work
+        // goes. Judged before any move, as the readings show them.
+        let freeUntil = accounts.reduce(into: [UUID: Date]()) { result, account in
+            if let end = useBy(account, now: now) { result[account.id] = end }
+        }
+        // Whether a destination carries work spending `rate` an hour, whose
+        // arrival costs `cost`, in its free room: the work fits the room it
+        // has left at its own rate (`fitsFreeRoom`), and `outlooks`, its own
+        // and its model allowances' with the work, reach no limit within
+        // `newSessionRunway`, so the arrival's cache write pays off before
+        // the work moves on from a limit.
+        func takesFreeWork(_ account: Account, rate: Double, cost: Double, _ outlooks: [Outlook]) -> Bool {
+            guard let end = freeUntil[account.id],
+                  Self.fitsFreeRoom(rate: rate, cost: cost,
+                                    room: freeRoom(account, spent: spent[account.id] ?? 0, burn: burn[account.id] ?? 0,
+                                                   shared: shares[account.id], now: now),
+                                    until: end, now: now) else { return false }
+            return outlooks.allSatisfy { outlook in
+                outlook.limitAt.map { $0 >= now.addingTimeInterval(Self.newSessionRunway) } ?? true
+            }
+        }
         var plan = Plan()
         plan.filling = filling
         for account in accounts {
-            if !fillsAsPlanned(account), !onlyHeldRelieve(account, nil), let why = wholeReason(account) {
+            if !fillsAsPlanned(account), freeUntil[account.id] == nil, !onlyHeldRelieve(account, nil),
+               let why = wholeReason(account) {
                 plan.shedding[account.id] = current(account)
                 plan.shedReasons[account.id] = why
             }
@@ -1031,12 +1133,15 @@ struct SessionPacer {
             }
             for session in candidates where session.tokensPerHour > 0 {
                 guard source.key.map({ shedsScoped(source.account, $0) }) ?? sheds(source.account) else { break }
-                // Destinations lasting until the pool's run-out come first.
-                // The run-out counts the windows that refill on the way, and
-                // a heavy session takes any single account to a limit long
-                // before it; failing those, one lasting about as long as the
-                // source does, whose limit it reaches far sooner than any
-                // other's, serves the session no shorter than staying would.
+                // Free room that carries the session for the runway comes
+                // first (`takesFreeWork`): what it serves there would
+                // otherwise expire unused. Then destinations lasting until
+                // the pool's run-out. The run-out counts the windows that
+                // refill on the way, and a heavy session takes any single
+                // account to a limit long before it; failing those, one
+                // lasting about as long as the source does, whose limit it
+                // reaches far sooner than any other's, serves the session no
+                // shorter than staying would.
                 var best: (id: UUID, rank: Int, spare: Double)?
                 for destination in accounts where destination.id != source.account.id
                     && plan.shedding[destination.id] == nil && destination.baseWeight > 0 && filling[destination.id] == nil {
@@ -1052,7 +1157,9 @@ struct SessionPacer {
                     let outlooks = [after] + scoped
                     let sourceDeadline = source.limitAt < .distantFuture ? min(poolEnd ?? source.limitAt, source.limitAt) : nil
                     let rank: Int
-                    if outlooks.allSatisfy({ lastsEnough($0) }) {
+                    if takesFreeWork(destination, rate: rate, cost: cost, outlooks) {
+                        rank = -1
+                    } else if outlooks.allSatisfy({ lastsEnough($0) }) {
                         rank = 0
                     } else if let sourceDeadline, outlooks.allSatisfy({ lastsEnough($0, until: sourceDeadline) }) {
                         rank = 1
@@ -1098,7 +1205,8 @@ struct SessionPacer {
         // `remainderSecondSession` of the remainder would still go unused.
         // A session placed so reaches no limit before the reset, so the
         // shedding above leaves it there. Accounts giving sessions up spend
-        // nothing here, and a session leaves no other remainder account.
+        // nothing here, and a session leaves no other remainder account and
+        // no account filling its free room.
         if let remainders {
             let targets = accounts.compactMap { account -> (account: Account, reset: Date)? in
                 guard remainders.accounts.contains(account.id), !remainders.resting.contains(account.id),
@@ -1118,7 +1226,8 @@ struct SessionPacer {
                 guard before > 0 else { continue }
                 let candidates = spending.filter { session in
                     remainders.sessions.contains(session.id) && session.account != account.id
-                        && !remainders.accounts.contains(session.account) && plan.moves[session.id] == nil
+                        && !remainders.accounts.contains(session.account) && freeUntil[session.account] == nil
+                        && plan.moves[session.id] == nil
                         && !unmoved.contains(session.id) && now.timeIntervalSince(session.lastSeen) > Self.betweenTurns
                         && spends(session, now: now)
                 }.sorted { Self.lightRate($0) == Self.lightRate($1) ? $0.id < $1.id : Self.lightRate($0) < Self.lightRate($1) }
@@ -1180,10 +1289,10 @@ struct SessionPacer {
             plan.windowsOpen = windowsOpen
             if windowsOpen {
                 // Sessions already on one of the windows, resting ones
-                // included, stay where they are.
+                // included, and those filling free room, stay where they are.
                 let candidates = spending.filter { session in
                     remainders.sessions.contains(session.id) && plan.moves[session.id] == nil && !unmoved.contains(session.id)
-                        && !remainders.accounts.contains(session.account)
+                        && !remainders.accounts.contains(session.account) && freeUntil[session.account] == nil
                         && now.timeIntervalSince(session.lastSeen) > Self.betweenTurns && movable(session, now: now)
                         && spends(session, now: now)
                 }.map {
@@ -1650,6 +1759,11 @@ extension SessionPacer {
     /// window rule moves one, a move of one the search would have made is
     /// reported in `Rebalance.heldBack`, and one on an account that can no
     /// longer serve it moves as any blocked one does.
+    ///
+    /// An account filling free room (`useBy`) reaches its limit as the
+    /// goal: no session moves off it while it can serve, its run-out is
+    /// neither a bottleneck nor reported, and it takes a session only into
+    /// free room that carries it for `newSessionRunway`.
     func rebalance(accounts: [Account], sessions: [RebalanceSession], destinations: Set<UUID>, now: Date,
                    sharedGroup: SharedGroup? = nil, windows: Set<UUID>? = nil, resting: Set<UUID> = [],
                    placements: [String: WindowUse] = [:], held: Set<String> = []) -> Rebalance {
@@ -1666,6 +1780,18 @@ extension SessionPacer {
         }.map(\.id))
         let filling = Set(placed.filter { staying.contains($0.id) }.map(\.account))
         for index in placed.indices where staying.contains(placed[index].id) { placed[index].movable = false }
+        // Accounts filling free room (`useBy`): what they serve before
+        // their use-by time would otherwise expire unused, so none of their
+        // sessions moves while they can serve it, and their run-out is no
+        // bottleneck. They take a session only into free room that carries
+        // it for `newSessionRunway`.
+        let freeUntil = accounts.reduce(into: [UUID: Date]()) { result, account in
+            if let end = useBy(account, now: now) { result[account.id] = end }
+        }
+        for index in placed.indices
+        where freeUntil[placed[index].account] != nil && destinations.contains(placed[index].account) {
+            placed[index].movable = false
+        }
         // A session on an account that cannot serve it (no destination: at
         // its limit, or refusing it) gains from any room, however short, so
         // each movable one goes first where `place` puts it: spread over the
@@ -1746,9 +1872,25 @@ extension SessionPacer {
             accounts.filter { ids.contains($0.id) }.map { ($0, runway($0)) }.min { $0.1 < $1.1 }
         }
         func date(_ runway: TimeInterval) -> Date? { runway.isFinite ? now.addingTimeInterval(runway) : nil }
+        // Whether `account`, filling free room, takes `session` at a cache
+        // write of `cost`, with `trial` the sessions once it has: the
+        // session fits the room left at the account's rate before the move
+        // (`fitsFreeRoom`), and the account lasts `newSessionRunway` with it.
+        func takesFreeWork(_ account: Account, _ session: RebalanceSession, cost: Double,
+                           _ trial: [RebalanceSession], _ trialSpent: [UUID: Double]) -> Bool {
+            guard let end = freeUntil[account.id] else { return false }
+            let burn = placed.filter { $0.account == account.id }.reduce(0) { $0 + percent($1.tokensPerHour, on: account) }
+                + (unseen[account.id] ?? 0)
+            let room = freeRoom(account, spent: spent[account.id] ?? 0, burn: burn, shared: shares[account.id], now: now)
+            guard Self.fitsFreeRoom(rate: percent(session.tokensPerHour, on: account), cost: cost, room: room,
+                                    until: end, now: now) else { return false }
+            return self.runway(account, sessions: trial.filter { $0.account == account.id },
+                               spent: trialSpent[account.id] ?? 0, shared: shares[account.id],
+                               unseen: unseen[account.id] ?? 0, now: now) >= Self.newSessionRunway
+        }
         var result = Rebalance(moves: leaving, unblocked: Set(leaving.keys), filling: filling)
         for _ in 0..<(sessions.count + accounts.count) {
-            let open = Set(accounts.map(\.id)).subtracting(settled)
+            let open = Set(accounts.map(\.id)).subtracting(settled).subtracting(freeUntil.keys)
             guard let bottleneck = earliest(among: open), bottleneck.runway.isFinite else { break }
             let burn = placed.filter { $0.account == bottleneck.account.id }
                 .reduce(0) { $0 + percent($1.tokensPerHour, on: bottleneck.account) }
@@ -1770,6 +1912,9 @@ extension SessionPacer {
                     for key in scopedKeys(Session(id: session.id, account: destination.id, tokensPerHour: 0, contextTokens: 0,
                                                   lastSeen: now, cacheLifetime: nil, model: session.model), on: destination) {
                         trialScoped[destination.id, default: [:]][key, default: 0] += cost
+                    }
+                    if freeUntil[destination.id] != nil, !takesFreeWork(destination, session, cost: cost, trial, trialSpent) {
+                        continue
                     }
                     let after = accounts.filter { open.contains($0.id) }.map { account in
                         self.runway(account, sessions: trial.filter { $0.account == account.id },
@@ -1811,7 +1956,9 @@ extension SessionPacer {
         }
         // An account that cannot serve has run out already, whatever moves,
         // and a window a placement fills runs out as planned.
+        // An account filling free room reaches its limit as the goal.
         let reported = Set(accounts.map(\.id)).subtracting(stuck).subtracting(blockedAccounts).subtracting(filling)
+            .subtracting(freeUntil.keys)
         result.earliestRunOutBefore = reported.compactMap { initial[$0] }.min().flatMap(date)
         result.earliestRunOutAfter = earliest(among: reported).flatMap { date($0.runway) }
         return result
@@ -1845,7 +1992,9 @@ extension SessionPacer {
     /// room in proportion to what each can carry; `AppState.slotChoice`'s
     /// `fallback`, the pool's largest weight, is one account for all of
     /// them. `sharedGroup` counts where it runs now and from the projected
-    /// switch (`shares`). Read by `AppState.strandedPlacements`.
+    /// switch (`shares`). A destination filling free room (`useBy`) that
+    /// carries the session for `newSessionRunway` comes first, its run-out
+    /// counted as none. Read by `AppState.strandedPlacements`.
     func place(_ sessions: [RebalanceSession], accounts: [Account], running: [RebalanceSession],
                destinations: Set<UUID>, now: Date, sharedGroup: SharedGroup? = nil) -> [String: UUID] {
         let targets = accounts.filter { destinations.contains($0.id) }
@@ -1862,10 +2011,32 @@ extension SessionPacer {
             return self.runway(account, sessions: sessions, spent: (spent[account.id] ?? 0) + cost, scopedSpent: scoped,
                                shared: shares[account.id], unseen: unseen[account.id] ?? 0, now: now)
         }
+        // A destination filling free room (`useBy`) reaches its limit as the
+        // goal, not as a run-out: its run-out counts as none while it has
+        // `minimumLeftover` of that room left at its present rate and lasts
+        // `newSessionRunway`, and, with `adding` placed there at a cache
+        // write of `cost`, while that session fits the room
+        // (`fitsFreeRoom`). The free room is then where a session goes
+        // first, and no other destination is judged by it.
+        let freeUntil = targets.reduce(into: [UUID: Date]()) { result, account in
+            if let end = useBy(account, now: now) { result[account.id] = end }
+        }
+        func counted(_ account: Account, _ runway: TimeInterval, adding: RebalanceSession? = nil,
+                     cost: Double = 0) -> TimeInterval {
+            guard let end = freeUntil[account.id], runway >= Self.newSessionRunway else { return runway }
+            let burn = placed.filter { $0.account == account.id }.reduce(0) { $0 + percent($1.tokensPerHour, on: account) }
+                + (unseen[account.id] ?? 0)
+            let room = freeRoom(account, spent: spent[account.id] ?? 0, burn: burn, shared: shares[account.id], now: now)
+            let fits = adding.map { session in
+                Self.fitsFreeRoom(rate: percent(session.tokensPerHour, on: account), cost: cost, room: room,
+                                  until: end, now: now)
+            } ?? (room >= Self.minimumLeftover)
+            return fits ? .infinity : runway
+        }
         var result: [String: UUID] = [:]
         let ordered = sessions.sorted { $0.tokensPerHour == $1.tokensPerHour ? $0.id < $1.id : $0.tokensPerHour > $1.tokensPerHour }
         for session in ordered {
-            let lasting = Dictionary(uniqueKeysWithValues: targets.map { ($0.id, runway($0)) })
+            let lasting = Dictionary(uniqueKeysWithValues: targets.map { ($0.id, counted($0, runway($0))) })
             var best: (account: Account, earliest: TimeInterval, own: TimeInterval, spare: Double, cost: Double,
                        scoped: [String: Double])?
             for destination in targets {
@@ -1875,7 +2046,8 @@ extension SessionPacer {
                 let keys = scopedKeys(Session(id: session.id, account: destination.id, tokensPerHour: 0, contextTokens: 0,
                                               lastSeen: now, cacheLifetime: nil, model: session.model), on: destination)
                 let scoped = Dictionary(uniqueKeysWithValues: keys.map { ($0, cost) })
-                let own = runway(destination, adding: moved, cost: cost, scopedCost: scoped)
+                let own = counted(destination, runway(destination, adding: moved, cost: cost, scopedCost: scoped),
+                                  adding: session, cost: cost)
                 let others = targets.filter { $0.id != destination.id }.compactMap { lasting[$0.id] }.min() ?? .infinity
                 let earliest = min(own, others)
                 let burn = (placed.filter { $0.account == destination.id } + [moved])
