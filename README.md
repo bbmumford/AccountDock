@@ -406,7 +406,10 @@ With slots, two more settings apply:
 - **Rebalance automatically** (off by default) makes the moves **Rebalance
   sessions now** would, at most once every half hour, and only when they move a
   session off an account that cannot serve it or into a session window, or the
-  first account then runs out more than an hour later.
+  first account then runs out more than an hour later. A session that has just
+  moved stays where it went for its prompt cache's lifetime, at least an hour,
+  before pacing or an automatic rebalance moves it again, unless that account
+  refuses it or reaches its limit; the events say when such a move waits.
 - **Resume sessions left waiting at a limit once their slot has room** (on by
   default). When Claude Code stops at a usage limit and waits for the reset on
   its own, and AccountDock has since moved the session's slot to an account

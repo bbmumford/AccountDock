@@ -301,6 +301,10 @@ struct SessionPacer {
         /// ends. Reaching that window's limit is what the placement is for,
         /// so none of them is in `shedding` for it.
         var filling: [UUID: Date] = [:]
+        /// Sessions the shedding rule would have moved, with where, that
+        /// stay because they moved within their hold (`plan`'s `held`); read
+        /// by `AppState` for the event saying why they stay.
+        var heldBack: [String: UUID] = [:]
     }
 
     /// A session window a session moves to use (`Plan.windowUses`): the
@@ -721,9 +725,17 @@ struct SessionPacer {
     /// window's limit and takes none given up elsewhere. Once the window is
     /// at its limit or refuses, `AppState.strandedPlacements` moves the
     /// session on; once `until` passes, the caller no longer passes it.
+    ///
+    /// `held` are sessions that moved within their hold
+    /// (`AppState.slotSessionsWithinHold`): the cache their move wrote has
+    /// not yet lasted its lifetime, so no rule here moves them again; one
+    /// the shedding rule would have moved is reported in `Plan.heldBack`.
+    /// The account each runs on still counts its rate, and one that can no
+    /// longer serve it gives it to `AppState.strandedPlacements`, which the
+    /// hold does not stop.
     func plan(accounts: [Account], sessions: [Session], now: Date, sharedGroup: SharedGroup? = nil,
               fixed: Set<String> = [], remainders: RemainderSpending? = nil,
-              placements: [String: WindowUse] = [:]) -> Plan {
+              placements: [String: WindowUse] = [:], held: Set<String> = []) -> Plan {
         let ids = Set(accounts.map(\.id))
         let active = sessions.filter { ids.contains($0.account) && now.timeIntervalSince($0.lastSeen) <= Self.activeWithin }
         let placed = Set(sessions.filter { placements[$0.id]?.account == $0.account }.map(\.id))
@@ -731,8 +743,10 @@ struct SessionPacer {
             guard placed.contains(session.id), let use = placements[session.id], ids.contains(use.account) else { return }
             result[use.account] = max(result[use.account] ?? use.until, use.until)
         }
-        // Sessions no rule here moves: pinned ones and placed ones.
+        // Sessions no rule here moves: pinned ones and placed ones. Held
+        // ones are weighed by the shedding rule only to report them.
         let staying = fixed.union(placed)
+        let unmoved = staying.union(held)
         let shares = shares(sharedGroup, accounts: accounts, now: now)
         var spent: [UUID: Double] = [:]
         var burn: [UUID: Double] = [:]
@@ -884,6 +898,11 @@ struct SessionPacer {
                     if best.map({ spare > $0.spare }) ?? true { best = (destination.id, spare) }
                 }
                 guard let best, let target = accounts.first(where: { $0.id == best.id }) else { continue }
+                // A held session stays; the next candidate is tried instead.
+                if held.contains(session.id) {
+                    plan.heldBack[session.id] = best.id
+                    continue
+                }
                 plan.moves[session.id] = best.id
                 let leaving = percent(session.tokensPerHour, on: source.account)
                 burn[source.account.id, default: 0] -= leaving
@@ -931,7 +950,7 @@ struct SessionPacer {
                 let candidates = active.filter { session in
                     remainders.sessions.contains(session.id) && session.account != account.id
                         && !remainders.accounts.contains(session.account) && plan.moves[session.id] == nil
-                        && !staying.contains(session.id) && now.timeIntervalSince(session.lastSeen) > Self.betweenTurns
+                        && !unmoved.contains(session.id) && now.timeIntervalSince(session.lastSeen) > Self.betweenTurns
                 }.sorted { Self.lightRate($0) == Self.lightRate($1) ? $0.id < $1.id : Self.lightRate($0) < Self.lightRate($1) }
                 var chosen = 0
                 for session in candidates {
@@ -987,7 +1006,7 @@ struct SessionPacer {
                 // Sessions already on one of the windows, resting ones
                 // included, stay where they are.
                 let candidates = active.filter { session in
-                    remainders.sessions.contains(session.id) && plan.moves[session.id] == nil && !staying.contains(session.id)
+                    remainders.sessions.contains(session.id) && plan.moves[session.id] == nil && !unmoved.contains(session.id)
                         && !remainders.accounts.contains(session.account)
                         && now.timeIntervalSince(session.lastSeen) > Self.betweenTurns && movable(session, now: now)
                 }.map {
@@ -1336,6 +1355,10 @@ extension SessionPacer {
         /// settled, and left out of the run-outs reported, since the work
         /// their windows serve until they fill is what the placement is for.
         var filling: Set<UUID> = []
+        /// Sessions whose move would have been the search's best at some
+        /// step, with where, that stay because they moved within their hold
+        /// (`held`).
+        var heldBack: [String: UUID] = [:]
     }
 
     /// How long `account` lasts carrying `sessions` after `spent` percent
@@ -1407,9 +1430,15 @@ extension SessionPacer {
     /// it nor onto it, and its run-out, the window filling as planned, is
     /// served work rather than a bottleneck to improve. A placed session
     /// whose account can no longer serve it moves as any blocked one does.
+    ///
+    /// `held`, for a rebalance nobody asked for, are sessions that moved
+    /// within their hold, as `plan` takes them: neither the search nor the
+    /// window rule moves one, a move of one the search would have made is
+    /// reported in `Rebalance.heldBack`, and one on an account that can no
+    /// longer serve it moves as any blocked one does.
     func rebalance(accounts: [Account], sessions: [RebalanceSession], destinations: Set<UUID>, now: Date,
                    sharedGroup: SharedGroup? = nil, windows: Set<UUID>? = nil, resting: Set<UUID> = [],
-                   placements: [String: WindowUse] = [:]) -> Rebalance {
+                   placements: [String: WindowUse] = [:], held: Set<String> = []) -> Rebalance {
         var placed = sessions.filter { session in accounts.contains { $0.id == session.account } }
         let shares = shares(sharedGroup, accounts: accounts, now: now)
         let unseen = unseenBurn(accounts, sessions: placed, sharedGroup: sharedGroup, shares: shares)
@@ -1464,8 +1493,11 @@ extension SessionPacer {
                 }
                 var result = Rebalance(moves: leaving, unblocked: Set(leaving.keys), filling: filling)
                 result.earliestRunOutBefore = carriersRunOut(placed, spent: spent)
-                // As in `plan`, sessions already on a window stay there.
-                let candidates = placed.filter { $0.movable && !moved.contains($0.id) && !windows.contains($0.account) }.map {
+                // As in `plan`, sessions already on a window stay there, and
+                // held ones where they are.
+                let candidates = placed.filter {
+                    $0.movable && !moved.contains($0.id) && !windows.contains($0.account) && !held.contains($0.id)
+                }.map {
                     WindowCandidate(id: $0.id, account: $0.account, tokensPerHour: $0.tokensPerHour,
                                     contextTokens: $0.contextTokens, cacheLifetime: $0.cacheLifetime, model: $0.model)
                 }
@@ -1509,6 +1541,8 @@ extension SessionPacer {
                 + (shares[bottleneck.account.id].map { $0.from <= now ? $0.percentPerHour : 0 } ?? 0)
                 + (unseen[bottleneck.account.id] ?? 0)
             var best: (index: Int, to: Account, runway: TimeInterval, cost: Double)?
+            // The best move of a held session, which is not made.
+            var bestHeld: (session: String, to: UUID, runway: TimeInterval)?
             for (index, session) in placed.enumerated()
             where session.account == bottleneck.account.id && session.movable && !moved.contains(session.id) {
                 for destination in accounts where destination.id != session.account && destinations.contains(destination.id)
@@ -1534,10 +1568,17 @@ extension SessionPacer {
                     let gained = after.isFinite
                         ? millions((after - bottleneck.runway) / 3600 * burn, on: bottleneck.account) : .infinity
                     guard gained > millions(cost, on: destination) else { continue }
+                    if held.contains(session.id) {
+                        if bestHeld.map({ after > $0.runway }) ?? true { bestHeld = (session.id, destination.id, after) }
+                        continue
+                    }
                     if best.map({ after > $0.runway || (after == $0.runway && cost < $0.cost) }) ?? true {
                         best = (index, destination, after, cost)
                     }
                 }
+            }
+            if let bestHeld, best.map({ bestHeld.runway > $0.runway }) ?? true {
+                result.heldBack[bestHeld.session] = bestHeld.to
             }
             guard let best else {
                 settled.insert(bottleneck.account.id)

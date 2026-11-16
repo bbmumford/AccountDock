@@ -33,6 +33,10 @@ extension AppState {
         /// How many of `moves` take a session off an account that cannot
         /// serve it (`SessionPacer.Rebalance.unblocked`).
         var unblockedMoves = 0
+        /// For an automatic rebalance, the moves its sessions' holds stopped
+        /// (`SessionPacer.Rebalance.heldBack`), with when each hold began.
+        var heldBack: [String: UUID] = [:]
+        var holds: [String: Date] = [:]
 
         /// How the earliest run-out changes, in words.
         var outcome: String {
@@ -67,8 +71,10 @@ extension AppState {
         sessionSlotsInUse(provider)
     }
 
-    /// The plan for the provider's running slot sessions now.
-    func rebalancePreview(_ provider: AIProviderType, now: Date = Date()) -> RebalancePreview {
+    /// The plan for the provider's running slot sessions now. An
+    /// `automatic` one, which nobody asked for, leaves the sessions within
+    /// their hold where they are (`slotSessionsWithinHold`).
+    func rebalancePreview(_ provider: AIProviderType, now: Date = Date(), automatic: Bool = false) -> RebalancePreview {
         guard rebalanceAvailable(provider), let slots = SessionSlots(provider) else { return RebalancePreview() }
         let (pacerAccounts, destinations) = rebalanceAccounts(provider, now: now)
         let pacer = SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
@@ -80,9 +86,10 @@ extension AppState {
         // window placements in force, so both follow one rule while those
         // windows are worth spending and while a placement fills one.
         let spending = remainderSpending(provider, pooled: destinations, slotted: Set(sessions.map(\.id)), now: now)
+        let holds = automatic ? slotSessionsWithinHold(provider, now: now) : [:]
         let plan = pacer.rebalance(accounts: pacerAccounts, sessions: sessions, destinations: destinations, now: now,
                                    sharedGroup: shared, windows: spending?.accounts, resting: spending?.resting ?? [],
-                                   placements: windowPlacementsInForce(provider, now: now))
+                                   placements: windowPlacementsInForce(provider, now: now), held: Set(holds.keys))
         let from = sessions.reduce(into: [String: UUID]()) { $0[$1.id] = $1.account }
         let moves = plan.moves.compactMap { id, to in from[id].map { RebalanceMove(session: id, from: $0, to: to) } }
             .sorted { $0.session < $1.session }
@@ -97,7 +104,9 @@ extension AppState {
             sharedNote: sharedGroupNote(shared),
             windowMoves: plan.windowUses.count,
             windowUses: plan.windowUses,
-            unblockedMoves: plan.unblocked.count
+            unblockedMoves: plan.unblocked.count,
+            heldBack: plan.heldBack,
+            holds: holds
         )
     }
 
@@ -207,10 +216,12 @@ extension AppState {
 
     /// Makes the moves of `rebalancePreview` through the slot-move path
     /// (`requestedSlotMoves`, honoured by `serveSessionSlots`, which records
-    /// each move). Returns the plan it made.
+    /// each move). Returns the plan it made. `automatic` as in
+    /// `rebalancePreview`, or the preview already made for one.
     @discardableResult
-    func applyRebalance(_ provider: AIProviderType, now: Date = Date()) async -> RebalancePreview {
-        let preview = rebalancePreview(provider, now: now)
+    func applyRebalance(_ provider: AIProviderType, now: Date = Date(), automatic: Bool = false,
+                        preview made: RebalancePreview? = nil) async -> RebalancePreview {
+        let preview = made ?? rebalancePreview(provider, now: now, automatic: automatic)
         guard !preview.moves.isEmpty else { return preview }
         for move in preview.moves {
             requestedSlotMoves[move.session] = move.to
@@ -242,14 +253,18 @@ extension AppState {
 
     /// Rebalances each provider whose policy asks for it, at most once per
     /// `balanceMoveInterval` and only when it is worth it, so caches are not
-    /// rewritten for little. Runs on every quota cycle after
-    /// `maintainSessionSlots`.
+    /// rewritten for little; sessions within their hold stay where they
+    /// are, and each move a hold stops is recorded once (`noteHeldMoves`).
+    /// Runs on every quota cycle after `maintainSessionSlots`.
     func rebalanceAutomaticallyIfDue(now: Date = Date()) async {
         for provider in AIProviderType.implementedProviders
         where failoverConfig.policy(for: provider).rebalanceAutomatically && rebalanceAvailable(provider) {
             if let last = lastRebalance[provider], now.timeIntervalSince(last) < Self.balanceMoveInterval { continue }
-            guard Self.rebalanceIsWorthIt(rebalancePreview(provider, now: now)) else { continue }
-            await applyRebalance(provider, now: now)
+            let preview = rebalancePreview(provider, now: now, automatic: true)
+            noteHeldMoves(provider, heldBack: preview.heldBack, holds: preview.holds, rule: "the automatic rebalance",
+                          now: now)
+            guard Self.rebalanceIsWorthIt(preview) else { continue }
+            await applyRebalance(provider, now: now, automatic: true, preview: preview)
         }
     }
 }

@@ -471,8 +471,10 @@ extension AppState {
     /// The same for a slot claimed by `sessionLaunch`, whose command may be
     /// copied and run some minutes later.
     static let requestedClaimGrace: TimeInterval = 30 * 60
-    /// A session moved to balance load stays where it went at least this
-    /// long, so it is not moved back before its new cache has paid off.
+    /// How long an account a session moved to for a remainder or a window
+    /// rests (`RemainderSpending.resting`), and the least time between two
+    /// automatic rebalances. A moved session itself is held for its cache's
+    /// lifetime (`moveHold`).
     static let balanceMoveInterval: TimeInterval = 30 * 60
 
     /// Keeps the one-session slots: each claimed slot serves its account, or
@@ -578,11 +580,16 @@ extension AppState {
                 cannotServe($0) && !accountCannotServe($0, provider: provider, planner: planner, now: now, wholeAllowance: true)
             } == true
             let pinned = sessionPins.account(of: session?.sessionID)
+            // The pacer's move waits out the session's hold (`moveHold`),
+            // which `SessionPacer.plan` already honours.
             let balance = session.flatMap { session -> UUID? in
                 guard let destination = sessionSlotStates[provider]?.sessionMoves[session.sessionID],
                       pooled.contains(destination), !session.isWorking,
                       model == nil || !cannotServe(destination),
-                      slotDirectoryMovedAt[path].map({ now.timeIntervalSince($0) >= Self.balanceMoveInterval }) ?? true
+                      slotDirectoryMovedAt[path].map({
+                          !Self.withinHold(movedAt: $0, cacheLifetime: sessionRates.entries[session.sessionID]?.cacheLifetime,
+                                           now: now)
+                      }) ?? true
                 else { return nil }
                 return destination
             }

@@ -1448,6 +1448,24 @@ makes the same moves at most once per `balanceMoveInterval`, and only when
 they move a session off an account that cannot serve it or into a session
 window, or the first account then runs out more than an hour later.
 
+A move writes the session's whole context into its new account's cache,
+which pays off only while the session stays for that cache's lifetime. A
+slot session whose slot moved, by any rule or by hand, is therefore within
+its **hold** for its cache's lifetime, at least an hour
+(`AppState.moveHold`, `slotSessionsWithinHold`, from
+`slotDirectoryMovedAt`): no automatic rule moves it again, neither the
+pacer's shedding, remainder and window rules (`SessionPacer.plan`'s `held`,
+and `serveSessionSlots`, which applies a pacer move only after the hold) nor
+the automatic rebalance (`rebalance`'s `held`). Its account refusing it or
+reaching its limit still moves it, through the stranded placement or as a
+rebalance's blocked session, and a move the user asks for is never held.
+A move a hold stops is recorded once per hold (`Plan.heldBack`,
+`Rebalance.heldBack`, `AppState.noteHeldMoves`): "Kept session X on hexorda
+although pacing would move it to Backup: it moved there at 11:42 am, and
+moving it again before 12:42 pm would write its cache a second time before
+the first has paid off. It moves sooner only if hexorda refuses it or
+reaches its limit."
+
 A slot session can be **pinned** to its subscription (`SessionPins`, kept by
 session ID under `app.accountdock.failover.pins`, so `--resume` of the same
 session is pinned too and resumes on the pinned account; a pin goes when its

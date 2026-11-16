@@ -148,6 +148,77 @@ final class WindowPlacementTests: XCTestCase {
         XCTAssertEqual(placed.moves["c0"], backup, "hexorda's room is planned for the placement")
     }
 
+    // MARK: - The hold after a move
+
+    func testAMovedSessionIsHeldForItsCacheLifetimeAtLeastAnHour() {
+        XCTAssertEqual(AppState.moveHold(cacheLifetime: nil), 3600)
+        XCTAssertEqual(AppState.moveHold(cacheLifetime: 300), 3600, "an hour even for a five-minute cache")
+        XCTAssertEqual(AppState.moveHold(cacheLifetime: 7200), 7200)
+        let moved = now.addingTimeInterval(-59 * 60)
+        XCTAssertTrue(AppState.withinHold(movedAt: moved, cacheLifetime: 3600, now: now))
+        XCTAssertFalse(AppState.withinHold(movedAt: moved, cacheLifetime: 3600, now: now.addingTimeInterval(2 * 60)))
+    }
+
+    func testTheShedderLeavesAHeldSessionAndSaysWhy() {
+        // 1603da04 moved to hexorda by another rule minutes ago, with no
+        // placement: hexorda still gives sessions up, but not that one.
+        let plan = SessionPacer().plan(accounts: accounts(), sessions: sessions(), now: now, held: ["1603da04"])
+        XCTAssertNotNil(plan.shedding[hexorda])
+        XCTAssertNil(plan.moves["1603da04"])
+        XCTAssertEqual(plan.heldBack["1603da04"], backup, "the move the hold stopped, for its event")
+        XCTAssertEqual(plan.moves["a78ddf66"], backup, "a session outside its hold still moves")
+        XCTAssertNil(plan.heldBack["a78ddf66"])
+    }
+
+    func testTheAutomaticRebalanceLeavesHeldSessionsUnlessTheirAccountCannotServe() {
+        let destinations: Set<UUID> = [hexorda, bytrix, backup]
+        let held = SessionPacer().rebalance(accounts: accounts(), sessions: rebalanceSessions(), destinations: destinations,
+                                            now: now, held: ["a78ddf66", "1603da04"])
+        XCTAssertTrue(held.moves.isEmpty)
+        XCTAssertEqual(held.heldBack["a78ddf66"], backup)
+
+        // Bytrix at its limit: its held session moves all the same.
+        let blocked = SessionPacer().rebalance(accounts: accounts(), sessions: rebalanceSessions(),
+                                               destinations: [hexorda, backup], now: now, held: ["a78ddf66"])
+        XCTAssertNotNil(blocked.moves["a78ddf66"])
+        XCTAssertTrue(blocked.unblocked.contains("a78ddf66"))
+    }
+
+    func testTheWindowRuleTakesNoHeldSession() {
+        // The automatic rebalance moved 4822c359 onto the large account a
+        // few minutes ago; the window rule then moved it on to bytrix.
+        let carrier = UUID()
+        var large = SessionPacer.Account(id: carrier, utilization: 30, resetsAt: now.addingTimeInterval(3 * 3600),
+                                         burnPerHour: 0, baseWeight: 1, percentPerMillion: 0.25)
+        large.weeklyRemaining = 48
+        large.weeklyResetsAt = now.addingTimeInterval(60 * 3600)
+        var window = SessionPacer.Account(id: bytrix, utilization: 0, resetsAt: nil, burnPerHour: 0, baseWeight: 0,
+                                          percentPerMillion: 1)
+        window.weeklyRemaining = 600
+        window.weeklyResetsAt = now.addingTimeInterval(100 * 3600)
+        let running = (0..<6).map {
+            SessionPacer.Session(id: $0 == 0 ? "4822c359" : "big\($0)", account: carrier, tokensPerHour: 30_000_000,
+                                 contextTokens: 100_000, lastSeen: now.addingTimeInterval(-5 * 60), cacheLifetime: 3600,
+                                 lastTurnStart: now.addingTimeInterval(-6 * 60), recentTokensPerHour: 30_000_000)
+        }
+        let spending = SessionPacer.RemainderSpending(accounts: [bytrix], sessions: Set(running.map(\.id)))
+        let free = SessionPacer().plan(accounts: [large, window], sessions: running, now: now, remainders: spending)
+        XCTAssertNotNil(free.windowUses["4822c359"])
+        let held = SessionPacer().plan(accounts: [large, window], sessions: running, now: now, remainders: spending,
+                                       held: ["4822c359"])
+        XCTAssertNil(held.moves["4822c359"])
+        XCTAssertFalse(held.windowUses.isEmpty, "another session uses the window instead")
+    }
+
+    @MainActor
+    func testTheHeldMoveEventSaysWhyTheSessionStays() {
+        let event = AppState.heldMoveEvent(session: "session 1603da04 in ~/Mother", account: "hexorda", destination: "Backup",
+                                           rule: "pacing", movedAt: now.addingTimeInterval(-60), until: now.addingTimeInterval(59 * 60),
+                                           now: now)
+        XCTAssertTrue(event.hasPrefix("Kept session 1603da04 in ~/Mother on hexorda although pacing would move it to Backup: it moved there at "))
+        XCTAssertTrue(event.hasSuffix("It moves sooner only if hexorda refuses it or reaches its limit."))
+    }
+
     func testARestingWindowStaysAWindowButTakesNoFurtherSession() {
         // Three Max 5x windows offered for spending while the large account
         // runs out before they refill; hexorda took a session within the

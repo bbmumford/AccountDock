@@ -661,11 +661,13 @@ extension AppState {
                               now: now)
         }
         let pacer = SessionPacer(moveCostFactor: movesSessions ? 1 : provider.capabilities.sessionMoveCostFactor)
-        // Window placements are slot sessions'; the router's sessions have
-        // none.
+        // Window placements and holds are slot sessions'; the router's
+        // sessions have neither.
         let placements = movesSessions ? [:] : windowPlacementsInForce(provider, now: now)
+        let holds = movesSessions ? [:] : slotSessionsWithinHold(provider, now: now)
         let plan = pacer.plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
-                              fixed: pinned, remainders: remainders, placements: placements)
+                              fixed: pinned, remainders: remainders, placements: placements, held: Set(holds.keys))
+        noteHeldMoves(provider, heldBack: plan.heldBack, holds: holds, rule: "pacing", now: now)
         // A session is never moved to an account without allowance for the
         // model it uses, nor off a draining account before its limit.
         var moves = plan.moves.filter { session, destination in

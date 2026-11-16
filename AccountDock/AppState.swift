@@ -288,6 +288,10 @@ final class AppState: ObservableObject {
     /// by session, so `serveSessionSlots` records each as a window
     /// placement when it makes the move.
     var requestedWindowUses: [String: SessionPacer.WindowUse] = [:]
+    /// Sessions whose automatic move a hold has stopped and been recorded,
+    /// with the move that began the hold (`noteHeldMoves`), so each hold is
+    /// recorded once.
+    var holdNoted: [String: Date] = [:]
     /// Where each account's token cost last came from (`accountRatio`),
     /// so the log records each change of seed once.
     var ratioSources: [UUID: TurnCostModel.RatioSource] = [:]
