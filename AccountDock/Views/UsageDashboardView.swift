@@ -61,11 +61,18 @@ private struct SessionCountLabel: View {
                 })
                 .environmentObject(appState)
             } else {
-                Text(verbatim: appState.sessionSummary(sessions))
-                    .font(.caption)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(8)
-                    .frame(minWidth: 180, maxWidth: 440, alignment: .leading)
+                // One line per session, so the list always shows as many
+                // as the count beside the card's title.
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(sessions.sorted(), id: \.self) { id in
+                        Text(verbatim: appState.sessionSummary([id]))
+                            .font(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(8)
+                .frame(minWidth: 180, maxWidth: 440, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
