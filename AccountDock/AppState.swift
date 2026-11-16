@@ -1747,7 +1747,7 @@ final class AppState: ObservableObject {
             setRateLimitTier(ClaudeService.rateLimitTier(from: tokenJSON), for: account.id)
         }
         if includeMetadata || forced, shouldCheckClaudeProfile(account, forced: forced),
-           await refreshClaudeSubscriptionMetadata(accountID: account.id, accessToken: accessToken) {
+           await refreshClaudeSubscriptionMetadata(accountID: account.id, accessToken: accessToken, forced: forced) {
             return .workloadUnavailable(unavailableMessage(for: account.provider))
         }
         do {
@@ -1851,10 +1851,11 @@ final class AppState: ObservableObject {
     }
 
     /// Returns true only when Anthropic explicitly reports an inactive plan.
-    private func refreshClaudeSubscriptionMetadata(accountID: UUID, accessToken: String) async -> Bool {
+    private func refreshClaudeSubscriptionMetadata(accountID: UUID, accessToken: String, forced: Bool = false) async -> Bool {
         // Profile requests count against the same Anthropic allowance as
-        // usage requests; a skipped check is retried on a later refresh.
-        guard spendUsageRequest(.claudeCode, .background) else { return false }
+        // usage requests; a skipped check is retried on a later refresh. A
+        // refresh the user asked for checks regardless, as its reading does.
+        guard forced || spendUsageRequest(.claudeCode, .background) else { return false }
         lastProfileCheck[accountID] = Date()
         do {
             let live = try await claudeService.getLiveSubscription(accessToken: accessToken)
