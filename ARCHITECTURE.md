@@ -620,7 +620,17 @@ the refusal, and, when that reading shows no window resetting at the time the
 refusal states, the accounts in use whose readings predate it are read too,
 and the refusal moves to the account whose window does. While the reset it
 states is no window of the account it names and the reading that would
-settle it is held back, it does not count, for up to five minutes. An account
+settle it is held back, it does not count, for up to five minutes. A refusal
+is the account's that served the request when it was refused: the slot's
+account at that time by its history (`servingSlotAccount`), unless the reset
+the refusal states is none of that account's windows; it is then the one
+account the slot may have served the request with whose window it matches
+(`servingSlotCandidates`: the settled account and any moved to within
+`slotMoveSettling` before the request, kept as `SessionRefusal.served` for
+the checks that follow), or else the one account of all whose window it
+matches (`refusingAccount`). Two accounts resetting at the same time (bytrix
+and cybrio at 1:30 am) leave the slot's history to tell them apart, so a
+refusal is never put down to the account the slot left. An account
 whose reading is older than its pool lifetime is read before it takes a new
 session (`FailoverPlanner.poolReadingIsCurrent`) and takes none while that
 reading cannot be made.
@@ -1079,7 +1089,14 @@ makes of the other measured accounts' costs (their median, so one stray
 account sets no expectation) is therefore blended toward that expectation,
 in log terms, by how many of `trustedReadings` (10) readings it has learned
 from (`TurnCostModel.accountReadings`), and stands alone after that
-(`RatioSource.blendedWithPlanSize`). Each measured cost is kept with the
+(`RatioSource.blendedWithPlanSize`). One reading whose sample strays more
+than `strayReading` (4) times either way from the account's learned cost
+starts that count again at one (`recordReading`): a single sample of 7.5%
+per million took a Max 20x account trusted at 0.18% to 2.37%, over twice the
+1.06% a Max 5x account at 4.25% makes of a window four times its size, and
+the cost is then blended toward
+the plan-size expectation again, as after a plan change, until
+`trustedReadings` readings agree. Each measured cost is kept with the
 plan it was measured on (`TurnCostModel.accountPlans`, the plan and the
 rate-limit tier): once the account is on another plan, as an upgrade from
 Pro to Max, which makes each percent five times the work, that cost is not
@@ -1554,8 +1571,15 @@ the pool weights and which sessions move, each time the pool is rebuilt
   is charged the whole cache write of the session's arrival
   (`SessionPacer.arrivalCost`: its context at 2 a token for the one-hour
   cache, 1.25 for the five-minute one), not only what the move adds over
-  staying. A run whose process left no session record is placed by its
-  slot's path at `defaultSessionRate`. The sessions an exhausted account, or
+  staying. A run whose process left no session record, as every session
+  is for the first cycle after AccountDock starts, is placed by its slot's
+  path at `defaultSessionRate`, weighed and charged in the cycle's ledger
+  with the sessions; one admission leaves waiting is kept on its account
+  by its slot (`admissionHeldRuns`, `slotChoice`'s `heldOn`) and never
+  listed in a pause, which knows no session of it. The events and plans
+  name it by the folder its process runs in ("a run in ~/ORBTR",
+  `AppState.unrecordedRunName`, from the `PWD` `refreshSlotProcesses`
+  reads, `slotFolders`), never by its slot's path. The sessions an exhausted account, or
   a small plan's filled session window, gives up spread over the accounts
   with room by how long each then lasts, instead of all going to the account
   with the largest pool weight: a session that must leave is served rather
@@ -1580,25 +1604,83 @@ the pool weights and which sessions move, each time the pool is rebuilt
   reads "Session balancing admitted 2 of 9 waiting session(s) to cybrio's
   fresh window: they fit until its reset at 8:29 pm; 7 wait for their own
   accounts."
+- Every rule that sends a session to an account within one quota cycle
+  charges that account in one ledger (`LaneLedger`, kept per provider in
+  `AppState.laneLedgers` and started afresh by `runQuotaCycle`): each
+  session once, at the weighted tokens per hour it is expected to use from
+  when it starts there (now for a placement, a move or a release from a
+  pause; the account's reset for a planned wait or a session a wait holds
+  there, `chargeHeldWaits`) plus its arrival's cache rewrite in that
+  account's cost. Lane admission and the stranded placement count the
+  charges started by now beside each lane's own sessions; the held-session
+  plans, the slot path's fallback (`ledgerFallback`) and the sessions a
+  pause releases test the destination with `CapacityOutlook.carries`: from
+  when the session starts there until an hour later, everything charged
+  there and the session itself, grown by 1/`windowFitShare`, fits the room
+  the account has then, its resets refilling it on the way. An account at
+  its limit carries nothing before the reset that frees it.
+- No session is sent, moved or released onto an account on a belief of
+  room (`AppState.freshForArrivals`): the account must have been read
+  within `arrivalReadingAge` (5 minutes), with no passed reset still
+  unconfirmed, and must have refused no request since with a reset still
+  to come (`refusedUntilReset`: a refusal keeps its account at its limit
+  until the reset its words state, `refusalHolds`, whatever older readings
+  show; one of a session whose model has an allowance of its own there is
+  left to `recordedLimitRefusal`). That holds for the stranded placement's
+  destinations, the slot path's fallback, `limitPauseScope`'s destinations
+  and `admitPausedSessions`' accounts. While sessions wait for room,
+  `readIdleDestinationIfDue` keeps every account showing room, those
+  serving sessions included, read within that age. A pause at a limit
+  releases the sessions it holds only as far as the ledger lets them
+  (`releaseFits`, from `rescopeLimitPause` through `limitPauseScope`'s
+  `holding`): each goes on where its account, read fresh, carries its rate
+  before it was held for the hour beside the sessions running there and
+  everything the cycle already sent or released there, the other held
+  sessions competing rather than loading it, and is charged once released;
+  one no window holds for the hour goes on alone on an account nothing
+  else uses. "The account each paused session runs on has room again;
+  resumed N session(s) and ended the pause." is recorded only once every
+  held session has gone on so.
 - Each session admission leaves waiting gets a plan (`HeldSessionPlan`,
-  through `AppState.planHeldSessions`, kept in `heldSessionPlans`): it waits
-  for the earliest lane, the account whose 5-hour window, week or limit
-  resets first with room for an hour of it beside the sessions there, by
-  admission's own measure, its own account included and charged no rewrite.
-  It moves now instead to a lane with room only when that serves more work
-  until an hour past that reset, each account weighed alone
-  (`CapacityOutlook.servedAlone`: what the session adds there, less what the
-  sessions already on it lose once it fills the lane early, less its
-  rewrite), and only when its own account resets later than its cache lasts;
-  a tie waits. A planned wait whose reset has come is placed on its lane once
-  that lane is a destination (`HeldSessionPlan.due`: a reading confirms the
-  reset), and stands for `accountHoldGrace` until one does. The plan is the
-  session's row note ("resumes on fluxon about 12:50 am") and an event when
-  it changes. While admission keeps a session on its account, played or not,
+  through `AppState.planHeldSessions`, kept in `heldSessionPlans`), and they
+  are planned together (`HeldSessionPlan.planTogether`), the heaviest first,
+  each against the ledger, which then charges its lane: it waits for the
+  earliest lane, the account whose 5-hour window, week or limit resets
+  first and carries an hour of it beside the sessions there and everything
+  already planned onto it, its own account included and charged no
+  rewrite. A lane's fresh window is so planned only as full as it holds for
+  the hour; the next sessions go to the next lane by its reset, and a
+  session no lane carries for an hour within a 5-hour window of its own
+  account's reset waits for its own account, charged there from that
+  reset. With every account at its limit, admission has no
+  lane and every stranded session is planned so. It moves now instead to a
+  lane with room only when that serves more work until an hour past that
+  reset (`CapacityOutlook.servedAlone`, counting the lane's ledger charges:
+  what the session adds there, less what the sessions already on it lose
+  once it fills the lane early, less its rewrite), and only when its own
+  account resets later than its cache lasts; a tie waits. A planned wait
+  whose reset has come is placed on its lane once that lane is a
+  destination (`HeldSessionPlan.due`: a reading confirms the reset) and
+  still carries it beside what the cycle sent there, and stands for
+  `accountHoldGrace` until one does. The plan is the session's row note
+  ("resumes on fluxon about 12:50 am"); a move is an event when it changes,
+  and the waits one event while it says the same
+  (`HeldSessionPlan.summary`): "At 12:50 am fluxon's fresh window takes
+  platform-execution and continues-field (≈ 60 min of its window); 5 others
+  wait for hexorda at 1:10 am, bytrix and cybrio at 1:30 am." While admission keeps a session on its account, played or not,
   `slotChoice`'s path for an account that can no longer serve keeps it there
   (`heldOn`, from `admissionHolds`) rather than sending it to the pool's
   `fallback`; admission's placement or the user's own move takes it
-  elsewhere.
+  elsewhere. Any other session on such an account goes to the first account
+  by pool weight that can serve it and, by the ledger, carries it for the
+  hour (`AppState.ledgerFallback`), which is then charged with it, and
+  stays where it is when none does, held by the pause at the limit. No
+  automatic rule moves a slot onto an account that cannot serve it
+  (`slotChoice` passes over such a placement, fallback or balancing move,
+  and a pacer move is taken only to an account that can serve), so the
+  sessions an account gives up go one at a time where the ledger has room
+  for each, never all at once to another account at its limit; only the
+  user's own move goes anywhere.
 - An account a threshold switch left with room still on it drains
   (`AppState.drainingAccounts`): above its thresholds it keeps a pool weight
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when

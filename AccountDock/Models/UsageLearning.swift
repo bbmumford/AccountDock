@@ -73,6 +73,11 @@ struct TurnCostModel: Codable, Equatable {
     /// from what its plan size makes of the other accounts' before it is
     /// blended toward that until `trustedReadings`.
     static let sizeDisagreement = 2.0
+    /// How far, as a factor either way, one reading's sample may stray from
+    /// the account's learned ratio before its trusted-reading count starts
+    /// again (`recordReading`): the square of `sizeDisagreement`, wider
+    /// than the spread of honest readings of one plan.
+    static let strayReading = sizeDisagreement * sizeDisagreement
 
     /// Where an account's ratio came from (`ratio(for:sizes:plans:)`).
     enum RatioSource: Equatable {
@@ -179,10 +184,20 @@ struct TurnCostModel: Codable, Equatable {
         guard sample.isFinite, sample > 0 else { return }
         percentPerMillion = percentPerMillion.map { $0 * (1 - Self.smoothing) + sample * Self.smoothing } ?? sample
         var perAccount = accountPercentPerMillion ?? [:]
-        perAccount[account] = perAccount[account].map { $0 * (1 - Self.smoothing) + sample * Self.smoothing } ?? sample
+        let learned = perAccount[account]
+        perAccount[account] = learned.map { $0 * (1 - Self.smoothing) + sample * Self.smoothing } ?? sample
         accountPercentPerMillion = perAccount
         var readings = accountReadings ?? [:]
-        readings[account, default: 0] += 1
+        // A reading this far from what the account has learned moved its
+        // cost more than its readings so far vouch for, as other use moving
+        // the window between two readings does: its count starts again, so
+        // `ratio(for:sizes:plans:)` blends the cost toward its plan size,
+        // as after a plan change, until `trustedReadings` readings agree.
+        if let learned, max(sample / learned, learned / sample) > Self.strayReading {
+            readings[account] = 1
+        } else {
+            readings[account, default: 0] += 1
+        }
         accountReadings = readings
         pending[account] = 0
     }

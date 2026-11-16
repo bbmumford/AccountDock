@@ -937,6 +937,14 @@ struct SessionPacer {
                           percentPerMillion: account.percentPerMillion) * moveCostFactor
     }
 
+    /// Window percent the arrivals `ledger` charged to `account` by `now`
+    /// take from it: the cache writes of the sessions this cycle already
+    /// sent there, which `admitToLanes` and `place` count as spent.
+    func ledgerArrivals(_ ledger: LaneLedger?, on account: Account, now: Date) -> Double {
+        guard let tokens = ledger?.arrivalTokens(on: account.id, by: now), tokens > 0 else { return 0 }
+        return Allowance.percent(millions: tokens / 1_000_000, percentPerMillion: account.percentPerMillion)
+    }
+
     /// Weighted tokens per hour freed per cache token rewritten, which orders
     /// the sessions an account gives up.
     private func relief(_ session: Session) -> Double {
@@ -2064,13 +2072,17 @@ extension SessionPacer {
     /// carries the session for `newSessionRunway` comes first, its run-out
     /// counted as none. Read by `AppState.strandedPlacements`.
     func place(_ sessions: [RebalanceSession], accounts: [Account], running: [RebalanceSession],
-               destinations: Set<UUID>, now: Date, sharedGroup: SharedGroup? = nil) -> [String: UUID] {
+               destinations: Set<UUID>, now: Date, sharedGroup: SharedGroup? = nil,
+               ledger: LaneLedger? = nil) -> [String: UUID] {
         let targets = accounts.filter { destinations.contains($0.id) }
         guard !targets.isEmpty else { return [:] }
         let shares = shares(sharedGroup, accounts: accounts, now: now)
-        var placed = running.filter { session in targets.contains { $0.id == session.account } }
-        let unseen = unseenBurn(targets, sessions: placed, sharedGroup: sharedGroup, shares: shares)
-        var spent: [UUID: Double] = [:]
+        let present = (ledger?.excluding(running) ?? running).filter { session in targets.contains { $0.id == session.account } }
+        let unseen = unseenBurn(targets, sessions: present, sharedGroup: sharedGroup, shares: shares)
+        // What the cycle already sent to each destination (`LaneLedger`)
+        // runs there beside its own sessions, and its arrivals are spent.
+        var placed = present + (ledger?.started(by: now, on: Set(targets.map(\.id))) ?? [])
+        var spent = targets.reduce(into: [UUID: Double]()) { $0[$1.id] = ledgerArrivals(ledger, on: $1, now: now) }
         var scopedSpent: [UUID: [String: Double]] = [:]
         func runway(_ account: Account, adding extra: RebalanceSession? = nil, cost: Double = 0,
                     scopedCost: [String: Double] = [:]) -> TimeInterval {
@@ -2184,15 +2196,20 @@ extension SessionPacer {
     /// spreads them then. Read by `AppState.strandedPlacements` and
     /// `AppState.limitPauseScope`.
     func admitToLanes(_ sessions: [RebalanceSession], accounts: [Account], running: [RebalanceSession],
-                      destinations: Set<UUID>, now: Date, sharedGroup: SharedGroup? = nil) -> LaneAdmission? {
+                      destinations: Set<UUID>, now: Date, sharedGroup: SharedGroup? = nil,
+                      ledger: LaneLedger? = nil) -> LaneAdmission? {
         let lanes = accounts.filter { destinations.contains($0.id) }
         guard !sessions.isEmpty, !lanes.isEmpty else { return nil }
         let shares = shares(sharedGroup, accounts: accounts, now: now)
-        let placed = running.filter { session in lanes.contains { $0.id == session.account } }
-        let unseen = unseenBurn(lanes, sessions: placed, sharedGroup: sharedGroup, shares: shares)
+        let present = (ledger?.excluding(running) ?? running).filter { session in lanes.contains { $0.id == session.account } }
+        let unseen = unseenBurn(lanes, sessions: present, sharedGroup: sharedGroup, shares: shares)
+        // What the cycle already sent to each lane (`LaneLedger`) runs there
+        // beside its own sessions, and its arrivals are spent.
+        let placed = present + (ledger?.started(by: now, on: Set(lanes.map(\.id))) ?? [])
         var burn: [UUID: Double] = [:]
         var spent: [UUID: Double] = [:]
         for lane in lanes {
+            spent[lane.id] = ledgerArrivals(ledger, on: lane, now: now)
             burn[lane.id] = placed.filter { $0.account == lane.id }.reduce(0) { $0 + percent($1.tokensPerHour, on: lane) }
                 + (unseen[lane.id] ?? 0)
         }

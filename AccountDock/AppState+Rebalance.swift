@@ -213,8 +213,11 @@ extension AppState {
             noteLaneAdmission(provider, admission: nil, candidates: [], accounts: [], now: now)
             return [:]
         }
+        // A destination's room is taken from a fresh reading, never from an
+        // old belief or one a refusal since contradicts (`freshForArrivals`).
         let chosen = Self.strandedDestinations(members) { id in
             !accountCannotServe(id, provider: provider, planner: planner, now: now, wholeAllowance: true)
+                && freshForArrivals(id, now: now)
         }
         var pacerAccounts: [SessionPacer.Account] = []
         for member in chosen {
@@ -231,10 +234,16 @@ extension AppState {
         let open = all.subtracting(windowPlacementsInForce(provider, now: now).values.map(\.account))
         let pacer = SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
         let others = running.filter { !strandedIDs.contains($0.id) }
+        // Every account is charged for what this cycle already sent or
+        // planned onto it; the stranded sessions themselves are weighed
+        // again here.
+        var ledger = laneLedger(provider, now: now)
+        for id in strandedIDs { ledger.remove(id) }
         // While capacity is scarce, each lane with room takes only the
         // sessions it carries until its reset, and the rest wait where they
         // are, held by the pause gate; with pausing off nothing could hold
-        // them, so they are spread as before.
+        // them, so they are spread as before. With no lane at all every one
+        // waits, each planned for the lane whose reset first carries it.
         if pausingProviders.contains(provider), routedStatus[provider] == nil {
             let everyAccount = pacerAccounts + (accounts.filter { account in
                 account.provider == provider && !pacerAccounts.contains { $0.id == account.id }
@@ -242,8 +251,12 @@ extension AppState {
                 pacerAccount(account.id, state: quotaState(for: account, now: now, wholeAllowance: true), weight: 0,
                              planner: planner, now: now)
             })
-            let admitted = pacer.admitToLanes(stranded, accounts: everyAccount, running: others,
-                                              destinations: Set(pacerAccounts.map(\.id)), now: now, sharedGroup: shared)
+            let admitted = pacerAccounts.isEmpty
+                ? SessionPacer.LaneAdmission(waiting: stranded.map(\.id).sorted())
+                : pacer.admitToLanes(stranded, accounts: everyAccount, running: others,
+                                     destinations: Set(pacerAccounts.map(\.id)), now: now, sharedGroup: shared,
+                                     ledger: ledger)
+            laneLedgers[provider] = ledger
             // Each session left waiting waits for the earliest lane, or moves
             // now where that serves more (`planHeldSessions`).
             let admission = planHeldSessions(provider, admission: admitted, candidates: stranded, running: others,
@@ -251,8 +264,14 @@ extension AppState {
             noteLaneAdmission(provider, admission: admission, candidates: stranded, accounts: everyAccount, now: now)
             if let admission { return admission.placements }
         }
-        return pacer.place(stranded, accounts: pacerAccounts, running: others,
-                           destinations: open.isEmpty ? all : open, now: now, sharedGroup: shared)
+        let placements = pacer.place(stranded, accounts: pacerAccounts, running: others,
+                                     destinations: open.isEmpty ? all : open, now: now, sharedGroup: shared, ledger: ledger)
+        for (id, lane) in placements {
+            guard let session = stranded.first(where: { $0.id == id }) else { continue }
+            ledger.charge(placedCharge(session, on: lane, pacer: pacer, now: now))
+        }
+        laneLedgers[provider] = ledger
+        return placements
     }
 
     /// The pool members a session whose account can no longer serve it may

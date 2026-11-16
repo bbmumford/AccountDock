@@ -499,15 +499,30 @@ accounts.").
 
 A session no lane admits does not only wait for its own account: it waits for
 whichever account's reset first frees room for an hour of it, and moves there
-once a reading confirms that reset. It moves now instead only when a lane with
-room serves more work that way until an hour past that reset, counting the
-sessions already on the lane that it would leave without room, and only when
-its own account resets after its prompt cache expires; on a tie it waits. Its
-row on the Sessions page says where and when it resumes ("resumes on fluxon
-about 12:50 am"), and the event says why ("platform-execution waits: no lane
-carries it for an hour; it resumes on fluxon at 12:50 am, when fluxon's window
-resets — 40 min before bytrix's."). Until then no other rule moves it off its
-account, even after you play it; moving it yourself still does.
+once a reading confirms that reset. The waiting sessions are planned
+together, the heaviest first, and every account is charged for everything
+the same cycle already sent or planned onto it, the sessions waiting there for
+its reset included: a lane's fresh window is planned only as full as it holds
+for the hour, the next sessions go to the next lane by its reset, and the rest
+wait for their own accounts. It moves now instead only when a lane with room
+serves more work that way until an hour past that reset, counting the sessions
+already on the lane that it would leave without room, and only when its own
+account resets after its prompt cache expires; on a tie it waits. Its row on
+the Sessions page says where and when it resumes ("resumes on fluxon about
+12:50 am"), and one event says how the lanes are shared ("At 12:50 am fluxon's
+fresh window takes platform-execution and continues-field (≈ 60 min of its
+window); 5 others wait for hexorda at 1:10 am, bytrix and cybrio at 1:30
+am."). Until then no other rule moves it off its account, even after you play
+it; moving it yourself still does. A session on an account that can no longer
+serve it that no rule places goes to another account only where that account
+has room for it for the hour beside everything sent there that cycle; it
+otherwise waits where it is.
+
+No session is moved or resumed onto an account on an old belief of room: the
+account must have been read within the last five minutes, and an account that
+refused a request stays at its limit until the reset the refusal names. When
+the accounts have room again, a pause releases only as many of its sessions as
+a fresh reading shows room for together; the rest keep waiting.
 
 When the router serves the sessions, a session also stays on its account while
 its prompt cache lasts, and one refused at the limit with the reset at most

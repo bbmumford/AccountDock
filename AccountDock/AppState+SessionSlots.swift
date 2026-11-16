@@ -16,6 +16,10 @@ extension AppState {
         /// The slot directory each running process reads; read by
         /// `sessionAttribution` and `slotAccount(forSession:)`.
         var directoryByProcess: [Int32: String] = [:]
+        /// The folder each slot's process runs in (its `PWD`), by slot path,
+        /// read with `directoryByProcess` (`slotFolders`); names a run with
+        /// no session record in the events (`unrecordedRunName`).
+        var folderByDirectory: [String: String] = [:]
         /// The account serving each slot that has running sessions.
         var directoryServing: [String: UUID] = [:]
         /// Accounts whose slot a running session reads; they are read and
@@ -234,20 +238,23 @@ extension AppState {
             SessionSlots(provider).map { (provider, $0) }
         }
         guard !isolated.isEmpty else { return }
-        let read = await Task.detached(priority: .utility) { () -> [([Int32: String], BackgroundSessionProcesses)] in
+        let read = await Task.detached(priority: .utility) {
+            () -> [([Int32: String], BackgroundSessionProcesses, [String: String])] in
             let table = ProcessTable.read() ?? ProcessTable(entries: [])
             return isolated.map { _, slots in
                 let background = slots.background.map {
                     BackgroundSessionProcesses(table: table, executable: slots.executable, support: $0)
                 } ?? BackgroundSessionProcesses()
-                return (slots.directoriesByProcess(in: table), background)
+                let directories = slots.directoriesByProcess(in: table)
+                return (directories, background, Self.slotFolders(directories, table: table))
             }
 
         }.value
-        for ((provider, slots), (directories, background)) in zip(isolated, read) {
+        for ((provider, slots), (directories, background, folders)) in zip(isolated, read) {
             sessionSlotStates[provider, default: SessionSlotState()].background = background
             let byProcess = Self.sessionSlotDirectories(directories, background: background)
             sessionSlotStates[provider, default: SessionSlotState()].directoryByProcess = byProcess
+            sessionSlotStates[provider, default: SessionSlotState()].folderByDirectory = folders
             // A slot in use that `serveSessionSlots` has not served yet, as
             // on the first cycle after launch, serves the account the slot
             // itself records; `refreshSessions` would otherwise count its
@@ -273,6 +280,34 @@ extension AppState {
     nonisolated static func sessionSlotDirectories(_ directories: [Int32: String],
                                                    background: BackgroundSessionProcesses) -> [Int32: String] {
         directories.filter { !background.nonSessions.contains($0.key) }
+    }
+
+    /// The folder each slot's process runs in, by slot path: the `PWD` in
+    /// the environment of the process reading it (`directories`, by process
+    /// ID, from `table`), the lowest process ID first when several read
+    /// one. A run that keeps no session record is named by it.
+    nonisolated static func slotFolders(_ directories: [Int32: String], table: ProcessTable) -> [String: String] {
+        var folders: [String: String] = [:]
+        for (pid, directory) in directories.sorted(by: { $0.key < $1.key }) where folders[directory] == nil {
+            guard let entry = table.entries.first(where: { $0.pid == pid }),
+                  let folder = entry.environmentValue("PWD"), folder.hasPrefix("/") else { continue }
+            folders[directory] = folder
+        }
+        return folders
+    }
+
+    /// How the events and plans name a run with no session record in the
+    /// slot at `slot`: by the folder it runs in ("a run in ~/ORBTR"), never
+    /// by the slot's path.
+    func unrecordedRunName(_ provider: AIProviderType, slot: String) -> String {
+        Self.runName(folder: sessionSlotStates[provider]?.folderByDirectory[slot])
+    }
+
+    /// "a run in ~/ORBTR" for a run in `folder`; "a run with no session
+    /// record" when its folder is unknown.
+    nonisolated static func runName(folder: String?) -> String {
+        guard let folder else { return eventName(of: nil) }
+        return "a run in " + (folder as NSString).abbreviatingWithTildeInPath
     }
 
     /// The account serving the slot a running session reads, when the
@@ -521,9 +556,11 @@ extension AppState {
             : strandedPlacements(provider, slots: slots, members: members, unrecorded: unrecorded, now: now)
         maintainPins(provider, sessionsBySlot: sessionsByDirectory.mapValues(\.sessionID), now: now)
         // Sessions waiting on their account for its reset keep it, and one
-        // lane admission keeps there stays even once the user plays it.
+        // lane admission keeps there stays even once the user plays it; so
+        // does a run with no session record admission keeps, by its slot.
         let waiting = waitingSessions(provider)
         let admissionHeld = admissionHolds(provider)
+        let admissionHeldRuns = admissionHeldRuns[provider] ?? [:]
         var credentials: [UUID: SlotCredential] = [:]
         func credential(_ id: UUID) async -> SlotCredential? {
             if let known = credentials[id] { return known }
@@ -543,6 +580,9 @@ extension AppState {
                                    process: session?.processID, now: now)
         }
         let spareTarget = Self.spareTarget(peakSessions: recentSessionPeak(provider, now: now))
+        // Read once, when a slot first needs the fallback.
+        var fallbackRunning: [SessionPacer.RebalanceSession]?
+        var fallbackAccounts: [CapacityOutlook.Account]?
         var sparesOf: [UUID: Int] = [:]
         var remove: [URL] = []
         var removeSpares: [URL] = []
@@ -588,8 +628,7 @@ extension AppState {
             // which `SessionPacer.plan` already honours.
             let balance = session.flatMap { session -> UUID? in
                 guard let destination = sessionSlotStates[provider]?.sessionMoves[session.sessionID],
-                      pooled.contains(destination), !session.isWorking,
-                      model == nil || !cannotServe(destination),
+                      pooled.contains(destination), !session.isWorking, !cannotServe(destination),
                       slotDirectoryMovedAt[path].map({
                           !Self.withinHold(movedAt: $0, cacheLifetime: sessionRates.entries[session.sessionID]?.cacheLifetime,
                                            now: now)
@@ -597,12 +636,33 @@ extension AppState {
                 else { return nil }
                 return destination
             }
+            let placed = session.map { placements[$0.sessionID] } ?? placements[path]
+            let waitsOn = session.flatMap { waiting[$0.sessionID] }
+            let heldOn = session.map { admissionHeld[$0.sessionID] } ?? admissionHeldRuns[path]
+            // An account that can no longer serve sends its session to the
+            // pool's fallback only where the cycle's ledger shows room for
+            // it beside everything else sent there (`ledgerFallback`).
+            let falling = pinned == nil && !modelSpent && (slot.account.map(cannotServe) ?? false)
+                && (placed.map(cannotServe) ?? true) && heldOn == nil && waitsOn == nil
+            var fallen: (lane: UUID, charge: LaneLedger.Charge)?
+            if falling {
+                if fallbackRunning == nil { fallbackRunning = slotRebalanceSessions(provider, slots: slots, now: now) }
+                if fallbackAccounts == nil { fallbackAccounts = capacityOutlookAccounts(provider, now: now) }
+                let candidates = ([fallback].compactMap { $0 } + byWeight).reduce(into: [UUID]()) { result, id in
+                    if !result.contains(id) { result.append(id) }
+                }
+                fallen = ledgerFallback(provider, id: session?.sessionID ?? path, from: slot.account, byWeight: candidates,
+                                        cannotServe: cannotServe, running: fallbackRunning ?? [],
+                                        accounts: fallbackAccounts ?? [], now: now)
+            }
             let choice = Self.slotChoice(current: slot.account, pinned: pinned,
                                          requested: session.flatMap { requestedSlotMoves.removeValue(forKey: $0.sessionID) },
                                          balance: balance, cannotServe: cannotServe, modelSpent: modelSpent,
-                                         byWeight: byWeight, placed: session.map { placements[$0.sessionID] } ?? placements[path],
-                                         fallback: fallback, waitsOn: session.flatMap { waiting[$0.sessionID] },
-                                         heldOn: session.flatMap { admissionHeld[$0.sessionID] })
+                                         byWeight: byWeight, placed: placed,
+                                         fallback: falling ? fallen?.lane : fallback, waitsOn: waitsOn, heldOn: heldOn)
+            if let fallen, choice.target == fallen.lane, !choice.requested {
+                laneLedgers[provider] = { var ledger = laneLedger(provider, now: now); ledger.charge(fallen.charge); return ledger }()
+            }
             let target = choice.target
             let balanced = choice.balanced
             let requested = choice.requested
@@ -666,7 +726,7 @@ extension AppState {
             quotaTrends[target]?.settle(at: now)
             let from = slot.account.flatMap { id in accounts.first { $0.id == id } }.map { messageName($0) } ?? "its account"
             let to = accounts.first { $0.id == target }.map { messageName($0) } ?? "another account"
-            let subject = Self.eventName(of: session)
+            let subject = session.map { Self.eventName(of: $0) } ?? unrecordedRunName(provider, slot: path)
             slotDirectoryMovedAt[path] = now
             noteSlotAssignment(path, from: slot.account, to: target, at: now)
             // The model's own limit is named when it is what the account
@@ -800,7 +860,9 @@ extension AppState {
     /// session, else, when only the session's model is spent there, the
     /// first account by weight with room for it, else the account
     /// `strandedPlacements` placed it on (`placed`) while that can serve it,
-    /// else `fallback`; a requested move (`requested`) wins, and failing
+    /// else `fallback`, which `serveSessionSlots` gives only when the
+    /// cycle's ledger shows it carries the session (`ledgerFallback`), and
+    /// nil otherwise, so the slot stays; a requested move (`requested`) wins, and failing
     /// one a balancing move (`balance`, already checked by the caller to be
     /// allowed). A pinned session (`pinned`) keeps its pinned account
     /// whatever else would apply, and a request for it is dropped: only
@@ -809,18 +871,24 @@ extension AppState {
     /// cannot serve it now; only a requested move takes it elsewhere. One
     /// lane admission keeps on an account (`heldOn`, from `admissionHolds`,
     /// played or not) goes only where admission places it, never to
-    /// `fallback`, since admission found no lane that carries it.
+    /// `fallback`, since admission found no lane that carries it. An
+    /// account that cannot serve is never where an automatic rule moves a
+    /// slot: a `placed`, `fallback` or `balance` account at its limit is
+    /// passed over, and the slot stays rather than moving from one account
+    /// at its limit to another.
     nonisolated static func slotChoice(current: UUID?, pinned: UUID?, requested: UUID?, balance: UUID?,
                                        cannotServe: (UUID) -> Bool, modelSpent: Bool, byWeight: [UUID],
                                        placed: UUID? = nil, fallback: UUID?, waitsOn: UUID? = nil,
                                        heldOn: UUID? = nil) -> SlotChoice {
         if let pinned { return SlotChoice(target: pinned, keptPinned: cannotServe(pinned)) }
-        let target = current.flatMap { cannotServe($0) ? nil : $0 }
-            ?? (modelSpent ? byWeight.first { !cannotServe($0) }
-                : placed.flatMap { cannotServe($0) ? nil : $0 } ?? heldOn ?? fallback)
+        // No automatic rule moves a session onto an account that can no
+        // longer serve it: such a fallback or balancing move is dropped.
+        func serving(_ id: UUID?) -> UUID? { id.flatMap { cannotServe($0) ? nil : $0 } }
+        let target = serving(current)
+            ?? (modelSpent ? byWeight.first { !cannotServe($0) } : serving(placed) ?? heldOn ?? serving(fallback))
         if let requested { return SlotChoice(target: requested, requested: true) }
         if let waitsOn { return SlotChoice(target: waitsOn) }
-        if let balance, balance != target { return SlotChoice(target: balance, balanced: true) }
+        if let balance = serving(balance), balance != target { return SlotChoice(target: balance, balanced: true) }
         return SlotChoice(target: target)
     }
 

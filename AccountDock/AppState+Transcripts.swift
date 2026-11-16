@@ -16,6 +16,11 @@ extension AppState {
         /// read, when the reset it states names another (`account`); kept
         /// so `verifyRefusals` names the account again as readings arrive.
         var attributed: UUID? = nil
+        /// The accounts the session's slot served around the refusal's time
+        /// (`servingSlotCandidates`), among which `refusingAccount` names
+        /// the one whose window the stated reset matches, here and each time
+        /// `verifyRefusals` weighs it again.
+        var served: [UUID] = []
         /// False while the refusal's stated reset is no window of `account`
         /// by readings older than the refusal and the read that would
         /// settle it is held back (`verifyRefusals`); `recordedLimitRefusal`
@@ -127,10 +132,13 @@ extension AppState {
             }
             let attributedBefore = decision?.account
             // A refusal is the account's whose window its stated reset
-            // matches, when that is not the attributed account's.
+            // matches, when that is not the attributed account's: among the
+            // accounts the slot served around the request's time first.
+            let served = request.limitRefusal == nil ? []
+                : slotAccounts(forSession: request.session, process: process, around: request.at)
             if let words = request.limitRefusal, let attributed = decision?.account {
                 let refusing = Self.refusingAccount(words: words, at: request.at, attributed: attributed,
-                                                    windows: resetWindows(provider))
+                                                    windows: resetWindows(provider), served: served)
                 if refusing.byReset {
                     decision = SessionAttribution.Decision(account: refusing.account, source: decision?.source ?? .slot,
                                                            observedAt: request.at)
@@ -151,6 +159,7 @@ extension AppState {
                             provider: provider, now: now)
                 if sessionRefusals[request.session]?.at == request.at {
                     sessionRefusals[request.session]?.attributed = attributedBefore == decision.account ? nil : attributedBefore
+                    sessionRefusals[request.session]?.served = served
                     if !refused.contains(request.session) { refused.append(request.session) }
                 }
                 continue
@@ -164,6 +173,38 @@ extension AppState {
             recordTurnUsage(request, account: decision.account)
         }
         return refused
+    }
+
+    /// The accounts `session`'s slot may have served a request at `time`
+    /// with (`servingSlotCandidates` over `slotAccountHistory`); empty when
+    /// it reads no slot AccountDock has seen move. Read for each refusal by
+    /// `recordTranscriptRequests`.
+    func slotAccounts(forSession session: String, process: Int32?, around time: Date) -> [UUID] {
+        guard let process, let directory = slotDirectoryByProcess[process],
+              let history = slotAccountHistory[directory] else { return [] }
+        return Self.servingSlotCandidates(at: time, history: history)
+    }
+
+    /// The accounts a slot with `history` may have served a request at
+    /// `time` with: the one it served once its last settled move had
+    /// settled (`slotMoveSettling`), and each it was moved to since, whose
+    /// token the CLI may already have read. `servingSlotAccount` picks one
+    /// of them for a request served; a refusal's stated reset picks among
+    /// them (`refusingAccount`). A move made after `time` is none of them.
+    nonisolated static func servingSlotCandidates(at time: Date, history: [SlotAssignment]) -> [UUID] {
+        guard var settled = history.first?.account else { return [] }
+        var unsettled: [UUID] = []
+        for assignment in history.dropFirst() where assignment.at <= time {
+            if time.timeIntervalSince(assignment.at) >= slotMoveSettling {
+                settled = assignment.account
+                unsettled = []
+            } else {
+                unsettled.append(assignment.account)
+            }
+        }
+        return ([settled] + unsettled).reduce(into: [UUID]()) { result, id in
+            if !result.contains(id) { result.append(id) }
+        }
     }
 
     // MARK: - Checking refusals against readings
@@ -193,9 +234,10 @@ extension AppState {
     /// to, whose stored windows are out of date.
     nonisolated static func refusalVerification(words: String, at: Date, attributed: UUID,
                                                 windows: [(id: UUID, resets: [Date])], wholeAt: [UUID: Date],
-                                                inUse: [UUID], calendar: Calendar = .current)
+                                                inUse: [UUID], served: [UUID] = [], calendar: Calendar = .current)
         -> (account: UUID, doubtful: Bool, read: [UUID]) {
-        let owner = refusingAccount(words: words, at: at, attributed: attributed, windows: windows, calendar: calendar).account
+        let owner = refusingAccount(words: words, at: at, attributed: attributed, windows: windows, served: served,
+                                    calendar: calendar).account
         let reset = refusalResetDate(words, at: at, calendar: calendar)
         let corroborated = reset.map { reset in
             windows.first { $0.id == owner }?.resets.contains { abs($0.timeIntervalSince(reset)) < 10 * 60 } ?? false
@@ -267,6 +309,6 @@ extension AppState {
         }.map(\.id)
         return Self.refusalVerification(words: refusal.words, at: refusal.at, attributed: attributed,
                                         windows: resetWindows(provider), wholeAt: accountWholeReadings.mapValues(\.at),
-                                        inUse: inUse)
+                                        inUse: inUse, served: refusal.served)
     }
 }

@@ -242,8 +242,12 @@ final class PauseScopeTests: XCTestCase {
                                        holdsNewTurns: false, holdsListedNewTurns: true),
                                  for: provider, directory: pauseDirectory)
             let gate = try runGate(provider, session: session)
-            XCTAssertTrue(waitUntil(within: 5) { AgentPauseGate.waitingSessions(provider, directory: pauseDirectory) == [session] },
-                          "\(provider.rawValue)'s gate marks the session waiting where the app reads it")
+            // The marker and the gate process it names, which a loaded
+            // machine can take seconds to write.
+            XCTAssertTrue(waitUntil(within: 30) {
+                AgentPauseGate.waitingSessions(provider, directory: pauseDirectory) == [session]
+                    && AgentPauseGate.waitingGates(provider, directory: pauseDirectory)[session] == gate.processIdentifier
+            }, "\(provider.rawValue)'s gate marks the session waiting where the app reads it")
             // Read with nothing in memory, as after a relaunch.
             func listed() -> [WaitingSession] {
                 AppState.pausedSessions(
@@ -261,7 +265,7 @@ final class PauseScopeTests: XCTestCase {
             XCTAssertEqual(shown.first?.resumeAt, resetAt, "the resume time is its own account's")
 
             AgentPauseGate.release(provider, directory: pauseDirectory)
-            XCTAssertTrue(waitUntil(within: 5) { !gate.isRunning }, "\(provider.rawValue)'s session goes on once released")
+            XCTAssertTrue(waitUntil(within: 30) { !gate.isRunning }, "\(provider.rawValue)'s session goes on once released")
             XCTAssertTrue(listed().isEmpty)
             XCTAssertTrue(AgentPauseGate.waitingSessions(provider, directory: pauseDirectory).isEmpty)
         }

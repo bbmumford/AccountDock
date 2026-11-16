@@ -283,17 +283,26 @@ extension AppState {
     }
 
     /// The account that refused a request: `attributed`, unless the reset
-    /// the refusal states matches none of its windows and exactly one other
-    /// account's, which is then the account whose token the request
-    /// carried (`byReset`).
+    /// the refusal states matches none of its windows. Then it is the one
+    /// account among `served`, the accounts the session's slot served
+    /// around the request's time (`servingSlotCandidates`), whose window it
+    /// matches, or else the one account of all whose window it matches: the
+    /// account whose token the request carried (`byReset`). Several
+    /// accounts can reset at one time (bytrix and cybrio at 1:30 am), and
+    /// the slot's own history tells which of them served it, so a refusal
+    /// is never charged to the account the slot moved to later.
     nonisolated static func refusingAccount(words: String, at: Date, attributed: UUID,
-                                            windows: [(id: UUID, resets: [Date])],
+                                            windows: [(id: UUID, resets: [Date])], served: [UUID] = [],
                                             calendar: Calendar = .current) -> (account: UUID, byReset: Bool) {
-        guard let reset = refusalResetDate(words, at: at, calendar: calendar),
-              let named = account(resettingAt: reset, among: windows), named != attributed else { return (attributed, false) }
-        let attributedMatches = windows.first { $0.id == attributed }?.resets
-            .contains { abs($0.timeIntervalSince(reset)) < 10 * 60 } ?? false
-        return attributedMatches ? (attributed, false) : (named, true)
+        guard let reset = refusalResetDate(words, at: at, calendar: calendar) else { return (attributed, false) }
+        func matches(_ id: UUID) -> Bool {
+            windows.first { $0.id == id }?.resets.contains { abs($0.timeIntervalSince(reset)) < 10 * 60 } ?? false
+        }
+        if matches(attributed) { return (attributed, false) }
+        let servedMatching = Set(served.filter { $0 != attributed && matches($0) })
+        if servedMatching.count == 1, let account = servedMatching.first { return (account, true) }
+        guard let named = account(resettingAt: reset, among: windows), named != attributed else { return (attributed, false) }
+        return (named, true)
     }
 
     // MARK: - Reading the trail

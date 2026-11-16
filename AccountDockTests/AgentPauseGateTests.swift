@@ -128,6 +128,15 @@ final class AgentPauseGateTests: XCTestCase {
         return !process.isRunning
     }
 
+    /// Whether `condition` holds within `seconds`, checked every tenth of a
+    /// second, so a gate script slow to start on a loaded machine is waited
+    /// for rather than missed.
+    private func waitUntil(within seconds: Double, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !condition(), Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+        return condition()
+    }
+
     func testEverySessionWaitsWhileThePauseHoldsNewTurns() throws {
         let pauseDirectory = directory.appendingPathComponent("Library/Application Support/AccountDock/Pause")
         try FileManager.default.createDirectory(at: pauseDirectory, withIntermediateDirectories: true)
@@ -332,24 +341,26 @@ final class AgentPauseGateTests: XCTestCase {
         let output = Pipe()
         let mine = try runGate(event: "PostToolUse", session: "mine", home: directory, output: output)
         let other = try runGate(event: "PostToolUse", session: "other", home: directory)
-        Thread.sleep(forTimeInterval: 0.8)
-        let gates = AgentPauseGate.waitingGates(.claudeCode, directory: pauseDirectory)
-        XCTAssertEqual(gates["mine"], mine.processIdentifier, "the marker names the gate process")
-        XCTAssertEqual(gates["other"], other.processIdentifier)
+        // Each gate writes its marker once it starts waiting, which a
+        // loaded machine can take seconds to reach.
+        XCTAssertTrue(waitUntil(within: 30) {
+            let gates = AgentPauseGate.waitingGates(.claudeCode, directory: pauseDirectory)
+            return gates["mine"] == mine.processIdentifier && gates["other"] == other.processIdentifier
+        }, "the marker names the gate process")
 
         AgentPauseGate.resume(.claudeCode, session: "mine", directory: pauseDirectory)
-        XCTAssertTrue(waitForExit(mine, within: 5), "the resumed session goes on")
+        XCTAssertTrue(waitForExit(mine, within: 30), "the resumed session goes on")
         XCTAssertFalse(waitForExit(other, within: 1), "the other session stays held")
         let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: output.fileHandleForReading.readDataToEndOfFile()) as? [String: Any])
         XCTAssertTrue((json["systemMessage"] as? String ?? "").contains("because you resumed it"))
 
         let nextStep = try runGate(event: "PostToolUse", session: "mine", home: directory)
-        XCTAssertTrue(waitForExit(nextStep, within: 3), "its later tool calls are not held")
+        XCTAssertTrue(waitForExit(nextStep, within: 30), "its later tool calls are not held")
         let nextTurn = try runGate(event: "UserPromptSubmit", session: "mine", home: directory)
-        XCTAssertTrue(waitForExit(nextTurn, within: 3), "nor its new turns")
+        XCTAssertTrue(waitForExit(nextTurn, within: 30), "nor its new turns")
 
         AgentPauseGate.release(.claudeCode, directory: pauseDirectory)
-        XCTAssertTrue(waitForExit(other, within: 5))
+        XCTAssertTrue(waitForExit(other, within: 30))
         XCTAssertTrue(AgentPauseGate.resumedSessions(.claudeCode, directory: pauseDirectory).isEmpty, "the pause's end clears it")
     }
 
