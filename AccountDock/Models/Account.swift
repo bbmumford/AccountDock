@@ -185,13 +185,29 @@ struct Account: Identifiable, Codable, Hashable {
 
     var workloadAvailability: ProviderWorkloadAvailability {
         if cliAccessRefusedAt != nil { return .unavailable(label: "\(provider.rawValue) disabled by organisation") }
+        if hasUnassignedSeat { return .unavailable(label: "No seat assigned") }
         return Self.workloadAvailability(provider: provider, subscriptionType: currentPlan)
     }
 
+    /// Ends a plan name (`ClaudeService.liveSubscription`) when the account
+    /// belongs to a team or enterprise organisation but has no seat in it:
+    /// "team (no seat)".
+    static let unassignedSeatSuffix = " (no seat)"
+
+    /// The account is a member of an organisation that has assigned it no
+    /// seat (licence), so it has no subscription to run the CLI with.
+    var hasUnassignedSeat: Bool {
+        currentPlan?.lowercased().hasSuffix(Self.unassignedSeatSuffix) == true
+    }
+
     /// What the account card says while the organisation refuses the CLI
-    /// (`cliAccessRefusedAt`). Its seat or licence may have been removed,
-    /// so it says where to look, and that AccountDock checks again.
+    /// (`cliAccessRefusedAt`) or has assigned the account no seat. Its seat
+    /// or licence may have been removed, so it says where to look, and that
+    /// AccountDock checks again.
     var cliAccessNotice: String? {
+        if hasUnassignedSeat {
+            return "In a team, but no seat (licence) is assigned to this account, so it cannot use \(provider.rawValue). Ask the team's admin to assign one; AccountDock checks again when you refresh."
+        }
         guard cliAccessRefusedAt != nil else { return nil }
         return "Organisation has disabled \(provider.rawValue) subscription access. Check this account's seat or licence with its organisation's admin; AccountDock checks again daily and when you refresh."
     }
@@ -228,6 +244,7 @@ struct Account: Identifiable, Codable, Hashable {
     /// it can.
     var cliUnavailableReason: String? {
         if cliAccessRefusedAt != nil { return "its organisation has disabled \(provider.rawValue) subscription access" }
+        if hasUnassignedSeat { return "it has no seat in its team" }
         guard !supportsProviderWorkloads else { return nil }
         return "its plan does not include \(provider.rawValue)"
     }

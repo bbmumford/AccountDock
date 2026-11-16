@@ -91,6 +91,24 @@ final class ClaudeServiceTests: XCTestCase {
         )
     }
 
+    func testATeamMemberWithNoSeatIsUnavailable() {
+        let profile: [String: Any] = [
+            "account": ["has_claude_max": false, "has_claude_pro": false],
+            "organization": ["organization_type": "claude_team", "rate_limit_tier": "default_raven",
+                             "seat_tier": "unassigned", "subscription_status": "active"]
+        ]
+        let snapshot = ClaudeService.liveSubscription(fromProfileJSON: profile)
+        XCTAssertEqual(snapshot.planType, "team (no seat)")
+        var account = Account(email: "member@team.example", displayName: "Member", provider: .claudeCode,
+                              subscriptionType: "team")
+        _ = account.applyProfilePlan(snapshot.planType, inactive: false, tier: snapshot.rateLimitTier, checkedAt: Date())
+        XCTAssertTrue(account.hasUnassignedSeat)
+        XCTAssertFalse(account.supportsProviderWorkloads)
+        XCTAssertEqual(account.providerUnavailableLabel, "No seat assigned")
+        XCTAssertEqual(account.cliUnavailableReason, "it has no seat in its team")
+        XCTAssertNotNil(account.cliAccessNotice)
+    }
+
     func testAnUpgradedAccountsPlanAndTierComeFromItsOrganisation() {
         let profile: [String: Any] = [
             "account": ["has_claude_max": true, "has_claude_pro": false],

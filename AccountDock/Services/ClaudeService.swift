@@ -324,8 +324,12 @@ final class ClaudeService: @unchecked Sendable {
             let plan = type.hasPrefix("claude_") ? String(type.dropFirst("claude_".count)) : type
             return plan.isEmpty ? nil : plan
         }
+        // A member of a team or enterprise organisation to whom no seat is
+        // assigned has no Claude subscription of their own.
+        let unassigned = (organization?["seat_tier"] as? String)?.lowercased() == "unassigned"
+        let plan = unassigned ? organizationPlan.map { "\($0)\(Account.unassignedSeatSuffix)" } : organizationPlan
         return ClaudeSubscriptionSnapshot(
-            planType: expired ? nil : (explicit ?? organizationPlan),
+            planType: expired ? nil : (explicit ?? plan),
             isInactive: expired,
             rateLimitTier: expired ? nil : organization?["rate_limit_tier"] as? String,
             email: profileIdentity(fromProfileJSON: json).email
