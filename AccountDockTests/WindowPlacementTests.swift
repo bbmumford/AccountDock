@@ -219,6 +219,34 @@ final class WindowPlacementTests: XCTestCase {
         XCTAssertTrue(event.hasSuffix("It moves sooner only if hexorda refuses it or reaches its limit."))
     }
 
+    // MARK: - The events
+
+    @MainActor
+    func testTheEventsTellOneStoryFromAWindowMoveToTheSessionLeaving() {
+        let until = now.addingTimeInterval(75 * 60)
+        let arrives = AppState.windowMoveEvent(session: "session 1603da04 in ~/Mother", from: "fluxon", account: "hexorda",
+                                               until: until, now: now)
+        let clock = UsageFormat.clock(until, now: now)
+        XCTAssertTrue(arrives.contains("using hexorda's session window until \(clock)"))
+
+        // While the placement holds, the account is not shed, so no event
+        // says hexorda gives its sessions up.
+        let plan = SessionPacer().plan(accounts: accounts(), sessions: sessions(), now: now, placements: hexordaPlacement)
+        XCTAssertNil(plan.shedReasons[hexorda])
+
+        // It leaves when the window is used up or refuses it, or once its
+        // time has passed, and the move's event says which.
+        XCTAssertEqual(AppState.windowLeaveReason(account: "hexorda", cannotServe: true, refused: false, until: until, now: now),
+                       "hexorda's session window is used up, as its placement there until \(clock) planned")
+        XCTAssertEqual(AppState.windowLeaveReason(account: "hexorda", cannotServe: true, refused: true, until: until, now: now),
+                       "hexorda refused it at its limit, ending its placement there until \(clock)")
+        let later = until.addingTimeInterval(60)
+        XCTAssertEqual(AppState.windowLeaveReason(account: "hexorda", cannotServe: false, refused: false, until: until, now: later),
+                       "its placement on hexorda's session window ended at \(UsageFormat.clock(until, now: later)) as planned")
+        XCTAssertNil(AppState.windowLeaveReason(account: "hexorda", cannotServe: false, refused: false, until: until, now: now),
+                     "a move made while the placement holds gives its own reason")
+    }
+
     // MARK: - New sessions on small windows
 
     @MainActor

@@ -827,6 +827,19 @@ refuses, leaves its sessions to the stranded placement above, so they move
 on to the next account with room, and a window spent again once it
 refills. The shared group stays where `FailoverPlanner.carries` lets it.
 
+The events tell each placement as one story. The move into the window says
+until when (`windowMoveEvent`, for a rebalance's window moves too), and the
+move that takes the session off says why (`AppState.windowLeaveReason`):
+"Moved session X from hexorda to Backup: hexorda's session window is used
+up, as its placement there until 12:57 pm planned.", or "hexorda refused it
+at its limit, ending its placement there until 12:57 pm", or, for a later
+move, "since its placement on hexorda's session window ended at 12:57 pm as
+planned". No event says an account a placement fills gives sessions up for
+reaching that window's limit, since the pacer does not shed it. A move the
+automatic rebalance makes says so ("the automatic rebalance makes the
+sessions last longer that way"), and its summary reads "Rebalancing sessions
+automatically: …", rather than "a request asked for it".
+
 For new
 sessions, `carriesNewSession` and the pacer's runway rule let such an
 account take one while it can carry a typical session for an hour, and the

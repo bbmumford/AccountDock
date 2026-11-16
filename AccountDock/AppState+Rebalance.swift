@@ -226,9 +226,11 @@ extension AppState {
         for move in preview.moves {
             requestedSlotMoves[move.session] = move.to
             requestedWindowUses[move.session] = preview.windowUses[move.session]
+            if automatic { automaticSlotMoves.insert(move.session) } else { automaticSlotMoves.remove(move.session) }
         }
         lastRebalance[provider] = now
-        failoverEvents.record(provider, "Rebalancing sessions: \(preview.outcome)"
+        failoverEvents.record(provider, (automatic ? "Rebalancing sessions automatically: " : "Rebalancing sessions: ")
+                              + preview.outcome
                               + (preview.sharedNote.map { " " + $0 } ?? ""))
         await maintainSessionSlots(now: now)
         return preview

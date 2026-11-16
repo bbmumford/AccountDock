@@ -635,7 +635,9 @@ extension AppState {
                     let spent = accounts.first { $0.id == current }.flatMap { account in
                         model.flatMap { limitingModel(account, models: [$0], now: now) }
                     }
-                    let why = requested ? "a request asked for it"
+                    let why = requested && automaticSlotMoves.contains(session.sessionID)
+                        ? "the automatic rebalance makes the sessions last longer that way"
+                        : requested ? "a request asked for it"
                         : balanced ? "to balance load; it rebuilds its prompt cache there"
                         : spent.map { "\(from) has no \($0) allowance left" } ?? "\(from) can no longer serve it"
                     pendingSlotRestarts[session.sessionID] = PendingSlotRestart(
@@ -668,21 +670,36 @@ extension AppState {
             let spent = slot.account.flatMap { id in accounts.first { $0.id == id } }.flatMap { account in
                 model.flatMap { limitingModel(account, models: [$0], now: now) }
             }
-            let why = pinned != nil ? "it is pinned there"
-                : requested ? "a request asked for it"
-                : spent.map { "\(from) has no \($0) allowance left" + (modelSpent ? "; its other sessions stay" : "") }
-                ?? "\(from) can no longer serve it"
             // A session leaving the account of its window placement leaves
-            // the placement.
+            // the placement, and the event says why: the window is used up
+            // or refused it, or the placement's time has passed.
+            let placement = session.flatMap { windowPlacements[$0.sessionID] }.flatMap { $0.account == slot.account ? $0 : nil }
             if let session, windowPlacements[session.sessionID].map({ $0.account != target }) == true {
                 windowPlacements[session.sessionID] = nil
             }
+            let leaving = placement.flatMap { placement -> String? in
+                let refused = accounts.first { $0.id == placement.account }
+                    .map { recordedLimitRefusal($0, model: model, now: now) } ?? false
+                return Self.windowLeaveReason(account: from, cannotServe: cannotServe(placement.account), refused: refused,
+                                              until: placement.until, now: now)
+            }
+            // A move the automatic rebalance asked for says so, rather than
+            // that a request asked for it.
+            let automatic = requested && session.map { automaticSlotMoves.remove($0.sessionID) != nil } == true
+            let why = pinned != nil ? "it is pinned there"
+                : automatic ? "the automatic rebalance makes the sessions last longer that way; it rebuilds its prompt cache there"
+                : requested ? "a request asked for it"
+                : spent.map { "\(from) has no \($0) allowance left" + (modelSpent ? "; its other sessions stay" : "") }
+                ?? leaving ?? "\(from) can no longer serve it"
             // A rebalance's move into a session window is a window
-            // placement as the pacer's own is.
+            // placement as the pacer's own is, and recorded the same way.
             if requested, let session, let use = requestedWindowUses.removeValue(forKey: session.sessionID),
                use.account == target {
                 remainderMovedAt[target] = now
                 recordWindowPlacement(session.sessionID, use: use, now: now)
+                failoverEvents.record(provider, Self.windowMoveEvent(session: subject, from: from, account: to, until: use.until,
+                                                                     now: now))
+                continue
             }
             // A move to spend an allowance that would otherwise expire names
             // that allowance, and rests the account for `balanceMoveInterval`;
@@ -701,7 +718,8 @@ extension AppState {
                 continue
             }
             failoverEvents.record(provider, balanced
-                ? "Moved \(subject) from \(from) to \(to) to balance load; it rebuilds its prompt cache there at its next request."
+                ? "Moved \(subject) from \(from) to \(to) to balance load" + (leaving.map { ", since \($0)" } ?? "")
+                    + "; it rebuilds its prompt cache there at its next request."
                 : "Moved \(subject) from \(from) to \(to): \(why).")
         }
         for id in open where sparesOf[id, default: 0] < spareTarget {
@@ -712,8 +730,10 @@ extension AppState {
             }.value
             sparesOf[id, default: 0] += made
         }
-        // A rebalance's window outlives no request it belongs to.
+        // A rebalance's window, and its being automatic, outlive no request
+        // they belong to.
         requestedWindowUses = requestedWindowUses.filter { requestedSlotMoves[$0.key] != nil }
+        automaticSlotMoves = automaticSlotMoves.filter { requestedSlotMoves[$0] != nil }
         if !remove.isEmpty || !removeSpares.isEmpty {
             for directory in remove {
                 sessionSlotStates[provider]?.directoryServing[directory.path] = nil

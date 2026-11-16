@@ -31,6 +31,22 @@ extension AppState {
         }
     }
 
+    /// Why a session leaves the window placement it had on `account`, for
+    /// the event of the move that takes it off (`serveSessionSlots`): the
+    /// account cannot serve it, its session window used up or refusing it,
+    /// or the placement's `until` has passed. Nil for a move made while the
+    /// placement still held, as one the user asked for, whose event gives
+    /// its own reason.
+    nonisolated static func windowLeaveReason(account: String, cannotServe: Bool, refused: Bool, until: Date,
+                                              now: Date) -> String? {
+        let planned = UsageFormat.clock(until, now: now)
+        if cannotServe {
+            return refused ? "\(account) refused it at its limit, ending its placement there until \(planned)"
+                : "\(account)'s session window is used up, as its placement there until \(planned) planned"
+        }
+        return now >= until ? "its placement on \(account)'s session window ended at \(planned) as planned" : nil
+    }
+
     /// Records the window placement a slot move made (`serveSessionSlots`),
     /// and forgets placements whose window has long since ended: a session
     /// window past `until` plus a whole window has reset whatever happened.

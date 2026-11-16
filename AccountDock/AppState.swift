@@ -288,6 +288,9 @@ final class AppState: ObservableObject {
     /// by session, so `serveSessionSlots` records each as a window
     /// placement when it makes the move.
     var requestedWindowUses: [String: SessionPacer.WindowUse] = [:]
+    /// The sessions among `requestedSlotMoves` the automatic rebalance asked
+    /// to move, so `serveSessionSlots` says so in the move's event.
+    var automaticSlotMoves: Set<String> = []
     /// Sessions whose automatic move a hold has stopped and been recorded,
     /// with the move that began the hold (`noteHeldMoves`), so each hold is
     /// recorded once.
