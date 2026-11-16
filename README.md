@@ -462,6 +462,25 @@ comes soon move before one deep in a long turn. Sessions an account at its
 limit gives up are spread over the accounts with room, by how long each then
 lasts.
 
+An account whose weekly allowance its 5-hour windows can no longer use up
+before the weekly reset is used to the full instead: whatever it serves
+before that reset is allowance that would otherwise expire. Pacing and
+rebalancing move no session off it before it reaches its 5-hour limit, and
+its window's room until the earlier of the window's reset and the weekly
+reset is where sessions moving off other accounts and new sessions go first,
+when it carries them for the hour. Otherwise new sessions go by how soon each
+account's allowance must be spent for the room it has: a week with little
+left and days to go takes the least, however much work that little is. Once it reaches the limit its sessions wait for a reset
+within their cache or move on, as at any limit. The 5-hour window is the
+cap: with 68% of a Max 5x week left four hours before its reset and 37% of
+its window used, at most the window's 63% (about 8% of its week) can be used
+before then, however many sessions run there; more sessions only reach that
+cap sooner, and the rest of that week expires whatever runs. The Sessions
+page and the rebalance preview say so under the provider, the soonest reset
+first ("bytrix: 68% of its week resets on Tue 1:00 am; its 5-hour window caps
+what can be used before then at 63%; session 8c64c5f8 in ~/ORBTR is using it,
+filling it by 10:25 pm.").
+
 When capacity is scarce, so that the accounts with room cannot carry every
 waiting session, and **Pause sessions** is chosen, a lane that frees up (a
 reset, a small plan with room) does not take them all. It admits sessions in
