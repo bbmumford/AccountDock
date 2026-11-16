@@ -329,6 +329,23 @@ final class PauseScopeTests: XCTestCase {
         XCTAssertFalse(isolation.screenWaitsAtLimit(quoted))
     }
 
+    func testTheFooterIsFoundAboveALongAgentsPanel() {
+        let isolation = ClaudeSessionIsolation()
+        let rule = String(repeating: "─", count: 60)
+        let panel = (1...9).map { "  ◯ general-purpose  Waiting on step \($0)    2h 14m" }.joined(separator: "\n")
+        // The transcript above the box quotes the wait; only the footer below it counts.
+        let screen = "⏺ Usage limit reached · continuing automatically at 1:30am · esc to cancel\n" + rule + "\n❯ \n" + rule
+            + "\n    Continuing automatically at 1:30am · esc to cancel · /usage-credits to continue now"
+            + "\n  execution-platform | md 03f30f18 | wf 0\n  ⏵⏵ bypass permissions on · 1 shell, 3 monitors\n  ⏺ main\n" + panel
+        XCTAssertTrue(isolation.screenWaitsAtLimit(screen))
+        XCTAssertTrue(isolation.screenReportsRunningWork(screen))
+
+        let continued = "⏺ Usage limit reached · continuing automatically at 1:30am · esc to cancel\n" + rule + "\n❯ \n" + rule
+            + "\n  execution-platform | md 03f30f18 | wf 0\n  ⏵⏵ bypass permissions on\n  ⏺ main\n" + panel
+        XCTAssertFalse(isolation.screenWaitsAtLimit(continued), "the transcript's line above the box is no wait")
+        XCTAssertFalse(isolation.screenReportsRunningWork(continued))
+    }
+
     func testThePolicyResumesLeftWaitingSessionsByDefault() throws {
         XCTAssertTrue(ProviderFailoverPolicy().resumeSessionsLeftWaiting)
         let decoded = try JSONDecoder().decode(ProviderFailoverPolicy.self, from: Data("{}".utf8))
