@@ -885,8 +885,15 @@ extension AppState {
             state.id != active && !planner.carries(state, from: current, at: now, floor: floor)
         }.map(\.id))
         guard !small.isEmpty else { return nil }
+        // An account rests only while a session moved there spends: one
+        // gone idle uses none of the room it was moved for, and resting the
+        // account would keep away the sessions that would use that room.
         let resting = small.filter { id in
-            remainderMovedAt[id].map { now.timeIntervalSince($0) < Self.balanceMoveInterval } ?? false
+            guard let moved = remainderMovedAt[id], now.timeIntervalSince(moved) < Self.balanceMoveInterval else { return false }
+            return now.timeIntervalSince(moved) <= SessionPacer.idleAfter || slotSessionIDs(provider).contains { session in
+                slotAccount(forSession: session, provider: provider) == id
+                    && (sessionRates.entries[session].map { now.timeIntervalSince($0.lastSeen) <= SessionPacer.idleAfter } ?? false)
+            }
         }
         let working = Set((liveSessions[provider] ?? []).filter(\.isWorking).map(\.sessionID))
         return SessionPacer.RemainderSpending(accounts: small, sessions: slotted.subtracting(working), resting: resting)

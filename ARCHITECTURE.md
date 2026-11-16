@@ -774,7 +774,9 @@ an account in the pool, other than the active one, that fails `carries`
 and whose weekly allowance the accounts' present rates would leave unused
 at its reset takes the lightest slot session (by `SessionPacer.lightRate`,
 the larger of its current rate and its last hour's) that is between turns
-(quiet for `betweenTurns`, and not working by its record), not pinned, not
+(quiet for `betweenTurns`, and not working by its record) yet still spends
+(heard from within `idleAfter`, 15 minutes, at a rate above nothing:
+`SessionPacer.spends`), not pinned, not
 on a draining account and not on another such account, whose use until the
 reset plus its cache rewrite (`moveCost`) fits in what is left, keeping the
 account within every window and its model's own allowance, and whose use
@@ -790,7 +792,10 @@ that account among the accounts it offers, but resting
 (`RemainderSpending.resting`, from `AppState.remainderMovedAt`): for
 `balanceMoveInterval` it takes no further session, yet it is still no
 carrier, so the shedding rule and a rebalance do not take the session
-straight back. A session placed so reaches no limit there before the
+straight back. It rests only while a slot session on it spends, or for
+`idleAfter` after the move while the session's first turn there is still
+to come: a session gone idle uses none of the room, and resting the account
+would keep away the sessions that would. A session placed so reaches no limit there before the
 reset, so shedding leaves it; if the account reaches its limit after all,
 the session moves on as any stranded slot session does.
 
@@ -808,9 +813,15 @@ leave once its own rate has run; one at a time, the slot session between
 turns whose arrival costs the fewest tokens per hour it then stays goes to
 the window where that is least, so small contexts and light rates go first
 and heavy sessions spread over the windows by their token room. A session
-goes only when its whole arrival write fits and the use it makes of the room
-is worth `remainderWorth` times that write, so an 800k-token session moves
-only into room no cheaper session takes. New sessions go by the tokens per
+goes only when it spends (`spends`), its whole arrival write fits and the
+use it makes of the room is worth `remainderWorth` times that write, so an
+800k-token session moves only into room no cheaper session takes; and only
+when that write and its rate until the reset, or for `newSessionRunway`
+when the reset is later, fit `windowFitShare` (90%) of the room. A window's
+last few percent before an imminent reset take a session sized to them (5M
+an hour fits bytrix's last 6% for half an hour; 33.8M an hour would spend
+them in ten minutes and be refused until the reset), and a fresh window
+takes a heavy session it carries for the hour. New sessions go by the tokens per
 hour each account would otherwise leave unused: the windows' room until
 their resets, and a carrier's room until the first carrier's reset, which is
 none once its own sessions spend it. `serveSessionSlots` records "Moved
@@ -821,8 +832,9 @@ Every such move, the pacer's or a rebalance's, is a **window placement**
 (`AppState.windowPlacements`): the session is planned to stay on that
 account until its window is used up or the placement's "until" time, and
 every rule that moves slot sessions follows that one intent. While the
-session's slot serves the account and "until" has not passed
-(`AppState.windowPlacementsInForce`), `SessionPacer.plan` and `rebalance`
+session's slot serves the account, "until" has not passed and the session
+spends, heard from within `idleAfter` or placed that recently
+(`AppState.windowPlacementsInForce`, `placementHolds`), `SessionPacer.plan` and `rebalance`
 take it as a session that stays, and the account it fills
 (`Plan.filling`, `Rebalance.filling`) as filling as planned: reaching its
 session window's limit is no reason to shed (only a weekly limit binding
@@ -1484,7 +1496,9 @@ provider whose sessions run in one-session slots; also the requests action
 `{"action":"rebalance","provider":…,"apply":true|false}`) places the running
 slot sessions so the first account to reach a limit does so as late as
 possible (`SessionPacer.rebalance`). Each session counts at its rate over
-its last hour (at least `defaultSessionRate` with no history) against every
+its last hour (`AppState.rebalanceRate`: `defaultSessionRate` with no
+history, and what it uses now, near nothing, once quiet past `idleAfter`,
+so no idle session is moved to make the others last longer) against every
 window and its model's own allowance, and each account also carries the use
 its readings show beyond its sessions and the shared group
 (`SessionPacer.unseenBurn`), which stays wherever the sessions go: the rate

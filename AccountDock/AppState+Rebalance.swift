@@ -134,9 +134,7 @@ extension AppState {
 
     /// The provider's running slot sessions as `SessionPacer.rebalance` and
     /// `SessionPacer.place` take them: each on the account its slot serves,
-    /// at its rate over its last hour (at least its current rate, and
-    /// `defaultSessionRate` with no history), movable unless mid-turn or
-    /// pinned.
+    /// at `rebalanceRate`, movable unless mid-turn or pinned.
     func slotRebalanceSessions(_ provider: AIProviderType, slots: SessionSlots,
                                now: Date) -> [SessionPacer.RebalanceSession] {
         let pacer = SessionPacer()
@@ -146,18 +144,34 @@ extension AppState {
                   let account = slotDirectoryServing[directory] else { return nil }
             let id = session.sessionID
             let entry = sessionRates.entries[id]
-            let measured = max(sessionRates.tokensPerHour(id, now: now), sessionRates.demand(id, until: now) ?? 0)
+            let measured = Self.rebalanceRate(current: sessionRates.tokensPerHour(id, now: now),
+                                              recent: sessionRates.demand(id, until: now), lastSeen: entry?.lastSeen, now: now)
             let model = sessionModel(id, now: now)
             let pacing = SessionPacer.Session(id: id, account: account, tokensPerHour: measured,
                                               contextTokens: entry?.contextTokens ?? 0, lastSeen: entry?.lastSeen ?? now,
                                               cacheLifetime: entry?.cacheLifetime, lastTurnStart: entry?.lastTurnStart, model: model)
             return SessionPacer.RebalanceSession(
-                id: id, account: account, tokensPerHour: measured > 0 ? measured : SessionPacer.defaultSessionRate,
+                id: id, account: account, tokensPerHour: measured,
                 contextTokens: entry?.contextTokens ?? 0, model: model,
                 movable: !session.isWorking && pacer.movable(pacing, now: now) && !sessionPins.isPinned(id),
                 cacheLifetime: entry?.cacheLifetime
             )
         }
+    }
+
+    /// The rate a slot session counts at in `slotRebalanceSessions`: its
+    /// rate over its last hour (`recent`), at least its `current` one;
+    /// `SessionPacer.defaultSessionRate` for one never heard from
+    /// (`lastSeen` nil); and for one quiet past `SessionPacer.idleAfter`,
+    /// what it uses now, near nothing. Such a session waits on its user and
+    /// spends nothing wherever it is, so no rebalance moves it to make the
+    /// others last longer (`SessionPacer.rebalance` and its window rule
+    /// gain nothing from a rate of nothing), and moved anyway it would
+    /// rewrite its whole context when it next speaks.
+    nonisolated static func rebalanceRate(current: Double, recent: Double?, lastSeen: Date?, now: Date) -> Double {
+        guard let lastSeen else { return SessionPacer.defaultSessionRate }
+        if now.timeIntervalSince(lastSeen) > SessionPacer.idleAfter { return current }
+        return max(current, recent ?? 0)
     }
 
     /// Where `serveSessionSlots` sends each slot session whose account can

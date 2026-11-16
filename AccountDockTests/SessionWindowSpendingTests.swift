@@ -51,8 +51,8 @@ final class SessionWindowSpendingTests: XCTestCase {
 
     func testCheapAndLightSessionsUseTheSmallPlansWindowsWhileTheLargeAccountRunsOut() throws {
         let plan = SessionPacer().plan(accounts: accounts(), sessions: sessions(), now: now, remainders: spending)
-        XCTAssertEqual(Set(plan.moves.keys), ["s53k", "light1", "light2", "light3", "light4"],
-                       "the 53k session and the light ones go; the 800k ones stay while cheaper sessions use the room")
+        XCTAssertEqual(Set(plan.moves.keys), ["light1", "light2", "light3", "light4"],
+                       "the light ones go; at 300% of a Pro window an hour the heavy ones would spend one in twenty minutes")
         XCTAssertEqual(Set(plan.windowUses.keys), Set(plan.moves.keys))
         XCTAssertTrue(plan.moves.values.allSatisfy { pros.contains($0) })
         XCTAssertEqual(Set(plan.moves.values), Set(pros), "the moves are spread over every window with room")
@@ -61,10 +61,8 @@ final class SessionWindowSpendingTests: XCTestCase {
             XCTAssertGreaterThan(use.until, now)
             XCTAssertLessThanOrEqual(use.until, now.addingTimeInterval(FailoverPlanner.sessionWindow))
         }
-        // The light ones fill a window between them; the 53k one fills what
-        // a light one leaves.
+        // The light ones fill a window between them.
         XCTAssertEqual(plan.moves["light1"], plan.moves["light4"])
-        XCTAssertEqual(plan.moves["light2"], plan.moves["s53k"])
     }
 
     func testWhileTheWindowsAreWorthSpendingNewSessionsGoWhereRoomWouldExpire() {

@@ -211,4 +211,80 @@ final class SmallWindowLaneTests: XCTestCase {
         let fast = state(cybrio, session: 87, resetIn: 32, weekly: 12, weeklyResetIn: 30, ratio: 6.73, active: true, burn: 60)
         XCTAssertNotNil(planner.secondsUntilExhaustion(fast, now: now), "60% an hour spends the 13% in 13 minutes")
     }
+
+    // MARK: - Room is spent by sessions that spend
+
+    /// bytrix's week has room it would leave unused at its 1:00 am reset.
+    /// The lightest session by its last hour went quiet 40 minutes ago: moved
+    /// there it spends nothing, the room still expires, and it pays its whole
+    /// context's write when it next speaks. The light session still working
+    /// goes instead.
+    func testAnIdleSessionIsNeverMovedToSpendARemainder() {
+        let quietBackup = account(backup, used: 0, resetIn: nil, weekly: 46, weeklyResetIn: 161, ratio: 0.95, burn: 1,
+                                  window: false)
+        let roomy = account(bytrix, used: 60, resetIn: 33, weekly: 13, weeklyResetIn: 10, ratio: 1.151, weight: 0)
+        let sessions = [session("1603da04", on: backup, rate: 500_000, context: 100_000, quiet: 40),
+                        session("19496bb9", on: backup, rate: 1_300_000, context: 100_000, quiet: 5)]
+        let spending = SessionPacer.RemainderSpending(accounts: [bytrix], sessions: Set(sessions.map(\.id)))
+        let plan = SessionPacer().plan(accounts: [quietBackup, roomy], sessions: sessions, now: now, remainders: spending)
+        XCTAssertEqual(plan.moves, ["19496bb9": bytrix])
+        XCTAssertFalse(SessionPacer().spends(sessions[0], now: now))
+        XCTAssertTrue(SessionPacer().spends(sessions[1], now: now))
+    }
+
+    /// While Backup alone carries the work and runs out long before its
+    /// week resets, the small windows' room is spent. bytrix's last 6%
+    /// before 3:30 pm takes the session whose use until then fits it, not
+    /// the 33.8M-an-hour one with a small context, which would spend it in
+    /// ten minutes and be refused until the reset.
+    func testTheLastFewPercentBeforeAResetGoToASessionSizedToThem() throws {
+        let carrier = account(backup, used: 0, resetIn: nil, weekly: 46, weeklyResetIn: 161, ratio: 0.95, burn: 95, window: false)
+        // Its week unread, so the window alone is spent.
+        var window = account(bytrix, used: 93, resetIn: 33, weekly: 13, weeklyResetIn: 10, ratio: 1.151, weight: 0)
+        window.weeklyRemaining = nil
+        let sessions = [session("4822c359", on: backup, rate: 33_800_000, context: 42_000, quiet: 3, turn: 52),
+                        session("medium", on: backup, rate: 5_000_000, context: 300_000, quiet: 3, turn: 10),
+                        session("3a862465", on: backup, rate: 0, context: 200_000, quiet: 25)]
+        let spending = SessionPacer.RemainderSpending(accounts: [bytrix], sessions: Set(sessions.map(\.id)))
+        let pacer = SessionPacer()
+        XCTAssertTrue(pacer.windowsWorthSpending(carriers: [carrier], burn: [backup: 95], spent: [:], shares: [:],
+                                                 sharedGroup: nil, now: now))
+        let plan = pacer.plan(accounts: [carrier, window], sessions: sessions, now: now, remainders: spending)
+        XCTAssertEqual(plan.moves, ["medium": bytrix])
+        let use = try XCTUnwrap(plan.windowUses["medium"])
+        XCTAssertEqual(use.until, at(minutes: 33), "5M an hour lasts there until the reset")
+        // A window with the hour's room takes the heavy one for its runway.
+        var fresh = account(bytrix, used: 0, resetIn: 300, weekly: 13, weeklyResetIn: 10, ratio: 1.151, weight: 0)
+        fresh.weeklyRemaining = nil
+        let refilled = pacer.plan(accounts: [carrier, fresh], sessions: sessions, now: now, remainders: spending)
+        XCTAssertEqual(refilled.moves["4822c359"], bytrix)
+    }
+
+    /// A rebalance counts a session gone quiet at what it uses now, so it
+    /// moves no idle session to make the others last longer; one never
+    /// heard from counts as a new session would.
+    @MainActor
+    func testARebalanceCountsAnIdleSessionAtWhatItUsesNow() {
+        XCTAssertEqual(AppState.rebalanceRate(current: 10_000, recent: 4_000_000, lastSeen: at(minutes: -40), now: now), 10_000)
+        XCTAssertEqual(AppState.rebalanceRate(current: 3_000_000, recent: 4_000_000, lastSeen: at(minutes: -3), now: now),
+                       4_000_000)
+        XCTAssertEqual(AppState.rebalanceRate(current: 0, recent: nil, lastSeen: nil, now: now), SessionPacer.defaultSessionRate)
+        let idle = SessionPacer.RebalanceSession(id: "075198d6", account: cybrio, tokensPerHour: 0, contextTokens: 611_000,
+                                                 model: nil, movable: true, cacheLifetime: 3600)
+        let rebalanced = SessionPacer().rebalance(accounts: accounts(), sessions: [idle], destinations: Set(accounts().map(\.id)),
+                                                  now: now)
+        XCTAssertTrue(rebalanced.moves.isEmpty)
+    }
+
+    /// A window placement holds its window only while its session spends:
+    /// one quiet past `SessionPacer.idleAfter` frees the window for the
+    /// sessions the other rules send there.
+    @MainActor
+    func testAnIdleSessionsPlacementNoLongerHoldsItsWindow() {
+        XCTAssertTrue(AppState.placementHolds(lastSeen: at(minutes: -5), placedAt: at(minutes: -30), until: at(minutes: 20), now: now))
+        XCTAssertFalse(AppState.placementHolds(lastSeen: at(minutes: -20), placedAt: at(minutes: -30), until: at(minutes: 20), now: now))
+        XCTAssertTrue(AppState.placementHolds(lastSeen: nil, placedAt: at(minutes: -2), until: at(minutes: 20), now: now),
+                      "a session just placed has its first turn to come")
+        XCTAssertFalse(AppState.placementHolds(lastSeen: at(minutes: -1), placedAt: at(minutes: -30), until: at(minutes: -1), now: now))
+    }
 }

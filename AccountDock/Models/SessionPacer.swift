@@ -383,6 +383,24 @@ struct SessionPacer {
     static let longTurn: TimeInterval = 15 * 60
     /// A session quiet this long is between turns.
     static let betweenTurns: TimeInterval = 2 * 60
+    /// A session quiet this long waits on its user: it spends nothing until
+    /// it speaks again, whenever that is, and then writes its whole context
+    /// into the cache of the account it is on. No rule moves one to spend
+    /// room (`spends`), and its window placement no longer holds the window
+    /// (`AppState.placementHolds`).
+    static let idleAfter: TimeInterval = 15 * 60
+    /// The share of a session window's room a session moved there to use
+    /// it may plan to spend (`spendWindows`); the rest is left for the
+    /// spread of its rate.
+    static let windowFitShare = 0.9
+
+    /// Whether the session spends: heard from within `idleAfter`, at a rate
+    /// (`lightRate`) above nothing. Only such a session moves to spend a
+    /// remainder or a window's room (`plan`); one gone idle spends nothing
+    /// there, so the room expires all the same.
+    func spends(_ session: Session, now: Date) -> Bool {
+        now.timeIntervalSince(session.lastSeen) <= Self.idleAfter && Self.lightRate(session) > 0
+    }
 
     /// Whether the session's move takes effect soon: a move applies when
     /// its next turn starts, which a long autonomous turn puts off.
@@ -665,8 +683,12 @@ struct SessionPacer {
     /// spread over the windows by their token room. A session goes only
     /// where the whole cache write of its arrival (`arrivalCost`) fits in
     /// the room and the use it then makes of the room, at most the rest of
-    /// it, is worth `remainderWorth` times that write; its model's own
-    /// allowance there must hold both. Sessions on a target stay. Each
+    /// it, is worth `remainderWorth` times that write, and where that write
+    /// and its rate until the reset, or for `newSessionRunway` when the
+    /// reset is later, fit `windowFitShare` of the room, so a window's last
+    /// few percent take a session sized to them and a fresh window a heavy
+    /// one it carries for the hour; its model's own allowance there must
+    /// hold both. Sessions on a target stay. Each
     /// placed session is charged to its target's `spent` and `burn` and
     /// taken off its own account's `burn`. Its `WindowUse.until` is when the
     /// sessions placed on the target fill its room, at most the reset.
@@ -702,6 +724,13 @@ struct SessionPacer {
                     let rate = percent(session.tokensPerHour, on: account)
                     let use = min(window.room - cost, rate * hours)
                     guard cost < window.room, use > 0, use >= Self.remainderWorth * cost else { continue }
+                    // It must fit the room for as long as it stays: until
+                    // the reset, or its runway when the reset is later, at
+                    // its expected rate, within `windowFitShare`. A heavy
+                    // session in a window's last few percent spends them in
+                    // minutes and is refused until the reset.
+                    let planned = rate * min(hours, Self.newSessionRunway / 3600)
+                    guard cost + planned <= window.room * Self.windowFitShare else { continue }
                     let probe = Session(id: session.id, account: account.id, tokensPerHour: 0, contextTokens: 0,
                                         lastSeen: now, cacheLifetime: nil, model: session.model)
                     let modelFits = scopedKeys(probe, on: account).allSatisfy { key in
@@ -1050,6 +1079,7 @@ struct SessionPacer {
                     remainders.sessions.contains(session.id) && session.account != account.id
                         && !remainders.accounts.contains(session.account) && plan.moves[session.id] == nil
                         && !unmoved.contains(session.id) && now.timeIntervalSince(session.lastSeen) > Self.betweenTurns
+                        && spends(session, now: now)
                 }.sorted { Self.lightRate($0) == Self.lightRate($1) ? $0.id < $1.id : Self.lightRate($0) < Self.lightRate($1) }
                 var chosen = 0
                 for session in candidates {
@@ -1108,6 +1138,7 @@ struct SessionPacer {
                     remainders.sessions.contains(session.id) && plan.moves[session.id] == nil && !unmoved.contains(session.id)
                         && !remainders.accounts.contains(session.account)
                         && now.timeIntervalSince(session.lastSeen) > Self.betweenTurns && movable(session, now: now)
+                        && spends(session, now: now)
                 }.map {
                     WindowCandidate(id: $0.id, account: $0.account, tokensPerHour: Self.lightRate($0),
                                     contextTokens: $0.contextTokens, cacheLifetime: $0.cacheLifetime, model: $0.model)
