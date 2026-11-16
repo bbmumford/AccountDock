@@ -115,10 +115,11 @@ extension AppState {
                                  arrivalTokens: arrival, from: now, kind: .placed)
     }
 
-    /// Records, once while it says the same, which sessions each lane's
-    /// reset takes and which wait for their own accounts
-    /// (`HeldSessionPlan.summary`), with how long each lane's fresh window
-    /// lasts the sessions planned onto it.
+    /// Records which sessions each lane's reset takes and which wait for
+    /// their own accounts (`HeldSessionPlan.summary`), with how long each
+    /// lane's fresh window lasts the sessions planned onto it; again only
+    /// when the plan itself changes, not when the sessions' rates move that
+    /// estimate.
     private func noteHeldPlanSummary(_ provider: AIProviderType, plans: [String: HeldSessionPlan], waiting: [String],
                                      base: [UUID: Double], ledger: LaneLedger, accounts: [CapacityOutlook.Account],
                                      pacer: SessionPacer, now: Date) {
@@ -139,8 +140,10 @@ extension AppState {
             heldPlanSummaryNoted[provider] = nil
             return
         }
-        guard heldPlanSummaryNoted[provider] != event else { return }
-        heldPlanSummaryNoted[provider] = event
+        let plan = waits.map { "\($0.name)>\($0.plan.lane.uuidString)@\(Int($0.plan.at.timeIntervalSince1970 / 60))" }
+            .sorted().joined(separator: "|") + "|unplanned:\(unplanned)"
+        guard heldPlanSummaryNoted[provider] != plan else { return }
+        heldPlanSummaryNoted[provider] = plan
         failoverEvents.record(provider, event)
     }
 
