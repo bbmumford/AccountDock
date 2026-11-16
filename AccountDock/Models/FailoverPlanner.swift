@@ -185,6 +185,17 @@ struct FailoverPlanner {
         /// Forecast long-window percent per hour; when present, balancing
         /// compares strategies by simulating the coming week.
         var demand: (@Sendable (Date) -> Double)?
+        /// Weighted tokens per hour a balance switch's destination must
+        /// carry for the shared sign-in at least (`carries`' `floor`): the
+        /// rate of the sessions on it, and no less than a typical session's,
+        /// since the sign-in also starts every session launched outside a
+        /// slot. The active account's learned rate reads near nothing once
+        /// it has been held at its limit, when exactly that work waits to
+        /// resume, and a destination judged by it takes the sign-in with a
+        /// sliver of its window left. Set by `AppState` where a balance
+        /// switch or its projection is planned; 0 judges by the learned
+        /// rate alone.
+        var balanceMovingTokensPerHour: Double = 0
 
         init(
             policy: ProviderFailoverPolicy,
@@ -670,13 +681,14 @@ struct FailoverPlanner {
         if let lastSwitch, now.timeIntervalSince(lastSwitch) < settings.minimumDwell {
             return .stay(.dwell)
         }
+        let floor = settings.balanceMovingTokensPerHour
         let candidates = others.filter {
-            let burn = expectedBurn(movingFrom: current, to: $0)
+            let burn = expectedBurn(movingFrom: current, to: $0, floor: floor)
             // A balance switch moves the whole shared group, as failover
             // does: a small remainder is left to the slot sessions and new
             // sessions the pool sizes to it.
             return tier($0, now: now, expectedSessionBurn: burn.session, expectedWeeklyBurn: burn.weekly) == .belowTrigger
-                && carries($0, from: current, at: now)
+                && carries($0, from: current, at: now, floor: floor)
         }.sorted { latestStart($0, now: now) < latestStart($1, now: now) }
         guard let best = candidates.first else { return .stay(.healthy) }
         let advantage = latestStart(current, now: now).timeIntervalSince(latestStart(best, now: now)) / 3600
@@ -798,18 +810,21 @@ struct FailoverPlanner {
     /// (`QuotaAccountState.stayingSessionBurnPerHour`), beside the
     /// destination's own slot sessions, which stay. `tier` takes the larger
     /// of this and the destination's measured burn, which already holds its
-    /// slot sessions once its readings show them.
+    /// slot sessions once its readings show them. `floor`, in weighted
+    /// tokens per hour, is the least the moving work counts as
+    /// (`Settings.balanceMovingTokensPerHour`), at the destination's cost.
     func expectedBurn(movingFrom current: QuotaAccountState,
-                      to destination: QuotaAccountState) -> (session: Double, weekly: Double) {
+                      to destination: QuotaAccountState, floor: Double = 0) -> (session: Double, weekly: Double) {
         let k = current.sessionPerWeekly ?? Self.defaultSessionPerWeekly
         let destinationK = destination.sessionPerWeekly ?? Self.defaultSessionPerWeekly
+        let least = Allowance.percent(millions: max(0, floor) / 1_000_000, percentPerMillion: destination.percentPerMillion)
         // The moving work is `current`'s percent; the destination counts
         // the same tokens at its own size.
-        let session = converted(max(0, expectedSessionBurn(of: current) - current.stayingSessionBurnPerHour),
-                                from: current, to: destination)
+        let session = max(least, converted(max(0, expectedSessionBurn(of: current) - current.stayingSessionBurnPerHour),
+                                           from: current, to: destination))
             + destination.stayingSessionBurnPerHour
-        let weekly = converted(max(0, current.weeklyBurnPerHour - current.stayingSessionBurnPerHour / k) * k,
-                               from: current, to: destination) / destinationK
+        let weekly = max(least, converted(max(0, current.weeklyBurnPerHour - current.stayingSessionBurnPerHour / k) * k,
+                                          from: current, to: destination)) / destinationK
             + destination.stayingSessionBurnPerHour / destinationK
         return (session, weekly)
     }
@@ -923,14 +938,15 @@ struct FailoverPlanner {
     /// from the long window, by the plan's ratio, for an account without a
     /// session window, whose session rate is never learned. `current`'s
     /// rate and deviation are converted to the destination's size
-    /// (`converted`).
-    func carriedBurn(from current: QuotaAccountState, to destination: QuotaAccountState) -> (session: Double, weekly: Double) {
+    /// (`converted`). `floor` as in `expectedBurn`.
+    func carriedBurn(from current: QuotaAccountState, to destination: QuotaAccountState,
+                     floor: Double = 0) -> (session: Double, weekly: Double) {
         func sessionDeviation(_ state: QuotaAccountState) -> Double {
             state.usage?.fiveHour != nil
                 ? state.sessionBurnStdDev
                 : state.weeklyBurnStdDev * (state.sessionPerWeekly ?? Self.defaultSessionPerWeekly)
         }
-        let moving = expectedBurn(movingFrom: current, to: destination)
+        let moving = expectedBurn(movingFrom: current, to: destination, floor: floor)
         let k = current.sessionPerWeekly ?? Self.defaultSessionPerWeekly
         let destinationK = destination.sessionPerWeekly ?? Self.defaultSessionPerWeekly
         let weeklyDeviation = converted(current.weeklyBurnStdDev * k, from: current, to: destination) / destinationK
@@ -952,9 +968,13 @@ struct FailoverPlanner {
     /// `plan`, projects the account the switch will pick. `tier`'s dwell
     /// margin, in long-window percent over the dwell, passes an account a
     /// few percent from its limit, which the moving work spends in minutes.
-    func carries(_ destination: QuotaAccountState, from current: QuotaAccountState, at date: Date) -> Bool {
+    /// `floor`, in weighted tokens per hour, is the least the moving work
+    /// counts as (`Settings.balanceMovingTokensPerHour`); a balance switch
+    /// and the accounts `AppState.remainderSpending` offers pass it.
+    func carries(_ destination: QuotaAccountState, from current: QuotaAccountState, at date: Date,
+                 floor: Double = 0) -> Bool {
         guard let projection = projection(destination, now: date), let weekly = projection.weekly else { return false }
-        let burn = carriedBurn(from: current, to: destination)
+        let burn = carriedBurn(from: current, to: destination, floor: floor)
         // A window that resets within the horizon needs room only until
         // then, and one no account could carry the rate for that long only
         // for as long as `burstCarryShare` of an unused window would. The

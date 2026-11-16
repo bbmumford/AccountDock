@@ -601,6 +601,17 @@ extension AppState {
         return settings
     }
 
+    /// `plannerSettings` for planning a balance switch as of `now`, with
+    /// the least rate its destination must carry for the shared sign-in
+    /// (`balanceMovingRate`). Read by `plan(provider:…)`, `nextActiveSwitch`
+    /// and `remainderSpending`, so the switch made, the switch projected
+    /// and the accounts too small for it agree.
+    func plannerSettings(_ provider: AIProviderType, canVerify: Bool = true, forBalancing now: Date) -> FailoverPlanner.Settings {
+        var settings = plannerSettings(provider, canVerify: canVerify)
+        settings.balanceMovingTokensPerHour = balanceMovingRate(provider, now: now)
+        return settings
+    }
+
     func quotaState(for account: Account, now: Date = Date(), model: String? = nil,
                     wholeAllowance: Bool = false) -> QuotaAccountState {
         let trend = quotaTrends[account.id] ?? QuotaTrend()
@@ -885,7 +896,7 @@ extension AppState {
         canVerify: Bool
     ) -> (FailoverPlan, FailoverPlanner) {
         let now = Date()
-        let planner = FailoverPlanner(settings: plannerSettings(provider, canVerify: canVerify))
+        let planner = FailoverPlanner(settings: plannerSettings(provider, canVerify: canVerify, forBalancing: now))
         let recovered = exhaustedFailoverAccounts[provider, default: []]
         // Each account's slot sessions stay on it when the active account
         // changes; the plan charges a destination for them beside the work

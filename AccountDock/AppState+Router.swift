@@ -826,7 +826,8 @@ extension AppState {
     /// otherwise expire, with intelligent balancing on: the pool's accounts
     /// (`pooled`) other than the active one that cannot carry the work a
     /// switch would move there (`FailoverPlanner.carries`, judged as
-    /// `nextActiveSwitch` judges it, slot sessions staying where they are),
+    /// `nextActiveSwitch` judges it, slot sessions staying where they are,
+    /// and at the least rate a balance switch counts that work at),
     /// those a session moved to for a remainder or a window within
     /// `balanceMoveInterval` among them as `resting`; and the `slotted`
     /// sessions not mid-turn. A balance switch moves the whole shared group,
@@ -840,12 +841,13 @@ extension AppState {
         let policy = failoverConfig.policy(for: provider)
         guard policy.intelligentBalancingEnabled, !slotted.isEmpty,
               let active = activeAccount(for: provider)?.id else { return nil }
-        let planner = FailoverPlanner(settings: plannerSettings(provider))
+        let planner = FailoverPlanner(settings: plannerSettings(provider, forBalancing: now))
         let ladder = accounts.filter { $0.provider == provider && ($0.id == active || pooled.contains($0.id)) }
         let states = withStayingBurns(ladder.map { quotaState(for: $0, now: now) }, provider: provider, now: now)
         guard let current = states.first(where: { $0.id == active }) else { return nil }
+        let floor = planner.settings.balanceMovingTokensPerHour
         let small = Set(states.filter { state in
-            state.id != active && !planner.carries(state, from: current, at: now)
+            state.id != active && !planner.carries(state, from: current, at: now, floor: floor)
         }.map(\.id))
         guard !small.isEmpty else { return nil }
         let resting = small.filter { id in

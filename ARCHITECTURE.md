@@ -758,7 +758,15 @@ the pace, so the latest start is the reset itself, and the event's figure
 destination resets. A balance switch moves the whole shared group, so its
 destination must carry the moving work as any switch destination must
 (`FailoverPlanner.carries`); a remainder too small for that is spent by slot
-sessions and new sessions the pool sizes to it, never by the group.
+sessions and new sessions the pool sizes to it, never by the group. The
+moving work counts at no less than the shared group's own rate and a
+typical session's (`Settings.balanceMovingTokensPerHour`, from
+`AppState.balanceMovingRate`), since the sign-in also starts every session
+launched outside a slot, and an active account held at its limit learns a
+rate near nothing just when that work waits to resume: a Max 5x window with
+13% left for 39 minutes takes no balance switch from a Max 20x window that
+has just reset. `remainderSpending` judges the accounts too small for the
+group at the same rate.
 
 With pacing on, `SessionPacer.plan` spends such a remainder
 (`SessionPacer.RemainderSpending`, built by `AppState.remainderSpending`):
