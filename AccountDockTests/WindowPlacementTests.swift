@@ -219,6 +219,48 @@ final class WindowPlacementTests: XCTestCase {
         XCTAssertTrue(event.hasSuffix("It moves sooner only if hexorda refuses it or reaches its limit."))
     }
 
+    // MARK: - New sessions on small windows
+
+    @MainActor
+    func testASmallWindowWithRoomThatWouldExpireTakesAShareSizedToItsRoom() {
+        // A typical session (29M an hour, 94% of hexorda's window) cannot run
+        // for an hour on either Max 5x account. Hexorda's own rate leaves
+        // its 59% unused at its reset: 18M tokens over 3 hours, a fifth of
+        // a typical session's rate. Bytrix's own session fills its window.
+        let typical = 29_000_000.0
+        var empty = accounts()[0]
+        XCTAssertEqual(AppState.windowShare(empty, typicalRate: typical, now: now), 59 / 3.25 / 3 / 29, accuracy: 0.001)
+        var busy = accounts()[1]
+        busy.burnPerHour = 21.3 * 2.25
+        XCTAssertEqual(AppState.windowShare(busy, typicalRate: typical, now: now), 0, "its own session uses that room")
+        XCTAssertEqual(AppState.windowShare(accounts()[2], typicalRate: typical, now: now), 0, "no session window")
+        empty.utilization = 99
+        XCTAssertEqual(AppState.windowShare(empty, typicalRate: typical, now: now), 0)
+    }
+
+    func testThePacerGivesAnExpiringWindowNewSessionsBesideACarrier() {
+        // Backup carries a typical session for the hour; hexorda does not,
+        // but its window's room is lost at its reset unless used, so it
+        // takes new sessions too, fewer than Backup. Bytrix's own use, which
+        // its readings show, reaches its limit before its reset: none there.
+        var open = accounts()
+        open[0].baseWeight = 1
+        open[1].baseWeight = 1
+        open[1].burnPerHour = 21.3 * 2.25
+        let running = [SessionPacer.Session(id: "b1", account: backup, tokensPerHour: 11_700_000, contextTokens: 300_000,
+                                            lastSeen: now.addingTimeInterval(-60), cacheLifetime: 3600,
+                                            recentTokensPerHour: 11_700_000)]
+        let plan = SessionPacer().plan(accounts: open, sessions: running, now: now)
+        XCTAssertGreaterThan(plan.weights[backup] ?? 0, 0)
+        XCTAssertGreaterThan(plan.weights[hexorda] ?? 0, 0)
+        XCTAssertLessThan(plan.weights[hexorda] ?? 0, plan.weights[backup] ?? 0)
+        XCTAssertEqual(plan.weights[bytrix], 0)
+        // The share is the room's own rate at most.
+        let room = SessionPacer().expiringWindowRate(open[0], burn: 0, now: now)
+        XCTAssertEqual(room, 59 / 3.25 / 3, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(plan.weights[hexorda] ?? 0, room + 0.0001)
+    }
+
     func testARestingWindowStaysAWindowButTakesNoFurtherSession() {
         // Three Max 5x windows offered for spending while the large account
         // runs out before they refill; hexorda took a session within the

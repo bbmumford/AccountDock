@@ -536,6 +536,21 @@ struct SessionPacer {
         }.min() ?? 0
     }
 
+    /// Million weighted tokens per hour, until its reset, of the room the
+    /// account's session window has left at that reset once its own `burn`
+    /// and `spent` have run: room that expires unused, since the window
+    /// then starts again full. 0 without a session window, or with less
+    /// such room than `minimumLeftover`, which no session's start is worth.
+    /// `plan`'s new-session weights and `AppState.buildPool` give an
+    /// account short of the runway a share of new sessions sized to it.
+    func expiringWindowRate(_ account: Account, spent: Double = 0, burn: Double, now: Date) -> Double {
+        guard account.hasSessionWindow else { return 0 }
+        let end = account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
+        let room = spare(account, until: end, spent: spent, burn: burn, shared: nil, now: now)
+        guard room >= Self.minimumLeftover else { return 0 }
+        return millions(room, on: account) / (max(end.timeIntervalSince(now), 60) / 3600)
+    }
+
     /// Whether `carriers`, the accounts that take sessions for the runway,
     /// will together have spent what they hold before the first of the
     /// resets that refills them: each reaches a limit before its binding
@@ -1023,9 +1038,13 @@ struct SessionPacer {
         }
         // A session started now is expected to use `typicalNewSessionRate`.
         // An account that could not carry one more such session for
-        // `newSessionRunway` takes none while another account can: the
-        // session would be refused there, or moved and made to write its
-        // cache again, within the hour. `key` adds the allowance of the
+        // `newSessionRunway` takes none while another account can, unless
+        // its session window would otherwise leave room unused at its reset
+        // (`expiringWindowRate`): that room is lost whatever moves, and the
+        // next session's rate is not known when it starts, so the account
+        // takes a share sized to the room, in tokens per hour, and a light
+        // session can use it. A heavy one that fills it moves on as any
+        // session on a full window does. `key` adds the allowance of the
         // model the session uses.
         let typical = Self.typicalNewSessionRate(active)
         // How long the account carries one more such session before it
@@ -1049,7 +1068,14 @@ struct SessionPacer {
                 $0[$1.id] = min(runway($1, key) ?? Self.newSessionRunway, Self.newSessionRunway)
             }
             let carrying = all.filter { $0.value > 0 && (runways[$0.key] ?? 0) >= Self.newSessionRunway }
-            if !carrying.isEmpty { return all.mapValues { _ in 0 }.merging(carrying) { $1 } }
+            if !carrying.isEmpty {
+                let expiring = accounts.reduce(into: [UUID: Double]()) { result, account in
+                    guard carrying[account.id] == nil, let value = all[account.id], value > 0 else { return }
+                    let room = expiringWindowRate(account, spent: spent[account.id] ?? 0, burn: burn[account.id] ?? 0, now: now)
+                    if room > 0 { result[account.id] = min(value, account.baseWeight * room) }
+                }
+                return all.mapValues { _ in 0 }.merging(carrying) { $1 }.merging(expiring) { $1 }
+            }
             let taking = accounts.filter { $0.baseWeight > 0 }
             let among = taking.isEmpty ? accounts : taking
             let best = among.compactMap { runways[$0.id] }.max() ?? 0

@@ -261,8 +261,10 @@ provider's failover order when it should take work.
   percent: one percent of a Pro week is about a twentieth of one percent of a
   Max 20x week. Each account's cost is learned from its own readings, and a
   new account starts from its plan's size (Pro, Max 5x, Max 20x) until they
-  take over, so a small plan never receives a session that would empty its
-  window within the hour.
+  take over, so a small plan never receives a running session that would
+  empty its window within the hour. New sessions, whose use is not known yet,
+  still start on a small plan whose 5-hour window would otherwise reset with
+  room unused, in proportion to that room.
 - **The shared sign-in.** The sessions on the shared sign-in all move with the
   active account. AccountDock counts them on the active account and, from the
   switch failover expects to make, on the account they will move to, so no

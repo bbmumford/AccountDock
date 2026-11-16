@@ -831,7 +831,20 @@ For new
 sessions, `carriesNewSession` and the pacer's runway rule let such an
 account take one while it can carry a typical session for an hour, and the
 pacer weighs it by the room it has left, a small share beside an account
-with most of its week.
+with most of its week. One that cannot carry a typical session for the hour
+still takes new sessions when its session window would otherwise leave room
+unused at its reset, at its own rate, at least `minimumLeftover` (2%)
+(`SessionPacer.expiringWindowRate`):
+the next session's rate is not known when it starts, and that room is lost
+whatever moves, so a light session may as well use it. `buildPool` keeps
+such an account open (`AppState.windowShare`, the room's tokens per hour
+until the reset over a typical session's rate, at most 1, which is its
+weight when pacing is off), and the pacer gives it a weight sized to that
+room, in tokens per hour, beside the accounts that carry the runway. A
+window its own sessions will fill before its reset gets none while another
+account carries the runway, and with none, the runway rule's fallback
+weighs every account as before. Moving a running session there still
+follows the runway, the window and the stranded rules.
 
 Whether an account has a session window is read from each reading, account by
 account, because a plan can drop it while others keep it (Claude's Ultra plan
@@ -1302,7 +1315,9 @@ the pool weights and which sessions move, each time the pool is rebuilt
   account that could not carry one more session of the running sessions'
   typical rate for that hour beside its own rate
   (`AppState.carriesNewSession`) has weight 0 while another could, a
-  draining one at `drainingPreferred` included. The drain ends when a reading or a refusal shows its limit, when it is
+  draining one at `drainingPreferred` included, unless its session window
+  would otherwise leave room unused at its reset (`AppState.windowShare`,
+  under Balancing above). The drain ends when a reading or a refusal shows its limit, when it is
   active again, or a session window after the switch.
 - A session that starts a turn after its cache has expired is placed again
   like a new session (`RouterState.cacheAwareSessions`), since moving it
