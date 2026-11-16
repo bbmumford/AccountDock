@@ -78,7 +78,14 @@ extension AppState {
         guard rebalanceAvailable(provider), let slots = SessionSlots(provider) else { return RebalancePreview() }
         let (pacerAccounts, destinations) = rebalanceAccounts(provider, now: now)
         let pacer = SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
-        let sessions = slotRebalanceSessions(provider, slots: slots, now: now)
+        // A session waiting on its account for its reset stays there unless
+        // the user asks for the rebalance.
+        let waiting = automatic ? waitingSessions(provider) : [:]
+        let sessions = slotRebalanceSessions(provider, slots: slots, now: now).map { session in
+            var session = session
+            if waiting[session.id] != nil { session.movable = false }
+            return session
+        }
         // The sessions on the shared sign-in are none of these and never
         // move; they count where the active account is and will be.
         let shared = sharedGroup(provider, sessions: pacerSessions(provider, now: now), now: now)?.group
@@ -189,8 +196,9 @@ extension AppState {
             SessionPacer.RebalanceSession(id: slot.path, account: slot.account, tokensPerHour: SessionPacer.defaultSessionRate,
                                           contextTokens: 0, model: nil, movable: true)
         }
+        let waiting = waitingSessions(provider)
         let stranded = (running + unnamed).filter { session in
-            !sessionPins.isPinned(session.id)
+            !sessionPins.isPinned(session.id) && waiting[session.id] == nil
                 && accountCannotServe(session.account, provider: provider, planner: planner, now: now, wholeAllowance: true)
         }
         guard !stranded.isEmpty else { return [:] }

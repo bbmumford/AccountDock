@@ -97,6 +97,9 @@ extension AppState {
         refreshSessions()
         await handleExternalRequests()
         await ingestTranscriptRequests()
+        // Before the slots are served, so no rule moves a session that waits
+        // for its account's reset this cycle.
+        for provider in AgentPauseGate.providers { await holdSessionsForImminentReset(provider) }
         await maintainSessionSlots(processesRead: true)
         await applyModelFallbacks()
         await resumeSessionsLeftWaiting()
@@ -1001,7 +1004,9 @@ extension AppState {
         canVerify: Bool
     ) -> (FailoverPlan, FailoverPlanner) {
         let now = Date()
-        let planner = FailoverPlanner(settings: plannerSettings(provider, canVerify: canVerify, forBalancing: now))
+        var settings = plannerSettings(provider, canVerify: canVerify, forBalancing: now)
+        settings.sharedSignInWaitsUntil = sharedSignInWaitsUntil(provider, active: current.id)
+        let planner = FailoverPlanner(settings: settings)
         let recovered = exhaustedFailoverAccounts[provider, default: []]
         // Each account's slot sessions stay on it when the active account
         // changes; the plan charges a destination for them beside the work
@@ -1063,9 +1068,6 @@ extension AppState {
             guard account.id != current.id else { return false }
             return servingVerdict(account, planner: planner, now: now) == .canServe
         }
-        if pooled {
-            await holdSessionsForImminentReset(provider, policy: policy, ladder: ladder, planner: planner)
-        }
         let fallbackAvailable = poolHasRoom || policy.enabled
             && planner.hasFallback(
                 current: currentState,
@@ -1100,6 +1102,9 @@ extension AppState {
                 updateStatus(provider, "Using \(messageName(current)) up to its limit; no other account is below its failover threshold.", settles: true)
             } else if reason == .holdingForImminentReset {
                 updateStatus(provider, "Holding \(messageName(current)); its limiting window resets soon.", settles: true)
+            } else if reason == .waitingForResetWithCache {
+                // `holdSessionsForImminentReset` holds the sessions there.
+                updateStatus(provider, "Keeping \(messageName(current)) active: the sessions on the shared sign-in wait for its reset, which comes before their prompt caches expire.", settles: true)
             }
             // On extra usage the account keeps serving past its limit, so its
             // sessions are not paused for reaching it.
@@ -1507,9 +1512,11 @@ extension AppState {
                                    newSessionBurn: typical / 1_000_000 * accountRatio(account.id), now: now)
         }.map(\.id))
         var placements: [String: UUID] = [:]
+        // A session waiting on its account for its reset stays there, held.
+        let waiting = waitingSessions(provider)
         if !destinations.isEmpty, let slots = SessionSlots(provider) {
             let running = slotRebalanceSessions(provider, slots: slots, now: now)
-            let leaving = running.filter { $0.movable && atOrNearLimit($0.account) }
+            let leaving = running.filter { $0.movable && atOrNearLimit($0.account) && waiting[$0.id] == nil }
             let ids = Set(leaving.map(\.id))
             let pacerAccounts = ladder.map { account in
                 pacerAccount(account.id, state: quotaState(for: account, now: now, wholeAllowance: true), weight: 1,
@@ -1524,6 +1531,9 @@ extension AppState {
         return Self.pauseScope(sessions: sessions, active: current.id, atOrNearLimit: atOrNearLimit,
                                anyRoom: !roomy.isEmpty, destination: { placements[$0] },
                                pinnedHeld: { session in
+            if pinned[session] == nil, let account = waiting[session] {
+                return !self.servesAgain(account, planner: planner, now: now)
+            }
             guard let account = pinned[session] else { return nil }
             if self.pinnedHoldsPlayed[session] == account { return false }
             let hold = pinnedLimits[account] ?? self.pinnedHold(account, planner: planner, now: now)
@@ -1623,11 +1633,12 @@ extension AppState {
     /// limit that still lists them as chosen, so `rescopeLimitPause` judges
     /// the pinned ones by their account and `endPause` leaves the chosen
     /// ones held. Any other pause lists them too.
-    nonisolated static func pinnedHoldPause(existing: AgentPauseGate.PauseFile?, adding: [String],
-                                            at now: Date) -> AgentPauseGate.PauseFile? {
+    nonisolated static func pinnedHoldPause(existing: AgentPauseGate.PauseFile?, adding: [String], at now: Date,
+                                            reason: String = "a pinned session's account reached its limit")
+        -> AgentPauseGate.PauseFile? {
         guard !adding.isEmpty else { return nil }
         guard var pause = existing else {
-            return AgentPauseGate.PauseFile(sessions: adding, reason: "a pinned session's account reached its limit",
+            return AgentPauseGate.PauseFile(sessions: adding, reason: reason,
                                             pausedAt: now, resumeAt: nil, holdsNewTurns: false,
                                             holdsListedNewTurns: true)
         }
@@ -1637,7 +1648,7 @@ extension AppState {
         pause.sessions = sessions
         if pause.manual == true, pause.account == nil {
             pause.manual = nil
-            pause.reason = "a pinned session's account reached its limit"
+            pause.reason = reason
             pause.holdsListedNewTurns = true
         }
         return pause
@@ -1751,7 +1762,7 @@ extension AppState {
         var available = planner.headroom(state, projection) - FailoverPlanner.minimumUsableHeadroom - 1
         // A session pinned to another account spends that account, not the
         // active one's headroom; one the user paused waits for the user.
-        let pinned = pinnedSessionAccounts(provider)
+        let pinned = pinnedSessionAccounts(provider).merging(waitingSessions(provider)) { pin, _ in pin }
         let waiting = Self.automaticallyReleasable(AgentPauseGate.waitingSessions(provider), pause: pause)
             .filter { pinned[$0].map { $0 == current.id } ?? true }
         let order = pause.sessions.filter(waiting.contains) + waiting.subtracting(pause.sessions).sorted()
@@ -1821,7 +1832,8 @@ extension AppState {
         // (`rescopeLimitPause`), never where the forecast would place it.
         let releasable = Self.automaticallyReleasable(allHeld, pause: pause)
         let pinned = pinnedSessionAccounts(provider)
-        let held = releasable.filter { pinned[$0] == nil }
+        let waits = waitingSessions(provider)
+        let held = releasable.filter { pinned[$0] == nil && waits[$0] == nil }
         guard !held.isEmpty else { return }
         let now = Date()
         // An account hold places its sessions back on their own account
@@ -1937,71 +1949,7 @@ extension AppState {
 
     /// How long after its reset an account hold keeps its sessions for
     /// their own account.
-    static let accountHoldGrace: TimeInterval = 10 * 60
-
-    /// With sessions served from several accounts, an account about to reach
-    /// its limit whose limiting window resets before its working sessions'
-    /// prompt caches expire holds those sessions at their next tool call
-    /// until the reset, rather than letting the router move them onto an
-    /// account that writes their whole context again. Only sessions with a
-    /// context of `heldCacheMinimumContext` tokens or more are held; a
-    /// reset within the router's own hold (`RouterLogic.maximumHold`) is left
-    /// to the router. The pause names the account, and its sessions continue
-    /// on it once it reset.
-    func holdSessionsForImminentReset(
-        _ provider: AIProviderType,
-        policy: ProviderFailoverPolicy,
-        ladder: [Account],
-        planner: FailoverPlanner
-    ) async {
-        let now = Date()
-        if let pause = AgentPauseGate.read(provider) {
-            guard let id = pause.account else { return }
-            if resumesAsCapacityAllows(provider) {
-                await admitPausedSessions(provider, planner: planner)
-            } else if let account = accounts.first(where: { $0.id == id }) {
-                let state = quotaState(for: account, now: now)
-                let reset = (pause.resumeAt ?? now) <= now
-                let usable = planner.isFresh(state, now: now)
-                    && planner.servingVerdict(state, now: now, lead: Self.suspensionLead) == .canServe
-                if reset && usable || (pause.resumeAt ?? now).addingTimeInterval(Self.accountHoldGrace) <= now {
-                    let resumed = await releasePausedAgents(provider)
-                    failoverEvents.record(provider, "\(messageName(account)) reset; \(resumed) held session(s) continue on it.")
-                }
-            }
-            return
-        }
-        guard policy.paceSessions, pausingProviders.contains(provider),
-              pauseOverrideUntil[provider].map({ $0 <= now }) ?? true else { return }
-        let working = Set(AgentPauseGate.turningSessions(provider))
-        for account in ladder {
-            let state = quotaState(for: account, now: now)
-            guard planner.servingVerdict(state, now: now, lead: Self.suspensionLead).atOrNearLimit else { continue }
-            let paced = pacerAccount(account.id, state: state, weight: 1, planner: planner, now: now)
-            let pacer = SessionPacer()
-            let reset = pacer.outlook(paced, burn: max(paced.burnPerHour, 1), now: now).windowEndsAt
-            guard reset.timeIntervalSince(now) > RouterLogic.maximumHold,
-                  accountHoldResets[provider].map({ abs($0.timeIntervalSince(reset)) > 120 }) ?? true else { continue }
-            let sessions = sessionRates.entries.filter { id, entry in
-                working.contains(id) && entry.account == account.id
-                    && entry.contextTokens >= Self.heldCacheMinimumContext
-                    && reset.addingTimeInterval(60) <= entry.lastSeen.addingTimeInterval(
-                        entry.cacheLifetime ?? SessionPacer.defaultCacheLifetime)
-            }.keys.sorted()
-            guard !sessions.isEmpty else { continue }
-            accountHoldResets[provider] = reset
-            let name = messageName(account)
-            AgentPauseGate.write(
-                .init(sessions: sessions, reason: "\(name) resets before their prompt caches expire", pausedAt: now,
-                      resumeAt: reset, holdsNewTurns: false, account: account.id),
-                for: provider
-            )
-            refreshPauseStatus(provider)
-            let until = UsageFormat.duration(reset.timeIntervalSince(now))
-            failoverEvents.record(provider, "\(name) is at its limit and resets in \(until), before the prompt caches of its \(sessions.count) working session(s) expire: they wait at their next tool call and continue on it after the reset, instead of writing their context again on another account.")
-            return
-        }
-    }
+    nonisolated static let accountHoldGrace: TimeInterval = 10 * 60
 
     /// Whether `account` can take work now, with `suspensionLead` as the
     /// lead (`FailoverPlanner.servingVerdict`).

@@ -520,6 +520,8 @@ extension AppState {
         let placements = members.isEmpty ? [:]
             : strandedPlacements(provider, slots: slots, members: members, unrecorded: unrecorded, now: now)
         maintainPins(provider, sessionsBySlot: sessionsByDirectory.mapValues(\.sessionID), now: now)
+        // Sessions waiting on their account for its reset keep it.
+        let waiting = waitingSessions(provider)
         var credentials: [UUID: SlotCredential] = [:]
         func credential(_ id: UUID) async -> SlotCredential? {
             if let known = credentials[id] { return known }
@@ -597,7 +599,7 @@ extension AppState {
                                          requested: session.flatMap { requestedSlotMoves.removeValue(forKey: $0.sessionID) },
                                          balance: balance, cannotServe: cannotServe, modelSpent: modelSpent,
                                          byWeight: byWeight, placed: session.map { placements[$0.sessionID] } ?? placements[path],
-                                         fallback: fallback)
+                                         fallback: fallback, waitsOn: session.flatMap { waiting[$0.sessionID] })
             let target = choice.target
             let balanced = choice.balanced
             let requested = choice.requested
@@ -796,14 +798,17 @@ extension AppState {
     /// one a balancing move (`balance`, already checked by the caller to be
     /// allowed). A pinned session (`pinned`) keeps its pinned account
     /// whatever else would apply, and a request for it is dropped: only
-    /// unpinning frees it.
+    /// unpinning frees it. A session that waits on its account
+    /// (`waitsOn`, from `sessionWaits`) keeps that account although it
+    /// cannot serve it now; only a requested move takes it elsewhere.
     nonisolated static func slotChoice(current: UUID?, pinned: UUID?, requested: UUID?, balance: UUID?,
                                        cannotServe: (UUID) -> Bool, modelSpent: Bool, byWeight: [UUID],
-                                       placed: UUID? = nil, fallback: UUID?) -> SlotChoice {
+                                       placed: UUID? = nil, fallback: UUID?, waitsOn: UUID? = nil) -> SlotChoice {
         if let pinned { return SlotChoice(target: pinned, keptPinned: cannotServe(pinned)) }
         let target = current.flatMap { cannotServe($0) ? nil : $0 }
             ?? (modelSpent ? byWeight.first { !cannotServe($0) } : placed.flatMap { cannotServe($0) ? nil : $0 } ?? fallback)
         if let requested { return SlotChoice(target: requested, requested: true) }
+        if let waitsOn { return SlotChoice(target: waitsOn) }
         if let balance, balance != target { return SlotChoice(target: balance, balanced: true) }
         return SlotChoice(target: target)
     }

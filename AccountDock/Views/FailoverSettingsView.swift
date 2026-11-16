@@ -114,6 +114,11 @@ struct FailoverSettingsView: View {
                     .padding(.leading, 20)
                     .help("Paused sessions continue a few at a time as accounts reset, each on an account where its forecast use fits before that account's window resets, instead of all at once on the first account that resets. A session's forecast is its average use in the hour before it paused, so one doing most of the work goes first and small ones fill what is left. A resumed session is paused again if its account nears its limit anyway.")
             }
+            if policy.suspendAgentsWhenExhausted, provider.capabilities.pauseGate != nil {
+                Toggle("Wait on the account for a reset that comes before the session's cache expires", isOn: binding(provider, \.waitForResetWithinCache))
+                    .padding(.leading, 20)
+                    .help("A session whose account reaches its limit, refused or about to be, stays on that account and waits at its next tool call when the account resets before the session's prompt cache expires (an hour after its last request, or its own cache lifetime), and continues there at the reset with its cache, instead of writing its whole context into another account's cache. The sessions on the shared sign-in wait together on the active account, and failover makes no switch meanwhile. A later reset moves the session as usual.")
+            }
             // Pausing, playing, pinning and moving sessions by hand happen
             // on the main window's Sessions tab.
             if provider.capabilities.pauseGate != nil || provider.capabilities.sessionIsolation != nil {

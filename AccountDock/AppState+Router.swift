@@ -716,7 +716,9 @@ extension AppState {
         let shared = movesSessions ? nil : sharedGroup(provider, sessions: sessions, now: now)
         if let shared { sessions.removeAll { shared.members.contains($0.id) } }
         noteSharedGroup(shared?.group, provider: provider)
-        let pinned = Set(sessionPins.pinned(provider).keys)
+        // Pinned sessions, and those waiting on their account for its reset,
+        // stay where they are.
+        let pinned = Set(sessionPins.pinned(provider).keys).union(waitingSessions(provider).keys)
         let onDraining = Set(sessions.filter { draining.contains($0.account) }.map(\.id))
         // Without the router only sessions in one-session slots can move.
         let movable = movesSessions ? nil : Set((liveSessions[provider] ?? []).compactMap { session -> String? in

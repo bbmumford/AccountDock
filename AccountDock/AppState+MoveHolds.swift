@@ -5,7 +5,9 @@ import Foundation
 /// the session stays there for that cache's lifetime. Until then no
 /// automatic rule moves it again (the pacer's shedding, remainder and window
 /// rules, and the automatic rebalance), unless its account refuses it or is
-/// at its limit, which the stranded placement answers whatever the hold. A
+/// at its limit, which the stranded placement answers whatever the hold,
+/// except when that account resets before the session's cache expires: it
+/// then waits there (`holdSessionsForImminentReset`). A
 /// move the user asks for, by hand or with **Rebalance sessions now**, is
 /// never held.
 extension AppState {
@@ -64,6 +66,6 @@ extension AppState {
         "Kept \(session) on \(account) although \(rule) would move it to \(destination): it moved there at "
             + "\(UsageFormat.clock(movedAt, now: now)), and moving it again before \(UsageFormat.clock(until, now: now)) "
             + "would write its cache a second time before the first has paid off. It moves sooner only if \(account) "
-            + "refuses it or reaches its limit."
+            + "refuses it or reaches its limit with its reset later than its cache lasts."
     }
 }

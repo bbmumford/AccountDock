@@ -1392,17 +1392,41 @@ the pool weights and which sessions move, each time the pool is rebuilt
   event-stream head goes out at once, a comment follows every 14 seconds,
   and the request goes to the same account again after the reset. Errors
   after that head are written as `event: error`.
-- An account at its limit, or within `suspensionLead` of it, whose limiting
-  window resets more than five minutes away but at least a minute before the
-  prompt caches of its working sessions expire, holds those sessions
-  (`AppState.holdSessionsForImminentReset`) instead of letting the router
-  move them onto an account that writes their whole context again. Only
-  sessions with at least `heldCacheMinimumContext` tokens of context are
-  held. The pause file names the account (`PauseFile.account`) and holds
-  them at their next tool call, not their new turns; they continue on that
-  account once it has reset, through `admitPausedSessions` restricted to it,
-  or wherever capacity is ten minutes after the reset if no reading shows
-  it. One reset holds its account's sessions once.
+- A session whose account is at its limit (refused at it) or within
+  `suspensionLead` of it, and whose account resets at least a minute
+  (`resetHoldMargin`) before the session's prompt cache expires (its last
+  request plus its cache lifetime, an hour when unknown), **waits** on that
+  account and continues there with its cache
+  (`AppState.holdSessionsForImminentReset`, `cacheOutlastsReset`), with the
+  policy's `waitForResetWithinCache` (on by default) and pausing at the
+  limit, since the gate is what holds it. It runs every quota cycle before
+  the slots are served, for every gated provider: a slot session waits on its
+  slot's account, a session the router serves from its pool on the account
+  serving it (a reset within `RouterLogic.maximumHold` left to the router),
+  and the sessions on the shared sign-in on the active account, all of them
+  or none (`sharedSignInWaits`: those whose caches outlast the reset hold at
+  least half the group's context), while failover's plan stays
+  (`FailoverPlanner.Settings.sharedSignInWaitsUntil`,
+  `.stay(.waitingForResetWithCache)`). The reset is
+  `FailoverPlanner.heldAvailableAt`, which after a refusal takes the fuller
+  window's. Each wait (`AppState.SessionWait`, in `sessionWaits`) is one more
+  session a pause at a limit lists: it joins the pause in effect or a pause
+  listing it (`pinnedHoldPause`), at its next tool call and new turn, and
+  `limitPauseScope` keeps it held, placing it nowhere, until its account
+  serves again (`servesAgain`: a fresh reading with room, no refusal since),
+  or `accountHoldGrace` after the reset with no reading showing it.
+  Meanwhile `serveSessionSlots` keeps its slot there (`slotChoice`'s
+  `waitsOn`), `paced` and the automatic rebalance leave it, the stranded
+  placement skips it, `admitPausedSessions` lets it go only where it is, and
+  steps within the active account's headroom go to no session waiting on
+  another account. Only sessions with at least `heldCacheMinimumContext`
+  tokens of context wait: a smaller one rewrites its context elsewhere for
+  less than its idle wait costs. A session the user plays goes on, and its
+  wait no longer holds it (`SessionWait.played`). The event reads "Holding
+  session X on hexorda until its reset at 3:09 pm: sooner than its cache
+  expires, so it keeps its cache." A pause file that names one account
+  (`PauseFile.account`), kept from before sessions waited one by one, still
+  ends at that account's reset.
 - New sessions go to accounts by unused rate, the pool weight times the
   rate the account can still add without reaching its limit; with none
   left anywhere, by the share of the time to its reset each account lasts

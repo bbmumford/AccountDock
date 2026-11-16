@@ -473,9 +473,12 @@ final class AppState: ObservableObject {
     /// and `holdPinnedSessionsAtLimit` leave each running until the account
     /// has room again or the session is no longer pinned to it.
     var pinnedHoldsPlayed: [String: UUID] = [:]
-    /// The reset each provider's last account hold waited for, so one reset
-    /// holds its account's sessions once.
-    var accountHoldResets: [AIProviderType: Date] = [:]
+    /// Sessions kept on the account they run on and held there by the pause
+    /// gate until it serves them again, by provider and session
+    /// (`SessionWait`). Written by `holdSessionsForImminentReset`; read by
+    /// `serveSessionSlots`, the pacer, the rebalance, `limitPauseScope` and
+    /// failover's plan, which all leave such a session where it is.
+    var sessionWaits: [AIProviderType: [String: SessionWait]] = [:]
 
     struct SessionAdmission: Equatable {
         let session: String

@@ -100,6 +100,10 @@ enum FailoverPlan: Equatable {
         /// active account keeps serving until a window actually reaches 100%.
         case drainingToLimit
         case holdingForImminentReset
+        /// The active account is at its limit, and the sessions on the
+        /// shared sign-in wait on it for a reset that comes before their
+        /// prompt caches expire (`Settings.sharedSignInWaitsUntil`).
+        case waitingForResetWithCache
         case dwell
         /// Every allowance is exhausted; the account serves on extra usage.
         case usingExtraUsage
@@ -196,6 +200,13 @@ struct FailoverPlanner {
         /// switch or its projection is planned; 0 judges by the learned
         /// rate alone.
         var balanceMovingTokensPerHour: Double = 0
+        /// When the active account's reset is due that the sessions on the
+        /// shared sign-in wait on it for, since it comes before their prompt
+        /// caches expire (`AppState.holdSessionsForImminentReset`); nil
+        /// while they wait for none. A switch would move them and rewrite
+        /// their contexts elsewhere, so `plan` makes no switch at the limit
+        /// or a threshold until `AppState.accountHoldGrace` after it.
+        var sharedSignInWaitsUntil: Date?
 
         init(
             policy: ProviderFailoverPolicy,
@@ -630,6 +641,10 @@ struct FailoverPlanner {
 
         if !atLimit, shouldHoldForImminentReset(current, now: now) {
             return .stay(.holdingForImminentReset)
+        }
+        if current.workloadAvailable, let until = settings.sharedSignInWaitsUntil,
+           until.addingTimeInterval(AppState.accountHoldGrace) > now {
+            return .stay(.waitingForResetWithCache)
         }
 
         let belowTrigger = others.filter { tierOf($0) == .belowTrigger && carries($0, from: current, at: now) }

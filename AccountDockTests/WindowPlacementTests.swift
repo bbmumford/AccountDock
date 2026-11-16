@@ -226,7 +226,7 @@ final class WindowPlacementTests: XCTestCase {
                                            rule: "pacing", movedAt: now.addingTimeInterval(-60), until: now.addingTimeInterval(59 * 60),
                                            now: now)
         XCTAssertTrue(event.hasPrefix("Kept session 1603da04 in ~/Mother on hexorda although pacing would move it to Backup: it moved there at "))
-        XCTAssertTrue(event.hasSuffix("It moves sooner only if hexorda refuses it or reaches its limit."))
+        XCTAssertTrue(event.hasSuffix("It moves sooner only if hexorda refuses it or reaches its limit with its reset later than its cache lasts."))
     }
 
     // MARK: - The events

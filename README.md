@@ -384,12 +384,21 @@ limit gives up are spread over the accounts with room, by how long each then
 lasts.
 
 When the router serves the sessions, a session also stays on its account while
-its prompt cache lasts, and one that reaches the limit with the reset at most
-five minutes away waits for it on its own account and continues with its
-cache. When the reset is further away but still comes before the working
-sessions' caches expire, those sessions wait at their next tool call and
-continue on their account after it resets, instead of writing their whole
-context again elsewhere.
+its prompt cache lasts, and one refused at the limit with the reset at most
+five minutes away is held by the router and continues with its cache.
+
+**Wait on the account for a reset that comes before the session's cache
+expires** (on by default, with **Pause sessions**): a session whose account
+reaches its limit, refused or about to be, stays on that account when the
+account resets before the session's prompt cache expires (an hour after its
+last request, or its own cache lifetime). It waits at its next tool call and
+continues there at the reset with its cache, instead of writing its whole
+context into another account's cache; the event says so ("Holding session X on
+hexorda until its reset at 3:09 pm: sooner than its cache expires, so it keeps
+its cache."). This applies to sessions in slots of their own, sessions the
+router serves, and the sessions on the shared sign-in, which wait together on
+the active account while failover makes no switch. Only a reset later than
+that moves the session, by the usual rules.
 
 While the accounts taking sessions will have spent what they hold before
 their reset anyway, AccountDock also spends smaller plans' 5-hour windows,
@@ -414,7 +423,8 @@ With slots, two more settings apply:
   first account then runs out more than an hour later. A session that has just
   moved stays where it went for its prompt cache's lifetime, at least an hour,
   before pacing or an automatic rebalance moves it again, unless that account
-  refuses it or reaches its limit; the events say when such a move waits.
+  refuses it or reaches its limit with its reset later than its cache lasts;
+  the events say when such a move waits.
 - **Resume sessions left waiting at a limit once their slot has room** (on by
   default). When Claude Code stops at a usage limit and waits for the reset on
   its own, and AccountDock has since moved the session's slot to an account
