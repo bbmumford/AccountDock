@@ -916,8 +916,21 @@ session lists): pin, pause or play, and move.
   a reset, a route, a rescoped limit pause) goes through `AppState.endPause`,
   which keeps the chosen sessions held as the user's own pause
   (`AgentPauseGate.narrowToChosen`); a route's narrowing keeps them too.
-  Capacity checks never end a pause that holds only chosen sessions
-  (`PauseFile.holdsOnlyChosenSessions`). **Resume all** releases them.
+  **Resume all** releases them.
+- **A pause the user took** (`PauseFile.heldByUser`: **Pause all**, which
+  `pauseSessionsNow` writes, or sessions chosen one at a time) ends only by
+  the user's hand: **Resume all** (`resumePausedAgentsNow`) or playing its
+  sessions (`resumeSession`), the paths that call `endPause` with
+  `keepingChosen` false. Every automatic path leaves it: `narrowToChosen`
+  keeps it whole, `capacityEndsPause` is false for it (capacity returning
+  and resets), `releaseSuspendedAgents` returns before it (pausing or
+  monitoring turned off), `AgentPauseGate.narrow` and
+  `holdSessionsTooLargeForRoute` leave "Pause all" alone, `suspendAgents`
+  writes no pause at a limit over it (`limitPauseYields`), and paced resume,
+  steps within headroom and `resumeSessionsLeftWaiting` skip the sessions it
+  holds (`automaticallyReleasable`, `PauseFile.userHeld`). A session held
+  both by the user and by a limit waits for the user. `resumeAsCapacityAllows`
+  governs automatic pauses only.
 - **Playing one session** is `AppState.resumeSession`
   (`AgentPauseGate.playOne`): the session goes on while the pause holds the
   others. When it was the last session held, the pause ends, as **Resume
@@ -1000,7 +1013,7 @@ and the session shows a status message and terminal title while it waits.
 - The same script runs on `UserPromptSubmit`, so any turn that starts waits
   there before its first request, including a subagent reporting back to its
   session or a scheduled agent waking up. The pause file stays until capacity
-  returns.
+  returns, or, for a pause the user took, until the user resumes.
 - A pause the user started is marked `manual`; it releases no steps within
   headroom.
 - A hook may wait only as long as its CLI allows, and Kimi Code allows 600
@@ -1055,17 +1068,18 @@ and the session shows a status message and terminal title while it waits.
   pointer lists the candidates. The waiting session's terminal title names
   the shortcut.
 - No pause ends because the user chose an account that failover excludes:
-  sessions wait for **Resume all** or for capacity on an account in the
-  failover order (the account active when the pause began only after a window
-  reset).
+  sessions of a pause at a limit wait for **Resume all** or for capacity on
+  an account in the failover order (the account active when the pause began
+  only after a window reset); those of a pause the user took wait for the
+  user alone.
 - Every way out of a pause goes through `AppState.endPause`: capacity returned,
   a route target took the requests, or the user resumed; a route target that
   cannot take some sessions narrows the pause to them instead. The gate tells each
   resumed Claude Code agent to check its background work in all three cases.
 - While the account still has some room, one step at a time is released through
   an `.allow` file, within the remaining headroom.
-- The pause ends when a reading confirms capacity, or when the user chooses
-  **Resume all**.
+- A pause at a limit ends when a reading confirms capacity, or when the user
+  chooses **Resume all**; a pause the user took only by the user's hand.
 - Every way a pause ends goes through `AppState.endPause`, which records
   where the sessions continue (the route target and model, or the account
   now active). The gate shows it to the user and the agent as each session

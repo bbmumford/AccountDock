@@ -180,8 +180,11 @@ when the first account would then run out, and makes the moves once you
 confirm. A move is made only when it pays for the prompt cache it rewrites,
 and never mid-turn. **Pause all** holds every session at its next tool call
 and every new turn at its start, for instance before switching to an account
-at its limit; the sessions continue when you resume them or when an account in
-the failover order has capacity.
+at its limit. A pause you take, with **Pause all** or on one session, ends
+only when you resume: **Resume all**, or playing each session. Capacity
+returning, a reset, resuming as capacity allows, a route target or any other
+automatic step never lets those sessions go, and a session both you and a
+limit paused waits for you.
 
 An account card's session list has the same controls. There a pinned session
 refused at its account's limit shows **pinned · refused at limit** with
@@ -416,7 +419,8 @@ a time, each on an account where that use fits before the account's window
 resets. The session doing most of the work goes first and smaller ones fill
 what is left, and as more accounts reset, more sessions continue, spread
 across them. A resumed session is paused again if its account nears its limit
-anyway.
+anyway. This applies to pauses at a limit only: sessions you paused yourself
+wait for you whether it is on or off.
 
 ### The request router
 

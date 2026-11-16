@@ -64,13 +64,17 @@ extension AppState {
     /// each refused at a usage limit (`refusals`, from the transcripts)
     /// within `leftWaitingWindow`, whose slot now serves another account
     /// (`slotAccount`) that can serve it (`canServe`), and not already
-    /// resumed for that refusal (`handled`, by the refusal's time). With
-    /// the account each now runs on.
+    /// resumed for that refusal (`handled`, by the refusal's time). A
+    /// session the user paused (`userHeld`, `PauseFile.userHeld`) waits for
+    /// the user and is never told to go on. With the account each now runs
+    /// on.
     nonisolated static func leftWaitingCandidates(sessions: [String], refusals: [String: SessionRefusal],
                                                   slotAccount: (String) -> UUID?, canServe: (UUID) -> Bool,
-                                                  handled: [String: Date], now: Date) -> [String: UUID] {
+                                                  handled: [String: Date], userHeld: Set<String> = [],
+                                                  now: Date) -> [String: UUID] {
         sessions.reduce(into: [:]) { result, session in
-            guard let refusal = refusals[session], now.timeIntervalSince(refusal.at) < leftWaitingWindow,
+            guard !userHeld.contains(session),
+                  let refusal = refusals[session], now.timeIntervalSince(refusal.at) < leftWaitingWindow,
                   handled[session] != refusal.at, let serving = slotAccount(session),
                   serving != refusal.account, canServe(serving) else { return }
             result[session] = serving
@@ -94,11 +98,14 @@ extension AppState {
                   failoverConfig.policy(for: provider).resumeSessionsLeftWaiting else { continue }
             let planner = FailoverPlanner(settings: plannerSettings(provider))
             let live = liveSessions[provider] ?? []
+            let running = Set(live.map(\.sessionID))
+            let userHeld = running.subtracting(Self.automaticallyReleasable(running, pause: AgentPauseGate.read(provider)))
+                .subtracting(AgentPauseGate.resumedSessions(provider))
             let candidates = Self.leftWaitingCandidates(
                 sessions: live.map(\.sessionID), refusals: sessionRefusals,
                 slotAccount: { self.slotAccount(forSession: $0, provider: provider) },
                 canServe: { !self.accountCannotServe($0, provider: provider, planner: planner, now: now, wholeAllowance: true) },
-                handled: leftWaitingResumed, now: now
+                handled: leftWaitingResumed, userHeld: userHeld, now: now
             )
             for (sessionID, serving) in candidates {
                 guard let session = live.first(where: { $0.sessionID == sessionID }),

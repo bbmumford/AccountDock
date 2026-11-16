@@ -125,6 +125,27 @@ enum AgentPauseGate {
             manual == true && holdsNewTurns != true && account == nil
         }
 
+        /// A pause the user took: "Pause all" (`holdsAllForUser`) or one of
+        /// sessions chosen one at a time (`holdsOnlyChosenSessions`). Only
+        /// the user ends it, with "Resume all" or by playing its sessions;
+        /// nothing automatic does (`narrowToChosen`, `narrow`,
+        /// `AppState.capacityEndsPause`, `AppState.automaticallyReleasable`),
+        /// whatever capacity returns, and whether or not sessions resume as
+        /// capacity allows.
+        var heldByUser: Bool { manual == true && account == nil }
+
+        /// The user's "Pause all": every session waits at its next tool
+        /// call and every new turn at its start until the user resumes.
+        var holdsAllForUser: Bool { heldByUser && holdsNewTurns == true }
+
+        /// The running sessions (`running`) the user's own pause holds: all
+        /// of them under "Pause all", else those chosen one at a time. A
+        /// session in both a pause at a limit and the user's choice is the
+        /// user's. Automatic releases leave these alone.
+        func userHeld(running: Set<String>) -> Set<String> {
+            holdsAllForUser ? Set(sessions).union(running) : Set(chosenListed)
+        }
+
         /// The sessions in `chosen` still listed.
         var chosenListed: [String] {
             (chosen ?? []).filter(sessions.contains)
@@ -190,11 +211,15 @@ enum AgentPauseGate {
     /// Keeps the pause on for `sessions` only, and the sessions the user
     /// paused one at a time (`PauseFile.chosen`), each held at its next tool
     /// call and new turn. Every other waiting session continues
-    /// `continuation`, which the gate tells it.
+    /// `continuation`, which the gate tells it. The user's "Pause all"
+    /// (`PauseFile.holdsAllForUser`) is left as it is, as only the user
+    /// ends it. Returns whether the pause was narrowed.
+    @discardableResult
     static func narrow(
         _ provider: AIProviderType, to sessions: [String], reason: String, continuation: String?,
         directory: URL = pauseDirectory
-    ) {
+    ) -> Bool {
+        if read(provider, directory: directory)?.holdsAllForUser == true { return false }
         // The note is written before the sessions it concerns are let go; a
         // new pause file starts without one, so it follows that write.
         func note() {
@@ -213,6 +238,7 @@ enum AgentPauseGate {
         pause.account = nil
         write(pause, for: provider, directory: directory)
         if existing == nil { note() }
+        return true
     }
 
     static func isActive(_ provider: AIProviderType, directory: URL = pauseDirectory) -> Bool {
@@ -304,14 +330,15 @@ enum AgentPauseGate {
     /// Ends a pause except for the sessions the user paused one at a time
     /// (`PauseFile.chosen`): the pause becomes the user's own, listing only
     /// them, as `pauseOne` writes it, and every other session continues
-    /// `continuation`. A pause holding only such sessions is left as it is.
-    /// Returns whether a pause stays in effect; with none chosen, nothing
-    /// is written and the caller releases the pause. Read by
+    /// `continuation`. A pause the user took (`PauseFile.heldByUser`), "Pause
+    /// all" or one holding only such sessions, is left as it is. Returns
+    /// whether a pause stays in effect; with none chosen, nothing is
+    /// written and the caller releases the pause. Read by
     /// `AppState.endPause`, through which every pause ends.
     static func narrowToChosen(_ provider: AIProviderType, continuation: String?,
                                directory: URL = pauseDirectory) -> Bool {
         guard let pause = read(provider, directory: directory) else { return false }
-        if pause.holdsOnlyChosenSessions { return true }
+        if pause.heldByUser { return true }
         let chosen = pause.chosenListed
         guard !chosen.isEmpty else { return false }
         if let continuation, let continued = continuationURL(provider, directory: directory) {
