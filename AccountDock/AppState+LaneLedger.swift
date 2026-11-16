@@ -7,8 +7,10 @@ extension AppState {
     /// How long a ledger serves the rules run between two quota cycles (a
     /// move by hand, a rebalance, a session resumed from the Sessions page),
     /// which then weigh against the last cycle's charges; past it, a fresh
-    /// one.
-    nonisolated static let laneLedgerLifetime: TimeInterval = 2 * 60
+    /// one. Longer than a cycle that reads accounts and moves sessions
+    /// under load takes, so no rule late in a slow cycle loses the charges
+    /// its earlier rules made.
+    nonisolated static let laneLedgerLifetime: TimeInterval = 5 * 60
 
     /// The provider's ledger for the cycle running at `now`.
     func laneLedger(_ provider: AIProviderType, now: Date) -> LaneLedger {
@@ -158,17 +160,30 @@ extension AppState {
     func ledgerFallback(_ provider: AIProviderType, id: String, from current: UUID?, byWeight: [UUID],
                         cannotServe: (UUID) -> Bool, running: [SessionPacer.RebalanceSession],
                         accounts outlook: [CapacityOutlook.Account], now: Date) -> (lane: UUID, charge: LaneLedger.Charge)? {
-        let pacer = SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
-        let ledger = laneLedger(provider, now: now)
         let session = running.first { $0.id == id }
             ?? SessionPacer.RebalanceSession(id: id, account: current ?? UUID(), tokensPerHour: SessionPacer.defaultSessionRate,
                                              contextTokens: 0, model: nil, movable: true)
-        let present = ledger.excluding(running.filter { $0.id != id })
-        for lane in byWeight where lane != current && !cannotServe(lane) && freshForArrivals(lane, now: now) {
+        return Self.fallbackLane(session, from: current, candidates: byWeight,
+                                 usable: { !cannotServe($0) && self.freshForArrivals($0, now: now) },
+                                 running: running, accounts: outlook, ledger: laneLedger(provider, now: now), now: now,
+                                 pacer: SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor))
+    }
+
+    /// `ledgerFallback`'s rule for `session`, leaving `current`: the first
+    /// of `candidates` other than it that is `usable` (it can serve the
+    /// session and was read fresh) and carries the session for the hour
+    /// beside `running` there and `ledger`'s charges, with the charge that
+    /// move makes; nil when none does.
+    nonisolated static func fallbackLane(_ session: SessionPacer.RebalanceSession, from current: UUID?, candidates: [UUID],
+                                         usable: (UUID) -> Bool, running: [SessionPacer.RebalanceSession],
+                                         accounts outlook: [CapacityOutlook.Account], ledger: LaneLedger, now: Date,
+                                         pacer: SessionPacer) -> (lane: UUID, charge: LaneLedger.Charge)? {
+        let present = ledger.excluding(running.filter { $0.id != session.id })
+        for lane in candidates where lane != current && usable(lane) {
             guard let account = outlook.first(where: { $0.id == lane }) else { continue }
             let charge = placedCharge(session, on: lane, pacer: pacer, now: now)
             let base = present.filter { $0.account == lane }.reduce(0) { $0 + $1.tokensPerHour }
-            guard CapacityOutlook.carries(account, base: base, loads: ledger.loads(on: lane, excluding: id),
+            guard CapacityOutlook.carries(account, base: base, loads: ledger.loads(on: lane, excluding: session.id),
                                           adding: CapacityOutlook.Load(from: now, tokensPerHour: charge.tokensPerHour,
                                                                        arrivalTokens: charge.arrivalTokens),
                                           until: now.addingTimeInterval(SessionPacer.newSessionRunway), now: now,

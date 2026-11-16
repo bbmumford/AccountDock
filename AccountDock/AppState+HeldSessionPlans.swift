@@ -104,6 +104,11 @@ extension AppState {
     /// its arrival's cache write unless it already runs there.
     func placedCharge(_ session: SessionPacer.RebalanceSession, on lane: UUID, pacer: SessionPacer,
                       now: Date) -> LaneLedger.Charge {
+        Self.placedCharge(session, on: lane, pacer: pacer, now: now)
+    }
+
+    nonisolated static func placedCharge(_ session: SessionPacer.RebalanceSession, on lane: UUID, pacer: SessionPacer,
+                                         now: Date) -> LaneLedger.Charge {
         let arrival = lane == session.account ? 0
             : SessionSizing.arrivalTokens(session.contextTokens, cacheLifetime: session.cacheLifetime) * pacer.moveCostFactor
         return LaneLedger.Charge(session: session.id, lane: lane, tokensPerHour: session.tokensPerHour,

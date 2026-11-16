@@ -1674,7 +1674,13 @@ the pool weights and which sessions move, each time the pool is rebuilt
   elsewhere. Any other session on such an account goes to the first account
   by pool weight that can serve it and, by the ledger, carries it for the
   hour (`AppState.ledgerFallback`), which is then charged with it, and
-  stays where it is when none does, held by the pause at the limit.
+  stays where it is when none does, held by the pause at the limit. No
+  automatic rule moves a slot onto an account that cannot serve it
+  (`slotChoice` passes over such a placement, fallback or balancing move,
+  and a pacer move is taken only to an account that can serve), so the
+  sessions an account gives up go one at a time where the ledger has room
+  for each, never all at once to another account at its limit; only the
+  user's own move goes anywhere.
 - An account a threshold switch left with room still on it drains
   (`AppState.drainingAccounts`): above its thresholds it keeps a pool weight
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when

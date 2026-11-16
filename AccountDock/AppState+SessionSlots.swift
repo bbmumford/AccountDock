@@ -628,8 +628,7 @@ extension AppState {
             // which `SessionPacer.plan` already honours.
             let balance = session.flatMap { session -> UUID? in
                 guard let destination = sessionSlotStates[provider]?.sessionMoves[session.sessionID],
-                      pooled.contains(destination), !session.isWorking,
-                      model == nil || !cannotServe(destination),
+                      pooled.contains(destination), !session.isWorking, !cannotServe(destination),
                       slotDirectoryMovedAt[path].map({
                           !Self.withinHold(movedAt: $0, cacheLifetime: sessionRates.entries[session.sessionID]?.cacheLifetime,
                                            now: now)
@@ -872,18 +871,24 @@ extension AppState {
     /// cannot serve it now; only a requested move takes it elsewhere. One
     /// lane admission keeps on an account (`heldOn`, from `admissionHolds`,
     /// played or not) goes only where admission places it, never to
-    /// `fallback`, since admission found no lane that carries it.
+    /// `fallback`, since admission found no lane that carries it. An
+    /// account that cannot serve is never where an automatic rule moves a
+    /// slot: a `placed`, `fallback` or `balance` account at its limit is
+    /// passed over, and the slot stays rather than moving from one account
+    /// at its limit to another.
     nonisolated static func slotChoice(current: UUID?, pinned: UUID?, requested: UUID?, balance: UUID?,
                                        cannotServe: (UUID) -> Bool, modelSpent: Bool, byWeight: [UUID],
                                        placed: UUID? = nil, fallback: UUID?, waitsOn: UUID? = nil,
                                        heldOn: UUID? = nil) -> SlotChoice {
         if let pinned { return SlotChoice(target: pinned, keptPinned: cannotServe(pinned)) }
-        let target = current.flatMap { cannotServe($0) ? nil : $0 }
-            ?? (modelSpent ? byWeight.first { !cannotServe($0) }
-                : placed.flatMap { cannotServe($0) ? nil : $0 } ?? heldOn ?? fallback)
+        // No automatic rule moves a session onto an account that can no
+        // longer serve it: such a fallback or balancing move is dropped.
+        func serving(_ id: UUID?) -> UUID? { id.flatMap { cannotServe($0) ? nil : $0 } }
+        let target = serving(current)
+            ?? (modelSpent ? byWeight.first { !cannotServe($0) } : serving(placed) ?? heldOn ?? serving(fallback))
         if let requested { return SlotChoice(target: requested, requested: true) }
         if let waitsOn { return SlotChoice(target: waitsOn) }
-        if let balance, balance != target { return SlotChoice(target: balance, balanced: true) }
+        if let balance = serving(balance), balance != target { return SlotChoice(target: balance, balanced: true) }
         return SlotChoice(target: target)
     }
 
