@@ -208,6 +208,12 @@ struct UsageDashboardView: View {
                             }
                             .sectionPadding()
 
+                            // The Sessions page's Outlook line; a click opens
+                            // that page, where it expands.
+                            if let outlook = appState.capacityOutlook(provider) {
+                                CapacityOutlookView(provider: provider, outlook: outlook, expandable: false)
+                                    .sectionPadding()
+                            }
                             if let routed = appState.routedStatus[provider] {
                                 RoutedRequestsBanner(provider: provider, status: routed)
                             }

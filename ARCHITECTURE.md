@@ -1836,6 +1836,35 @@ forecast use fits (`SessionPacer.admit`):
 The user's own pause still ends whole, and a provider without router token
 counts resumes as before.
 
+### Outlook
+
+`CapacityOutlook.project` answers, for the Sessions page and the usage tab
+(`CapacityOutlookView`), how long a provider's sessions run at their current
+rates and when they run again. `AppState.capacityOutlook` builds its inputs
+and keeps the result until the next usage refresh or for a minute
+(`capacityOutlookLifetime`), so a redraw does not project again: every account
+of the provider as `pacerAccount` sees it, with its `sessionPerWeekly` to size
+a new week, taking part unless excluded, needing sign-in or ineligible, and
+blocked until its `bindingReset` when at its limit; and every live session at
+`SessionPacer.lightRate`, a session a limit holds at `SessionRates.heldDemand`
+and one the user holds at nothing. Nil until the router has measured a
+session's rate.
+
+The projection steps forward five minutes at a time, and to every reset in
+between. At each step a passed 5-hour window starts again empty, a passed week
+starts again full a week on, and the step's demand is served from the
+accounts with room (`roomBy` at that moment) in order of when their room would
+start going unused: the window's reset for an account whose windows cannot
+spend its week before it renews, else the latest start that still spends the
+week at a window per five hours. Within a step the served part runs first, so
+the moment the last room goes is exact to the step's share. The first step
+with demand left over is the pause (`allPausedAt`); after it, a running stretch
+of at least `resumeRun` is the resume, named by the refill that frees the most
+tokens at its start, and shorter ones are bursts. It stops shortly after the
+resume, or after seven days. The what-if runs it again without the heaviest
+session. Moves' cache rewrites and use the router does not see are not
+counted.
+
 ### Lifecycle
 
 `RequestRouterController.reconcile(wanted:)` runs every two minutes. When a

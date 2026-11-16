@@ -144,6 +144,35 @@ A paused session also says when it goes on: about when its account is expected
 to serve it again or, if you paused it, when you play it. Each provider
 heading says how many sessions are paused and since when.
 
+Below that line, the **Outlook** says how long the provider's sessions keep
+running at their current rates and when they run again, for instance "Runs
+until about Tue 8:54 am · then paused until about Tue 9:00 pm (cybrio's new
+week)", "All paused · resumes about Tue 9:00 pm (cybrio's new week)" or "Runs
+through the next 7 days at the current rate." Click it to open:
+
+- a timeline from now to just past the resume, running stretches in the brand
+  colour and paused ones tinted, with the hours above it and a tick at each
+  event;
+- the refills on the way (a 5-hour window starting again, a new week), the
+  accounts running out with when each is back, and the moment every session
+  pauses;
+- what comes back during the pause: short bursts where a 5-hour window
+  refills on an account with weekly room left, and the refill the sessions
+  resume on (the first that carries them for half an hour or more);
+- the three sessions using the most, and when everything would pause with the
+  heaviest of them paused.
+
+The Outlook plays each session's use over its last hour forward (a session
+idle for that hour counts at nearly nothing; one a limit paused counts at its
+use before the pause, one you paused at nothing) over every account's 5-hour
+window, weekly allowance and resets, spending first the allowance that would
+otherwise go unused soonest. Accounts excluded from failover or needing sign-in
+never count, and an account at its limit counts from the reset that frees it.
+The cache rewrite of moving a session and use outside the router are left out.
+It is worked out again after each usage refresh, or every minute, and stays
+open or closed per provider. The usage tab shows the same line under each
+provider heading; clicking it opens the Sessions tab.
+
 Each row has three icons:
 
 - **Lock.** Pins the session to its subscription, so failover, pacing,

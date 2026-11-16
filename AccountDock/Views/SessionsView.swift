@@ -57,6 +57,16 @@ struct SessionsView: View {
         return providers.map { appState.sessionsSection($0) }
     }
 
+    /// The Outlook is projected from the live sessions and accounts, so the
+    /// screenshot renderer's sample sections show none.
+    private var showsOutlook: Bool {
+        #if DEBUG
+        return sampleSections == nil
+        #else
+        return true
+        #endif
+    }
+
     private var providers: [AIProviderType] {
         let hidden = ProviderVisibility.hidden(in: hiddenProviders)
         return appState.sessionControlProviders.filter { provider in
@@ -78,6 +88,9 @@ struct SessionsView: View {
             Text(section.pauseLine)
                 .font(.caption)
                 .foregroundStyle(.textSecondary)
+            if showsOutlook, !section.entries.isEmpty, let outlook = appState.capacityOutlook(provider) {
+                CapacityOutlookView(provider: provider, outlook: outlook)
+            }
             // Why a small plan's window with room takes no running session.
             ForEach(appState.laneNotes[provider] ?? [], id: \.self) { note in
                 Label(note, systemImage: "info.circle")
