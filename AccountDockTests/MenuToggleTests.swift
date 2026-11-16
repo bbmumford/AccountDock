@@ -48,6 +48,13 @@ final class MenuToggleTests: XCTestCase {
         XCTAssertFalse(on.rebalanceAutomatically)
     }
 
+    func testOneProvidersSwitchMakesTheFooterMixedAndSaysWhereItWasSet() {
+        // Claude Code's heading turns failover off while Codex and Kimi Code keep it.
+        XCTAssertEqual(AppState.toggleState([false, true, true]), .mixed)
+        XCTAssertEqual(AppState.toggleEvent("Failover", on: false, providers: ["Claude Code"], from: "the Sessions page"),
+                       "Failover turned off from the Sessions page for Claude Code.")
+    }
+
     func testFailoverIsTheMoveTheActiveAccountSwitch() {
         var policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
         policy.enabled = true

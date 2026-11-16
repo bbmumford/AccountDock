@@ -122,6 +122,7 @@ struct SessionsView: View {
                 .help("Resume all: every paused session continues now. Sessions may then reach the usage limit.")
                 .accessibilityLabel("Resume all sessions")
             }
+            ProviderFailoverSwitch(provider: provider, place: "the Sessions page")
             if section.canRebalance {
                 RebalanceButton(provider: provider)
             }

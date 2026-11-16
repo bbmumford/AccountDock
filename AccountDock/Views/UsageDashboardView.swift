@@ -178,6 +178,9 @@ struct UsageDashboardView: View {
                                 .font(.headline)
                                 .foregroundStyle(.brand)
                                 Spacer()
+                                ProviderFailoverSwitch(provider: provider, place: "the usage tab")
+                                    .buttonStyle(.borderless)
+                                    .font(.caption)
                                 if appState.rebalanceAvailable(provider) {
                                     RebalanceButton(provider: provider)
                                         .buttonStyle(.borderless)

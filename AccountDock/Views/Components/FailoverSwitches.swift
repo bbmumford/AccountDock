@@ -86,3 +86,30 @@ struct FooterSwitches: View {
         }
     }
 }
+
+/// One provider's Failover switch, beside its Rebalance icon on the
+/// Sessions page and the usage tab: its "Move the active account
+/// automatically" (`AppState.setActiveAccountMovement`), which the footer's
+/// switch also sets.
+struct ProviderFailoverSwitch: View {
+    @EnvironmentObject private var appState: AppState
+    @ObservedObject private var store = FailoverConfigStore.shared
+    let provider: AIProviderType
+    /// Where the switch is, for the event.
+    let place: String
+
+    var body: some View {
+        let on = store.policy(for: provider).movesActiveAccountAutomatically
+        let name = provider.capabilities.displayName
+        Button {
+            appState.setActiveAccountMovement(!on, for: [provider], from: place)
+        } label: {
+            SwitchGlyph.failover(on ? .on : .off)
+        }
+        .help(on
+            ? "Failover for \(name): on — the active account moves at a threshold or its limit, and for weekly balancing. Click to keep it where it is."
+            : "Failover for \(name): off — the active account stays where it is. Click to let failover and weekly balancing move it.")
+        .accessibilityLabel("Failover for \(name)")
+        .accessibilityValue(on ? "On" : "Off")
+    }
+}

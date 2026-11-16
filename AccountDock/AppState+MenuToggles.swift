@@ -8,8 +8,9 @@ import Foundation
 /// other settings (pacing, rebalancing automatically, resuming sessions left
 /// waiting) act only while `distributeSessions` is on, and the switch leaves
 /// them as they are, so turning it on again restores what the provider had.
-/// The menu's footer sets either for every provider at once, changing the
-/// stored policy the Settings toggles change, through the same steps.
+/// The menu's footer sets either for every provider at once; the provider
+/// headings beside Rebalance set Failover for one. Both change the stored
+/// policy the Settings toggles change, through the same steps.
 extension AppState {
     /// What a switch over several providers shows.
     enum ToggleState: Equatable {

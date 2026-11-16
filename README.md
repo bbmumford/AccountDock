@@ -335,6 +335,9 @@ provider's failover order when it should take work.
   ("Claude Code on · Codex off · Kimi Code off"), and each change is recorded
   as Settings records it. Balancing changes that one setting alone, so pacing
   and Rebalance automatically are as you left them when it is on again.
+  Beside each provider's Rebalance icon, on the Sessions page and the usage
+  tab, the same Failover switch sets that provider alone; the footer's shows
+  mixed as soon as the providers differ.
 - **Quarantine.** An account whose stored credential fails verification is left
   out of automatic switching until you re-authenticate it.
 
