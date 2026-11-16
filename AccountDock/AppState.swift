@@ -508,6 +508,11 @@ final class AppState: ObservableObject {
     /// The destination of the switch last withheld for a locked active
     /// account, so `performAutomaticSwitch` reports each once.
     var lockedSwitchNoted: [AIProviderType: UUID] = [:]
+    /// When each session on the shared sign-in was last restarted in a slot
+    /// of its own because the active account stays at its limit
+    /// (`holdSharedSessionsOnStayingAccount`), so a restart that did not
+    /// take is tried again only after `stuckRestartSpacing`.
+    var stayingRestartAt: [String: Date] = [:]
     /// The digest of each account's saved sign-in the provider confirmed as
     /// that account's (`savedCopyIsOwn`).
     var savedCopyVerified: [UUID: String] = [:]

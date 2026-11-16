@@ -906,9 +906,9 @@ final class FailoverPlannerTests: XCTestCase {
         XCTAssertNil(AppState.limitingModel(usage: usage, models: ["claude-other-1"], wholeAtLimit: false, narrowedAtLimit: true))
         XCTAssertNil(AppState.limitingModel(usage: usage, models: ["claude-fable-5"], wholeAtLimit: false, narrowedAtLimit: false))
         XCTAssertEqual(AppState.exhaustedSwitchEvent(source: "Personal", target: "ORBTR", modelLimit: "Fable"),
-                       "Personal has no Fable allowance left for the sessions on the shared sign-in; switching to ORBTR.")
+                       "Failover switches the active account from Personal to ORBTR: Personal has no Fable allowance left for the sessions on the shared sign-in.")
         XCTAssertEqual(AppState.exhaustedSwitchEvent(source: "Personal", target: "ORBTR", modelLimit: nil),
-                       "Personal is at its limit; switching to ORBTR.")
+                       "Failover switches the active account from Personal to ORBTR: Personal is at its limit.")
     }
 
     func testASlotSessionOfUnknownModelIsJudgedByTheWholeAllowance() throws {

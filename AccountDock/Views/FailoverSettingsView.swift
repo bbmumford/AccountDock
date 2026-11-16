@@ -18,7 +18,7 @@ struct FailoverSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Text("Automatically rotate within each provider. A threshold starts a switch to an account that is below its thresholds on both the session and long window. When no such account exists, the active account keeps working up to the provider limit, then moves to the account with the most remaining capacity.")
+                Text("Each provider has three separate things. The active account is the account its shared sign-in uses; failover and weekly balancing move it. Session balancing moves sessions in slots of their own between accounts, one at a time, whatever the active account does. Pausing holds sessions whose own account is at its limit.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -49,62 +49,131 @@ struct FailoverSettingsView: View {
         let includedCount = providerAccounts.filter { !policy.excludedAccountIDs.contains($0.id) }.count
 
         Section {
-            Toggle("Enable automatic failover", isOn: binding(provider, \.enabled))
+            Text("The account \(provider.rawValue)'s shared sign-in uses, and every session outside a slot of its own with it. Failover moves it when it reaches a threshold or its limit; weekly balancing moves it early so each account's weekly allowance is used in line with when it resets, the one resetting soonest first.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle("Move the active account automatically", isOn: binding(provider, \.movesActiveAccountAutomatically))
+                .help("On, failover and weekly balancing may switch the active account. Off, it stays where you put it: when it reaches its limit, sessions on the shared sign-in that can restart in a slot of their own do, so session balancing can place them, and the rest wait for its reset or for you to move them. Session balancing and pausing go on either way. The lock beside the active account on the Accounts tab is the same switch.")
+            Group {
+                Toggle("Failover: switch at a threshold or the limit", isOn: binding(provider, \.enabled))
+                if provider.capabilities.supportsSessionQuota {
+                    thresholdRow(
+                        title: "Session limit",
+                        enabled: binding(provider, \.sessionEnabled),
+                        threshold: binding(provider, \.sessionThreshold)
+                    )
+                }
 
-            if provider.capabilities.supportsSessionQuota {
                 thresholdRow(
-                    title: "Session limit",
-                    enabled: binding(provider, \.sessionEnabled),
-                    threshold: binding(provider, \.sessionThreshold)
+                    title: provider.capabilities.weeklyQuotaLabel,
+                    enabled: binding(provider, \.weeklyEnabled),
+                    threshold: binding(provider, \.weeklyThreshold)
                 )
-            }
 
-            thresholdRow(
-                title: provider.capabilities.weeklyQuotaLabel,
-                enabled: binding(provider, \.weeklyEnabled),
-                threshold: binding(provider, \.weeklyThreshold)
-            )
+                if provider.capabilities.supportsSelectableSwitchMode {
+                    Picker("Failover switch method", selection: binding(provider, \.switchMethod)) {
+                        ForEach(FailoverSwitchMethod.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .help(switchMethodHelp(policy.switchMethod, provider: provider))
+                }
 
-            if provider.capabilities.supportsSelectableSwitchMode {
-                Picker("Failover switch method", selection: binding(provider, \.switchMethod)) {
-                    ForEach(FailoverSwitchMethod.allCases) { mode in
-                        Text(mode.title).tag(mode)
+                Toggle("Loop through accounts continuously", isOn: binding(provider, \.loops))
+                Toggle("Prefer an account after its limit resets", isOn: binding(provider, \.resetAware))
+                Toggle("Prefer the account with the most headroom", isOn: binding(provider, \.preferMostCapacity))
+                Toggle("Wait for an imminent reset", isOn: binding(provider, \.waitForImminentReset))
+                if policy.waitForImminentReset {
+                    LabeledContent("Reset grace period") {
+                        Stepper(
+                            "\(Int(policy.resetGraceMinutes)) min",
+                            value: binding(provider, \.resetGraceMinutes),
+                            in: 1...30,
+                            step: 1
+                        )
+                        .monospacedDigit()
+                    }
+                    .padding(.leading, 20)
+                }
+                Toggle("Weekly balancing", isOn: binding(provider, \.intelligentBalancingEnabled))
+                    .help("Moves the active account early so each account's weekly allowance is used in line with when it resets: one that resets sooner is used sooner, so none expires with allowance left. It spends included accounts in the order their allowances would otherwise expire: an account whose weekly or monthly limit resets sooner, or whose remaining allowance its 5-hour cap could no longer drain in time, is used first. Destinations must be below their thresholds on both windows. An allowance too small to carry the sessions on the shared sign-in is not switched to; with pacing on, the lightest idle session in its own slot moves there to use it before it resets, when that session's use fits in what is left and is worth the cache it rebuilds there, at most once every \(Int(AppState.balanceMoveInterval / 60)) minutes per account.")
+                if policy.intelligentBalancingEnabled {
+                    LabeledContent("Switch advantage") {
+                        Stepper(
+                            "\(Int(policy.balancingMinimumAdvantageHours)) h",
+                            value: binding(provider, \.balancingMinimumAdvantageHours),
+                            in: 1...72,
+                            step: 1
+                        )
+                        .monospacedDigit()
+                    }
+                    .padding(.leading, 20)
+                    .help("How much sooner another account's remaining allowance must need to start being used, to be fully consumed before it resets, before AccountDock moves work to it. Larger values reduce switching.")
+
+                    LabeledContent("Minimum time on account") {
+                        Stepper(
+                            "\(Int(policy.balancingMinimumDwellMinutes)) min",
+                            value: binding(provider, \.balancingMinimumDwellMinutes),
+                            in: 5...180,
+                            step: 5
+                        )
+                        .monospacedDigit()
+                    }
+                    .padding(.leading, 20)
+                    .help("Prevents oscillation after a balancing switch. Threshold failover still acts immediately.")
+
+                    if provider.capabilities.supportsSelectableSwitchMode && policy.switchMethod == .safeRestart {
+                        Label(
+                            "\(provider.capabilities.displayName) balancing waits in Switch Safely mode because healthy sessions have no limit error. Choose Switch Without Restart or Force Restart Sessions to rebalance proactively.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     }
                 }
-                .help(switchMethodHelp(policy.switchMethod, provider: provider))
+
+            }
+            .disabled(!policy.movesActiveAccountAutomatically)
+            if let status = appState.failoverStatus[provider] {
+                Label(status, systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
-            Toggle("Loop through accounts continuously", isOn: binding(provider, \.loops))
-            Toggle("Prefer an account after its limit resets", isOn: binding(provider, \.resetAware))
-            Toggle("Prefer the account with the most headroom", isOn: binding(provider, \.preferMostCapacity))
-            Toggle("Wait for an imminent reset", isOn: binding(provider, \.waitForImminentReset))
-            if policy.waitForImminentReset {
-                LabeledContent("Reset grace period") {
-                    Stepper(
-                        "\(Int(policy.resetGraceMinutes)) min",
-                        value: binding(provider, \.resetGraceMinutes),
-                        in: 1...30,
-                        step: 1
-                    )
-                    .monospacedDigit()
+        } header: {
+            Label("\(provider.rawValue): Active account", systemImage: provider.iconName)
+        } footer: {
+            if (policy.enabled || policy.intelligentBalancingEnabled) && includedCount < 2 {
+                Text("Automatic switching needs at least two included accounts for this provider.")
+            }
+        }
+
+        if provider.capabilities.requestRouter != nil || provider.capabilities.sessionIsolation != nil
+            || provider.capabilities.requestHold?.bridgedProtocol != nil {
+            Section {
+                Text("Moving sessions in slots of their own between accounts, one at a time, by the room each account has: new sessions, pacing and rebalancing. It keeps running whether or not the active account moves.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if provider.capabilities.requestRouter != nil {
+                    routingControls(provider, policy: policy)
+                } else if provider.capabilities.requestHold?.bridgedProtocol != nil, !RouteTarget.available(for: provider).isEmpty {
+                    bridgeControls(provider, policy: policy)
                 }
-                .padding(.leading, 20)
-            }
-            if provider.capabilities.supportsWindowWarming {
-                Toggle("Keep reset windows warm", isOn: binding(provider, \.keepWindowsWarm))
-                    .help(
-                        "For every managed account, after a confirmed \(provider.capabilities.supportsSessionQuota ? "\(provider.capabilities.sessionQuotaLabel.lowercased()) or " : "")\(provider.capabilities.weeklyQuotaLabel.lowercased()) reset, send one minimal non-persistent request so its new countdown starts. Failover exclusions do not disable warming."
-                    )
-            }
+                // A provider AccountDock does not route serves several accounts
+                // through credential slots; Codex has its bridge controls too.
+                if provider.capabilities.requestRouter == nil, provider.capabilities.sessionIsolation != nil {
+                    slotControls(provider, policy: policy)
+                }
 
-            if provider.capabilities.liveUsageFeed == .statusLine {
-                Toggle("Read live quota from \(provider.rawValue)'s status line", isOn: $statusLineTelemetry)
-                    .help("Wraps the configured Claude Code status-line command so the 5-hour and weekly limits Claude Code receives with every response are recorded for AccountDock. The original status line keeps working unchanged. This removes most usage-endpoint requests, which is what Anthropic throttles.")
-                    .onChange(of: statusLineTelemetry) { _, _ in
-                        Task.detached(priority: .utility) { ClaudeStatusLineTelemetry.synchronize() }
-                    }
+            } header: {
+                Text("\(provider.rawValue): Sessions")
             }
+        }
 
+        Section {
+            Text("Holding a session at its next step while its own account is at its limit, account by account; sessions on accounts with room keep running.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Toggle("Pause sessions when all accounts are exhausted", isOn: binding(provider, \.suspendAgentsWhenExhausted))
                 .help("When no other account can take the work, every session waits before its next request, shortly before the active account reaches its limit, so no request fails, and new turns wait at their start. Terminals stay usable, and sessions continue once a verified account has capacity.")
 
@@ -129,58 +198,24 @@ struct FailoverSettingsView: View {
                     .help("The Sessions tab of AccountDock's menu lists every running session, with its account and state, and pauses, plays, pins and moves each one, or pauses and resumes them all.")
             }
 
-            if provider.capabilities.requestRouter != nil {
-                routingControls(provider, policy: policy)
-            } else if provider.capabilities.requestHold?.bridgedProtocol != nil, !RouteTarget.available(for: provider).isEmpty {
-                bridgeControls(provider, policy: policy)
-            }
-            // A provider AccountDock does not route serves several accounts
-            // through credential slots; Codex has its bridge controls too.
-            if provider.capabilities.requestRouter == nil, provider.capabilities.sessionIsolation != nil {
-                slotControls(provider, policy: policy)
-            }
+        } header: {
+            Text("\(provider.rawValue): Pausing")
+        }
 
-            Toggle("Intelligent long-window balancing", isOn: binding(provider, \.intelligentBalancingEnabled))
-                .help("Spends included accounts in the order their allowances would otherwise expire: an account whose weekly or monthly limit resets sooner, or whose remaining allowance its 5-hour cap could no longer drain in time, is used first. Destinations must be below their thresholds on both windows. An allowance too small to carry the sessions on the shared sign-in is not switched to; with pacing on, the lightest idle session in its own slot moves there to use it before it resets, when that session's use fits in what is left and is worth the cache it rebuilds there, at most once every \(Int(AppState.balanceMoveInterval / 60)) minutes per account.")
-            if policy.intelligentBalancingEnabled {
-                LabeledContent("Switch advantage") {
-                    Stepper(
-                        "\(Int(policy.balancingMinimumAdvantageHours)) h",
-                        value: binding(provider, \.balancingMinimumAdvantageHours),
-                        in: 1...72,
-                        step: 1
+        Section {
+            if provider.capabilities.supportsWindowWarming {
+                Toggle("Keep reset windows warm", isOn: binding(provider, \.keepWindowsWarm))
+                    .help(
+                        "For every managed account, after a confirmed \(provider.capabilities.supportsSessionQuota ? "\(provider.capabilities.sessionQuotaLabel.lowercased()) or " : "")\(provider.capabilities.weeklyQuotaLabel.lowercased()) reset, send one minimal non-persistent request so its new countdown starts. Failover exclusions do not disable warming."
                     )
-                    .monospacedDigit()
-                }
-                .padding(.leading, 20)
-                .help("How much sooner another account's remaining allowance must need to start being used, to be fully consumed before it resets, before AccountDock moves work to it. Larger values reduce switching.")
-
-                LabeledContent("Minimum time on account") {
-                    Stepper(
-                        "\(Int(policy.balancingMinimumDwellMinutes)) min",
-                        value: binding(provider, \.balancingMinimumDwellMinutes),
-                        in: 5...180,
-                        step: 5
-                    )
-                    .monospacedDigit()
-                }
-                .padding(.leading, 20)
-                .help("Prevents oscillation after a balancing switch. Threshold failover still acts immediately.")
-
-                if provider.capabilities.supportsSelectableSwitchMode && policy.switchMethod == .safeRestart {
-                    Label(
-                        "\(provider.capabilities.displayName) balancing waits in Switch Safely mode because healthy sessions have no limit error. Choose Switch Without Restart or Force Restart Sessions to rebalance proactively.",
-                        systemImage: "info.circle"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
             }
 
-            if let status = appState.failoverStatus[provider] {
-                Label(status, systemImage: "arrow.triangle.2.circlepath")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if provider.capabilities.liveUsageFeed == .statusLine {
+                Toggle("Read live quota from \(provider.rawValue)'s status line", isOn: $statusLineTelemetry)
+                    .help("Wraps the configured Claude Code status-line command so the 5-hour and weekly limits Claude Code receives with every response are recorded for AccountDock. The original status line keeps working unchanged. This removes most usage-endpoint requests, which is what Anthropic throttles.")
+                    .onChange(of: statusLineTelemetry) { _, _ in
+                        Task.detached(priority: .utility) { ClaudeStatusLineTelemetry.synchronize() }
+                    }
             }
 
             VStack(alignment: .leading, spacing: 7) {
@@ -246,11 +281,7 @@ struct FailoverSettingsView: View {
                 }
             }
         } header: {
-            Label(provider.rawValue, systemImage: provider.iconName)
-        } footer: {
-            if (policy.enabled || policy.intelligentBalancingEnabled) && includedCount < 2 {
-                Text("Automatic switching needs at least two included accounts for this provider.")
-            }
+            Text("\(provider.rawValue): Accounts")
         }
     }
 

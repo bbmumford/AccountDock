@@ -225,7 +225,7 @@ final class WindowPlacementTests: XCTestCase {
         let event = AppState.heldMoveEvent(session: "session 1603da04 in ~/Mother", account: "hexorda", destination: "Backup",
                                            rule: "pacing", movedAt: now.addingTimeInterval(-60), until: now.addingTimeInterval(59 * 60),
                                            now: now)
-        XCTAssertTrue(event.hasPrefix("Kept session 1603da04 in ~/Mother on hexorda although pacing would move it to Backup: it moved there at "))
+        XCTAssertTrue(event.hasPrefix("Session balancing kept session 1603da04 in ~/Mother on hexorda although pacing would move it to Backup: it moved there at "))
         XCTAssertTrue(event.hasSuffix("It moves sooner only if hexorda refuses it or reaches its limit with its reset later than its cache lasts."))
     }
 

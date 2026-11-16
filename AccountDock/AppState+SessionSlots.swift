@@ -719,10 +719,13 @@ extension AppState {
                                               resetsAt: remainder.resetsAt, now: now))
                 continue
             }
+            // A move the user asked for is theirs; every other one is
+            // session balancing's, and its event says so.
+            let actor = requested && !automatic ? "Moved" : "Session balancing moved"
             failoverEvents.record(provider, balanced
-                ? "Moved \(subject) from \(from) to \(to) to balance load" + (leaving.map { ", since \($0)" } ?? "")
+                ? "Session balancing moved \(subject) from \(from) to \(to) to balance load" + (leaving.map { ", since \($0)" } ?? "")
                     + "; it rebuilds its prompt cache there at its next request."
-                : "Moved \(subject) from \(from) to \(to): \(why).")
+                : "\(actor) \(subject) from \(from) to \(to): \(why).")
         }
         for id in open where sparesOf[id, default: 0] < spareTarget {
             guard let value = await credential(id) else { continue }

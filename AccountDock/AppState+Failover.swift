@@ -99,7 +99,10 @@ extension AppState {
         await ingestTranscriptRequests()
         // Before the slots are served, so no rule moves a session that waits
         // for its account's reset this cycle.
-        for provider in AgentPauseGate.providers { await holdSessionsForImminentReset(provider) }
+        for provider in AgentPauseGate.providers {
+            await holdSessionsForImminentReset(provider)
+            await holdSharedSessionsOnStayingAccount(provider)
+        }
         await maintainSessionSlots(processesRead: true)
         await applyModelFallbacks()
         await resumeSessionsLeftWaiting()
@@ -851,15 +854,29 @@ extension AppState {
     /// window an allowance can be used at any pace, so its latest start is
     /// its reset, and the figure is how much sooner `target` resets.
     nonisolated static func balanceSwitchEvent(source: String, target: String, hours: Double) -> String {
-        "Balancing moves work from \(source) to \(target): \(target)'s allowance must start being used \(Int(hours.rounded())) hour(s) before \(source)'s for each to be used up before it resets."
+        "Weekly balancing switches the active account from \(source) to \(target): \(target)'s weekly allowance must start being used \(Int(hours.rounded())) hour(s) before \(source)'s for each to be used up before its own reset."
+    }
+
+    /// The event for a switch the "Move the active account automatically"
+    /// switch stopped (`ProviderFailoverPolicy.activeAccountLocked`),
+    /// naming whether failover or weekly balancing asked for it.
+    nonisolated static func lockedSwitchEvent(source: String, target: String, reason: FailoverPlan.SwitchReason) -> String {
+        let actor = reason.isBalance ? "Weekly balancing" : "Failover"
+        let rest = switch reason {
+        case .exhausted, .workloadUnavailable:
+            " Sessions in slots of their own keep moving; those on the shared sign-in that can restart in a slot of their own do, and the rest wait for \(source) to reset or for you to move them."
+        case .threshold, .balance: ""
+        }
+        return "\(actor) would switch the active account from \(source) to \(target), but moving the active account automatically is off, so it stays on \(source).\(rest)"
     }
 
     /// The event for an exhausted switch away from `source`; `modelLimit`
     /// names the model whose own allowance ran out for the sessions on the
     /// shared sign-in, when that is the limit (`limitingModel`).
     nonisolated static func exhaustedSwitchEvent(source: String, target: String, modelLimit: String?) -> String {
-        guard let modelLimit else { return "\(source) is at its limit; switching to \(target)." }
-        return "\(source) has no \(modelLimit) allowance left for the sessions on the shared sign-in; switching to \(target)."
+        let prefix = "Failover switches the active account from \(source) to \(target): "
+        guard let modelLimit else { return prefix + "\(source) is at its limit." }
+        return prefix + "\(source) has no \(modelLimit) allowance left for the sessions on the shared sign-in."
     }
 
     /// How long a session's last reported model is taken as the one it uses.
@@ -2099,7 +2116,8 @@ extension AppState {
         if policy.activeAccountLocked {
             if lockedSwitchNoted[provider] != target.id {
                 lockedSwitchNoted[provider] = target.id
-                failoverEvents.record(provider, "\(messageName(current)) is locked as the active account, so no switch to \(messageName(target)) was made.")
+                failoverEvents.record(provider, Self.lockedSwitchEvent(source: messageName(current), target: messageName(target),
+                                                                       reason: reason))
             }
             return
         }
@@ -2138,15 +2156,15 @@ extension AppState {
         switch reason {
         case .balance(let hours) where hours < 1:
             // The forecast decided: staying would leave more allowance unused.
-            failoverEvents.record(provider, "Balancing moves work from \(sourceName) to \(targetName): over the coming week this leaves less of their allowances unused.")
+            failoverEvents.record(provider, "Weekly balancing switches the active account from \(sourceName) to \(targetName): over the coming week this leaves less of their weekly allowances unused at their resets.")
         case .balance(let hours):
             failoverEvents.record(provider, Self.balanceSwitchEvent(source: sourceName, target: targetName, hours: hours))
         case .threshold:
-            failoverEvents.record(provider, "Threshold reached; switching \(sourceName) → \(targetName).")
+            failoverEvents.record(provider, "Failover switches the active account from \(sourceName) to \(targetName): \(sourceName) reached its threshold.")
         case .exhausted:
             failoverEvents.record(provider, Self.exhaustedSwitchEvent(source: sourceName, target: targetName, modelLimit: modelLimit))
         case .workloadUnavailable:
-            failoverEvents.record(provider, "\(sourceName) no longer includes this workload; switching to \(targetName).")
+            failoverEvents.record(provider, "Failover switches the active account from \(sourceName) to \(targetName): \(sourceName) no longer includes this workload.")
         }
         failoverLog.info("\(provider.rawValue): \(sourceName) -> \(targetName) (\(reason))")
 

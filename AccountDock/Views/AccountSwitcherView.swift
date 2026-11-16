@@ -243,8 +243,8 @@ struct AccountSwitcherView: View {
                 }
                 .buttonStyle(.borderless)
                 .help(locked
-                    ? "Locked: failover will not switch away from this account. Click to unlock."
-                    : "Lock this account as the active one, so failover does not switch away from it.")
+                    ? "Locked: neither failover nor weekly balancing moves the active account away from this one (Move the active account automatically is off). Sessions in slots of their own still move. Click to unlock."
+                    : "Lock this account as the active one, so neither failover nor weekly balancing moves the active account away from it (turns Move the active account automatically off).")
             }
             if !account.isActive && account.supportsProviderWorkloads {
                 Button {

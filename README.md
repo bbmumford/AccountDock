@@ -304,8 +304,12 @@ provider's failover order when it should take work.
   rather than as having no session limit. The reading and the warm-up use a
   share of the provider's request allowance that background reads cannot use
   up.
-- **Intelligent balancing.** Optionally spend accounts in the order their weekly
-  allowance would otherwise expire unused. Once AccountDock has learned a day of
+- **Weekly balancing.** Optionally move the active account early so each
+  account's weekly allowance is used in line with when it actually resets: one
+  that resets sooner is used sooner, so none expires with allowance left. It
+  ranks accounts by the latest moment each must start being used for its
+  remaining allowance to be spent before its own reset, not by how much each
+  has used. Once AccountDock has learned a day of
   your usage pattern, it simulates the coming week to choose, and shows a
   one-line outlook for the week. An allowance too small to carry the sessions
   on the shared sign-in is not switched to; with pacing on, one light, idle
@@ -314,9 +318,14 @@ provider's failover order when it should take work.
 - **Pace estimate.** Under each provider, while its active account is in use:
   when that account reaches its limit at the current pace, and when every
   included account would be used up and sessions paused.
-- **Lock the active account.** The lock beside the active account on the
-  Accounts tab keeps failover from switching away from it; sessions in slots
-  of their own still move.
+- **Move the active account automatically** (on unless you lock it). Off, the
+  active account stays where you put it: neither failover nor weekly balancing
+  switches it. When it reaches its limit, the sessions on the shared sign-in
+  are not moved together; each that can restart in a slot of its own (idle in
+  agterm, or a background session) does, so session balancing can place it on
+  an account with room, and the rest wait, with **Pause sessions**, for its
+  reset or for you to move them. Sessions in slots of their own keep moving.
+  The lock beside the active account on the Accounts tab is the same switch.
 - **Quarantine.** An account whose stored credential fails verification is left
   out of automatic switching until you re-authenticate it.
 

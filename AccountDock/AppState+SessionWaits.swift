@@ -13,6 +13,11 @@ extension AppState {
             /// expires: it continues there with its cache rather than
             /// writing its whole context into another account's cache.
             case cacheOutlastsReset
+            /// The session is on the shared sign-in, whose active account is
+            /// at or near its limit while "Move the active account
+            /// automatically" is off, and it cannot restart in a slot of its
+            /// own (`holdSharedSessionsOnStayingAccount`).
+            case activeAccountStays
         }
 
         var account: UUID
@@ -43,7 +48,9 @@ extension AppState {
     /// `plan(provider:ladder:current:canVerify:)` for
     /// `FailoverPlanner.Settings.sharedSignInWaitsUntil`.
     func sharedSignInWaitsUntil(_ provider: AIProviderType, active: UUID) -> Date? {
-        (sessionWaits[provider] ?? [:]).values.filter { $0.shared && !$0.played && $0.account == active }.map(\.until).max()
+        (sessionWaits[provider] ?? [:]).values.filter {
+            $0.shared && !$0.played && $0.account == active && $0.reason == .cacheOutlastsReset
+        }.map(\.until).max()
     }
 
     /// Whether a session whose account is at or near its limit keeps its
@@ -132,24 +139,17 @@ extension AppState {
         let planner = FailoverPlanner(settings: plannerSettings(provider))
         await endAccountHoldIfDue(provider, planner: planner, now: now)
         let live = liveSessions[provider] ?? []
-        let liveIDs = Set(live.map(\.sessionID))
-        // A wait ends when its account serves again, or once the grace after
-        // its reset has passed without a reading showing it.
-        var waits = (sessionWaits[provider] ?? [:]).filter { id, wait in
-            liveIDs.contains(id) && wait.until.addingTimeInterval(Self.accountHoldGrace) > now
-                && !servesAgain(wait.account, planner: planner, now: now)
-        }
+        let slotted = slotSessionIDs(provider)
+        let pooled = provider == AIProviderType.routedProvider && policy.distributeSessions && routerInUse
+        var waits = currentWaits(provider, slotted: slotted, pooled: pooled, planner: planner, now: now)
         guard policy.waitForResetWithinCache, pausingProviders.contains(provider), routedStatus[provider] == nil,
               pauseOverrideUntil[provider].map({ $0 <= now }) ?? true,
               let active = activeAccount(for: provider)?.id else {
-            sessionWaits[provider] = nil
+            waits = waits.filter { $0.value.reason != .cacheOutlastsReset }
+            sessionWaits[provider] = waits.isEmpty ? nil : waits
             return
         }
-        // A wait on the shared sign-in ends when the active account changes.
-        waits = waits.filter { !$0.value.shared || $0.value.account == active }
         let pinned = pinnedSessionAccounts(provider)
-        let slotted = slotSessionIDs(provider)
-        let pooled = provider == AIProviderType.routedProvider && policy.distributeSessions && routerInUse
         var resets: [UUID: Date?] = [:]
         func reset(_ id: UUID) -> Date? {
             if let known = resets[id] { return known }
@@ -189,9 +189,9 @@ extension AppState {
             }
         }
         var sharedAdded: [String] = []
-        let groupWaits = waits.values.contains { $0.shared }
-            || Self.sharedSignInWaits(heldContext: sharedKept, totalContext: sharedContext)
-        if groupWaits, let until = waits.values.first(where: \.shared)?.until ?? reset(active) {
+        let groupWait = waits.values.first { $0.shared && $0.reason == .cacheOutlastsReset }
+        let groupWaits = groupWait != nil || Self.sharedSignInWaits(heldContext: sharedKept, totalContext: sharedContext)
+        if groupWaits, let until = groupWait?.until ?? reset(active) {
             for id in sharedIDs where waits[id] == nil {
                 waits[id] = SessionWait(account: active, reason: .cacheOutlastsReset, until: until, since: now, shared: true)
                 sharedAdded.append(id)
@@ -211,6 +211,108 @@ extension AppState {
             failoverEvents.record(provider, Self.sharedResetHoldEvent(count: sharedAdded.count, account: on, reset: wait.until,
                                                                       now: now))
         }
+    }
+
+    /// The provider's waits that still stand: the session runs, on the
+    /// account it waits on (its slot's, the router's for a pooled one, the
+    /// active account for one on the shared sign-in), which cannot serve it
+    /// yet (`servesAgain`), and the grace after the reset has not passed. A
+    /// move the user made, a switch of the active account or a restart in a
+    /// slot of its own therefore ends the wait.
+    func currentWaits(_ provider: AIProviderType, slotted: Set<String>, pooled: Bool, planner: FailoverPlanner,
+                      now: Date) -> [String: SessionWait] {
+        let live = Set((liveSessions[provider] ?? []).map(\.sessionID))
+        let active = activeAccount(for: provider)?.id
+        return (sessionWaits[provider] ?? [:]).filter { id, wait in
+            guard live.contains(id), wait.until.addingTimeInterval(Self.accountHoldGrace) > now,
+                  !servesAgain(wait.account, planner: planner, now: now) else { return false }
+            if wait.shared { return !slotted.contains(id) && wait.account == active }
+            if slotted.contains(id) { return slotAccount(forSession: id, provider: provider) == wait.account }
+            return pooled
+        }
+    }
+
+    /// With "Move the active account automatically" off
+    /// (`ProviderFailoverPolicy.activeAccountLocked`), the active account
+    /// stays where the user put it, and failover moves none of the sessions
+    /// on the shared sign-in when it reaches its limit. Once it is at or
+    /// near its limit, each such session that can restart in a slot of its
+    /// own (idle in agterm, or a background session nothing holds:
+    /// `restartBlocker`) does (`restartInOwnSlot`), at most once every
+    /// `stuckRestartSpacing`, so session balancing can place it on an
+    /// account with room; the rest wait on the active account
+    /// (`SessionWait.Reason.activeAccountStays`), held by the pause gate,
+    /// until it serves again, the user moves them or the switch is turned
+    /// on. Sessions in slots of their own are session balancing's and keep
+    /// moving. Only with pausing at the limit and session slots in use for
+    /// the restarts; runs every quota cycle after
+    /// `holdSessionsForImminentReset`.
+    func holdSharedSessionsOnStayingAccount(_ provider: AIProviderType, now: Date = Date()) async {
+        let policy = failoverConfig.policy(for: provider)
+        var waits = sessionWaits[provider] ?? [:]
+        let planner = FailoverPlanner(settings: plannerSettings(provider))
+        guard policy.activeAccountLocked, monitoredProviders.contains(provider), pausingProviders.contains(provider),
+              routedStatus[provider] == nil, pauseOverrideUntil[provider].map({ $0 <= now }) ?? true,
+              let active = activeAccount(for: provider), atOrNearLimit(active.id, planner: planner, now: now) else {
+            waits = waits.filter { $0.value.reason != .activeAccountStays }
+            sessionWaits[provider] = waits.isEmpty ? nil : waits
+            return
+        }
+        let slotted = slotSessionIDs(provider)
+        let pinned = pinnedSessionAccounts(provider)
+        let pooled = provider == AIProviderType.routedProvider && policy.distributeSessions && routerInUse
+        guard !pooled else { return }
+        // Sessions typed into this cycle restart through the launcher; the
+        // next cycle finds them in a slot, or holds them if they are not.
+        var typed: Set<String> = []
+        if sessionSlotsInUse(provider) {
+            for session in unisolatedSessions[provider] ?? [] where waits[session.sessionID] == nil {
+                let id = session.sessionID
+                guard stayingRestartAt[id].map({ now.timeIntervalSince($0) >= Self.stuckRestartSpacing }) ?? true,
+                      Self.restartBlocker(session, terminal: unisolatedTerminals[id], background: backgroundSessionStates[id],
+                                          refused: sessionRefusals[id] != nil, now: now) == nil else { continue }
+                stayingRestartAt[id] = now
+                if await restartInOwnSlot(id) { typed.insert(id) }
+            }
+        }
+        let live = Set((liveSessions[provider] ?? []).map(\.sessionID))
+        stayingRestartAt = stayingRestartAt.filter { live.contains($0.key) }
+        let until = limitReset(active.id, planner: planner, now: now) ?? now.addingTimeInterval(FailoverPlanner.sessionWindow)
+        var added: [String] = []
+        for session in liveSessions[provider] ?? [] {
+            let id = session.sessionID
+            guard !slotted.contains(id), pinned[id] == nil, waits[id] == nil, !typed.contains(id) else { continue }
+            waits[id] = SessionWait(account: active.id, reason: .activeAccountStays, until: until, since: now, shared: true)
+            added.append(id)
+        }
+        sessionWaits[provider] = waits.isEmpty ? nil : waits
+        guard !added.isEmpty || !typed.isEmpty else { return }
+        writeWaits(provider, added, reason: "the active account stays at its limit while moving it automatically is off", now: now)
+        failoverEvents.record(provider, Self.stayingAccountEvent(account: messageName(active), waiting: added.count,
+                                                                 restarted: typed.count, reset: until, now: now))
+    }
+
+    /// Whether `id` is at its limit (refused at it) or within
+    /// `suspensionLead` of it, as a pause at a limit judges an account.
+    func atOrNearLimit(_ id: UUID, planner: FailoverPlanner, now: Date) -> Bool {
+        guard let account = accounts.first(where: { $0.id == id }) else { return false }
+        let state = quotaState(for: account, now: now)
+        return state.refusedAtLimit
+            || planner.servingVerdict(planner.servingView(state), now: now, lead: Self.suspensionLead).atOrNearLimit
+    }
+
+    /// The event for the sessions on the shared sign-in while the active
+    /// account stays at its limit with moving it automatically off.
+    nonisolated static func stayingAccountEvent(account: String, waiting: Int, restarted: Int, reset: Date,
+                                                now: Date) -> String {
+        var parts = ["\(account) stays the active account at its limit: moving the active account automatically is off, so failover moves none of the sessions on the shared sign-in."]
+        if restarted > 0 {
+            parts.append("\(restarted) restart(s) in a slot of their own, so session balancing can place them on an account with room.")
+        }
+        if waiting > 0 {
+            parts.append("\(waiting) wait(s) for its reset at \(UsageFormat.clock(reset, now: now)), or for you to move them.")
+        }
+        return parts.joined(separator: " ")
     }
 
     /// Lists `sessions` in the provider's pause: the pause in effect, or a

@@ -174,7 +174,7 @@ final class SessionWindowSpendingTests: XCTestCase {
     func testTheEventsNameTheWindowAndTheUnblockedMoves() {
         let event = AppState.windowMoveEvent(session: "session 1234abcd", from: "Personal", account: "hexorda",
                                              until: now.addingTimeInterval(50 * 60), now: now)
-        XCTAssertTrue(event.hasPrefix("Moved session 1234abcd from Personal to hexorda, using hexorda's session window until "))
+        XCTAssertTrue(event.hasPrefix("Session balancing moved session 1234abcd from Personal to hexorda, using hexorda's session window until "))
         XCTAssertTrue(event.hasSuffix("; it rebuilds its cache there."))
 
         let move = AppState.RebalanceMove(session: "c0", from: cybrio, to: bytrix)

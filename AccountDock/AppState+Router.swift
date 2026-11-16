@@ -906,7 +906,7 @@ extension AppState {
     /// from where, and until when the room placed there lasts.
     nonisolated static func windowMoveEvent(session: String, from: String, account: String, until: Date,
                                             now: Date) -> String {
-        "Moved \(session) from \(from) to \(account), using \(account)'s session window until "
+        "Session balancing moved \(session) from \(from) to \(account), using \(account)'s session window until "
             + "\(UsageFormat.clock(until, now: now)), which would otherwise go unused before \(from)'s room returns; "
             + "it rebuilds its cache there."
     }
@@ -916,7 +916,7 @@ extension AppState {
     /// `serveSessionSlots`.
     nonisolated static func remainderMoveEvent(session: String, account: String, percentLeft: Int, resetsAt: Date,
                                                now: Date) -> String {
-        "Moved \(session) (light use) to \(account) to use its last \(percentLeft)% before it resets "
+        "Session balancing moved \(session) (light use) to \(account) to use its last \(percentLeft)% before it resets "
             + "\(UsageFormat.atClock(resetsAt, now: now)); it rebuilds its cache there."
     }
 

@@ -63,7 +63,7 @@ extension AppState {
     /// stays on `account` although `rule` would move it to `destination`.
     nonisolated static func heldMoveEvent(session: String, account: String, destination: String, rule: String,
                                           movedAt: Date, until: Date, now: Date) -> String {
-        "Kept \(session) on \(account) although \(rule) would move it to \(destination): it moved there at "
+        "Session balancing kept \(session) on \(account) although \(rule) would move it to \(destination): it moved there at "
             + "\(UsageFormat.clock(movedAt, now: now)), and moving it again before \(UsageFormat.clock(until, now: now)) "
             + "would write its cache a second time before the first has paid off. It moves sooner only if \(account) "
             + "refuses it or reaches its limit with its reset later than its cache lasts."

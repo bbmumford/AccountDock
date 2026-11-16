@@ -66,7 +66,9 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     var distributeSessions = false
     /// The active account stays active: `AppState.performAutomaticSwitch`
     /// makes no switch away from it until the user unlocks it or switches
-    /// themselves. Sessions with a slot of their own still move.
+    /// themselves. Sessions with a slot of their own still move. Settings
+    /// show it as "Move the active account automatically"
+    /// (`movesActiveAccountAutomatically`).
     var activeAccountLocked = false
     /// With `distributeSessions`, each account's sessions are paced to its
     /// 5-hour window: new sessions go to the accounts with the most unused
@@ -116,6 +118,15 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     /// Failover, balancing and pausing switch the CLI's own account and send
     /// no request through it, so with neither set the CLI reaches its
     /// provider directly and the router does not run.
+    /// Whether failover and weekly balancing may move the active account,
+    /// the "Move the active account automatically" switch: the inverse of
+    /// `activeAccountLocked`, which stores it, so a lock set from the
+    /// Accounts tab and the switch are one setting.
+    var movesActiveAccountAutomatically: Bool {
+        get { !activeAccountLocked }
+        set { activeAccountLocked = !newValue }
+    }
+
     func usesRouter(for provider: AIProviderType) -> Bool {
         routeTarget != nil || (distributeSessions && provider.capabilities.sessionIsolation == nil)
     }

@@ -391,7 +391,7 @@ final class BalancingTests: XCTestCase {
                        "without a 5-hour window an allowance's latest start is its reset")
         XCTAssertEqual(planner.plan(current: healthy, ladder: all, lastSwitch: nil, now: now), .stay(.healthy))
         XCTAssertEqual(AppState.balanceSwitchEvent(source: "HSTLES (brandon)", target: "Backup", hours: 100),
-                       "Balancing moves work from HSTLES (brandon) to Backup: Backup's allowance must start being used 100 hour(s) before HSTLES (brandon)'s for each to be used up before it resets.")
+                       "Weekly balancing switches the active account from HSTLES (brandon) to Backup: Backup's weekly allowance must start being used 100 hour(s) before HSTLES (brandon)'s for each to be used up before its own reset.")
 
         // HSTLES (brandon) reaches its limit: the switch goes to Personal,
         // never onto Backup's 2%.
@@ -631,7 +631,7 @@ final class BalancingTests: XCTestCase {
         XCTAssertEqual(
             AppState.remainderMoveEvent(session: "session 1234abcd", account: "Backup", percentLeft: 2,
                                         resetsAt: now.addingTimeInterval(31 * 3600), now: now)
-                .hasPrefix("Moved session 1234abcd (light use) to Backup to use its last 2% before it resets on "), true)
+                .hasPrefix("Session balancing moved session 1234abcd (light use) to Backup to use its last 2% before it resets on "), true)
         XCTAssertTrue(AppState.remainderMoveEvent(session: "session 1234abcd", account: "Backup", percentLeft: 2,
                                                   resetsAt: now.addingTimeInterval(31 * 3600), now: now)
             .hasSuffix("; it rebuilds its cache there."))
