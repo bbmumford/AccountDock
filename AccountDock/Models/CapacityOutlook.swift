@@ -401,6 +401,84 @@ struct CapacityOutlook: Equatable {
     }
 }
 
+// MARK: - One account alone
+
+extension CapacityOutlook {
+    /// Weighted tokens `account` serves on its own from `now` until `end`:
+    /// `base`, the rate of the sessions on it, throughout, and `extra` from
+    /// `extraFrom` (now when nil), whose arrival first writes `arrival` tokens
+    /// into its cache. It serves while it has room and refuses what it cannot
+    /// carry until a reset frees more, the way the main projection steps;
+    /// none of its work goes elsewhere, so work added there takes room from
+    /// the sessions already on it. Also the window percent it has room for at
+    /// `end`, once the resets due then have refilled it. Excluded and
+    /// unavailable accounts serve nothing. Read by `HeldSessionPlan`.
+    static func servedAlone(_ account: Account, base: Double, extra: Double = 0, extraFrom: Date? = nil,
+                            arrival: Double = 0, now: Date, until end: Date, pacer: SessionPacer,
+                            step: TimeInterval = CapacityOutlook.defaultStep) -> (served: Double, room: Double) {
+        var state: State
+        switch account.availability {
+        case .serves: state = State(account: account, blockedUntil: nil)
+        case .atLimit:
+            state = State(account: account,
+                          blockedUntil: pacer.bindingReset(account.pacer, now: now) ?? now.addingTimeInterval(pacer.window))
+        case .excluded, .unavailable: return (0, 0)
+        }
+        func tokens(_ percent: Double) -> Double { pacer.millions(percent, on: state.account.pacer) * 1_000_000 }
+        func percent(_ tokens: Double) -> Double {
+            Allowance.percent(millions: tokens / 1_000_000, percentPerMillion: state.account.pacer.percentPerMillion)
+        }
+        let start = max(now, extraFrom ?? now)
+        var arrived = extra <= 0 && arrival <= 0
+        var served = 0.0
+        var time = now
+        while time < end {
+            _ = applyResets(&state, at: time, pacer: pacer)
+            if !arrived, time >= start {
+                arrived = true
+                let written = min(arrival, tokens(room(state, at: time, pacer: pacer)))
+                if written > 0 { spend(&state, percent: percent(written), at: time, pacer: pacer) }
+            }
+            var next = min(time.addingTimeInterval(step), end)
+            let resets = [state.account.pacer.resetsAt, state.account.pacer.weeklyResetsAt, state.blockedUntil, start]
+            for reset in resets.compactMap({ $0 }) where reset > time && reset < next { next = reset }
+            let rate = base + (time >= start ? extra : 0)
+            let taken = min(rate * next.timeIntervalSince(time) / 3600, tokens(room(state, at: time, pacer: pacer)))
+            if taken > 0 { spend(&state, percent: percent(taken), at: time, pacer: pacer) }
+            served += max(0, taken)
+            time = next
+        }
+        _ = applyResets(&state, at: end, pacer: pacer)
+        return (served, room(state, at: end, pacer: pacer))
+    }
+
+    /// The account's resets from `now` until `end`, each with what it renews:
+    /// its 5-hour window's (and one every five hours after it), its week's,
+    /// and, at its limit, the reset that frees it (`bindingReset`). Read by
+    /// `HeldSessionPlan.earliestLane`.
+    static func resets(_ account: Account, now: Date, until end: Date,
+                       pacer: SessionPacer) -> [(at: Date, kind: Event.Kind)] {
+        var result: [Date: Event.Kind] = [:]
+        if account.pacer.hasSessionWindow, var reset = account.pacer.resetsAt.flatMap({ $0 > now ? $0 : nil }) {
+            while reset <= end && result.count < 64 {
+                result[reset] = .windowRefill
+                reset = reset.addingTimeInterval(pacer.window)
+            }
+        }
+        if account.pacer.weeklyRemaining != nil, var reset = account.pacer.weeklyResetsAt.flatMap({ $0 > now ? $0 : nil }) {
+            while reset <= end {
+                result[reset] = .newWeek
+                reset = reset.addingTimeInterval(weekLength)
+            }
+        }
+        if account.availability == .atLimit, let freed = pacer.bindingReset(account.pacer, now: now), freed > now,
+           freed <= end, result[freed] == nil {
+            result[freed] = .windowRefill
+        }
+        return result.map { (at: $0.key, kind: $0.value) }.sorted { $0.at < $1.at }
+    }
+}
+
 // MARK: - Words
 
 extension CapacityOutlook {
