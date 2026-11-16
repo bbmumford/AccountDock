@@ -144,4 +144,32 @@ final class UseItOrLoseItTests: XCTestCase {
                                                destinations: [bytrix, fluxon, backup, voltrix], now: now, sharedGroup: group)
         XCTAssertNotEqual(heavyPlaced["33962de2"], bytrix)
     }
+
+    func testNewSessionsFollowHowSoonEachAllowanceMustBeSpent() {
+        let pacer = SessionPacer()
+        let byID = Dictionary(uniqueKeysWithValues: accounts().map { ($0.id, $0) })
+        // Backup's 80% of a window over the 155 hours to next Monday is 1M
+        // tokens an hour; fluxon's week resetting tomorrow night needs 59M,
+        // and bytrix's window, 62% over the 3.8 hours to its weekly reset,
+        // 16.5M.
+        XCTAssertEqual(pacer.evenRate(byID[backup]!, spent: 0, now: now), 1.0, accuracy: 0.01)
+        XCTAssertEqual(pacer.evenRate(byID[fluxon]!, spent: 0, now: now), 58.7, accuracy: 0.1)
+        XCTAssertEqual(pacer.evenRate(byID[bytrix]!, spent: 0, now: now), 16.5, accuracy: 0.1)
+        let plan = pacer.plan(accounts: accounts(), sessions: sessions(), now: now, sharedGroup: group,
+                              remainders: spending, held: ["8c64c5f8", "33962de2"])
+        XCTAssertTrue(plan.windowsOpen)
+        XCTAssertEqual(plan.weights[backup] ?? 0, 1.0, accuracy: 0.01,
+                       "Backup's room to the first carrier's reset, 2.6M an hour, counts at its even rate")
+        XCTAssertGreaterThan(plan.weights[voltrix] ?? 0, plan.weights[backup] ?? 0,
+                             "a week with 11% left and six days to go is the last place new work goes")
+        XCTAssertEqual(plan.weights[bytrix], 0, "cf-builder fills bytrix's window by 10:25 pm; another session only fills it sooner")
+    }
+
+    func testFreeRoomTakesNewSessionsFirst() {
+        let light = sessions(bytrixRate: 3_000_000)
+        let plan = SessionPacer().plan(accounts: accounts(bytrixRate: 3_000_000, bytrixWeight: 2), sessions: light, now: now,
+                                       sharedGroup: group, fixed: Set(light.map(\.id)), remainders: spending)
+        XCTAssertEqual(plan.weights[bytrix] ?? 0, 13.5, accuracy: 0.1, "51M tokens of free room over 3.8 hours")
+        for id in [hexorda, cybrio, fluxon, backup, voltrix] { XCTAssertEqual(plan.weights[id], 0) }
+    }
 }

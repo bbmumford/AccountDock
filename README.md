@@ -438,8 +438,10 @@ before the weekly reset is used to the full instead: whatever it serves
 before that reset is allowance that would otherwise expire. Pacing and
 rebalancing move no session off it before it reaches its 5-hour limit, and
 its window's room until the earlier of the window's reset and the weekly
-reset is where sessions moving off other accounts go first, when it carries
-them for the hour. Once it reaches the limit its sessions wait for a reset
+reset is where sessions moving off other accounts and new sessions go first,
+when it carries them for the hour. Otherwise new sessions go by how soon each
+account's allowance must be spent for the room it has: a week with little
+left and days to go takes the least, however much work that little is. Once it reaches the limit its sessions wait for a reset
 within their cache or move on, as at any limit. The 5-hour window is the
 cap: with 68% of a Max 5x week left four hours before its reset and 37% of
 its window used, at most the window's 63% (about 8% of its week) can be used

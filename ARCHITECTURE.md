@@ -928,7 +928,8 @@ them in ten minutes and be refused until the reset), and a fresh window
 takes a heavy session it carries for the hour. New sessions go by the tokens per
 hour each account would otherwise leave unused: the windows' room until
 their resets, and a carrier's room until the first carrier's reset, which is
-none once its own sessions spend it. `serveSessionSlots` records "Moved
+none once its own sessions spend it, at most its even rate
+(`SessionPacer.evenRate`, under Session pacing). `serveSessionSlots` records "Moved
 session X from Personal to hexorda, using hexorda's session window until
 12:20 pm, …" (`AppState.windowMoveEvent`).
 
@@ -1518,7 +1519,20 @@ the pool weights and which sessions move, each time the pool is rebuilt
   rate the account can still add without reaching its limit; with none
   left anywhere, by the share of the time to its reset each account lasts
   at its rate (`SessionPacer.sustainedShare`), the shared group's share
-  included.
+  included. Free room comes first: while an account has room left at its
+  use-by time that one more typical session fits (`fitsFreeRoom`) and
+  carries it for `newSessionRunway`, new sessions go only to such accounts,
+  by that room's tokens per hour until then. Where the weights measure room
+  to a horizon every account shares (the pool's run-out while the shared
+  group is projected to move, the first carrier's reset while the small
+  plans' windows are worth spending), an account's room counts at most at
+  its even rate (`SessionPacer.evenRate`): its room until it is lost (its
+  use-by time, else its weekly reset, the windows refilled on the way) over
+  the time until then, which orders accounts as weekly balancing's latest
+  start does. A weekly-only account with 11% of a Max 20x week left and six
+  days to go counts 1M tokens an hour, not the 2.6M its room until the
+  first carrier's reset would give it, beside a Pro window's 2.6M and a
+  Max 20x week resetting the next night that needs 59M.
 - An account sessions run on whose reading is older than its sessions'
   latest request, and older than ten minutes, stays in the pool for up to
   an hour with its weight scaled by ten minutes over the reading's age

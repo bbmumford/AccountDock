@@ -647,13 +647,16 @@ struct SessionPacer {
     /// Million weighted tokens per hour, until its reset, of the room the
     /// account's session window has left at that reset once its own `burn`
     /// and `spent` have run: room that expires unused, since the window
-    /// then starts again full. 0 without a session window, or with less
-    /// such room than `minimumLeftover`, which no session's start is worth.
-    /// `plan`'s new-session weights and `AppState.buildPool` give an
-    /// account short of the runway a share of new sessions sized to it.
+    /// then starts again full. For an account whose room is free until its
+    /// `useBy` time, the room left then, which its weekly reset takes with
+    /// it. 0 without a session window, or with less such room than
+    /// `minimumLeftover`, which no session's start is worth. `plan`'s
+    /// new-session weights and `AppState.buildPool` give an account short of
+    /// the runway a share of new sessions sized to it.
     func expiringWindowRate(_ account: Account, spent: Double = 0, burn: Double, now: Date) -> Double {
         guard account.hasSessionWindow else { return 0 }
-        let end = account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
+        let end = useBy(account, spent: spent, now: now)
+            ?? account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
         let room = spare(account, until: end, spent: spent, burn: burn, shared: nil, now: now)
         guard room >= Self.minimumLeftover else { return 0 }
         return millions(room, on: account) / (max(end.timeIntervalSince(now), 60) / 3600)
@@ -675,10 +678,10 @@ struct SessionPacer {
     /// for its whole allowance and moves none of its sessions to spend room
     /// elsewhere, `rebalance` neither moves a session off it nor counts its
     /// run-out, and its room left at that time (`freeRoom`) is the first
-    /// place a session shed or stranded elsewhere goes when it carries the
-    /// session for `newSessionRunway`. A session moves off it once it
-    /// reaches the limit, by the rules for any account at its limit. Read
-    /// by those.
+    /// place a session shed or stranded elsewhere, or a new session, goes
+    /// when it carries the session for `newSessionRunway`. A session moves
+    /// off it once it reaches the limit, by the rules for any account at
+    /// its limit. Read by those, and by `expiringWindowRate` and `evenRate`.
     func useBy(_ account: Account, spent: Double = 0, now: Date) -> Date? {
         guard account.hasSessionWindow, let weeklyLeft = account.weeklyRemaining,
               let weeklyEnd = account.weeklyResetsAt, weeklyEnd > now else { return nil }
@@ -732,6 +735,28 @@ struct SessionPacer {
     static func fitsFreeRoom(rate: Double, cost: Double, room: Double, until end: Date, now: Date) -> Bool {
         let hours = min(max(0, end.timeIntervalSince(now)), newSessionRunway) / 3600
         return room >= minimumLeftover && cost + rate * hours <= room * windowFitShare
+    }
+
+    /// Million weighted tokens per hour that spends the account's room
+    /// evenly until it is lost: its free room by its use-by time (`useBy`),
+    /// or else its room by its weekly reset (its session window's reset
+    /// without a weekly allowance), the session windows that refill on the
+    /// way counted (`roomBy`), over the hours until then. An allowance that
+    /// resets sooner, or that its session windows can no longer drain in
+    /// time, needs the larger rate, the order weekly balancing gives by
+    /// latest start (`FailoverPlanner.latestStart`). `plan` caps by it the
+    /// new-session weights it measures to a horizon shared by every
+    /// account (the pool's run-out, or the first carrier's reset while the
+    /// small plans' windows are worth spending): measured so, room that
+    /// lasts days past that horizon, as a weekly-only account's last 11%
+    /// with a week to go, would outweigh an allowance resetting in hours.
+    func evenRate(_ account: Account, spent: Double, now: Date) -> Double {
+        let free = useBy(account, spent: spent, now: now)
+        let end = free ?? account.weeklyResetsAt.flatMap { $0 > now ? $0 : nil }
+            ?? account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
+        let room = free == nil ? roomBy(account, end, spent: spent, now: now)
+            : spare(account, until: end, spent: spent, burn: 0, shared: nil, now: now)
+        return max(0, millions(room, on: account)) / (max(end.timeIntervalSince(now), 60) / 3600)
     }
 
     /// Whether `carriers`, the accounts that take sessions for the runway,
@@ -1373,6 +1398,14 @@ struct SessionPacer {
             spare(account, until: runOut, spent: spent[account.id] ?? 0, burn: burn[account.id] ?? 0,
                   shared: shares[account.id], now: now)
         }
+        // Room measured to a horizon every account shares counts at most
+        // at the rate that spends the account's room evenly until it is
+        // lost (`evenRate`): room that lasts days past that horizon is not
+        // lost by it, and the allowance that resets soonest for its room is
+        // used first.
+        func paced(_ tokensPerHour: Double, _ account: Account) -> Double {
+            min(max(0, tokensPerHour), evenRate(account, spent: spent[account.id] ?? 0, now: now))
+        }
         // Otherwise new sessions go by unused rate, in tokens (`millions`),
         // to accounts that stay within their windows. When every account would reach a limit
         // before its reset, they go by how much of its present rate each
@@ -1382,7 +1415,7 @@ struct SessionPacer {
         plan.weights = weighted { account in
             if let runOut {
                 return account.baseWeight > 0
-                    ? account.baseWeight * max(0, millions(spareRoom(account, runOut), on: account)) / runOutHours : 0
+                    ? account.baseWeight * paced(millions(spareRoom(account, runOut), on: account) / runOutHours, account) : 0
             }
             let outlook = current(account)
             let open = account.baseWeight > 0 && plan.shedding[account.id] == nil && outlook.limitAt == nil
@@ -1405,14 +1438,14 @@ struct SessionPacer {
                     guard account.baseWeight > 0 else { return 0 }
                     let whole = spareRoom(account, runOut)
                     guard let allowance = account.scoped[key], allowance.resetsAt > now else {
-                        return account.baseWeight * max(0, millions(whole, on: account)) / runOutHours
+                        return account.baseWeight * paced(millions(whole, on: account) / runOutHours, account)
                     }
                     let fraction = shares[account.id]?.scopedFractions[key] ?? 0
                     let end = min(runOut, allowance.resetsAt)
                     let own = allowance.remaining - (scopedSpent[account.id]?[key] ?? 0)
                         - Allowance.spent(perHour: scopedBurn[account.id]?[key] ?? 0, from: now, until: end)
                         - (shares[account.id]?.percent(from: now, until: end, fraction: fraction) ?? 0)
-                    return account.baseWeight * max(0, millions(min(whole, own), on: account)) / runOutHours
+                    return account.baseWeight * paced(millions(min(whole, own), on: account) / runOutHours, account)
                 }
                 let outlooks = [current(account)] + [currentScoped(account, key)].compactMap { $0 }
                 let open = account.baseWeight > 0 && plan.shedding[account.id] == nil
@@ -1433,12 +1466,13 @@ struct SessionPacer {
         }
         // With the windows worth spending, new sessions go by the tokens per
         // hour each account would otherwise leave unused: a small account's
-        // session window until its reset, a carrier's room until the first
-        // carrier's binding reset, which is none once its own sessions spend
-        // it by then. A new session placed on a carrier adds nothing served
-        // before that reset; one placed in a window adds what it uses there.
-        // Applied only while some window has room, and to a model's weights
-        // only where that model's own allowance is not spent.
+        // session window until its reset (its use-by time when sooner), a
+        // carrier's room until the first carrier's binding reset, which is
+        // none once its own sessions spend it by then, and at most its even
+        // rate (`paced`). A new session placed on a carrier adds nothing
+        // served before that reset; one placed in a window adds what it
+        // uses there. Applied only while some window has room, and to a
+        // model's weights only where that model's own allowance is not spent.
         if windowsOpen, let remainders {
             let carriers = accounts.filter { $0.baseWeight > 0 && !remainders.accounts.contains($0.id) }
             let refill = carriers.compactMap { account -> Date? in
@@ -1448,7 +1482,8 @@ struct SessionPacer {
             var windowRates: [UUID: Double] = [:]
             for account in accounts where remainders.accounts.contains(account.id) && account.hasSessionWindow
                 && shares[account.id] == nil && plan.shedding[account.id] == nil {
-                let end = account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
+                let end = freeUntil[account.id]
+                    ?? account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
                 let room = spare(account, until: end, spent: spent[account.id] ?? 0, burn: burn[account.id] ?? 0,
                                  shared: nil, now: now)
                 windowRates[account.id] = max(0, millions(room, on: account)) / (max(end.timeIntervalSince(now), 60) / 3600)
@@ -1458,7 +1493,7 @@ struct SessionPacer {
                 if let refill {
                     let hours = max(refill.timeIntervalSince(now), 60) / 3600
                     for account in carriers {
-                        rates[account.id] = max(0, millions(spareRoom(account, refill), on: account)) / hours
+                        rates[account.id] = paced(millions(spareRoom(account, refill), on: account) / hours, account)
                     }
                 }
                 plan.weights = accounts.reduce(into: [:]) { $0[$1.id] = rates[$1.id] ?? 0 }
@@ -1468,6 +1503,37 @@ struct SessionPacer {
                         result[account.id] = spentHere ? 0 : rates[account.id] ?? 0
                     }
                 }
+            }
+        }
+        // Free room comes first (`useBy`): while an account has room left at
+        // its use-by time that one more typical session fits
+        // (`fitsFreeRoom`) and it carries that session for
+        // `newSessionRunway`, new sessions go only to such accounts, by the
+        // free room's tokens per hour until then. What they serve there
+        // would otherwise expire unused; on any other account it spends
+        // allowance that lasts. One whose room the session does not fit
+        // keeps the share `weighted` sizes to its room beside the others. A
+        // model's weights follow where that model's own allowance also
+        // carries the session.
+        func freeRates(_ key: String?) -> [UUID: Double] {
+            accounts.reduce(into: [UUID: Double]()) { result, account in
+                guard account.baseWeight > 0, plan.shedding[account.id] == nil, filling[account.id] == nil,
+                      let end = freeUntil[account.id], end > now else { return }
+                let room = freeRoom(account, spent: spent[account.id] ?? 0, burn: burn[account.id] ?? 0,
+                                    shared: shares[account.id], now: now)
+                guard Self.fitsFreeRoom(rate: percent(typical, on: account), cost: 0, room: room, until: end, now: now),
+                      (runway(account, key) ?? .infinity) >= Self.newSessionRunway else { return }
+                result[account.id] = millions(room, on: account) / (max(end.timeIntervalSince(now), 60) / 3600)
+            }
+        }
+        let free = freeRates(nil)
+        if !free.isEmpty {
+            plan.weights = accounts.reduce(into: [:]) { $0[$1.id] = free[$1.id] ?? 0 }
+        }
+        for key in plan.modelWeights.keys {
+            let freeForModel = freeRates(key)
+            if !freeForModel.isEmpty {
+                plan.modelWeights[key] = accounts.reduce(into: [:]) { $0[$1.id] = freeForModel[$1.id] ?? 0 }
             }
         }
         return plan
