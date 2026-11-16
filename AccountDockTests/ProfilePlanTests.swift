@@ -199,7 +199,7 @@ final class ProfilePlanTests: XCTestCase {
         XCTAssertFalse(account.applyCredentialPlan("Ultra"))
         XCTAssertEqual(account.displaySubscriptionType, "Free")
         XCTAssertNil(account.planSize, "Kimi lists no plan sizes, so its cost is learned or plan-wide")
-        XCTAssertTrue(account.supportsProviderWorkloads, "Kimi does not require a paid plan for Kimi Code")
+        XCTAssertFalse(account.supportsProviderWorkloads, "Kimi Code needs a paid Kimi membership")
         XCTAssertEqual(AppState.learnedPlan(account), TurnCostModel.LearnedPlan(plan: "Free", tier: nil))
     }
 
