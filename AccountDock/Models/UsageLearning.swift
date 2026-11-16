@@ -47,8 +47,8 @@ struct TurnCostModel: Codable, Equatable {
     /// The account's own ratio once measured, otherwise the plan-wide one.
     func ratio(for account: UUID) -> Double { accountPercentPerMillion?[account] ?? ratio }
 
-    /// An account's plan as its credential names it
-    /// (`Account.subscriptionType`, `Account.rateLimitTier`).
+    /// An account's plan, the profile's first (`Account.currentPlan`,
+    /// `Account.currentRateLimitTier`).
     struct LearnedPlan: Codable, Equatable {
         var plan: String?
         var tier: String?

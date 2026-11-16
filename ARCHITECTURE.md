@@ -310,6 +310,35 @@ The token stored in keychain is a single JSON object (captured from real keychai
 - `scopes` is an **array of strings** (not a single string)
 - The token JSON does **NOT** contain email or account identity — the only way to determine which account a token belongs to is by calling `claude auth status` while that token is active
 - This lack of embedded identity is why AccountDock asks the profile endpoint whose a live token is before it saves it under an account.
+- `subscriptionType` and `rateLimitTier` are the plan the token was issued under: an upgrade or a downgrade does not change them, and `claude auth status` reports the same. See "Claude plans" below.
+
+### Claude plans
+
+A Claude account's plan and tier come from its account profile
+(`/api/oauth/profile`: `organization.organization_type` without its
+`claude_` prefix, `organization.rate_limit_tier`), which
+`Account.applyProfilePlan` keeps with the account (`profilePlan`,
+`profileRateLimitTier`, `profileCheckedAt`) and copies into the stored
+plan and tier. Once a profile has answered, every writer that reads a
+token, `claude auth status` or a sign-in's identity goes through
+`Account.applyCredentialPlan`, which leaves the plan and tier alone, and
+`planSize`, `planHasSessionWindow`, `displaySubscriptionType`,
+`workloadAvailability` and the learned plan read the profile's first
+(`currentPlan`, `currentRateLimitTier`). An account saved before any
+profile answered decodes as before and keeps its token's plan until one
+does. A profile naming another account's address than the account it was
+read for is not applied (`AppState.applyClaudeProfile`). An ended plan, in
+the profile or as a usage reply's refusal (`markClaudeCodeUnavailable`), is
+kept as "free".
+
+The profile is checked after a sign-in, a re-authentication and a switch,
+on the user's refresh for every account, and otherwise every
+`profileRecheckInterval` (three hours; a check that got no answer is tried
+again after `profileRetryInterval`), with the usage reading of an account
+or, for accounts only passive readings cover, by
+`recheckClaudeProfilesIfDue` after a refresh's readings, from the
+background allowance. A check that changes the plan or tier is logged
+(`[profile]`) and told in the failover events.
 
 ### Codex and Kimi
 
@@ -543,7 +572,20 @@ reading whose reply still names a passed reset does not confirm it. The quota
 cycle reads such accounts 30 seconds after the reset, at verification rank
 (`verifyPassedResets`), and runs again as soon as a cool-down or the budget
 lets the reading through. A passive reading confirms the reset without a
-request.
+request when it speaks for the windows after it
+(`AppState.passiveApplication`). Claude Code redraws a session's status
+line when a window resets, without a request, and leaves the passed window
+out, so after a reset a status line counts only when its session sent a
+request after the reset (`sessionRequestSeenAt`, from the transcripts, or
+the router's record) or shows the session window with use: until then its
+missing session window is no sign the account has none, a session window it
+shows at no use (the provider's moving placeholder) is not a started one,
+and it confirms nothing and stands as no live reading, though its long
+window is recorded. The usage cache, the endpoint's whole reply, leaves an
+unstarted session window in place on an account with one, and confirms
+nothing when fetched before the reset. While an account awaits a reading
+that confirms its reset, a reading that does not leaves its warm-up to
+`verifyPassedResets` (`unverifiedReadingStartsWarmup`).
 
 Window warming (`keepWindowsWarm`) starts an unused, unstarted window with one
 non-persistent probe (`performWindowWarmup`), so it resets sooner. The probe
@@ -551,8 +593,11 @@ runs at once on a whole reading taken within the last minute that shows the
 window unstarted, or, a minute after the provider's reset time, on an
 account nothing has used since the reset and whose sign-in is known to be its
 own; otherwise the warm-up reads the account first, through the ordinary
-reader. A session window is warmed only on an account whose reading carries
-one, while its long window has room; a window a probe started is not probed
+reader. A whole reply that leaves the session window out reports it not
+started on an account whose plan has one or whose session window has just
+reset (`readingHasSessionWindow`), whatever plan name is stored. A session
+window is warmed only on an account whose reading carries one, while its
+long window has room; a window a probe started is not probed
 again for 30 minutes unless another reset passes. A warm-up the budget or a
 cool-down holds back runs just after it ends; one that fails otherwise is
 retried after 2, 5, 15 and 30 minutes, then waits for the next reset.
@@ -936,8 +981,9 @@ outlook all count through:
 
 An account with no measured cost is seeded from its plan size
 (`ProviderCapabilities.planSizes`, keyed `<plan>:<tier>` or `<plan>`, read
-by `Account.planSize` from the stored plan and the credential's rate-limit
-tier; Claude: Max 20x 20, Max 5x 5, Pro 1) by `TurnCostModel.ratio(for:sizes:)`:
+by `Account.planSize` from the profile's plan and tier, or else the stored
+plan and the credential's rate-limit tier; Claude: Max 20x 20, Max 5x 5,
+Pro 1) by `TurnCostModel.ratio(for:sizes:)`:
 a measured account's cost times its size over this one's (the geometric mean
 over every such account), or, with none measured, the plan-wide cost scaled
 from the median known size. A provider whose plan sizes are not listed, or an

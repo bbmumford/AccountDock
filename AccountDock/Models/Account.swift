@@ -42,23 +42,120 @@ struct Account: Identifiable, Codable, Hashable {
     /// then serves no workload (`workloadAvailability`) until a re-check
     /// (`AppState.recheckCLIAccessIfDue`) is served again.
     var cliAccessRefusedAt: Date?
+    /// The plan the provider's account profile last named (Claude's
+    /// `organization.organization_type` without its `claude_` prefix, or
+    /// "free" once the profile or a usage reply shows the plan ended); nil
+    /// until a profile check answered. A credential keeps the plan it was
+    /// issued under through an upgrade or a downgrade, so once this is known
+    /// it is the account's plan (`currentPlan`): `applyProfilePlan` writes
+    /// it, and the credential, `claude auth status` and sign-in writers go
+    /// through `applyCredentialPlan`, which leaves the plan alone.
+    var profilePlan: String?
+    /// The rate-limit tier the account profile last named
+    /// (`organization.rate_limit_tier`), which sizes the plan; nil until a
+    /// profile check named one. Wins over the credential's
+    /// (`currentRateLimitTier`).
+    var profileRateLimitTier: String?
+    /// When a profile check last answered for the account, kept across
+    /// launches so `AppState.claudeProfileCheckDue` checks it again only
+    /// every `AppState.profileRecheckInterval`.
+    var profileCheckedAt: Date?
+
+    /// The account's plan: the profile's when a profile check named one,
+    /// otherwise the stored one. Read by every plan-dependent property
+    /// here and by `AppState.learnedPlan`.
+    var currentPlan: String? { profilePlan ?? subscriptionType }
+    /// The account's rate-limit tier: the profile's when a profile check
+    /// named one, otherwise the credential's.
+    var currentRateLimitTier: String? { profileRateLimitTier ?? rateLimitTier }
 
     /// The plan's name: the provider's name for its plan and tier, or else
     /// the subscription type with first letter capitalized ("pro" → "Pro").
     var displaySubscriptionType: String? {
-        if let plan = subscriptionType, let tier = rateLimitTier,
+        let current = currentPlan
+        if let plan = current, let tier = currentRateLimitTier,
            let name = provider.capabilities.planNames["\(plan):\(tier)"] { return name }
-        return subscriptionType?.prefix(1).uppercased().appending(subscriptionType?.dropFirst() ?? "")
+        return current?.prefix(1).uppercased().appending(current?.dropFirst() ?? "")
     }
 
     /// The plan's allowance relative to the provider's other plans
     /// (`ProviderCapabilities.planSizes`), by its plan and tier or its plan
-    /// alone; nil when the provider's table does not know it.
+    /// alone, the profile's first (`currentPlan`, `currentRateLimitTier`);
+    /// nil when the provider's table does not know it.
     var planSize: Double? {
-        guard let plan = subscriptionType?.lowercased() else { return nil }
+        guard let plan = currentPlan?.lowercased() else { return nil }
         let sizes = provider.capabilities.planSizes
-        if let tier = rateLimitTier, let size = sizes["\(plan):\(tier)"] { return size }
+        if let tier = currentRateLimitTier, let size = sizes["\(plan):\(tier)"] { return size }
         return sizes[plan]
+    }
+
+    /// Writes the plan and tier a credential, `claude auth status` or a
+    /// sign-in's identity names, each only while the account profile has
+    /// not named its own (`profilePlan`, `profileRateLimitTier`): a
+    /// credential still names the plan it was issued under after the plan
+    /// changed. A nil value leaves the stored one. Returns whether anything
+    /// changed, so the caller saves the accounts.
+    @discardableResult
+    mutating func applyCredentialPlan(_ plan: String?, tier: String? = nil) -> Bool {
+        var changed = false
+        if profilePlan == nil, let plan, subscriptionType != plan {
+            subscriptionType = plan
+            changed = true
+        }
+        if profileRateLimitTier == nil, let tier, rateLimitTier != tier {
+            rateLimitTier = tier
+            changed = true
+        }
+        return changed
+    }
+
+    /// A change of plan a profile check found, in the words the failover
+    /// events and the log use (`displaySubscriptionType`, and the stored
+    /// plan and tier).
+    struct PlanChange: Equatable {
+        var before: String
+        var after: String
+        var detail: String
+    }
+
+    /// Takes the plan and tier the account profile names now: `plan`, or
+    /// "free" when the profile shows the plan ended (`inactive`), and
+    /// `tier`; a plan or tier the profile does not name keeps the one
+    /// known. They become the profile's (`profilePlan`,
+    /// `profileRateLimitTier`) and the stored ones, so every reader agrees.
+    /// `checkedAt` is when the profile answered (`profileCheckedAt`).
+    /// Returns the change when the plan or tier differs from what the
+    /// account was taken to be on, nil when it is the same.
+    mutating func applyProfilePlan(_ plan: String?, inactive: Bool, tier: String?, checkedAt: Date) -> PlanChange? {
+        let before = (name: displaySubscriptionType ?? "none", plan: currentPlan, tier: currentRateLimitTier)
+        profileCheckedAt = checkedAt
+        if let named = inactive ? "free" : plan {
+            profilePlan = named
+            subscriptionType = named
+        }
+        if let tier, !inactive {
+            profileRateLimitTier = tier
+            rateLimitTier = tier
+        }
+        guard before.plan != currentPlan || before.tier != currentRateLimitTier else { return nil }
+        func raw(_ plan: String?, _ tier: String?) -> String { [plan ?? "none", tier].compactMap { $0 }.joined(separator: ":") }
+        var names = (before: before.name, after: displaySubscriptionType ?? "none")
+        // Plans the provider names alike (a Max plan on another tier) are
+        // told apart by their tiers.
+        if names.before == names.after {
+            names = ("\(names.before) (\(before.tier ?? "no tier"))", "\(names.after) (\(currentRateLimitTier ?? "no tier"))")
+        }
+        return PlanChange(before: names.before, after: names.after,
+                          detail: "\(raw(before.plan, before.tier)) -> \(raw(currentPlan, currentRateLimitTier))")
+    }
+
+    /// Makes the stored plan and tier the profile's where a profile check
+    /// named them, so every reader of the stored fields sees the plan the
+    /// account is on from launch. Applied by `AppState.loadAccounts` to
+    /// every decoded account.
+    mutating func adoptProfilePlan() {
+        if let profilePlan { subscriptionType = profilePlan }
+        if let profileRateLimitTier { rateLimitTier = profileRateLimitTier }
     }
 
     /// Whether the account's plan has a session window: always where the
@@ -72,9 +169,9 @@ struct Account: Identifiable, Codable, Hashable {
         case .required: return true
         case .unsupported: return false
         case .whenPresent:
-            guard let plan = subscriptionType?.lowercased() else { return nil }
+            guard let plan = currentPlan?.lowercased() else { return nil }
             let plans = provider.capabilities.sessionWindowPlans
-            if let tier = rateLimitTier, plans.contains("\(plan):\(tier)") { return true }
+            if let tier = currentRateLimitTier, plans.contains("\(plan):\(tier)") { return true }
             return plans.contains(plan) ? true : nil
         }
     }
@@ -88,7 +185,7 @@ struct Account: Identifiable, Codable, Hashable {
 
     var workloadAvailability: ProviderWorkloadAvailability {
         if cliAccessRefusedAt != nil { return .unavailable(label: "\(provider.rawValue) disabled by organisation") }
-        return Self.workloadAvailability(provider: provider, subscriptionType: subscriptionType)
+        return Self.workloadAvailability(provider: provider, subscriptionType: currentPlan)
     }
 
     /// What the account card says while the organisation refuses the CLI

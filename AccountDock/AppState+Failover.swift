@@ -298,18 +298,21 @@ extension AppState {
             guard let accountID = slot ?? attributed?.account else { continue }
             if let updatedAt = accountUsageUpdatedAt[accountID], observation.observedAt <= updatedAt { continue }
             if Self.describesSupersededWindow(observation.usage, stored: accountUsage[accountID]) { continue }
+            let applied = Self.passiveApplication(
+                observation, reportedNoSessionWindow: noSessionWindow, reset: resetToSeeAfresh(accountID),
+                hasSessionWindow: Self.readingHasSessionWindow(
+                    planHasSessionWindow: accounts.first(where: { $0.id == accountID })?.planHasSessionWindow,
+                    sessionWindowReset: sessionWindowResetPending(accountID)),
+                sessionRequestedAt: observation.processKey.flatMap { lastRequestSeen(bySession: $0) }
+            )
             let merged = accountUsage[accountID].map {
-                $0.merged(withNewer: observation.usage, clearingSession: noSessionWindow)
-            } ?? observation.usage
-            // The reading only confirms a reset when it carries every window
-            // the provider reports for the account, each with a reset still
-            // ahead.
-            let confirmsReset = usage.sevenDay != nil && (usage.fiveHour != nil || noSessionWindow)
-            recordUsage(merged, for: accountID, observedAt: observation.observedAt, confirmsReset: confirmsReset)
+                $0.merged(withNewer: applied.usage, clearingSession: applied.clearsSession)
+            } ?? applied.usage
+            recordUsage(merged, for: accountID, observedAt: observation.observedAt, confirmsReset: applied.confirmsReset)
             if accountUsageErrors[accountID]?.isRateLimited == true {
                 accountUsageErrors[accountID] = nil
             }
-            if observation.source.reportsWithEachResponse {
+            if applied.isLive {
                 liveReadingAt[accountID] = observation.observedAt
                 answerRouterRefusal(accountID, liveAt: observation.observedAt, now: now)
             }
@@ -500,11 +503,33 @@ extension AppState {
         failoverLog.warning("\(account.provider.rawValue) usage endpoint throttled; shared cool-down until \(budget.blockedUntil?.description ?? "unknown")")
     }
 
-    /// Plan tiers change rarely; profile requests share the usage budget.
+    /// Whether a Claude account's profile is checked with its usage reading
+    /// (`claudeProfileCheckDue`). Profile requests share the usage budget.
     func shouldCheckClaudeProfile(_ account: Account, forced: Bool, now: Date = Date()) -> Bool {
-        if forced || !account.supportsProviderWorkloads { return true }
-        guard let checked = lastProfileCheck[account.id] else { return true }
-        return now.timeIntervalSince(checked) >= 6 * 60 * 60
+        Self.claudeProfileCheckDue(checkedAt: account.profileCheckedAt, attemptedAt: lastProfileCheck[account.id],
+                                   forced: forced, available: account.supportsProviderWorkloads, now: now)
+    }
+
+    /// How long an answered profile check stands: plans change rarely, but
+    /// an upgrade or a downgrade changes how much work the account holds.
+    nonisolated static let profileRecheckInterval: TimeInterval = 3 * 60 * 60
+    /// How long after a profile check that got no answer it is tried again.
+    nonisolated static let profileRetryInterval: TimeInterval = 15 * 60
+
+    /// Whether a Claude account's profile is due a check: on the user's
+    /// refresh and on an account whose plan serves no workload (`forced`,
+    /// `available`), when no check has answered (`checkedAt`, kept with the
+    /// account), `profileRecheckInterval` after the last answer, and no
+    /// sooner than `profileRetryInterval` after a check that got none
+    /// (`attemptedAt`). Read by `shouldCheckClaudeProfile` and
+    /// `recheckClaudeProfilesIfDue`.
+    nonisolated static func claudeProfileCheckDue(checkedAt: Date?, attemptedAt: Date?, forced: Bool, available: Bool,
+                                                 now: Date) -> Bool {
+        if forced || !available { return true }
+        if let attemptedAt, checkedAt.map({ attemptedAt > $0 }) ?? true,
+           now.timeIntervalSince(attemptedAt) < profileRetryInterval { return false }
+        guard let checkedAt else { return true }
+        return now.timeIntervalSince(checkedAt) >= profileRecheckInterval
     }
 
     /// Reads one account's usage immediately. Returns whether a fresh
@@ -546,6 +571,86 @@ extension AppState {
         for account in accounts where !account.isActive && accountUsage[account.id] == nil && !needsSignIn(account) {
             await readUsageNow(account)
         }
+    }
+
+    /// How `ingestPassiveTelemetry` applies one passive reading: the
+    /// windows it records (`usage`), whether it drops a stored session
+    /// window (`clearsSession`), whether it confirms a passed reset
+    /// (`recordUsage`'s `confirmsReset`) and whether it stands as the
+    /// account's live reading (`liveReadingAt`).
+    struct PassiveApplication {
+        var usage: UsageAPIResponse
+        var clearsSession: Bool
+        var confirmsReset: Bool
+        var isLive: Bool
+    }
+
+    /// How a passive reading applies (`PassiveApplication`). `observation`
+    /// carries its windows with the passed resets dropped, and
+    /// `reportedNoSessionWindow` is whether it carried the long window
+    /// without a session window before they were. `reset` is the latest
+    /// reset of the account still to be seen afresh (`resetToSeeAfresh`);
+    /// with none, the reading applies as it reads: it confirms a reset when
+    /// it carries every window the provider reports for the account, each
+    /// with a reset still ahead.
+    ///
+    /// Claude Code redraws a session's status line when a window resets,
+    /// without a request, and leaves the passed window out. After a reset a
+    /// status line therefore speaks for the account's session window only
+    /// when the session sent a request after it (`sessionRequestedAt`) or
+    /// shows the window with use, which only a reply after the reset can
+    /// carry: until then its missing session window is no sign the account
+    /// has none, and a session window it shows at no use, the provider's
+    /// moving placeholder, is not taken for a started one. Such a reading
+    /// still records the long window, but confirms nothing and stands as no
+    /// live reading. The usage cache is the endpoint's whole reply, which
+    /// leaves an unstarted session window out, so on an account with a
+    /// session window (`hasSessionWindow`) its missing window is not
+    /// dropped; one fetched before the reset confirms nothing.
+    nonisolated static func passiveApplication(_ observation: PassiveUsageObservation, reportedNoSessionWindow: Bool,
+                                               reset: Date?, hasSessionWindow: Bool,
+                                               sessionRequestedAt: Date?) -> PassiveApplication {
+        let usage = observation.usage
+        let carriesEvery = usage.sevenDay != nil && (usage.fiveHour != nil || reportedNoSessionWindow)
+        guard let reset else {
+            return PassiveApplication(usage: usage, clearsSession: reportedNoSessionWindow, confirmsReset: carriesEvery,
+                                      isLive: observation.source.reportsWithEachResponse)
+        }
+        switch observation.source {
+        case .claudeStatusLine:
+            let requested = sessionRequestedAt.map { $0 >= reset } ?? false
+            let started = usage.fiveHour.map { requested || ($0.utilization ?? 0) > 0 } ?? false
+            let shown = usage.fiveHour == nil || started ? usage : usage.replacingFiveHour(nil)
+            let absent = requested && reportedNoSessionWindow
+            return PassiveApplication(usage: shown, clearsSession: absent,
+                                      confirmsReset: shown.sevenDay != nil && (started || absent),
+                                      isLive: started || requested)
+        case .claudeUsageCache:
+            let afterReset = observation.observedAt >= reset
+            return PassiveApplication(usage: usage, clearsSession: afterReset && reportedNoSessionWindow && !hasSessionWindow,
+                                      confirmsReset: afterReset && carriesEvery,
+                                      isLive: observation.source.reportsWithEachResponse)
+        case .codexRollout:
+            return PassiveApplication(usage: usage, clearsSession: reportedNoSessionWindow, confirmsReset: carriesEvery,
+                                      isLive: observation.source.reportsWithEachResponse)
+        }
+    }
+
+    /// When a session's newest request was seen: in its transcript
+    /// (`sessionRequestSeenAt`) or through the router (`sessionRates`).
+    func lastRequestSeen(bySession session: String) -> Date? {
+        [sessionRequestSeenAt[session], sessionRates.entries[session]?.lastSeen].compactMap { $0 }.max()
+    }
+
+    /// Whether a reading of an account should hold a session window: its
+    /// plan has one (`Account.planHasSessionWindow`), or one of its session
+    /// windows has just reset (`sessionWindowReset`, a pending session
+    /// warm-up), which shows the plan has them whatever its stored name
+    /// says. A whole reply that leaves the window out then reports it not
+    /// started (`recordUsage`), and a passive one does not drop it
+    /// (`passiveApplication`).
+    nonisolated static func readingHasSessionWindow(planHasSessionWindow: Bool?, sessionWindowReset: Bool) -> Bool {
+        planHasSessionWindow == true || sessionWindowReset
     }
 
     /// Whether a passive reading describes a long window the stored reading

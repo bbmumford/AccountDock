@@ -53,6 +53,10 @@ struct ClaudeSubscriptionSnapshot: Equatable, Sendable {
     /// The organisation's rate-limit tier the profile names
     /// (`default_claude_max_5x`), which sizes the plan; nil when it names none.
     var rateLimitTier: String? = nil
+    /// The address of the account the profile describes, so a profile read
+    /// with a credential found in the shared slot is applied only to the
+    /// account it names (`AppState.applyClaudeProfile`); nil when it names none.
+    var email: String? = nil
 }
 
 /// The account a Claude access token belongs to, from the account profile.
@@ -317,7 +321,8 @@ final class ClaudeService: @unchecked Sendable {
         return ClaudeSubscriptionSnapshot(
             planType: expired ? nil : (explicit ?? organizationPlan),
             isInactive: expired,
-            rateLimitTier: expired ? nil : organization?["rate_limit_tier"] as? String
+            rateLimitTier: expired ? nil : organization?["rate_limit_tier"] as? String,
+            email: profileIdentity(fromProfileJSON: json).email
         )
     }
 
