@@ -928,7 +928,8 @@ them in ten minutes and be refused until the reset), and a fresh window
 takes a heavy session it carries for the hour. New sessions go by the tokens per
 hour each account would otherwise leave unused: the windows' room until
 their resets, and a carrier's room until the first carrier's reset, which is
-none once its own sessions spend it. `serveSessionSlots` records "Moved
+none once its own sessions spend it, at most its even rate
+(`SessionPacer.evenRate`, under Session pacing). `serveSessionSlots` records "Moved
 session X from Personal to hexorda, using hexorda's session window until
 12:20 pm, …" (`AppState.windowMoveEvent`).
 
@@ -1428,6 +1429,30 @@ the pool weights and which sessions move, each time the pool is rebuilt
   shorter than staying would. The router moves it at its next turn
   (`RouterState.moves`). The event names the reason ("… while the other
   accounts still have room (together they last until …)").
+- An account whose weekly allowance its session windows could not drain
+  before its weekly reset even filled to the limit one after another
+  (`SessionPacer.useBy`: its weekly room exceeds what its windows hold until
+  that reset, `sessionCapacity`, by `minimumLeftover`; weekly balancing's
+  latest start for it has passed) has free room: every percent its windows
+  serve until the earlier of its session window's reset and its weekly reset
+  is weekly allowance that would otherwise expire unused. Reaching its
+  session window's limit is then the goal, not a run-out: `plan` sheds
+  nothing from it for its whole allowance and moves none of its sessions to
+  spend a remainder or a window, and `rebalance` neither moves a session off
+  it nor takes its run-out for a bottleneck or reports it. Its room left at
+  that time at its own rate (`freeRoom`) is the first destination of a
+  session the shedding rule moves, the stranded placement (`place`) places or
+  a rebalance moves, when the session's arrival and its rate until then, or
+  for `newSessionRunway` when that is later, fit `windowFitShare` of that
+  room (`fitsFreeRoom`) and it reaches no limit there within the hour: a
+  session sized to the room, so a heavy one does not push the account's own
+  sessions to its limit early. Once at its limit its sessions wait for a reset within
+  their cache or move on, as from any limit. The 5-hour window is the cap:
+  with 68% of a Max 5x week left 3 h 48 min before its weekly reset and 37%
+  of its window used, the window resetting half an hour after the week, at
+  most the window's 63% can be used before the week resets, about 8% of
+  the week at eight windows to the week, of the 68% it shows; one session at 52M weighted tokens an hour
+  fills it by 10:25 pm, and more sessions there would only fill it sooner.
 - An account that would reach its limit only shortly before its reset keeps
   its sessions. When one of them is refused at the limit and the reset the
   refusal names comes within five minutes and at least a minute before the
@@ -1480,7 +1505,14 @@ the pool weights and which sessions move, each time the pool is rebuilt
   (session X) would use its window in 40 min.", or that none elsewhere has
   used anything in its last hour, that the lightest one's rewrite outweighs
   its use, that the accounts carrying the work still have room until their
-  resets, or that its reading is too old.
+  resets, or that its reading is too old. Before those, each account with
+  free room (`useBy`), the soonest first, is described
+  (`AppState.useByNotes`, `useByNote`): how much of its week resets when,
+  what its 5-hour window lets it use before then, and which sessions use it
+  and when they fill it, or that nothing does and new sessions go there
+  first: "bytrix: 68% of its week resets on Tue 1:00 am; its 5-hour window
+  caps what can be used before then at 63%; session 8c64c5f8 in ~/ORBTR is
+  using it, filling it by 10:25 pm."
 - An idle account that could take sessions stays a destination
   (`AppState.readIdleDestinationIfDue`, `idleDestinationDue`): while
   sessions are served from several accounts, each quota cycle reads one
@@ -1494,7 +1526,20 @@ the pool weights and which sessions move, each time the pool is rebuilt
   rate the account can still add without reaching its limit; with none
   left anywhere, by the share of the time to its reset each account lasts
   at its rate (`SessionPacer.sustainedShare`), the shared group's share
-  included.
+  included. Free room comes first: while an account has room left at its
+  use-by time that one more typical session fits (`fitsFreeRoom`) and
+  carries it for `newSessionRunway`, new sessions go only to such accounts,
+  by that room's tokens per hour until then. Where the weights measure room
+  to a horizon every account shares (the pool's run-out while the shared
+  group is projected to move, the first carrier's reset while the small
+  plans' windows are worth spending), an account's room counts at most at
+  its even rate (`SessionPacer.evenRate`): its room until it is lost (its
+  use-by time, else its weekly reset, the windows refilled on the way) over
+  the time until then, which orders accounts as weekly balancing's latest
+  start does. A weekly-only account with 11% of a Max 20x week left and six
+  days to go counts 1M tokens an hour, not the 2.6M its room until the
+  first carrier's reset would give it, beside a Pro window's 2.6M and a
+  Max 20x week resetting the next night that needs 59M.
 - An account sessions run on whose reading is older than its sessions'
   latest request, and older than ten minutes, stays in the pool for up to
   an hour with its weight scaled by ten minutes over the reading's age
