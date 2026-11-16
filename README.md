@@ -446,7 +446,11 @@ within their cache or move on, as at any limit. The 5-hour window is the
 cap: with 68% of a Max 5x week left four hours before its reset and 37% of
 its window used, at most the window's 63% (about 8% of its week) can be used
 before then, however many sessions run there; more sessions only reach that
-cap sooner, and the rest of that week expires whatever runs.
+cap sooner, and the rest of that week expires whatever runs. The Sessions
+page and the rebalance preview say so under the provider, the soonest reset
+first ("bytrix: 68% of its week resets on Tue 1:00 am; its 5-hour window caps
+what can be used before then at 63%; session 8c64c5f8 in ~/ORBTR is using it,
+filling it by 10:25 pm.").
 
 When capacity is scarce, so that the accounts with room cannot carry every
 waiting session, and **Pause sessions** is chosen, a lane that frees up (a

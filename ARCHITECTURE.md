@@ -1505,7 +1505,14 @@ the pool weights and which sessions move, each time the pool is rebuilt
   (session X) would use its window in 40 min.", or that none elsewhere has
   used anything in its last hour, that the lightest one's rewrite outweighs
   its use, that the accounts carrying the work still have room until their
-  resets, or that its reading is too old.
+  resets, or that its reading is too old. Before those, each account with
+  free room (`useBy`), the soonest first, is described
+  (`AppState.useByNotes`, `useByNote`): how much of its week resets when,
+  what its 5-hour window lets it use before then, and which sessions use it
+  and when they fill it, or that nothing does and new sessions go there
+  first: "bytrix: 68% of its week resets on Tue 1:00 am; its 5-hour window
+  caps what can be used before then at 63%; session 8c64c5f8 in ~/ORBTR is
+  using it, filling it by 10:25 pm."
 - An idle account that could take sessions stays a destination
   (`AppState.readIdleDestinationIfDue`, `idleDestinationDue`): while
   sessions are served from several accounts, each quota cycle reads one

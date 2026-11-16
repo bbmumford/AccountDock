@@ -172,4 +172,30 @@ final class UseItOrLoseItTests: XCTestCase {
         XCTAssertEqual(plan.weights[bytrix] ?? 0, 13.5, accuracy: 0.1, "51M tokens of free room over 3.8 hours")
         for id in [hexorda, cybrio, fluxon, backup, voltrix] { XCTAssertEqual(plan.weights[id], 0) }
     }
+
+    func testTheNoteSaysWhenTheWeekResetsWhatTheWindowCapsAndWhoUsesIt() throws {
+        let pacer = SessionPacer()
+        let bytrixAccount = accounts()[0]
+        let fills = try XCTUnwrap(pacer.outlook(bytrixAccount, burn: bytrixAccount.burnPerHour, now: now).limitAt)
+        XCTAssertEqual(fills.timeIntervalSince(now) / 3600, 1.21, accuracy: 0.01, "cf-builder fills the window by 10:25 pm")
+        let note = AppState.useByNote(account: "bytrix", weeklyLeft: 68, weeklyReset: at(3.8), windowLeft: 63,
+                                      refills: pacer.refills(bytrixAccount, before: at(3.8), now: now),
+                                      users: ["session 8c64c5f8 in ~/ORBTR"], fillsAt: fills, freeLeft: 0,
+                                      takesNewFirst: false, now: now)
+        XCTAssertEqual(note, "bytrix: 68% of its week resets \(UsageFormat.atClock(at(3.8), now: now)); its 5-hour window caps "
+                       + "what can be used before then at 63%; session 8c64c5f8 in ~/ORBTR is using it, filling it by "
+                       + "\(UsageFormat.clock(fills, now: now)).")
+        // cybrio's windows start again four times before its week resets;
+        // with nothing on it, new sessions go there first.
+        let idle = AppState.useByNote(account: "cybrio", weeklyLeft: 71, weeklyReset: at(23.8), windowLeft: 69, refills: 4,
+                                      users: [], fillsAt: nil, freeLeft: 68, takesNewFirst: true, now: now)
+        XCTAssertEqual(idle, "cybrio: 71% of its week resets \(UsageFormat.atClock(at(23.8), now: now)); its 5-hour windows cap "
+                       + "what can be used before then at 69% of this one and 4 more whole windows; nothing is using it yet, "
+                       + "so new sessions go there first.")
+        // A light session leaves most of bytrix's window to new sessions.
+        let light = AppState.useByNote(account: "bytrix", weeklyLeft: 68, weeklyReset: at(3.8), windowLeft: 63, refills: 0,
+                                       users: ["session a", "session b"], fillsAt: nil, freeLeft: 50.7, takesNewFirst: true,
+                                       now: now)
+        XCTAssertTrue(light.hasSuffix("; session a and session b are using it, leaving 51% of it unused; new sessions go there first."))
+    }
 }

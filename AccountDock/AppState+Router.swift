@@ -740,7 +740,10 @@ extension AppState {
         noteHeldMoves(provider, heldBack: plan.heldBack, holds: holds, rule: "pacing", now: now)
         if !movesSessions {
             noteLaneShortfalls(provider, plan: plan, accounts: paced, sessions: sessions, remainders: remainders,
-                               stale: stale, now: now)
+                               stale: stale,
+                               leading: useByNotes(provider, plan: plan, accounts: paced, sessions: sessions,
+                                                   states: states, planner: planner, now: now),
+                               now: now)
         }
         // A session is never moved to an account without allowance for the
         // model it uses, nor off a draining account before its limit.
@@ -855,13 +858,15 @@ extension AppState {
     /// `laneNotes` for the Sessions page's provider header and the
     /// rebalance preview: the accounts `remainders` offers that take no
     /// move, and those whose reading is too old to take one (`stale`).
+    /// `leading` goes before them: what the accounts with free room do with
+    /// it (`useByNotes`).
     func noteLaneShortfalls(_ provider: AIProviderType, plan: SessionPacer.Plan, accounts paced: [SessionPacer.Account],
                             sessions: [SessionPacer.Session], remainders: SessionPacer.RemainderSpending?,
-                            stale: Set<UUID>, now: Date) {
+                            stale: Set<UUID>, leading: [String] = [], now: Date) {
         let pacer = SessionPacer()
         let taking = Set(plan.moves.values)
         let placed = Set(windowPlacementsInForce(provider, now: now).values.map(\.account))
-        var notes: [String] = []
+        var notes = leading
         for lane in paced.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
             guard let account = accounts.first(where: { $0.id == lane.id }), lane.hasSessionWindow,
                   !taking.contains(lane.id), !placed.contains(lane.id),
@@ -902,6 +907,67 @@ extension AppState {
         case .carriersHaveRoom:
             return "\(account): the accounts carrying the work still have room until their resets, so no session moves to use its window; \(session) would fit."
         }
+    }
+
+    /// What each pool account whose room is free until its use-by time
+    /// (`SessionPacer.useBy`) does with it, soonest first, for `laneNotes`:
+    /// the Sessions page's provider header and the rebalance preview. Its
+    /// week's figure promises more than its 5-hour window lets through
+    /// before that week resets, which the note states beside the sessions
+    /// using the window and when they fill it. Read by `paced`.
+    func useByNotes(_ provider: AIProviderType, plan: SessionPacer.Plan, accounts paced: [SessionPacer.Account],
+                    sessions: [SessionPacer.Session], states: [UUID: QuotaAccountState], planner: FailoverPlanner,
+                    now: Date) -> [String] {
+        let pacer = SessionPacer()
+        return paced.compactMap { lane -> (end: Date, note: String)? in
+            guard let end = pacer.useBy(lane, now: now), let weeklyReset = lane.weeklyResetsAt,
+                  let account = accounts.first(where: { $0.id == lane.id }),
+                  let projection = states[lane.id].flatMap({ planner.projection($0, now: now) }),
+                  let weekly = projection.weekly else { return nil }
+            let own = sessions.filter { session in
+                session.account == lane.id && session.tokensPerHour > 0
+                    && now.timeIntervalSince(session.lastSeen) <= SessionPacer.activeWithin
+            }.sorted { $0.tokensPerHour > $1.tokensPerHour }
+            let burn = max(lane.burnPerHour, own.reduce(0) { $0 + pacer.percent($1.tokensPerHour, on: lane) })
+            let free = pacer.freeRoom(lane, spent: 0, burn: burn, shared: nil, now: now)
+            let users = own.map { session in
+                liveSession(session.id).map { Self.eventName(of: $0.1) } ?? "session \(session.id.prefix(8))"
+            }
+            let fillsAt = pacer.outlook(lane, burn: burn, now: now).limitAt.flatMap { $0 <= end ? $0 : nil }
+            let note = Self.useByNote(account: messageName(account), weeklyLeft: 100 - weekly, weeklyReset: weeklyReset,
+                                      windowLeft: 100 - (projection.session ?? 0),
+                                      refills: pacer.refills(lane, before: weeklyReset, now: now), users: users,
+                                      fillsAt: fillsAt, freeLeft: free,
+                                      takesNewFirst: (plan.weights[lane.id] ?? 0) > 0 && free > 0, now: now)
+            return (end, note)
+        }.sorted { $0.end < $1.end }.map(\.note)
+    }
+
+    /// The words for one account with free room (`useByNotes`): "bytrix:
+    /// 68% of its week resets on Tue 1:00 am; its 5-hour window caps what
+    /// can be used before then at 63%; session 8c64c5f8 in ~/ORBTR is using
+    /// it, filling it by 10:25 pm." `windowLeft` is what its window has
+    /// left, `refills` how many more whole windows start before the weekly
+    /// reset, `users` the sessions spending there, `fillsAt` when they fill
+    /// the window before its use-by time, `freeLeft` the window percent they
+    /// leave unused then, and `takesNewFirst` whether new sessions go there
+    /// first (`SessionPacer.Plan.weights`).
+    nonisolated static func useByNote(account: String, weeklyLeft: Double, weeklyReset: Date, windowLeft: Double,
+                                      refills: Int, users: [String], fillsAt: Date?, freeLeft: Double,
+                                      takesNewFirst: Bool, now: Date) -> String {
+        func percent(_ value: Double) -> String { "\(Int(max(0, value).rounded()))%" }
+        var note = "\(account): \(percent(weeklyLeft)) of its week resets \(UsageFormat.atClock(weeklyReset, now: now)); "
+        note += refills == 0
+            ? "its 5-hour window caps what can be used before then at \(percent(windowLeft))"
+            : "its 5-hour windows cap what can be used before then at \(percent(windowLeft)) of this one and "
+                + "\(refills) more whole window\(refills == 1 ? "" : "s")"
+        guard let last = users.last else {
+            return note + (takesNewFirst ? "; nothing is using it yet, so new sessions go there first." : "; nothing is using it.")
+        }
+        note += users.count == 1 ? "; \(last) is using it" : "; \(users.dropLast().joined(separator: ", ")) and \(last) are using it"
+        if let fillsAt { return note + ", filling it by \(UsageFormat.clock(fillsAt, now: now))." }
+        guard freeLeft >= SessionPacer.minimumLeftover else { return note + "." }
+        return note + ", leaving \(percent(freeLeft)) of it unused" + (takesNewFirst ? "; new sessions go there first." : ".")
     }
 
     /// A slot session moving to spend an allowance that would otherwise

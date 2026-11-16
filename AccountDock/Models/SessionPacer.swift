@@ -681,7 +681,8 @@ struct SessionPacer {
     /// place a session shed or stranded elsewhere, or a new session, goes
     /// when it carries the session for `newSessionRunway`. A session moves
     /// off it once it reaches the limit, by the rules for any account at
-    /// its limit. Read by those, and by `expiringWindowRate` and `evenRate`.
+    /// its limit. Read by those, by `expiringWindowRate` and `evenRate`, and
+    /// by `AppState.useByNotes` for the provider's note.
     func useBy(_ account: Account, spent: Double = 0, now: Date) -> Date? {
         guard account.hasSessionWindow, let weeklyLeft = account.weeklyRemaining,
               let weeklyEnd = account.weeklyResetsAt, weeklyEnd > now else { return nil }
@@ -702,7 +703,8 @@ struct SessionPacer {
 
     /// How many times the account's session window starts again full
     /// before `horizon`, from its next reset (five hours from now when no
-    /// window runs) every `window`. Read by `sessionCapacity`.
+    /// window runs) every `window`. Read by `sessionCapacity` and by
+    /// `AppState.useByNotes`, which names the windows to come.
     func refills(_ account: Account, before horizon: Date, now: Date) -> Int {
         var reset = account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
         var count = 0
