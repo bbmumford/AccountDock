@@ -144,6 +144,53 @@ extension UsageAPIResponse {
     /// later reading with a session window brings it back.
     var reportsNoSessionWindow: Bool { fiveHour == nil && sevenDay != nil }
 
+    /// The reading with an unstarted session window, of `length` seconds,
+    /// in place of a missing one, for an account whose plan has a session
+    /// window (`hasSessionWindow`): the provider leaves a window nothing
+    /// has started out of its reply, so a reply carrying the long window
+    /// alone reports the window not started rather than absent. Applied by
+    /// `AppState.recordUsage` to whole readings, so the card shows it at 0%
+    /// and `AppState.windowsToWarm` starts it.
+    func fillingUnstartedSessionWindow(hasSessionWindow: Bool, length: TimeInterval) -> UsageAPIResponse {
+        guard hasSessionWindow, reportsNoSessionWindow else { return self }
+        return UsageAPIResponse(
+            fiveHour: UsageWindow(utilization: 0, resetsAt: nil, windowSeconds: Int(length)), sevenDay: sevenDay,
+            sevenDayOauthApps: sevenDayOauthApps, sevenDayOpus: sevenDayOpus, sevenDaySonnet: sevenDaySonnet,
+            sevenDayCowork: sevenDayCowork, iguanaNecktie: iguanaNecktie, extraUsage: extraUsage,
+            limits: limits, weeklyScopedShares: weeklyScopedShares, limitResets: limitResets
+        )
+    }
+
+    /// How an account card shows the session window.
+    enum SessionWindowDisplay: Equatable {
+        /// The window, in use.
+        case window
+        /// The plan has a window that nothing has started: shown at 0%.
+        case notStarted
+        /// The plan has no session window.
+        case noLimit
+        /// Nothing to show: the provider has no session window, or the
+        /// reading carries no window at all.
+        case absent
+    }
+
+    /// How the card shows this reading's session window, for an account
+    /// whose plan has one (`hasSessionWindow`, `Account.planHasSessionWindow`)
+    /// of a provider with session windows (`supportsSessionQuota`). A window
+    /// at 0% with no reset, or one the reply leaves out on such a plan, has
+    /// not started; only a plan without a window has no session limit.
+    func sessionWindowDisplay(hasSessionWindow: Bool, supportsSessionQuota: Bool) -> SessionWindowDisplay {
+        if let window = fiveHour { return window.isUnusedUnstartedWindow ? .notStarted : .window }
+        guard reportsNoSessionWindow, supportsSessionQuota else { return .absent }
+        return hasSessionWindow ? .notStarted : .noLimit
+    }
+
+    /// What the card says of a session window of `length` seconds that has
+    /// not started ("5-hour window not started").
+    static func unstartedWindowText(length: TimeInterval) -> String {
+        "\(Int((length / 3600).rounded()))-hour window not started"
+    }
+
     func replacingSevenDay(_ window: UsageWindow?) -> UsageAPIResponse {
         UsageAPIResponse(
             fiveHour: fiveHour, sevenDay: window, sevenDayOauthApps: sevenDayOauthApps,

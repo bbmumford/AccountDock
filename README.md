@@ -147,7 +147,10 @@ heading says how many sessions are paused and since when.
 Each row has three icons:
 
 - **Lock.** Pins the session to its subscription, so failover, pacing,
-  rebalancing and the model fallback leave it there. A session on the shared
+  rebalancing and the model fallback leave it there. With **Pause sessions**
+  chosen for the provider, a pinned session pauses when its subscription
+  reaches its failover threshold or limit, and continues when it has room
+  again. A session on the shared
   sign-in cannot be pinned; its row offers a restart into a slot of its own
   instead, for a session idle in agterm.
 - **Pause or play.** Pausing a session while nothing is paused holds only that
@@ -158,8 +161,12 @@ Each row has three icons:
   the front window. A session started before the pause hook was installed
   cannot be held until it is restarted.
 - **Move.** Lists every account of the provider with the room left in its
-  windows, or why it cannot take the session (it runs there now, needs signing
-  in, is excluded from failover or is at its limit). A session you move by
+  windows. A move by hand can go to any account that can serve the CLI: one
+  excluded from failover, at its limit or near it is offered with a warning
+  (an excluded account always pins the session there; at its limit, the
+  session waits there until the account has room). Only an account that
+  needs signing in, whose plan or organisation does not allow the CLI, or
+  that the session runs on now is greyed out. A session you move by
   hand is pinned where you put it, so failover and balancing do not move it
   straight back, unless balancing would have placed it there itself; the menu
   says which applies. Moving a pinned session unpins it first. A session on
@@ -173,8 +180,11 @@ when the first account would then run out, and makes the moves once you
 confirm. A move is made only when it pays for the prompt cache it rewrites,
 and never mid-turn. **Pause all** holds every session at its next tool call
 and every new turn at its start, for instance before switching to an account
-at its limit; the sessions continue when you resume them or when an account in
-the failover order has capacity.
+at its limit. A pause you take, with **Pause all** or on one session, ends
+only when you resume: **Resume all**, or playing each session. Capacity
+returning, a reset, resuming as capacity allows, a route target or any other
+automatic step never lets those sessions go, and a session both you and a
+limit paused waits for you.
 
 An account card's session list has the same controls. There a pinned session
 refused at its account's limit shows **pinned · refused at limit** with
@@ -266,13 +276,27 @@ provider's failover order when it should take work.
 - **Refusals checked.** A request refused at a usage limit is credited to the
   account that served it, by the reset time the refusal names, and checked
   against a fresh reading before anything moves for it.
+- **Accounts their organisation turned off.** When a team's admin removes an
+  account's seat or licence, Anthropic refuses every request with "Your
+  organization has disabled Claude subscription access for Claude Code"
+  (`oauth_org_not_allowed`). AccountDock reads that refusal from the session's
+  transcript, a usage reply or a warm-up, and treats the account like a plan
+  without the CLI: its card says the organisation has disabled access and to
+  check the seat or licence, its sessions move at once to accounts that can
+  serve them (pinned ones are unpinned), and nothing is placed, warmed or moved
+  there by hand. It is tried again once a day, and when you refresh, in case
+  access is restored.
 - **Reset-aware.** Hold briefly when a limit resets before the account would
   run out, and optionally prefer an account whose limit has just reset. Once a
   reset time passes, the account is read again within a minute and takes no
   work until a reading confirms the reset; it is never assumed to be at 0%.
 - **Keep windows warm.** Optionally start each window as soon as its reset is
   confirmed, with one minimal request that never becomes a resumable session,
-  so the next countdown starts immediately. The reading and the warm-up use a
+  so the next countdown starts immediately. Every signed-in account whose plan
+  includes the CLI is warmed, whether or not failover includes it, and an
+  account whose plan has a five-hour window that has not started (Claude
+  reports none until it starts) shows it at 0% as "5-hour window not started"
+  rather than as having no session limit. The reading and the warm-up use a
   share of the provider's request allowance that background reads cannot use
   up.
 - **Intelligent balancing.** Optionally spend accounts in the order their weekly
@@ -311,7 +335,10 @@ Choose what happens for each provider:
   account that would refuse it. The terminal stays attached and usable, and a
   message shows why. While an account still has a little room, paused
   sessions are let through one step at a time. Each continues on its own when
-  its account has room again, or with **Resume all**. A one-line banner under
+  its account has room again, or with **Resume all**. A pinned session is
+  never moved, so it pauses as soon as its own account reaches its failover
+  threshold or its limit, and continues once that account has room, or when
+  you unpin, move or play it. A one-line banner under
   the provider heading counts the paused sessions and says when they are
   expected to continue; its icons resume them all or open the Sessions tab.
 - **Serve requests from a route target** (Claude Code). Claude Code's requests
@@ -402,7 +429,8 @@ a time, each on an account where that use fits before the account's window
 resets. The session doing most of the work goes first and smaller ones fill
 what is left, and as more accounts reset, more sessions continue, spread
 across them. A resumed session is paused again if its account nears its limit
-anyway.
+anyway. This applies to pauses at a limit only: sessions you paused yourself
+wait for you whether it is on or off.
 
 ### The request router
 

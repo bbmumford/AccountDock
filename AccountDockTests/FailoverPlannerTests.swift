@@ -472,6 +472,51 @@ final class FailoverPlannerTests: XCTestCase {
         XCTAssertEqual(cleared.merged(withNewer: reading(session: 5, weekly: 21)).fiveHour?.utilization, 5)
     }
 
+    func testAProPlanWhoseReplyLeavesTheSessionWindowOutHasItNotStartedAndWarmsIt() throws {
+        // The usage endpoint's reply for a Pro account whose five-hour window
+        // nothing has started: the long window alone.
+        let reply = try JSONDecoder().decode(UsageAPIResponse.self, from: Data(
+            #"{"five_hour":null,"seven_day":{"utilization":12,"resets_at":"2099-10-17T14:00:00+00:00"}}"#.utf8))
+        XCTAssertTrue(reply.reportsNoSessionWindow)
+
+        let pro = Account(email: "icare@example.com", displayName: "ICARE", provider: .claudeCode, subscriptionType: "pro")
+        XCTAssertEqual(pro.planHasSessionWindow, true)
+        var unknown = pro
+        unknown.subscriptionType = "enterprise"
+        XCTAssertNil(unknown.planHasSessionWindow, "a plan the provider does not list leaves it to the replies")
+        var max = pro
+        max.subscriptionType = "max"
+        max.rateLimitTier = "default_claude_max_5x"
+        XCTAssertEqual(max.planHasSessionWindow, true)
+        max.rateLimitTier = "default_claude_max_20x"
+        XCTAssertNil(max.planHasSessionWindow, "a verified Max 20x account can have no session window")
+        XCTAssertEqual(Account(email: "k@example.com", displayName: "K", provider: .kimi).planHasSessionWindow, true)
+        XCTAssertEqual(Account(email: "g@example.com", displayName: "G", provider: .gemini).planHasSessionWindow, false)
+
+        XCTAssertEqual(reply.sessionWindowDisplay(hasSessionWindow: true, supportsSessionQuota: true), .notStarted,
+                       "a Pro account's card shows the window not started, not no session limit")
+        XCTAssertEqual(reply.sessionWindowDisplay(hasSessionWindow: false, supportsSessionQuota: true), .noLimit)
+        XCTAssertEqual(reply.sessionWindowDisplay(hasSessionWindow: true, supportsSessionQuota: false), .absent)
+        XCTAssertEqual(UsageAPIResponse.unstartedWindowText(length: 18_000), "5-hour window not started")
+
+        let filled = reply.fillingUnstartedSessionWindow(hasSessionWindow: true, length: 18_000)
+        XCTAssertEqual(filled.fiveHour?.utilization, 0)
+        XCTAssertNil(filled.fiveHour?.resetsAt)
+        XCTAssertEqual(filled.fiveHour?.windowSeconds, 18_000)
+        XCTAssertEqual(filled.sevenDay?.utilization, 12)
+        XCTAssertEqual(filled.sessionWindowDisplay(hasSessionWindow: true, supportsSessionQuota: true), .notStarted)
+        XCTAssertNil(reply.fillingUnstartedSessionWindow(hasSessionWindow: false, length: 18_000).fiveHour,
+                     "a plan without a session window keeps none")
+
+        // The warm-up starts it: without the filled window it had nothing to start.
+        let requested = AppState.PendingWindowWarmup(session: true, weekly: true)
+        XCTAssertFalse(AppState.windowsToWarm(reply, requested: requested, sessionQuota: true).session)
+        XCTAssertTrue(AppState.windowsToWarm(filled, requested: requested, sessionQuota: true).session)
+        XCTAssertEqual(AppState.warmupStep(requested: requested, stored: filled, verifiedAt: now, unusedSinceReset: false,
+                                           sessionQuota: true, lastProbeAt: nil, now: now),
+                       .probe(AppState.PendingWindowWarmup(session: true, weekly: false)))
+    }
+
     func testAWholePercentWeeklyStepIsNotReadAsAHighBurnWithoutASessionWindow() {
         var trend = QuotaTrend()
         func weekly(_ w: Double) -> UsageAPIResponse {

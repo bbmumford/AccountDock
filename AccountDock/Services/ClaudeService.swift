@@ -370,6 +370,9 @@ final class ClaudeService: @unchecked Sendable {
     enum UsageError: LocalizedError {
         case expired
         case subscriptionUnavailable
+        /// The account's organisation has turned off subscription access
+        /// for Claude Code (`refusesCLIAccess`).
+        case organizationDisabled
         case rateLimited(Date?)
         case network(String)
         case decode(String)
@@ -378,11 +381,26 @@ final class ClaudeService: @unchecked Sendable {
             switch self {
             case .expired: "Claude credentials have expired."
             case .subscriptionUnavailable: "This account does not currently include Claude Code."
+            case .organizationDisabled: "Your organization has disabled Claude subscription access for Claude Code."
             case .rateLimited: "Anthropic temporarily rate-limited usage refresh."
             case let .network(message): "Usage request failed: \(message)"
             case let .decode(message): "Usage response could not be read: \(message)"
             }
         }
+    }
+
+    /// Whether `text`, a reply, a CLI's output or a transcript's error, is
+    /// Anthropic refusing an account because its organisation has turned
+    /// off subscription access for Claude Code: HTTP 403 with the error type
+    /// `oauth_org_not_allowed`, which Claude Code shows as "API Error: Your
+    /// organization has disabled Claude subscription access for Claude Code
+    /// · Use an Anthropic API key instead, or ask your admin to enable
+    /// access". A team admin removing the account's seat or licence causes
+    /// it. Read by `getUsageLimits`, the warm-up and re-check probes and
+    /// `ClaudeTranscriptSource.accessRefusal`.
+    static func refusesCLIAccess(_ text: String) -> Bool {
+        text.contains("oauth_org_not_allowed")
+            || text.range(of: "disabled Claude subscription access", options: .caseInsensitive) != nil
     }
 
     /// Fetch usage for a specific access token
@@ -410,7 +428,7 @@ final class ClaudeService: @unchecked Sendable {
                 throw UsageError.expired
             }
             if httpResponse?.statusCode == 403 {
-                throw UsageError.subscriptionUnavailable
+                throw Self.refusesCLIAccess(responseString) ? UsageError.organizationDisabled : UsageError.subscriptionUnavailable
             }
             if httpResponse?.statusCode == 429 {
                 let retryAfter = httpResponse?.value(forHTTPHeaderField: "Retry-After")

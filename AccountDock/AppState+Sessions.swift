@@ -246,6 +246,13 @@ extension AppState {
         let provider = session.provider
         let chosenOnly = AgentPauseGate.read(provider)?.holdsOnlyChosenSessions == true
         let running = Set((liveSessions[provider] ?? []).map(\.sessionID))
+        // A pinned session played while its account is at its threshold or
+        // limit runs on there until the account has room again
+        // (`holdPinnedSessionsAtLimit`).
+        if let account = pinnedSessionAccounts(provider)[session.sessionID],
+           pinnedHold(account, planner: FailoverPlanner(settings: plannerSettings(provider)), now: Date()) != nil {
+            pinnedHoldsPlayed[session.sessionID] = account
+        }
         let ended = AgentPauseGate.playOne(provider, session: session.sessionID, running: running,
                                            continuation: continuationDescription(provider))
         if ended {

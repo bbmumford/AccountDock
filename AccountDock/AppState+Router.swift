@@ -223,11 +223,13 @@ extension AppState {
             }
             .keys.sorted()
         let continuation = "on \(target.displayName) \(model)"
-        // Sessions the user paused one at a time stay held through a route
+        // The user's "Pause all" holds every session through a route, and
+        // sessions the user paused one at a time stay held through one
         // (`AgentPauseGate.narrow` keeps them).
+        if existing?.holdsAllForUser == true { return }
         let chosen = existing?.chosenListed ?? []
         if large.isEmpty {
-            guard AgentPauseGate.isActive(provider), existing?.holdsOnlyChosenSessions != true else { return }
+            guard AgentPauseGate.isActive(provider), existing?.heldByUser != true else { return }
             let held = endPause(provider, continuation: continuation)
             failoverEvents.record(provider, "\(target.displayName) has capacity; \(held) paused session(s) continue on it.")
             return

@@ -98,6 +98,37 @@ final class TranscriptRequestFeedTests: XCTestCase {
                        "a subagent's refusal is its session's")
     }
 
+    func testAnOrganisationsRefusalOfTheCLIIsReadAsAnAccessRefusal() throws {
+        let words = "API Error: Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access"
+        let row: [String: Any] = [
+            "type": "assistant", "isApiErrorMessage": true, "error": "unknown", "sessionId": "abc",
+            "timestamp": "2026-11-15T09:00:00.000Z",
+            "message": ["model": "<synthetic>", "content": [["type": "text", "text": words]]],
+        ]
+        let refusal = try XCTUnwrap(ClaudeTranscriptSource.accessRefusal(row, session: "file"))
+        XCTAssertEqual(refusal.session, "abc")
+        XCTAssertEqual(refusal.accessRefusal, words)
+        XCTAssertNil(refusal.limitRefusal, "it is no usage limit")
+        XCTAssertEqual(refusal.contextTokens + refusal.outputTokens, 0)
+        XCTAssertEqual(ClaudeTranscriptSource.accessRefusal(row, session: "parent", subagent: true)?.session, "parent",
+                       "a subagent's refusal is its session's account's too")
+
+        var state = TranscriptReadState()
+        let file = TranscriptFile(url: URL(fileURLWithPath: "/dev/null"), session: "abc")
+        guard case .refusal(let read) = ClaudeTranscriptSource().row(row, file: file, state: &state) else {
+            return XCTFail("the row is read as a refusal")
+        }
+        XCTAssertEqual(read.accessRefusal, words)
+
+        var limit = row
+        limit["error"] = "rate_limit"
+        limit["message"] = ["model": "<synthetic>", "content": [["type": "text", "text": "You've reached your limit."]]]
+        XCTAssertNil(ClaudeTranscriptSource.accessRefusal(limit, session: "file"), "a usage limit stays a limit refusal")
+        var reply = row
+        reply["isApiErrorMessage"] = nil
+        XCTAssertNil(ClaudeTranscriptSource.accessRefusal(reply, session: "file"), "an answer quoting the words is no refusal")
+    }
+
     func testARunOfRefusalsIsOneEventAndOldOnesAreNone() {
         let now = Date()
         XCTAssertTrue(AppState.refusalIsNews(at: now.addingTimeInterval(-30), last: nil, now: now))

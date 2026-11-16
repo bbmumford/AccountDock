@@ -24,6 +24,12 @@ struct TranscriptRequest: Equatable, Sendable {
     /// Such a request used nothing, and `AppState.ingestTranscriptRequests`
     /// reads the refusing account whole instead of recording it.
     var limitRefusal: String? = nil
+    /// The provider's words when it refused the request because the
+    /// account cannot serve the CLI at all, as when its organisation turned
+    /// off subscription access. Such a request used nothing, and
+    /// `AppState.ingestTranscriptRequests` marks the account
+    /// (`AppState.noteCLIAccessRefused`) instead of recording it.
+    var accessRefusal: String? = nil
     /// Cache read tokens, part of `contextTokens`; with `cacheWriteTokens`
     /// they show `CredentialAudit.noteRequest` a cache rebuilt whole.
     var cacheReadTokens: Int = 0

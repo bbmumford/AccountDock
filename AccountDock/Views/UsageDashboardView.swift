@@ -274,8 +274,19 @@ struct UsageDashboardView: View {
             if status.needsSignIn {
                 signInPrompt(account)
             }
+            if let access = status.accessNotice {
+                HStack(alignment: .top) {
+                    Image(systemName: access.symbol)
+                        .foregroundStyle(access.tone.color)
+                    Text(access.text)
+                        .font(.caption)
+                        .foregroundStyle(.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                }
+            }
             if let usage = appState.accountUsage[account.id] {
-                usageBars(usage, provider: account.provider)
+                usageBars(usage, provider: account.provider, hasSessionWindow: account.planHasSessionWindow == true)
                 if account.provider.capabilities.supportsExtraUsage {
                     extraUsageRow(usage.extraUsage)
                 }
@@ -569,18 +580,34 @@ struct UsageDashboardView: View {
         return url
     }
 
+    /// The account's windows. A session window nothing has started, or one
+    /// the reply leaves out on a plan that has one (`hasSessionWindow`), is
+    /// shown at 0% as not started; only a plan without one has no limit.
     @ViewBuilder
-    private func usageBars(_ usage: UsageAPIResponse, provider: AIProviderType) -> some View {
-        if let session = usage.fiveHour {
+    private func usageBars(_ usage: UsageAPIResponse, provider: AIProviderType, hasSessionWindow: Bool) -> some View {
+        switch usage.sessionWindowDisplay(hasSessionWindow: hasSessionWindow,
+                                          supportsSessionQuota: provider.capabilities.supportsSessionQuota) {
+        case .window:
+            if let session = usage.fiveHour {
+                usageRow(
+                    label: LocalizedStringKey(provider.capabilities.sessionQuotaLabel),
+                    resetText: session.resetLabelString,
+                    utilization: session.utilization
+                )
+            }
+        case .notStarted:
             usageRow(
                 label: LocalizedStringKey(provider.capabilities.sessionQuotaLabel),
-                resetText: session.resetLabelString,
-                utilization: session.utilization
+                resetText: UsageAPIResponse.unstartedWindowText(
+                    length: usage.fiveHour?.windowSeconds.map(TimeInterval.init) ?? Allowance.sessionWindow),
+                utilization: 0
             )
-        } else if usage.reportsNoSessionWindow, provider.capabilities.supportsSessionQuota {
+        case .noLimit:
             Label("No \(provider.capabilities.sessionQuotaLabel.lowercased()) limit on this account", systemImage: "infinity")
                 .font(.caption)
                 .foregroundStyle(.textSecondary)
+        case .absent:
+            EmptyView()
         }
         if let weekly = usage.sevenDay {
             usageRow(

@@ -85,6 +85,7 @@ extension AppState {
             }
         }
         await verifyPassedResets(now: now)
+        await recheckCLIAccessIfDue(now: now)
         await refreshLimitResetsIfDue(now: now)
         if let routed = AIProviderType.routedProvider, routedStatus[routed] != nil {
             await refreshRouteTargetReading(maximumAge: 60)
@@ -105,7 +106,10 @@ extension AppState {
 
         await evaluateFailover()
         saveLearningIfDue()
-        for provider in AgentPauseGate.providers { prunePausedSessions(provider) }
+        for provider in AgentPauseGate.providers {
+            holdPinnedSessionsAtLimit(provider)
+            prunePausedSessions(provider)
+        }
     }
 
     /// Whether a quota cycle may start: none is running, no credential work
@@ -832,7 +836,7 @@ extension AppState {
             // account that failover excludes, chosen by hand, resumes nothing:
             // the sessions wait for the user or for capacity in the order.
             // A pause the user took holds whatever the automatic setting, until
-            // the user or capacity ends it.
+            // the user ends it (`releaseSuspendedAgents` leaves it).
             let userPaused = AgentPauseGate.read(provider)?.manual == true
             if !monitored.contains(provider) || (!policy.suspendAgentsWhenExhausted && !userPaused) {
                 await releaseSuspendedAgents(provider, reason: "AccountDock no longer pauses this provider's agents")
@@ -865,9 +869,9 @@ extension AppState {
 
     private func releaseSuspendedAgents(_ provider: AIProviderType, reason: String) async {
         guard hasPausedAgents(provider) || suspensionContexts[provider] != nil else { return }
-        // Sessions the user paused one at a time wait for the user, while
-        // AccountDock still manages the provider.
-        if AgentPauseGate.read(provider)?.holdsOnlyChosenSessions == true, monitoredProviders.contains(provider) { return }
+        // A pause the user took waits for the user, whatever AccountDock
+        // manages for the provider.
+        if AgentPauseGate.read(provider)?.heldByUser == true { return }
         let resumed = await releasePausedAgents(provider)
         if resumed > 0 {
             failoverEvents.record(provider, "Resumed \(resumed) paused session(s): \(reason).")
@@ -1154,6 +1158,9 @@ extension AppState {
         let scope = limitPauseScope(provider, current: current, now: Date())
         requestPauseMoves(provider, scope.moves)
         let existing = AgentPauseGate.read(provider)
+        // The user's "Pause all" already holds every session and turn, and
+        // a pause at a limit written over it would end it automatically.
+        if Self.limitPauseYields(to: existing) { return }
         guard !scope.held.isEmpty || scope.holdsNewTurns || existing != nil else {
             // Nothing waits: the next cycle judges again.
             suspensionContexts[provider] = nil
@@ -1199,16 +1206,18 @@ extension AppState {
     ///
     /// `continuation` names where the sessions go on; by default the route
     /// target serving the provider's requests, or else its active account.
-    /// Sessions the user paused one at a time stay held
-    /// (`AgentPauseGate.narrowToChosen`) unless `keepingChosen` is false,
-    /// as when the user resumes all.
+    /// What the user paused stays held (`AgentPauseGate.narrowToChosen`):
+    /// sessions chosen one at a time, and the whole of the user's own
+    /// pause, unless `keepingChosen` is false, as when the user resumes
+    /// all or plays the last held session.
     @discardableResult
     func endPause(_ provider: AIProviderType, continuation: String? = nil, keepingChosen: Bool = true) -> Int {
         let pause = AgentPauseGate.read(provider)
         let continuation = continuation ?? continuationDescription(provider)
         let kept = keepingChosen && AgentPauseGate.narrowToChosen(provider, continuation: continuation)
         if !kept { AgentPauseGate.release(provider, continuation: continuation) }
-        let held = (pause?.sessions.count ?? 0) - (kept ? pause?.chosenListed.count ?? 0 : 0)
+        let stillHeld = !kept ? 0 : pause?.heldByUser == true ? pause?.sessions.count ?? 0 : pause?.chosenListed.count ?? 0
+        let held = (pause?.sessions.count ?? 0) - stillHeld
         if kept { refreshPauseStatus(provider) } else { agentPauseStatus[provider] = nil }
         sessionAdmissions[provider] = nil
         userResumes[provider] = nil
@@ -1249,10 +1258,10 @@ extension AppState {
 
     /// The user's own pause, taken before moving work onto accounts that are
     /// at or near their limits: every session waits at its next tool call
-    /// and every new turn at its start. It ends when the user resumes, or
-    /// when an account in the failover order shows capacity; the account
-    /// active now must first reset to count. An active account that failover
-    /// excludes does not end it.
+    /// and every new turn at its start. Only the user ends it ("Resume all",
+    /// or playing each session): no returning capacity, reset, rescoping,
+    /// paced resume, route or other automatic path does
+    /// (`AgentPauseGate.PauseFile.heldByUser`).
     func pauseSessionsNow(_ provider: AIProviderType) {
         guard gatedProviders.contains(provider) else { return }
         // The hook may not be installed yet when the setting was just turned on.
@@ -1279,7 +1288,7 @@ extension AppState {
             for: provider
         )
         refreshPauseStatus(provider)
-        failoverEvents.record(provider, "Paused sessions at the user's request: each waits at its next tool call and new turns wait at their start, until you resume them or an account in the failover order has capacity.")
+        failoverEvents.record(provider, "Paused sessions at the user's request: each waits at its next tool call and new turns wait at their start, until you resume them.")
     }
 
     /// The user's own override: paused sessions continue now, and no new
@@ -1322,10 +1331,21 @@ extension AppState {
     /// room never waits for another account's limit. Every new turn waits
     /// (`holdsNewTurns`) only while no account has room. Read by
     /// `suspendAgents` and `rescopeLimitPause`.
+    ///
+    /// A pinned session never moves, so nothing failover does keeps it off
+    /// its account's limit: `pinnedHeld` answers for each pinned session
+    /// whether it waits (its account is past its failover threshold or at
+    /// its limit, and the user has not played it there), and nil for a
+    /// session that is not pinned, which the rules above judge.
     nonisolated static func pauseScope(sessions: [String: UUID?], active: UUID, atOrNearLimit: (UUID) -> Bool,
-                                       anyRoom: Bool, destination: (String) -> UUID?) -> PauseScope {
+                                       anyRoom: Bool, destination: (String) -> UUID?,
+                                       pinnedHeld: (String) -> Bool? = { _ in nil }) -> PauseScope {
         var scope = PauseScope(holdsNewTurns: !anyRoom)
         for (session, slot) in sessions.sorted(by: { $0.key < $1.key }) {
+            if let held = pinnedHeld(session) {
+                if held { scope.held.append(session) }
+                continue
+            }
             guard atOrNearLimit(slot ?? active) else { continue }
             if slot != nil, anyRoom, let target = destination(session) {
                 scope.moves[session] = target
@@ -1386,8 +1406,133 @@ extension AppState {
                 .place(leaving, accounts: pacerAccounts, running: running.filter { !ids.contains($0.id) },
                        destinations: destinations, now: now)
         }
+        let pinned = pinnedSessionAccounts(provider)
+        var pinnedLimits: [UUID: PinnedHold?] = [:]
         return Self.pauseScope(sessions: sessions, active: current.id, atOrNearLimit: atOrNearLimit,
-                               anyRoom: !roomy.isEmpty, destination: { placements[$0] })
+                               anyRoom: !roomy.isEmpty, destination: { placements[$0] },
+                               pinnedHeld: { session in
+            guard let account = pinned[session] else { return nil }
+            if self.pinnedHoldsPlayed[session] == account { return false }
+            let hold = pinnedLimits[account] ?? self.pinnedHold(account, planner: planner, now: now)
+            pinnedLimits[account] = hold
+            return hold != nil
+        })
+    }
+
+    /// Why a session pinned to an account waits (`pinnedHold`).
+    enum PinnedHold: Equatable {
+        /// The account is past its failover threshold, or reaches its limit
+        /// within `suspensionLead`: failover would move an unpinned session
+        /// off it now.
+        case threshold
+        /// The account is at its limit, or refused a request at it.
+        case limit
+    }
+
+    /// Whether a session pinned to `id` waits, and why: the account is at
+    /// its limit, or past the threshold that makes failover move unpinned
+    /// sessions off it (`FailoverPlanner.isTriggered`, or reaching its
+    /// limit within `suspensionLead`). Nil while it has room. Read by
+    /// `limitPauseScope` and `holdPinnedSessionsAtLimit`.
+    func pinnedHold(_ id: UUID, planner: FailoverPlanner, now: Date) -> PinnedHold? {
+        guard let account = accounts.first(where: { $0.id == id }) else { return nil }
+        let state = quotaState(for: account, now: now)
+        let verdict = planner.servingVerdict(planner.servingView(state), now: now, lead: Self.suspensionLead)
+        if state.refusedAtLimit || verdict == .atLimit { return .limit }
+        if verdict == .nearLimit || planner.isTriggered(state, now: now) { return .threshold }
+        return nil
+    }
+
+    /// The provider's running pinned sessions, each with the account it is
+    /// pinned to: the account its slot serves, which `serveSessionSlots`
+    /// keeps on the pin.
+    func pinnedSessionAccounts(_ provider: AIProviderType) -> [String: UUID] {
+        (liveSessions[provider] ?? []).reduce(into: [:]) { result, session in
+            guard let pin = sessionPins.account(of: session.sessionID) else { return }
+            result[session.sessionID] = slotAccount(forSession: session.sessionID, provider: provider) ?? pin
+        }
+    }
+
+    /// Holds each running pinned session whose own account reached its
+    /// failover threshold or its limit (`pinnedHold`), with pausing at the
+    /// limit on: failover never moves a pinned session, so without the
+    /// hold it would run into the limit. The session joins the pause in
+    /// effect, or a pause at a limit holding it alone (`pinnedHoldPause`),
+    /// at its next tool call and new turn. `rescopeLimitPause`, through
+    /// `limitPauseScope`, lets it go on once its account has room (a reset
+    /// or a reading), or once the user unpins or moves it; the user may
+    /// also play it (`pinnedHoldsPlayed`). Not while the user's "Resume
+    /// all" holds pauses off (`pauseOverrideUntil`), or a route target
+    /// serves the provider's requests. Run every quota cycle before
+    /// `prunePausedSessions`.
+    func holdPinnedSessionsAtLimit(_ provider: AIProviderType, now: Date = Date()) {
+        let pinned = pinnedSessionAccounts(provider)
+        // A played session that ended, or left the account, is forgotten.
+        pinnedHoldsPlayed = pinnedHoldsPlayed.filter { session, account in
+            liveSession(session).map { $0.0 != provider } ?? false || pinned[session] == account
+        }
+        guard pausingProviders.contains(provider), routedStatus[provider] == nil,
+              pauseOverrideUntil[provider].map({ $0 <= now }) ?? true, !pinned.isEmpty else { return }
+        let planner = FailoverPlanner(settings: plannerSettings(provider))
+        var holds: [UUID: PinnedHold?] = [:]
+        var reached: [String: (account: UUID, hold: PinnedHold)] = [:]
+        for (session, account) in pinned {
+            let hold = holds[account] ?? pinnedHold(account, planner: planner, now: now)
+            holds[account] = hold
+            guard let hold else {
+                // Its account has room again: a later limit holds it again.
+                if pinnedHoldsPlayed[session] == account { pinnedHoldsPlayed[session] = nil }
+                continue
+            }
+            if pinnedHoldsPlayed[session] == account { continue }
+            reached[session] = (account, hold)
+        }
+        let existing = AgentPauseGate.read(provider)
+        let resumed = AgentPauseGate.resumedSessions(provider)
+        let due = reached.keys.filter { !(existing?.sessions.contains($0) ?? false) && !resumed.contains($0) }.sorted()
+        guard let pause = Self.pinnedHoldPause(existing: existing, adding: due, at: now) else { return }
+        AgentPauseGate.write(pause, for: provider)
+        refreshPauseStatus(provider)
+        for session in due {
+            guard let entry = reached[session] else { continue }
+            let name = liveSession(session).map { Self.eventName(of: $0.1) } ?? "session \(session.prefix(8))"
+            let on = accounts.first { $0.id == entry.account }.map { messageName($0) } ?? "its account"
+            failoverEvents.record(provider, Self.pinnedHoldEvent(session: name, account: on, hold: entry.hold))
+        }
+    }
+
+    /// The pause file that holds `adding`, pinned sessions whose account
+    /// reached its threshold or limit, with the pause `existing` in effect;
+    /// nil when nothing changes. Without a pause, a pause at a limit holding
+    /// them alone, at their next tool call and new turn, while every other
+    /// session runs. A pause holding every new turn holds them already. A
+    /// pause of sessions the user chose one at a time becomes a pause at a
+    /// limit that still lists them as chosen, so `rescopeLimitPause` judges
+    /// the pinned ones by their account and `endPause` leaves the chosen
+    /// ones held. Any other pause lists them too.
+    nonisolated static func pinnedHoldPause(existing: AgentPauseGate.PauseFile?, adding: [String],
+                                            at now: Date) -> AgentPauseGate.PauseFile? {
+        guard !adding.isEmpty else { return nil }
+        guard var pause = existing else {
+            return AgentPauseGate.PauseFile(sessions: adding, reason: "a pinned session's account reached its limit",
+                                            pausedAt: now, resumeAt: nil, holdsNewTurns: false,
+                                            holdsListedNewTurns: true)
+        }
+        if pause.holdsNewTurns == true { return nil }
+        let sessions = pause.sessions + adding.filter { !pause.sessions.contains($0) }
+        guard sessions != pause.sessions else { return nil }
+        pause.sessions = sessions
+        if pause.manual == true, pause.account == nil {
+            pause.manual = nil
+            pause.reason = "a pinned session's account reached its limit"
+            pause.holdsListedNewTurns = true
+        }
+        return pause
+    }
+
+    /// The event recording that a pinned session waits for its account.
+    nonisolated static func pinnedHoldEvent(session: String, account: String, hold: PinnedHold) -> String {
+        "Paused \(session), pinned to \(account), which reached its \(hold == .limit ? "limit" : "threshold"); it continues when \(account) has room."
     }
 
     /// Sends each of `moves` to its account through the slot-move path,
@@ -1442,7 +1587,7 @@ extension AppState {
     func prunePausedSessions(_ provider: AIProviderType) {
         // An automatic pause left behind while pausing is turned off for the
         // provider has nothing that would end it; a pause the user took ends
-        // when the user resumes or capacity returns.
+        // only when the user resumes.
         if let pause = AgentPauseGate.read(provider), pause.manual != true, !pausingProviders.contains(provider) {
             let released = endPause(provider)
             failoverEvents.record(provider, "Released \(released) paused session(s): pausing at the limit is turned off for \(provider.capabilities.displayName).")
@@ -1487,7 +1632,11 @@ extension AppState {
         guard planner.isFresh(state, now: now), planner.tier(state, now: now) != .exhausted,
               let projection = planner.projection(state, now: now) else { return }
         var available = planner.headroom(state, projection) - FailoverPlanner.minimumUsableHeadroom - 1
-        let waiting = AgentPauseGate.waitingSessions(provider)
+        // A session pinned to another account spends that account, not the
+        // active one's headroom; one the user paused waits for the user.
+        let pinned = pinnedSessionAccounts(provider)
+        let waiting = Self.automaticallyReleasable(AgentPauseGate.waitingSessions(provider), pause: pause)
+            .filter { pinned[$0].map { $0 == current.id } ?? true }
         let order = pause.sessions.filter(waiting.contains) + waiting.subtracting(pause.sessions).sorted()
         for session in order {
             if AgentPauseGate.hasPendingStep(provider, session: session) { continue }
@@ -1526,8 +1675,9 @@ extension AppState {
 
     /// Whether the provider's paused sessions continue a few at a time as
     /// capacity returns. Forecasts need each request's token counts, which
-    /// the router or the CLI's transcripts report (`learnsRequestCost`);
-    /// the user's own pause ends whole, as they asked.
+    /// the router or the CLI's transcripts report (`learnsRequestCost`).
+    /// It governs automatic pauses at a limit only: the user's own pause
+    /// ends whole, and only when the user resumes it.
     func resumesAsCapacityAllows(_ provider: AIProviderType) -> Bool {
         failoverConfig.policy(for: provider).resumeAsCapacityAllows && learnsRequestCost(provider)
             && AgentPauseGate.read(provider)?.manual != true
@@ -1542,13 +1692,20 @@ extension AppState {
     /// are served from several accounts, otherwise on the active account.
     /// The pause ends once it holds no session.
     func admitPausedSessions(_ provider: AIProviderType, planner: FailoverPlanner) async {
-        guard let pause = AgentPauseGate.read(provider) else { return }
-        let held = heldSessions(provider)
-        guard !held.isEmpty else {
+        guard let pause = AgentPauseGate.read(provider), !pause.holdsAllForUser else { return }
+        let allHeld = heldSessions(provider)
+        guard !allHeld.isEmpty else {
             let resumed = await releasePausedAgents(provider)
             if resumed > 0 { failoverEvents.record(provider, "Every paused session has continued; the pause is over.") }
             return
         }
+        // Sessions the user paused wait for the user. A pinned session goes
+        // on only on its own account, once that account has room
+        // (`rescopeLimitPause`), never where the forecast would place it.
+        let releasable = Self.automaticallyReleasable(allHeld, pause: pause)
+        let pinned = pinnedSessionAccounts(provider)
+        let held = releasable.filter { pinned[$0] == nil }
+        guard !held.isEmpty else { return }
         let now = Date()
         // An account hold places its sessions back on their own account
         // until a while after its reset; a reading that never shows the
@@ -1595,7 +1752,9 @@ extension AppState {
         }.sorted().joined(separator: ", ")
         let waiting = held.count - admitted.count
         failoverEvents.record(provider, "Resumed \(admitted.count) of \(held.count) paused session(s) where their forecast use fits: \(names)." + (waiting > 0 ? " \(waiting) wait for more capacity." : ""))
-        if waiting == 0 {
+        // Pinned sessions still held keep the pause; the user's chosen ones
+        // stay held when it ends (`endPause`).
+        if waiting == 0, held.count == releasable.count {
             await releasePausedAgents(provider)
         }
     }
@@ -1782,8 +1941,8 @@ extension AppState {
         guard hasPausedAgents(provider) || suspensionContexts[provider] != nil else { return }
         // An account hold ends when its own account resets
         // (`holdSessionsForImminentReset`), not on another's capacity, and
-        // sessions the user paused one at a time when the user plays them.
-        if let pause = AgentPauseGate.read(provider), pause.account != nil || pause.holdsOnlyChosenSessions { return }
+        // a pause the user took when the user resumes.
+        if let pause = AgentPauseGate.read(provider), pause.account != nil || pause.heldByUser { return }
         if resumesAsCapacityAllows(provider), AgentPauseGate.isActive(provider) {
             await admitPausedSessions(provider, planner: planner)
             return
@@ -1797,6 +1956,13 @@ extension AppState {
         }
         guard planner.isFresh(state, now: now),
               planner.servingVerdict(state, now: now, lead: Self.suspensionLead) == .canServe else { return }
+        guard Self.capacityEndsPause(AgentPauseGate.read(provider), routed: routedStatus[provider] != nil) else {
+            // Its sessions go on one by one as their own accounts have room
+            // (`rescopeLimitPause`); a later limit of the active account may
+            // pause again (`suspendAgents`).
+            suspensionContexts[provider] = nil
+            return
+        }
         let resumed = await releasePausedAgents(provider)
         if resumed > 0 {
             pendingResetRecovery[provider] = nil
@@ -1804,6 +1970,41 @@ extension AppState {
             saveFailoverRuntime()
             failoverEvents.record(provider, "Capacity is available on \(messageName(current)); resumed \(resumed) paused session(s).")
         }
+    }
+
+    /// Whether the active account having room again ends `pause` whole
+    /// (`resumeAgentsIfCapacityReturned`). A pause at a limit that lists the
+    /// sessions it holds, without holding every new turn, does not: each
+    /// listed session goes on once its own account has room
+    /// (`rescopeLimitPause`), so a session pinned to an account still at
+    /// its limit stays held whatever the active account's room. While a
+    /// route target serves the requests (`routed`), ending the pause is
+    /// what brings them back (`releasePausedAgents`), so it ends. An account
+    /// hold ends at its own account's reset, and a pause the user took
+    /// (`AgentPauseGate.PauseFile.heldByUser`) only when the user resumes.
+    nonisolated static func capacityEndsPause(_ pause: AgentPauseGate.PauseFile?, routed: Bool = false) -> Bool {
+        guard let pause else { return true }
+        if pause.account != nil || pause.heldByUser { return false }
+        return routed || pause.holdsNewTurns == true
+    }
+
+    /// Whether a pause at a limit leaves `existing` as it is
+    /// (`suspendAgents`): the user's "Pause all" holds every session and
+    /// turn already, and only the user ends it.
+    nonisolated static func limitPauseYields(to existing: AgentPauseGate.PauseFile?) -> Bool {
+        existing?.holdsAllForUser == true
+    }
+
+    /// Which of `sessions` an automatic release may let go under `pause`:
+    /// none of the user's own pause (`PauseFile.userHeld`), which only the
+    /// user ends, so a session both the user and a limit hold waits for the
+    /// user. Read by paced resume (`admitPausedSessions`), the steps let
+    /// through within headroom (`releaseStepsWithinHeadroom`) and the
+    /// sessions the CLI left waiting at a limit (`resumeSessionsLeftWaiting`).
+    nonisolated static func automaticallyReleasable(_ sessions: Set<String>, pause: AgentPauseGate.PauseFile?,
+                                                    running: Set<String> = []) -> Set<String> {
+        guard let pause else { return sessions }
+        return sessions.subtracting(pause.userHeld(running: running.union(sessions)))
     }
 
     /// Whether either quota window restarted between two readings: its reset

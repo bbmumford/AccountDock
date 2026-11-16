@@ -585,6 +585,27 @@ scoped to one model (`limits[]` with `kind: weekly_scoped`) and the share of the
 weekly allowance each may use. The planner uses the model-scoped window that
 applies to the model the sessions are using, read from the status line.
 
+An account whose plan does not include the CLI (a free or ended plan) has a
+`subscriptionType` that `Account.workloadAvailability` reports unavailable,
+and the planner treats it as ineligible. An account whose organisation has
+turned off subscription access for Claude Code, as a team admin does by
+removing its seat or licence, is refused with HTTP 403 `oauth_org_not_allowed`,
+which Claude Code shows as "API Error: Your organization has disabled Claude
+subscription access for Claude Code · Use an Anthropic API key instead, or ask
+your admin to enable access" (`ClaudeService.refusesCLIAccess`). That refusal,
+read from a session's transcript (`ClaudeTranscriptSource.accessRefusal`, at
+most `cliAccessRefusalWindow` old), a usage reply (`UsageError.organizationDisabled`)
+or a warm-up probe, marks the account (`AppState.noteCLIAccessRefused`,
+`Account.cliAccessRefusedAt`, saved with the account), which reuses the
+unavailable plan's state: `workloadAvailability` is unavailable ("Claude Code
+disabled by organisation"), so failover, slots, pacing and warm-ups leave it
+and move its sessions off at once (the quota cycle is brought forward; pinned
+sessions are unpinned), a move by hand is refused with the reason
+(`Account.cliUnavailableReason`), and the card shows `Account.cliAccessNotice`,
+which asks the user to check the seat or licence. `recheckCLIAccessIfDue` tries
+the account again with the warm-up's request daily and on the user's refresh;
+served, the mark ends.
+
 ## Failover planning
 
 `FailoverPlanner` is a pure function from accounts, readings and settings to a
@@ -796,10 +817,20 @@ with most of its week.
 
 Whether an account has a session window is read from each reading, account by
 account, because a plan can drop it while others keep it (Claude's Ultra plan
-for verified accounts; Max keeps it). A reading with the long window and no
-session window means the account has none: `merged(withNewer:clearingSession:)`
-drops a stored window, `FailoverPlanner`, `QuotaSimulator` and `SessionPacer`
+for verified accounts; Max keeps it). The usage endpoint also leaves out a
+window nothing has started, so for a plan known to have one
+(`Account.planHasSessionWindow`, from `ProviderCapabilities.sessionWindowPlans`:
+Claude's Pro, Max 5x and Team, Codex's Plus and Pro, every Kimi plan) a whole
+reading with the long window alone carries the window unstarted
+(`fillingUnstartedSessionWindow`, applied by `recordUsage`): the card shows it
+at 0% as "5-hour window not started" (`sessionWindowDisplay`) and a warm-up
+starts it, whether or not failover includes the account. For any other plan,
+a reading with the long window and no session window means the account has
+none: `merged(withNewer:clearingSession:)` drops a stored window, the card says
+it has no session limit, `FailoverPlanner`, `QuotaSimulator` and `SessionPacer`
 limit the account by its long window alone, and no warm-up probe runs for it.
+No warm-up runs for an account that needs signing in or whose plan does not
+include the CLI.
 `QuotaTrend` then holds its long-window baseline until it has risen two points
 or for 30 minutes, since a whole-percent step in a short interval is rounding.
 
@@ -906,8 +937,21 @@ session lists): pin, pause or play, and move.
   a reset, a route, a rescoped limit pause) goes through `AppState.endPause`,
   which keeps the chosen sessions held as the user's own pause
   (`AgentPauseGate.narrowToChosen`); a route's narrowing keeps them too.
-  Capacity checks never end a pause that holds only chosen sessions
-  (`PauseFile.holdsOnlyChosenSessions`). **Resume all** releases them.
+  **Resume all** releases them.
+- **A pause the user took** (`PauseFile.heldByUser`: **Pause all**, which
+  `pauseSessionsNow` writes, or sessions chosen one at a time) ends only by
+  the user's hand: **Resume all** (`resumePausedAgentsNow`) or playing its
+  sessions (`resumeSession`), the paths that call `endPause` with
+  `keepingChosen` false. Every automatic path leaves it: `narrowToChosen`
+  keeps it whole, `capacityEndsPause` is false for it (capacity returning
+  and resets), `releaseSuspendedAgents` returns before it (pausing or
+  monitoring turned off), `AgentPauseGate.narrow` and
+  `holdSessionsTooLargeForRoute` leave "Pause all" alone, `suspendAgents`
+  writes no pause at a limit over it (`limitPauseYields`), and paced resume,
+  steps within headroom and `resumeSessionsLeftWaiting` skip the sessions it
+  holds (`automaticallyReleasable`, `PauseFile.userHeld`). A session held
+  both by the user and by a limit waits for the user. `resumeAsCapacityAllows`
+  governs automatic pauses only.
 - **Playing one session** is `AppState.resumeSession`
   (`AgentPauseGate.playOne`): the session goes on while the pause holds the
   others. When it was the last session held, the pause ends, as **Resume
@@ -920,9 +964,14 @@ session lists): pin, pause or play, and move.
   serves the destination), so failover and balancing leave it, unless
   balancing would place it there itself: `SessionMoveRules.balancingChoice`
   asks `SessionPacer.place` where the session would go among the accounts
-  rebalancing weighs. The move menu (`SessionMoveMenu`) lists every account
-  with its room, why it cannot take the session (needs sign-in, excluded,
-  at its limit), and whether the move pins it. Each move is recorded.
+  rebalancing weighs; a move onto an account failover excludes always
+  pins. The move menu (`SessionMoveMenu`) lists every account with its
+  room and whether the move pins it. A move by hand may go to any account
+  that can serve the CLI: excluded, at its limit or near it is a warning
+  (`SessionMoveMenu.warning`), and only an account that needs signing in or
+  cannot serve the CLI (`Account.cliUnavailableReason`), or the one the
+  session runs on, is refused (`SessionMoveRules.blocker`, which
+  `moveSession` applies too). Each move is recorded.
 
 A pause at a limit judges each session by the account it runs on
 (`AppState.pauseScope`, built by `limitPauseScope`): a slot session by its
@@ -934,6 +983,18 @@ none for before pausing; a slot session moves instead, through the slot-move
 path, to an account `SessionPacer.place` picks among those with room that
 carry one more typical session for the runway (`carriesNewSession`). A
 session on an account with room never waits for another account's limit.
+A pinned session never moves, so it waits instead once its own account is
+past its failover threshold or at its limit (`AppState.pinnedHold`), whether
+or not the active account is: every cycle `holdPinnedSessionsAtLimit` adds
+it to the pause in effect, or writes a pause at a limit listing it alone
+(`pinnedHoldPause`), and records "Paused X, pinned to Y, which reached its
+threshold (or limit); it continues when Y has room." The same rule in
+`pauseScope` lets it go on once its account has room, by a reset or a
+reading, or once it is unpinned or moved; a pinned session the user plays
+there runs on until the account has room again (`pinnedHoldsPlayed`). Such
+a pause ends session by session, never because the active account has room
+(`capacityEndsPause`), and neither paced resume nor steps within the active
+account's headroom release a session pinned elsewhere.
 The pause file lists exactly the sessions that wait, and each listed session
 also waits at a new turn (`holdsListedNewTurns`); every new turn waits
 (`holdsNewTurns`) only while no account has room. Every cycle,
@@ -973,7 +1034,7 @@ and the session shows a status message and terminal title while it waits.
 - The same script runs on `UserPromptSubmit`, so any turn that starts waits
   there before its first request, including a subagent reporting back to its
   session or a scheduled agent waking up. The pause file stays until capacity
-  returns.
+  returns, or, for a pause the user took, until the user resumes.
 - A pause the user started is marked `manual`; it releases no steps within
   headroom.
 - A hook may wait only as long as its CLI allows, and Kimi Code allows 600
@@ -1028,17 +1089,18 @@ and the session shows a status message and terminal title while it waits.
   pointer lists the candidates. The waiting session's terminal title names
   the shortcut.
 - No pause ends because the user chose an account that failover excludes:
-  sessions wait for **Resume all** or for capacity on an account in the
-  failover order (the account active when the pause began only after a window
-  reset).
+  sessions of a pause at a limit wait for **Resume all** or for capacity on
+  an account in the failover order (the account active when the pause began
+  only after a window reset); those of a pause the user took wait for the
+  user alone.
 - Every way out of a pause goes through `AppState.endPause`: capacity returned,
   a route target took the requests, or the user resumed; a route target that
   cannot take some sessions narrows the pause to them instead. The gate tells each
   resumed Claude Code agent to check its background work in all three cases.
 - While the account still has some room, one step at a time is released through
   an `.allow` file, within the remaining headroom.
-- The pause ends when a reading confirms capacity, or when the user chooses
-  **Resume all**.
+- A pause at a limit ends when a reading confirms capacity, or when the user
+  chooses **Resume all**; a pause the user took only by the user's hand.
 - Every way a pause ends goes through `AppState.endPause`, which records
   where the sessions continue (the route target and model, or the account
   now active). The gate shows it to the user and the agent as each session

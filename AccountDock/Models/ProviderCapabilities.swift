@@ -120,6 +120,14 @@ struct ProviderCapabilities: Sendable {
     /// provider's plan sizes are not known, which leaves the learned or
     /// default cost. Read through `Account.planSize`.
     var planSizes: [String: Double] = [:]
+    /// Plans known to have a session window where the provider's plans
+    /// differ (`sessionQuotaMode` `.whenPresent`), keyed `<plan>:<tier>`
+    /// or, for a plan whose tier does not change it, `<plan>`. A reply
+    /// without the window from such a plan reports it not started, not
+    /// absent: `Account.planHasSessionWindow` reads it, so the card shows
+    /// the window at 0% and a warm-up starts it. A plan left out is judged
+    /// by its replies alone.
+    var sessionWindowPlans: Set<String> = []
     /// What its CLI settings tab offers (`CLISettingsTabView`); nil for a
     /// provider whose CLI has no settings of AccountDock's.
     var cliSettings: CLISettings? = nil
@@ -376,6 +384,11 @@ extension AIProviderType {
                 planNames: ["max:default_claude_max_20x": "Ultra", "max:default_claude_max_5x": "Max"],
                 // Max 20x holds twenty times Pro's usage, Max 5x five times.
                 planSizes: ["max:default_claude_max_20x": 20, "max:default_claude_max_5x": 5, "pro": 1],
+                // Pro, Max 5x and Team seats are counted in five-hour
+                // windows, which the usage endpoint leaves out until one
+                // starts. Max 20x is left to its replies: a verified
+                // account on it can have no session window.
+                sessionWindowPlans: ["pro", "max:default_claude_max_5x", "team"],
                 cliSettings: .claudeCode
             )
         case .codex:
@@ -420,6 +433,7 @@ extension AIProviderType {
                 shortBadge: "X",
                 activityMetrics: [.turns, .linesChanged, .cost],
                 longWindowReportsLength: true,
+                sessionWindowPlans: ["plus", "pro"],
                 cliSettings: .codex
             )
         case .kimi:
