@@ -69,8 +69,10 @@ final class CapacityOutlookTests: XCTestCase {
         let resume = try XCTUnwrap(outlook.resume)
         // Every account is spent in the early morning; cybrio's new week at
         // 9 pm tomorrow is the first refill they run on for long.
-        XCTAssertGreaterThan(paused, hours(6))
-        XCTAssertLessThan(paused, hours(10))
+        // The weeks run out one by one from 1:15 am, bytrix's last at about
+        // 5 am, when nothing is left.
+        XCTAssertEqual(paused.timeIntervalSince(now) / 3600, 8.0, accuracy: 0.1)
+        XCTAssertEqual(outlook.runningOut.map { $0.name ?? "all" }, ["fluxon", "cybrio", "hexorda", "Backup", "bytrix", "all"])
         XCTAssertEqual(resume.kind, .newWeek)
         XCTAssertEqual(resume.name, "cybrio")
         XCTAssertEqual(resume.at.timeIntervalSince(hours(24)), 0, accuracy: 1)
@@ -132,8 +134,9 @@ final class CapacityOutlookTests: XCTestCase {
         let resume = try XCTUnwrap(outlook.resume)
         // voltrix, a Pro plan with most of its week left, refills its small
         // window during the pause: the sessions run on it for minutes.
+        // Its windows refill at about 6:15 am and 11:15 am: 18 and 15 minutes.
         let bursts = outlook.bursts
-        XCTAssertFalse(bursts.isEmpty)
+        XCTAssertEqual(bursts.map { ($0.at.timeIntervalSince(now) / 3600 * 4).rounded() / 4 }, [9.25, 14.25])
         for burst in bursts {
             XCTAssertEqual(burst.name, "voltrix")
             XCTAssertEqual(burst.kind, .windowRefill)
@@ -151,6 +154,8 @@ final class CapacityOutlookTests: XCTestCase {
         let whatIf = try XCTUnwrap(outlook.whatIf)
         XCTAssertEqual(whatIf.session.label, "cf-builder")
         XCTAssertGreaterThan(whatIf.allPausedAt ?? .distantFuture, paused)
+        // 157M an hour without it lasts until about 11:15 am instead of 5 am.
+        XCTAssertEqual(try XCTUnwrap(whatIf.allPausedAt).timeIntervalSince(now) / 3600, 14.26, accuracy: 0.1)
         XCTAssertEqual(outlook.biggest.map(\.label), ["cf-builder", "platform-engineer", "cf-designer"])
         XCTAssertEqual(outlook.rateLine, "~270M tokens/h across 14 sessions")
         XCTAssertEqual(outlook.biggestLine, "Biggest users: cf-builder 113M/h · platform-engineer 52M/h · cf-designer 28M/h")
