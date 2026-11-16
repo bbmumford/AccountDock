@@ -326,6 +326,15 @@ provider's failover order when it should take work.
   an account with room, and the rest wait, with **Pause sessions**, for its
   reset or for you to move them. Sessions in slots of their own keep moving.
   The lock beside the active account on the Accounts tab is the same switch.
+- **Switches in the menu.** Left of Refresh, Settings and Quit at the bottom
+  of the menu, **Failover** turns Move the active account automatically on or
+  off for every provider at once, and **Balancing** turns session balancing
+  (Serve sessions from several accounts at once) on or off for every provider
+  whose sessions can use it. Each shows on, off, or mixed when providers
+  differ (a mixed one turns them all on), its tooltip lists each provider
+  ("Claude Code on · Codex off · Kimi Code off"), and each change is recorded
+  as Settings records it. Balancing changes that one setting alone, so pacing
+  and Rebalance automatically are as you left them when it is on again.
 - **Quarantine.** An account whose stored credential fails verification is left
   out of automatic switching until you re-authenticate it.
 
