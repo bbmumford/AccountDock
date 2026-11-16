@@ -932,6 +932,23 @@ account whose size is unknown (a Max plan without its tier), keeps the
 plan-wide cost. The first measurement on the account replaces the seed, and
 the Learning log records each change in where an account's cost comes from.
 
+A few readings can mislead: a window that other use moved between two
+readings can make a Max 5x account read like a Max 20x one, which would send
+it four times the work it holds. A measured cost more than
+`sizeDisagreement` (2) times off, either way, from what the account's size
+makes of the other measured accounts' costs (their median, so one stray
+account sets no expectation) is therefore blended toward that expectation,
+in log terms, by how many of `trustedReadings` (10) readings it has learned
+from (`TurnCostModel.accountReadings`), and stands alone after that
+(`RatioSource.blendedWithPlanSize`). Each measured cost is kept with the
+plan it was measured on (`TurnCostModel.accountPlans`, the plan and the
+rate-limit tier): once the account is on another plan, as an upgrade from
+Pro to Max, which makes each percent five times the work, that cost is not
+used, and the next reading forgets it and its readings
+(`TurnCostModel.notePlan`, from `AppState.learnFromReading`), so the plan
+size seeds the account until it is measured again. A tier learned after the
+cost was is the same plan.
+
 ### Learning
 
 | Model | Learns | Used for |

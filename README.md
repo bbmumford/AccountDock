@@ -261,7 +261,10 @@ provider's failover order when it should take work.
   percent: one percent of a Pro week is about a twentieth of one percent of a
   Max 20x week. Each account's cost is learned from its own readings, and a
   new account starts from its plan's size (Pro, Max 5x, Max 20x) until they
-  take over, so a small plan never receives a running session that would
+  take over. A learned cost more than twice off what the plan's size and the
+  other accounts' costs suggest counts only in part until ten readings back
+  it, and a plan change starts the account's learning again, so a small plan
+  never receives a running session that would
   empty its window within the hour. New sessions, whose use is not known yet,
   still start on a small plan whose 5-hour window would otherwise reset with
   room unused, in proportion to that room.

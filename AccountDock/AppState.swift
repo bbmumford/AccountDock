@@ -1251,6 +1251,8 @@ final class AppState: ObservableObject {
             credentialFingerprintSeen[fingerprint] = nil
         }
         turnCostModel.accountPercentPerMillion?[id] = nil
+        turnCostModel.accountReadings?[id] = nil
+        turnCostModel.accountPlans?[id] = nil
         turnCostModel.pending[id] = nil
         turnCostModel.lastSession[id] = nil
         turnCostModel.sessionAccount = turnCostModel.sessionAccount.filter { $0.value != id }

@@ -14,6 +14,14 @@ struct TurnCostModel: Codable, Equatable {
     /// The same, measured on each account alone. Plans of different sizes
     /// count the same tokens as different shares of their windows.
     var accountPercentPerMillion: [UUID: Double]?
+    /// How many readings each account's own ratio has learned from
+    /// (`recordReading`); an account missing here has none counted. Read by
+    /// `ratio(for:sizes:plans:)`, which trusts a ratio that disagrees with
+    /// the account's plan size only after `trustedReadings`.
+    var accountReadings: [UUID: Int]?
+    /// The plan each account's own ratio was learned on (`notePlan`): a
+    /// ratio learned on another plan than the account's now is not its own.
+    var accountPlans: [UUID: LearnedPlan]?
     /// Weighted tokens of requests served since the account's last usage
     /// reading, by account.
     var pending: [UUID: Double] = [:]
@@ -39,10 +47,42 @@ struct TurnCostModel: Codable, Equatable {
     /// The account's own ratio once measured, otherwise the plan-wide one.
     func ratio(for account: UUID) -> Double { accountPercentPerMillion?[account] ?? ratio }
 
-    /// Where an account's ratio came from (`ratio(for:sizes:)`).
+    /// An account's plan as its credential names it
+    /// (`Account.subscriptionType`, `Account.rateLimitTier`).
+    struct LearnedPlan: Codable, Equatable {
+        var plan: String?
+        var tier: String?
+
+        /// Whether `other` is another plan: a part both name, named
+        /// differently. A ratio learned before the tier was known was
+        /// learned on the same plan.
+        func differs(from other: LearnedPlan) -> Bool {
+            func differ(_ lhs: String?, _ rhs: String?) -> Bool {
+                guard let lhs, let rhs else { return false }
+                return lhs.lowercased() != rhs.lowercased()
+            }
+            return differ(plan, other.plan) || differ(tier, other.tier)
+        }
+    }
+
+    /// Readings after which an account's own ratio is trusted even where it
+    /// disagrees with its plan size; with smoothing at 0.3 the first
+    /// reading then weighs under 3%.
+    static let trustedReadings = 10
+    /// How far, as a factor either way, an account's own ratio may stray
+    /// from what its plan size makes of the other accounts' before it is
+    /// blended toward that until `trustedReadings`.
+    static let sizeDisagreement = 2.0
+
+    /// Where an account's ratio came from (`ratio(for:sizes:plans:)`).
     enum RatioSource: Equatable {
         /// Measured on the account itself.
         case learned
+        /// Measured on the account itself, but more than
+        /// `sizeDisagreement` from what its plan size makes of the other
+        /// accounts' measured ratios, and from fewer than `trustedReadings`:
+        /// blended toward that expectation by how many readings it has.
+        case blendedWithPlanSize
         /// From the accounts with a measured ratio and a known plan size,
         /// scaled by the account's plan size.
         case seededFromLearned
@@ -62,11 +102,43 @@ struct TurnCostModel: Codable, Equatable {
     /// measured, the plan-wide ratio scaled from the median known size.
     /// Learning replaces the seed with the first measurement
     /// (`recordReading`). Read by `AppState.accountRatio`.
-    func ratio(for account: UUID, sizes: [UUID: Double]) -> (ratio: Double, source: RatioSource) {
-        if let learned = accountPercentPerMillion?[account] { return (learned, .learned) }
-        guard let size = sizes[account], size > 0 else { return (ratio, .planWide) }
+    ///
+    /// A measured ratio more than `sizeDisagreement` from what the
+    /// account's size makes of the other accounts' measured ratios (their
+    /// median, so one stray account sets no expectation) is blended toward
+    /// that expectation, in proportion to how many of `trustedReadings` it
+    /// has learned from: a few readings taken while other accounts' use
+    /// moved the window can read a Max 5x account as a Max 20x one, which
+    /// would send it four times the work it holds. `plans` holds each
+    /// account's plan now (`LearnedPlan`); a ratio learned on another plan
+    /// is not used, for the account or as a reference.
+    func ratio(for account: UUID, sizes: [UUID: Double],
+               plans: [UUID: LearnedPlan] = [:]) -> (ratio: Double, source: RatioSource) {
+        func measured(_ id: UUID) -> Double? {
+            guard let value = accountPercentPerMillion?[id], value > 0 else { return nil }
+            if let learnedOn = accountPlans?[id], let current = plans[id], learnedOn.differs(from: current) { return nil }
+            return value
+        }
+        let size = sizes[account].flatMap { $0 > 0 ? $0 : nil }
+        if let own = measured(account) {
+            guard let size else { return (own, .learned) }
+            let expected = sizes.compactMap { id, other -> Double? in
+                guard id != account, other > 0, let ratio = measured(id) else { return nil }
+                return ratio * other / size
+            }.sorted()
+            guard !expected.isEmpty else { return (own, .learned) }
+            let middle = expected.count / 2
+            let reference = expected.count % 2 == 1 ? expected[middle] : sqrt(expected[middle - 1] * expected[middle])
+            let readings = accountReadings?[account] ?? 0
+            guard max(own / reference, reference / own) > Self.sizeDisagreement, readings < Self.trustedReadings else {
+                return (own, .learned)
+            }
+            let weight = Double(readings) / Double(Self.trustedReadings)
+            return (exp(weight * log(own) + (1 - weight) * log(reference)), .blendedWithPlanSize)
+        }
+        guard let size else { return (ratio, .planWide) }
         let references = sizes.compactMap { id, referenceSize -> Double? in
-            guard referenceSize > 0, let learned = accountPercentPerMillion?[id], learned > 0 else { return nil }
+            guard referenceSize > 0, let learned = measured(id) else { return nil }
             return log(learned * referenceSize / size)
         }
         if !references.isEmpty {
@@ -109,7 +181,37 @@ struct TurnCostModel: Codable, Equatable {
         var perAccount = accountPercentPerMillion ?? [:]
         perAccount[account] = perAccount[account].map { $0 * (1 - Self.smoothing) + sample * Self.smoothing } ?? sample
         accountPercentPerMillion = perAccount
+        var readings = accountReadings ?? [:]
+        readings[account, default: 0] += 1
+        accountReadings = readings
         pending[account] = 0
+    }
+
+    /// Notes the plan `account` is on now, before a reading is learned
+    /// (`AppState.learnFromReading`). A plan change (another plan or tier)
+    /// changes how much work one percent of its window is, five times over
+    /// from Pro to Max 5x, so the account's own ratio and its readings are
+    /// forgotten and measured again, its plan size seeding it meanwhile.
+    /// Returns whether it forgot one.
+    @discardableResult
+    mutating func notePlan(_ plan: LearnedPlan, for account: UUID) -> Bool {
+        var plans = accountPlans ?? [:]
+        defer { accountPlans = plans }
+        guard let learnedOn = plans[account] else {
+            plans[account] = plan
+            return false
+        }
+        guard learnedOn.differs(from: plan) else {
+            plans[account] = LearnedPlan(plan: plan.plan ?? learnedOn.plan, tier: plan.tier ?? learnedOn.tier)
+            return false
+        }
+        plans[account] = plan
+        let forgot = accountPercentPerMillion?[account] != nil
+        accountPercentPerMillion?[account] = nil
+        accountReadings?[account] = nil
+        pending[account] = 0
+        lastSession[account] = nil
+        return forgot
     }
 
     /// Session percent the session's next request is expected to use.

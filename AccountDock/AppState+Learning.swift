@@ -83,6 +83,9 @@ extension AppState {
             }
         }
         if learnsRequestCost(account.provider), let session = usage.fiveHour?.utilization {
+            if turnCostModel.notePlan(Self.learnedPlan(account), for: account.id) {
+                learningLog.info("\(messageName(account)): its plan changed, so its cost is measured again from its readings")
+            }
             turnCostModel.recordReading(account: account.id, session: session)
         }
         guard let weekly = usage.sevenDay?.utilization, let before = previous?.sevenDay?.utilization else { return }
@@ -98,21 +101,30 @@ extension AppState {
         demandForecasts[account.provider, default: DemandForecast()].record(weeklyRise: rise, at: date)
     }
 
+    /// The account's plan as `TurnCostModel` keys what it learned by.
+    nonisolated static func learnedPlan(_ account: Account) -> TurnCostModel.LearnedPlan {
+        TurnCostModel.LearnedPlan(plan: account.subscriptionType, tier: account.rateLimitTier)
+    }
+
     /// The account's token cost, in session percent per million weighted
-    /// tokens (`TurnCostModel.ratio(for:sizes:)`): its own once measured,
-    /// otherwise seeded from its plan size (`Account.planSize`) relative to
-    /// the provider's other accounts. Every rate or room `SessionPacer` and
-    /// `FailoverPlanner` move or compare between accounts goes through it.
-    /// Each change in where it comes from is logged once.
+    /// tokens (`TurnCostModel.ratio(for:sizes:plans:)`): its own once
+    /// measured on the plan it is on now, blended toward its plan size while
+    /// that measurement disagrees with the other accounts' and rests on few
+    /// readings, otherwise seeded from its plan size (`Account.planSize`)
+    /// relative to the provider's other accounts. Every rate or room
+    /// `SessionPacer` and `FailoverPlanner` move or compare between accounts
+    /// goes through it. Each change in where it comes from is logged once.
     func accountRatio(_ id: UUID) -> Double {
         guard let account = accounts.first(where: { $0.id == id }) else { return turnCostModel.ratio(for: id) }
-        let sizes = accounts.filter { $0.provider == account.provider }
-            .reduce(into: [UUID: Double]()) { result, other in result[other.id] = other.planSize }
-        let (ratio, source) = turnCostModel.ratio(for: id, sizes: sizes)
+        let siblings = accounts.filter { $0.provider == account.provider }
+        let sizes = siblings.reduce(into: [UUID: Double]()) { result, other in result[other.id] = other.planSize }
+        let plans = siblings.reduce(into: [UUID: TurnCostModel.LearnedPlan]()) { $0[$1.id] = Self.learnedPlan($1) }
+        let (ratio, source) = turnCostModel.ratio(for: id, sizes: sizes, plans: plans)
         if ratioSources[id] != source {
             ratioSources[id] = source
             let origin = switch source {
             case .learned: "learned from its readings"
+            case .blendedWithPlanSize: "learned from few readings that disagree with its plan size, so blended toward it"
             case .seededFromLearned: "seeded from its plan size and the accounts with a learned cost"
             case .seededFromPlanWide: "seeded from its plan size and the plan-wide cost"
             case .planWide: "the plan-wide cost, its plan size unknown"
