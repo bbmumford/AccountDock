@@ -113,6 +113,13 @@ enum FailoverPlan: Equatable {
         /// account's, or below 1 when the demand forecast decided.
         case balance(advantageHours: Double)
         case workloadUnavailable
+
+        /// Whether intelligent balancing chose it; every other switch is
+        /// failover's, at a threshold or the limit.
+        var isBalance: Bool {
+            if case .balance = self { return true }
+            return false
+        }
     }
 
     case stay(StayReason)

@@ -430,12 +430,17 @@ enum AgentPauseGate {
     }
 
     /// The sessions of `pause` still to be counted: a session leaves the list
-    /// once it ended after the pause began. Any other activity keeps it
-    /// listed: a prompt during the pause waits at its start, and a session's
-    /// subagents report back to it as prompts.
-    static func stillHeld(_ pause: PauseFile, records: [String: AgentSession]) -> [String] {
+    /// once it ended after the pause began, or once its process no longer
+    /// runs (`isRunning`). Any other activity keeps it listed: a prompt
+    /// during the pause waits at its start, and a session's subagents report
+    /// back to it as prompts.
+    static func stillHeld(_ pause: PauseFile, records: [String: AgentSession],
+                          isRunning: (AgentSession) -> Bool = { AgentSessions.isRunning($0) }) -> [String] {
         pause.sessions.filter { session in
             guard let record = records[session], let observedAt = record.observedAt else { return true }
+            // A session whose process is gone, or whose process ID now
+            // belongs to another program, ended without a SessionEnd.
+            if record.processID != nil, !isRunning(record) { return false }
             return record.event != "SessionEnd" || observedAt <= pause.pausedAt
         }
     }

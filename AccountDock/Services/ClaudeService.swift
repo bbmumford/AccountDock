@@ -50,6 +50,9 @@ struct RunningClaudeProcess: Hashable, Identifiable, Sendable {
 struct ClaudeSubscriptionSnapshot: Equatable, Sendable {
     let planType: String?
     let isInactive: Bool
+    /// The organisation's rate-limit tier the profile names
+    /// (`default_claude_max_5x`), which sizes the plan; nil when it names none.
+    var rateLimitTier: String? = nil
 }
 
 /// The account a Claude access token belongs to, from the account profile.
@@ -297,14 +300,24 @@ final class ClaudeService: @unchecked Sendable {
         )
     }
 
+    /// The plan the profile reports now. A credential carries the plan and
+    /// tier it was issued under, which an upgrade does not change, so the
+    /// profile's `organization.organization_type` (`claude_max`,
+    /// `claude_pro`, `claude_team`, `claude_enterprise`) and
+    /// `organization.rate_limit_tier` decide; an explicit `subscriptionType`
+    /// field is used when the profile has one.
     static func liveSubscription(fromProfileJSON json: Any) -> ClaudeSubscriptionSnapshot {
         let expired = containsExpiredSubscription(json)
+        let organization = (json as? [String: Any])?["organization"] as? [String: Any]
+        let explicit = firstString(named: ["subscriptionType", "subscription_type"], in: json)
+        let organizationPlan = (organization?["organization_type"] as? String).flatMap { type -> String? in
+            let plan = type.hasPrefix("claude_") ? String(type.dropFirst("claude_".count)) : type
+            return plan.isEmpty ? nil : plan
+        }
         return ClaudeSubscriptionSnapshot(
-            planType: expired ? nil : firstString(
-                named: ["subscriptionType", "subscription_type"],
-                in: json
-            ),
-            isInactive: expired
+            planType: expired ? nil : (explicit ?? organizationPlan),
+            isInactive: expired,
+            rateLimitTier: expired ? nil : organization?["rate_limit_tier"] as? String
         )
     }
 

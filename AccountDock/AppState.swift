@@ -138,6 +138,9 @@ final class AppState: ObservableObject {
     /// provider.
     var usageRetryAfter: [UUID: Date] = [:]
     var lastProfileCheck: [UUID: Date] = [:]
+    /// Each Claude account's rate-limit tier as its profile last named it,
+    /// which wins over the tier its credential was issued under.
+    var profileRateLimitTiers: [UUID: String] = [:]
     /// Set while one failover evaluation, including any switch it performs,
     /// is in progress; a second evaluation would plan from the half-switched
     /// state and could start a competing switch.
@@ -1754,9 +1757,11 @@ final class AppState: ObservableObject {
             // its reading would show as this account's.
             guard Self.recordsReading(after: check) else { return .skipped }
         }
-        setRateLimitTier(ClaudeService.rateLimitTier(from: tokenJSON), for: account.id)
-        if includeMetadata, shouldCheckClaudeProfile(account, forced: forced),
-           await refreshClaudeSubscriptionMetadata(accountID: account.id, accessToken: accessToken) {
+        if profileRateLimitTiers[account.id] == nil {
+            setRateLimitTier(ClaudeService.rateLimitTier(from: tokenJSON), for: account.id)
+        }
+        if includeMetadata || forced, shouldCheckClaudeProfile(account, forced: forced),
+           await refreshClaudeSubscriptionMetadata(accountID: account.id, accessToken: accessToken, forced: forced) {
             return .workloadUnavailable(unavailableMessage(for: account.provider))
         }
         do {
@@ -1978,14 +1983,21 @@ final class AppState: ObservableObject {
     }
 
     /// Returns true only when Anthropic explicitly reports an inactive plan.
-    private func refreshClaudeSubscriptionMetadata(accountID: UUID, accessToken: String) async -> Bool {
+    private func refreshClaudeSubscriptionMetadata(accountID: UUID, accessToken: String, forced: Bool = false) async -> Bool {
         // Profile requests count against the same Anthropic allowance as
-        // usage requests; a skipped check is retried on a later refresh.
-        guard spendUsageRequest(.claudeCode, .background) else { return false }
+        // usage requests; a skipped check is retried on a later refresh. A
+        // refresh the user asked for checks regardless, as its reading does.
+        guard forced || spendUsageRequest(.claudeCode, .background) else { return false }
         lastProfileCheck[accountID] = Date()
         do {
             let live = try await claudeService.getLiveSubscription(accessToken: accessToken)
             guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { return false }
+            // The profile's tier is current; the credential's is the one it
+            // was issued under (`setRateLimitTier` from the token).
+            if let tier = live.rateLimitTier {
+                profileRateLimitTiers[accountID] = tier
+                setRateLimitTier(tier, for: accountID)
+            }
             let resolvedPlan = live.isInactive ? "free" : live.planType
             guard let resolvedPlan else { return false }
             if accounts[index].subscriptionType == resolvedPlan { return live.isInactive }

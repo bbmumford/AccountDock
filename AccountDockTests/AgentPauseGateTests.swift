@@ -73,8 +73,24 @@ final class AgentPauseGateTests: XCTestCase {
         try record("prompted", event: "UserPromptSubmit", pid: 12, at: "2026-10-17T09:15:00Z")
         try record("closed", event: "SessionEnd", pid: 13, at: "2026-10-17T09:16:00Z")
         let pause = AgentPauseGate.PauseFile(sessions: ["still", "turnended", "prompted", "closed"], reason: "limit", pausedAt: pausedAt, resumeAt: nil)
-        let held = AgentPauseGate.stillHeld(pause, records: AgentSessions.records(.claudeCode, directory: directory))
+        let held = AgentPauseGate.stillHeld(pause, records: AgentSessions.records(.claudeCode, directory: directory),
+                                            isRunning: { _ in true })
         XCTAssertEqual(held, ["still", "turnended", "prompted"])
+    }
+
+    func testAPausedSessionWhoseProcessIsGoneOrReusedIsNoLongerHeld() throws {
+        let pausedAt = ISO8601DateFormatter().date(from: "2026-10-17T09:10:00Z")!
+        try record("running", event: "UserPromptSubmit", pid: 40, at: "2026-10-17T09:00:00Z")
+        try record("crashed", event: "UserPromptSubmit", pid: 41, at: "2026-10-17T09:00:00Z")
+        try record("reused", event: "UserPromptSubmit", pid: 42, at: "2026-10-17T09:00:00Z")
+        let pause = AgentPauseGate.PauseFile(sessions: ["running", "crashed", "reused"], reason: "limit", pausedAt: pausedAt, resumeAt: nil)
+        let records = AgentSessions.records(.claudeCode, directory: directory)
+        let early = ISO8601DateFormatter().date(from: "2026-10-17T08:00:00Z")!
+        let late = ISO8601DateFormatter().date(from: "2026-10-17T10:00:00Z")!
+        let held = AgentPauseGate.stillHeld(pause, records: records) { record in
+            AgentSessions.isRunning(record, isAlive: { $0 != 41 }, startTime: { $0 == 42 ? late : early })
+        }
+        XCTAssertEqual(held, ["running"])
     }
 
     func testPauseFileRoundTripsAndReleases() {
