@@ -38,6 +38,21 @@ extension AppState {
     /// with no session on the shared sign-in.
     func sharedGroup(_ provider: AIProviderType, sessions: [SessionPacer.Session],
                      now: Date) -> (group: SessionPacer.SharedGroup, members: Set<String>)? {
+        guard var load = sharedGroupLoad(provider, sessions: sessions, now: now) else { return nil }
+        if let next = nextActiveSwitch(provider, now: now) {
+            load.group.nextAccount = next.account
+            load.group.switchAt = next.at
+        }
+        return load
+    }
+
+    /// The shared group without its projected switch: its sessions' rate
+    /// over their last hour (at least their current rate), context and
+    /// models, on the active account. Read by `sharedGroup` and by
+    /// `balanceMovingRate`, which `nextActiveSwitch` reads, so it asks for
+    /// no switch itself.
+    func sharedGroupLoad(_ provider: AIProviderType, sessions: [SessionPacer.Session],
+                         now: Date) -> (group: SessionPacer.SharedGroup, members: Set<String>)? {
         guard provider.capabilities.sessionIsolation != nil, let active = activeAccount(for: provider)?.id else { return nil }
         let own = Set(accounts.filter { $0.provider == provider }.map(\.id))
         let live = Set((liveSessions[provider] ?? []).map(\.sessionID))
@@ -46,18 +61,28 @@ extension AppState {
         let members = Self.sharedSessions(recent, own: own, slotted: slotSessionIDs(provider), live: live, recorded: recorded)
         guard !members.isEmpty else { return nil }
         let grouped = recent.filter { members.contains($0.id) }
-        var group = SessionPacer.SharedGroup(
+        let group = SessionPacer.SharedGroup(
             account: active,
             tokensPerHour: grouped.reduce(0) { $0 + max($1.tokensPerHour, $1.recentTokensPerHour ?? 0) },
             contextTokens: grouped.reduce(0) { $0 + $1.contextTokens },
             models: grouped.compactMap(\.model),
             sessionCount: grouped.count
         )
-        if let next = nextActiveSwitch(provider, now: now) {
-            group.nextAccount = next.account
-            group.switchAt = next.at
-        }
         return (group, members)
+    }
+
+    /// Weighted tokens per hour a balance switch's destination must carry
+    /// for the shared sign-in (`FailoverPlanner.Settings.balanceMovingTokensPerHour`):
+    /// the shared group's rate (`sharedGroupLoad`), at least a typical
+    /// session's (`SessionPacer.typicalNewSessionRate` of the sessions
+    /// active within `SessionPacer.activeWithin`). 0 with balancing off,
+    /// which makes no balance switch. Read by `plannerSettings(_:forBalancing:)`.
+    func balanceMovingRate(_ provider: AIProviderType, now: Date) -> Double {
+        guard failoverConfig.policy(for: provider).intelligentBalancingEnabled else { return 0 }
+        let sessions = pacerSessions(provider, now: now)
+        let recent = sessions.filter { now.timeIntervalSince($0.lastSeen) <= SessionPacer.activeWithin }
+        let group = sharedGroupLoad(provider, sessions: sessions, now: now)?.group.tokensPerHour ?? 0
+        return max(group, SessionPacer.typicalNewSessionRate(recent))
     }
 
     /// The account failover would make active next and when
@@ -74,7 +99,7 @@ extension AppState {
         let ordered = policy.accountOrder.compactMap { id in ladder.first { $0.id == id } }
             + ladder.filter { !policy.accountOrder.contains($0.id) }
         guard let current = ordered.first(where: \.isActive) else { return nil }
-        let planner = FailoverPlanner(settings: plannerSettings(provider))
+        let planner = FailoverPlanner(settings: plannerSettings(provider, forBalancing: now))
         let states = withStayingBurns(ordered.map { quotaState(for: $0, now: now) }, provider: provider, now: now)
         guard let currentState = states.first(where: { $0.id == current.id }) else { return nil }
         return planner.nextSwitch(current: currentState, ladder: states,

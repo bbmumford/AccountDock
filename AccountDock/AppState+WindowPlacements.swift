@@ -21,14 +21,33 @@ extension AppState {
     }
 
     /// The provider's window placements still in force, by session: the
-    /// session's slot serves the placement's account and `until` has not
-    /// passed. Read by `paced` and `rebalancePreview`.
+    /// session's slot serves the placement's account and the placement
+    /// holds (`placementHolds`). Read by `paced`, `rebalancePreview` and
+    /// `strandedPlacements`.
     func windowPlacementsInForce(_ provider: AIProviderType, now: Date) -> [String: SessionPacer.WindowUse] {
         windowPlacements.reduce(into: [:]) { result, entry in
             let (session, placement) = entry
-            guard now < placement.until, slotAccount(forSession: session, provider: provider) == placement.account else { return }
+            guard Self.placementHolds(lastSeen: sessionRates.entries[session]?.lastSeen, placedAt: placement.at,
+                                      until: placement.until, now: now),
+                  slotAccount(forSession: session, provider: provider) == placement.account else { return }
             result[session] = SessionPacer.WindowUse(account: placement.account, until: placement.until)
         }
+    }
+
+    /// Whether a window placement made at `placedAt` still holds its
+    /// window: `until` has not passed, and its session spends, heard from
+    /// (`lastSeen`) within `SessionPacer.idleAfter`, or placed that
+    /// recently and its first turn there still to come. A placement in
+    /// force makes its window filling as planned (`SessionPacer.Plan.filling`,
+    /// `Rebalance.filling`): it takes no session given up elsewhere, a
+    /// rebalance settles it, and a stranded session goes there only when
+    /// nothing else can. An idle session uses none of that room, so its
+    /// placement would keep every other session out of a window that then
+    /// expires unused.
+    nonisolated static func placementHolds(lastSeen: Date?, placedAt: Date, until: Date, now: Date) -> Bool {
+        guard now < until else { return false }
+        let heard = max(lastSeen ?? .distantPast, placedAt)
+        return now.timeIntervalSince(heard) <= SessionPacer.idleAfter
     }
 
     /// Why a session leaves the window placement it had on `account`, for

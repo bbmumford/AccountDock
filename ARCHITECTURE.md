@@ -758,7 +758,15 @@ the pace, so the latest start is the reset itself, and the event's figure
 destination resets. A balance switch moves the whole shared group, so its
 destination must carry the moving work as any switch destination must
 (`FailoverPlanner.carries`); a remainder too small for that is spent by slot
-sessions and new sessions the pool sizes to it, never by the group.
+sessions and new sessions the pool sizes to it, never by the group. The
+moving work counts at no less than the shared group's own rate and a
+typical session's (`Settings.balanceMovingTokensPerHour`, from
+`AppState.balanceMovingRate`), since the sign-in also starts every session
+launched outside a slot, and an active account held at its limit learns a
+rate near nothing just when that work waits to resume: a Max 5x window with
+13% left for 39 minutes takes no balance switch from a Max 20x window that
+has just reset. `remainderSpending` judges the accounts too small for the
+group at the same rate.
 
 With pacing on, `SessionPacer.plan` spends such a remainder
 (`SessionPacer.RemainderSpending`, built by `AppState.remainderSpending`):
@@ -766,7 +774,9 @@ an account in the pool, other than the active one, that fails `carries`
 and whose weekly allowance the accounts' present rates would leave unused
 at its reset takes the lightest slot session (by `SessionPacer.lightRate`,
 the larger of its current rate and its last hour's) that is between turns
-(quiet for `betweenTurns`, and not working by its record), not pinned, not
+(quiet for `betweenTurns`, and not working by its record) yet still spends
+(heard from within `idleAfter`, 15 minutes, at a rate above nothing:
+`SessionPacer.spends`), not pinned, not
 on a draining account and not on another such account, whose use until the
 reset plus its cache rewrite (`moveCost`) fits in what is left, keeping the
 account within every window and its model's own allowance, and whose use
@@ -782,7 +792,10 @@ that account among the accounts it offers, but resting
 (`RemainderSpending.resting`, from `AppState.remainderMovedAt`): for
 `balanceMoveInterval` it takes no further session, yet it is still no
 carrier, so the shedding rule and a rebalance do not take the session
-straight back. A session placed so reaches no limit there before the
+straight back. It rests only while a slot session on it spends, or for
+`idleAfter` after the move while the session's first turn there is still
+to come: a session gone idle uses none of the room, and resting the account
+would keep away the sessions that would. A session placed so reaches no limit there before the
 reset, so shedding leaves it; if the account reaches its limit after all,
 the session moves on as any stranded slot session does.
 
@@ -800,9 +813,15 @@ leave once its own rate has run; one at a time, the slot session between
 turns whose arrival costs the fewest tokens per hour it then stays goes to
 the window where that is least, so small contexts and light rates go first
 and heavy sessions spread over the windows by their token room. A session
-goes only when its whole arrival write fits and the use it makes of the room
-is worth `remainderWorth` times that write, so an 800k-token session moves
-only into room no cheaper session takes. New sessions go by the tokens per
+goes only when it spends (`spends`), its whole arrival write fits and the
+use it makes of the room is worth `remainderWorth` times that write, so an
+800k-token session moves only into room no cheaper session takes; and only
+when that write and its rate until the reset, or for `newSessionRunway`
+when the reset is later, fit `windowFitShare` (90%) of the room. A window's
+last few percent before an imminent reset take a session sized to them (5M
+an hour fits bytrix's last 6% for half an hour; 33.8M an hour would spend
+them in ten minutes and be refused until the reset), and a fresh window
+takes a heavy session it carries for the hour. New sessions go by the tokens per
 hour each account would otherwise leave unused: the windows' room until
 their resets, and a carrier's room until the first carrier's reset, which is
 none once its own sessions spend it. `serveSessionSlots` records "Moved
@@ -813,8 +832,9 @@ Every such move, the pacer's or a rebalance's, is a **window placement**
 (`AppState.windowPlacements`): the session is planned to stay on that
 account until its window is used up or the placement's "until" time, and
 every rule that moves slot sessions follows that one intent. While the
-session's slot serves the account and "until" has not passed
-(`AppState.windowPlacementsInForce`), `SessionPacer.plan` and `rebalance`
+session's slot serves the account, "until" has not passed and the session
+spends, heard from within `idleAfter` or placed that recently
+(`AppState.windowPlacementsInForce`, `placementHolds`), `SessionPacer.plan` and `rebalance`
 take it as a session that stays, and the account it fills
 (`Plan.filling`, `Rebalance.filling`) as filling as planned: reaching its
 session window's limit is no reason to shed (only a weekly limit binding
@@ -1267,7 +1287,18 @@ the pool weights and which sessions move, each time the pool is rebuilt
   weekly allowance (in 5-hour percent, by the plan's measured ratio) over the
   time to the weekly reset. The limit reached first decides, so an account
   about to run out for the week gives sessions up, and one whose week resets
-  soon takes more new sessions before its allowance is lost.
+  soon takes more new sessions before its allowance is lost. A 5-hour
+  window that resets before its limit starts again empty there and the
+  rate carries on into the next one (`SessionPacer.refilled`): 64% an hour
+  on a Max 5x window twelve minutes from its reset reaches the next
+  window's limit 93 minutes after the reset and waits there three and a
+  half hours, which counts as that limit; a wait of under a cache
+  lifetime at the end of the next window does not. The accounts' joint
+  run-out (`poolRunOut`) counts a whole window for every reset before it
+  (`roomBy`), so bytrix's last 7% minutes from its reset counts the window
+  after it, and failover's forecasts (`secondsUntilTrigger`,
+  `secondsUntilExhaustion`) count no 5-hour crossing after the window's
+  reset, so no switch is projected off a window the reset refills first.
 - An account that would reach its limit and then wait there longer than its
   sessions' prompt cache lasts (the longest `cache_control` lifetime they
   sent, an hour when unknown) gives sessions up when moving them keeps the
@@ -1285,7 +1316,11 @@ the pool weights and which sessions move, each time the pool is rebuilt
   with the session's rate and the cost of writing its context into that
   account's cache, reaches no limit before its reset, or none until within
   an hour of the pool's run-out, and in either case none within the hour,
-  by whichever of its windows binds first. The router moves it at its next turn
+  by whichever of its windows binds first. Since that run-out counts the
+  windows refilled on the way, a heavy session takes any one account to a
+  limit long before it; with no such destination, one reaching no limit
+  until within an hour of the source's own takes it, which serves it no
+  shorter than staying would. The router moves it at its next turn
   (`RouterState.moves`). The event names the reason ("… while the other
   accounts still have room (together they last until …)").
 - An account that would reach its limit only shortly before its reset keeps
@@ -1344,7 +1379,9 @@ the pool weights and which sessions move, each time the pool is rebuilt
   in the pacer's weights, and before pacing in `buildPool`, where any
   account that could not carry one more session of the running sessions'
   typical rate for that hour beside its own rate
-  (`AppState.carriesNewSession`) has weight 0 while another could, a
+  (`AppState.carriesNewSession`; a 5-hour window resetting within the hour
+  needs the room until its reset and a whole window after it) has weight 0
+  while another could, a
   draining one at `drainingPreferred` included, unless its session window
   would otherwise leave room unused at its reset (`AppState.windowShare`,
   under Balancing above). The drain ends when a reading or a refusal shows its limit, when it is
@@ -1459,7 +1496,9 @@ provider whose sessions run in one-session slots; also the requests action
 `{"action":"rebalance","provider":…,"apply":true|false}`) places the running
 slot sessions so the first account to reach a limit does so as late as
 possible (`SessionPacer.rebalance`). Each session counts at its rate over
-its last hour (at least `defaultSessionRate` with no history) against every
+its last hour (`AppState.rebalanceRate`: `defaultSessionRate` with no
+history, and what it uses now, near nothing, once quiet past `idleAfter`,
+so no idle session is moved to make the others last longer) against every
 window and its model's own allowance, and each account also carries the use
 its readings show beyond its sessions and the shared group
 (`SessionPacer.unseenBurn`), which stays wherever the sessions go: the rate
@@ -1477,7 +1516,15 @@ and the search goes on with the account that runs out next, so such an
 account does not end the search before the accounts the sessions crowd. The
 run-outs reported then leave out the accounts settled before the first move.
 The result never runs out earlier than before and every move pays for itself;
-it is a local optimum, not always the best assignment.
+it is a local optimum, not always the best assignment. A run-out is measured
+with the pacer's outlook, the window after a reset included (`refilled`), so
+64% an hour on a Max 5x window twenty minutes from its reset runs out 93
+minutes into the next window, and the search puts no such session there for
+the shedding rule to give up minutes later. A 5-hour limit reached within the
+router's hold of its reset (`RouterLogic.maximumHold`) is no run-out
+(`SessionPacer.runOutOutlook`): the account serves on from the reset, so a
+window filling a minute before its reset is not reported as "the first
+account runs out" at that reset.
 Excluded accounts, those needing sign-in and those at their limit are no
 destination. A movable session on an account that is no destination, one at
 its limit or refusing it, gains from any room however short: before the
@@ -1503,7 +1550,11 @@ pacer's shedding, remainder and window rules (`SessionPacer.plan`'s `held`,
 and `serveSessionSlots`, which applies a pacer move only after the hold) nor
 the automatic rebalance (`rebalance`'s `held`). Its account refusing it or
 reaching its limit still moves it, through the stranded placement or as a
-rebalance's blocked session, and a move the user asks for is never held.
+rebalance's blocked session, and a move the user asks for is never held. An
+account whose only sessions that could relieve it are within their hold
+gives none up (`SessionPacer.plan`): their move was planned against the same
+outlook, so it records no event saying it gives sessions up minutes after
+it took them.
 A move a hold stops is recorded once per hold (`Plan.heldBack`,
 `Rebalance.heldBack`, `AppState.noteHeldMoves`): "Kept session X on hexorda
 although pacing would move it to Backup: it moved there at 11:42 am, and

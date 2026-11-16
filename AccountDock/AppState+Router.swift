@@ -518,10 +518,9 @@ extension AppState {
         let typical = SessionPacer.typicalNewSessionRate(pacerSessions(provider, now: now))
         let carrying = Set(candidates.compactMap { candidate -> UUID? in
             let id = candidate.0.id
-            guard let state = states[id], let projection = planner.projection(state, now: now) else { return nil }
-            return Self.carriesNewSession(headroom: planner.headroom(state, projection),
-                                          burn: planner.expectedSessionBurn(of: state),
-                                          newSessionBurn: typical / 1_000_000 * accountRatio(id)) ? id : nil
+            guard let state = states[id] else { return nil }
+            return Self.carriesNewSession(state, planner: planner, newSessionBurn: typical / 1_000_000 * accountRatio(id),
+                                          now: now) ? id : nil
         })
         // Of the rest, those whose session window would otherwise leave
         // room unused at its reset, with a share of new sessions sized to
@@ -610,7 +609,43 @@ extension AppState {
     /// `burn` percent an hour, carries one more session spending
     /// `newSessionBurn` for `SessionPacer.newSessionRunway`.
     nonisolated static func carriesNewSession(headroom: Double, burn: Double, newSessionBurn: Double) -> Bool {
-        headroom >= (max(0, burn) + newSessionBurn) * SessionPacer.newSessionRunway / 3600
+        carriesNewSession(sessionRoom: nil, weeklyRoom: headroom, resetIn: nil, burn: burn, newSessionBurn: newSessionBurn)
+    }
+
+    /// `carriesNewSession` with the 5-hour window apart: `sessionRoom`
+    /// session percent left in it (nil without one), resetting in
+    /// `resetIn`, and `weeklyRoom` session percent of the week. A window
+    /// that resets within the runway needs room only until its reset and a
+    /// whole window for the rest of the runway, since it starts again
+    /// empty there: 20% left a quarter of an hour before the reset carries
+    /// 40% an hour, where counting the 20% for the whole hour would not.
+    nonisolated static func carriesNewSession(sessionRoom: Double?, weeklyRoom: Double, resetIn: TimeInterval?,
+                                              burn: Double, newSessionBurn: Double) -> Bool {
+        let rate = max(0, burn) + newSessionBurn
+        let hours = SessionPacer.newSessionRunway / 3600
+        guard weeklyRoom >= rate * hours else { return false }
+        guard let sessionRoom else { return true }
+        let before = min(hours, max(0, resetIn ?? .infinity) / 3600)
+        guard sessionRoom >= rate * before else { return false }
+        return before >= hours || 100 - FailoverPlanner.minimumUsableHeadroom >= rate * (hours - before)
+    }
+
+    /// `carriesNewSession` for an account's state: its projected windows,
+    /// its learned rate (`FailoverPlanner.expectedSessionBurn`) and
+    /// `newSessionBurn`, the next session's in its percent. Read by
+    /// `buildPool` and `limitPauseScope`.
+    nonisolated static func carriesNewSession(_ state: QuotaAccountState, planner: FailoverPlanner,
+                                              newSessionBurn: Double, now: Date) -> Bool {
+        guard let projection = planner.projection(state, now: now), let weekly = projection.weekly else { return false }
+        let burn = planner.expectedSessionBurn(of: state)
+        guard let session = projection.session else {
+            return carriesNewSession(headroom: planner.headroom(state, projection), burn: burn, newSessionBurn: newSessionBurn)
+        }
+        let weeklyRoom = Allowance.sessionRoom(sessionUsed: nil, weeklyUsed: weekly,
+                                               sessionPerWeekly: state.sessionPerWeekly ?? FailoverPlanner.defaultSessionPerWeekly)
+        return carriesNewSession(sessionRoom: max(0, 100 - session), weeklyRoom: weeklyRoom,
+                                 resetIn: projection.sessionReset?.timeIntervalSince(now), burn: burn,
+                                 newSessionBurn: newSessionBurn)
     }
 
     /// The share of new sessions an account that cannot carry a typical
@@ -826,7 +861,8 @@ extension AppState {
     /// otherwise expire, with intelligent balancing on: the pool's accounts
     /// (`pooled`) other than the active one that cannot carry the work a
     /// switch would move there (`FailoverPlanner.carries`, judged as
-    /// `nextActiveSwitch` judges it, slot sessions staying where they are),
+    /// `nextActiveSwitch` judges it, slot sessions staying where they are,
+    /// and at the least rate a balance switch counts that work at),
     /// those a session moved to for a remainder or a window within
     /// `balanceMoveInterval` among them as `resting`; and the `slotted`
     /// sessions not mid-turn. A balance switch moves the whole shared group,
@@ -840,16 +876,24 @@ extension AppState {
         let policy = failoverConfig.policy(for: provider)
         guard policy.intelligentBalancingEnabled, !slotted.isEmpty,
               let active = activeAccount(for: provider)?.id else { return nil }
-        let planner = FailoverPlanner(settings: plannerSettings(provider))
+        let planner = FailoverPlanner(settings: plannerSettings(provider, forBalancing: now))
         let ladder = accounts.filter { $0.provider == provider && ($0.id == active || pooled.contains($0.id)) }
         let states = withStayingBurns(ladder.map { quotaState(for: $0, now: now) }, provider: provider, now: now)
         guard let current = states.first(where: { $0.id == active }) else { return nil }
+        let floor = planner.settings.balanceMovingTokensPerHour
         let small = Set(states.filter { state in
-            state.id != active && !planner.carries(state, from: current, at: now)
+            state.id != active && !planner.carries(state, from: current, at: now, floor: floor)
         }.map(\.id))
         guard !small.isEmpty else { return nil }
+        // An account rests only while a session moved there spends: one
+        // gone idle uses none of the room it was moved for, and resting the
+        // account would keep away the sessions that would use that room.
         let resting = small.filter { id in
-            remainderMovedAt[id].map { now.timeIntervalSince($0) < Self.balanceMoveInterval } ?? false
+            guard let moved = remainderMovedAt[id], now.timeIntervalSince(moved) < Self.balanceMoveInterval else { return false }
+            return now.timeIntervalSince(moved) <= SessionPacer.idleAfter || slotSessionIDs(provider).contains { session in
+                slotAccount(forSession: session, provider: provider) == id
+                    && (sessionRates.entries[session].map { now.timeIntervalSince($0.lastSeen) <= SessionPacer.idleAfter } ?? false)
+            }
         }
         let working = Set((liveSessions[provider] ?? []).filter(\.isWorking).map(\.sessionID))
         return SessionPacer.RemainderSpending(accounts: small, sessions: slotted.subtracting(working), resting: resting)

@@ -1,0 +1,396 @@
+import XCTest
+@testable import AccountDock
+
+/// Five Claude accounts at 2:57 pm on a Monday: Backup, a Max 20x account
+/// with no 5-hour window and 54% of its week left, carries about 100M
+/// weighted tokens an hour; fluxon, a Max 20x account whose window reset at
+/// 2:50 pm, has an empty window and 74% of its week; hexorda, bytrix and
+/// cybrio, Max 5x accounts, have 47%, 7% and 13% of their windows left,
+/// resetting at 3:09, 3:30 and 3:29 pm. Each account's cost per million
+/// weighted tokens is the one it had learned or been seeded with.
+final class SmallWindowLaneTests: XCTestCase {
+    let now = Date(timeIntervalSince1970: 1_794_801_420)
+    let backup = UUID(), fluxon = UUID(), hexorda = UUID(), bytrix = UUID(), cybrio = UUID()
+
+    // MARK: - Fixture
+
+    private func iso(_ date: Date) -> String { ISO8601DateFormatter().string(from: date) }
+    private func at(minutes: Double) -> Date { now.addingTimeInterval(minutes * 60) }
+
+    private func reading(session: Double?, resetIn minutes: Double?, weekly: Double, weeklyResetIn hours: Double) -> UsageAPIResponse {
+        UsageAPIResponse(
+            fiveHour: session.map { UsageWindow(utilization: $0, resetsAt: minutes.map { iso(at(minutes: $0)) }) },
+            sevenDay: UsageWindow(utilization: weekly, resetsAt: iso(now.addingTimeInterval(hours * 3600))),
+            sevenDayOauthApps: nil, sevenDayOpus: nil, sevenDaySonnet: nil,
+            sevenDayCowork: nil, iguanaNecktie: nil, extraUsage: nil
+        )
+    }
+
+    private func state(_ id: UUID, session: Double?, resetIn minutes: Double?, weekly: Double, weeklyResetIn hours: Double,
+                       ratio: Double, active: Bool = false, burn: Double = 0, at time: Date? = nil) -> QuotaAccountState {
+        var state = QuotaAccountState(id: id, usage: reading(session: session, resetIn: minutes, weekly: weekly, weeklyResetIn: hours),
+                                      observedAt: (time ?? now).addingTimeInterval(-60), sessionBurnPerHour: burn,
+                                      sessionPerWeekly: 8, isActive: active)
+        state.percentPerMillion = ratio
+        return state
+    }
+
+    /// The live policy: no threshold failover, balancing on with a six-hour
+    /// advantage and a 30-minute dwell.
+    private func settings() -> FailoverPlanner.Settings {
+        var policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
+        policy.enabled = false
+        policy.sessionEnabled = false
+        policy.weeklyEnabled = true
+        policy.weeklyThreshold = 100
+        policy.intelligentBalancingEnabled = true
+        policy.balancingMinimumAdvantageHours = 6
+        policy.balancingMinimumDwellMinutes = 30
+        var settings = FailoverPlanner.Settings(policy: policy, provider: .claudeCode)
+        settings.sessionTrigger = 100
+        settings.weeklyTrigger = 100
+        return settings
+    }
+
+    private func account(_ id: UUID, used: Double, resetIn minutes: Double?, weekly: Double, weeklyResetIn hours: Double,
+                         ratio: Double, burn: Double = 0, weight: Double = 1, window: Bool = true) -> SessionPacer.Account {
+        var account = SessionPacer.Account(id: id, utilization: used, resetsAt: minutes.map { at(minutes: $0) },
+                                           burnPerHour: burn, baseWeight: weight, percentPerMillion: ratio,
+                                           hasSessionWindow: window)
+        account.weeklyRemaining = (99 - weekly) * 8
+        account.weeklyResetsAt = now.addingTimeInterval(hours * 3600)
+        return account
+    }
+
+    private func accounts(fluxonWeight: Double = 1) -> [SessionPacer.Account] {
+        [account(backup, used: 0, resetIn: nil, weekly: 46, weeklyResetIn: 161, ratio: 0.95, burn: 95, window: false),
+         account(fluxon, used: 0, resetIn: 293, weekly: 26, weeklyResetIn: 32, ratio: 0.966, weight: fluxonWeight),
+         account(hexorda, used: 53, resetIn: 12, weekly: 8, weeklyResetIn: 110, ratio: 3.0, burn: 64),
+         account(bytrix, used: 93, resetIn: 33, weekly: 13, weeklyResetIn: 10, ratio: 1.151, burn: 5),
+         account(cybrio, used: 87, resetIn: 32, weekly: 12, weeklyResetIn: 30, ratio: 6.73)]
+    }
+
+    /// A session at `rate` weighted tokens an hour over its last hour, quiet
+    /// for `quiet` minutes, its current rate fading meanwhile.
+    private func session(_ id: String, on account: UUID, rate: Double, context: Int, quiet: Double,
+                         turn: Double? = nil) -> SessionPacer.Session {
+        SessionPacer.Session(id: id, account: account, tokensPerHour: rate * exp(-quiet / 20), contextTokens: context,
+                             lastSeen: at(minutes: -quiet), cacheLifetime: 3600,
+                             lastTurnStart: turn.map { at(minutes: -$0) }, recentTokensPerHour: rate)
+    }
+
+    private func sessions() -> [SessionPacer.Session] {
+        [session("8c64c5f8", on: backup, rate: 32_600_000, context: 465_000, quiet: 3, turn: 8),
+         session("4822c359", on: backup, rate: 33_800_000, context: 42_000, quiet: 3, turn: 52),
+         session("583fb354", on: backup, rate: 22_300_000, context: 418_000, quiet: 3, turn: 34),
+         session("a78ddf66", on: backup, rate: 13_200_000, context: 693_000, quiet: 3, turn: 5),
+         session("19496bb9", on: backup, rate: 1_300_000, context: 489_000, quiet: 12),
+         session("3a862465", on: backup, rate: 0, context: 200_000, quiet: 25),
+         session("33962de2", on: hexorda, rate: 21_300_000, context: 300_000, quiet: 1, turn: 22),
+         session("345dc95e", on: bytrix, rate: 4_700_000, context: 761_000, quiet: 2, turn: 486),
+         session("1603da04", on: bytrix, rate: 0, context: 562_000, quiet: 107),
+         session("5386173b", on: bytrix, rate: 0, context: 310_000, quiet: 158),
+         session("075198d6", on: cybrio, rate: 0, context: 611_000, quiet: 61)]
+    }
+
+    // MARK: - A balance switch carries the shared sign-in for the runway
+
+    /// At 2:50 pm fluxon, active, has just reset; it had been held at its
+    /// limit for three hours, so its learned rate is nothing. cybrio's
+    /// allowance must start being used eight hours before fluxon's, but its
+    /// window has 13% left for 39 minutes: 1.9M tokens at its cost, which a
+    /// typical session spends in five minutes.
+    func testABalanceSwitchDoesNotMoveTheSharedSignInOntoAWindowThatCannotCarryIt() {
+        let then = now.addingTimeInterval(-7 * 60)
+        let current = state(fluxon, session: 0, resetIn: 293 + 7, weekly: 26, weeklyResetIn: 32.1, ratio: 0.966,
+                            active: true, at: then)
+        let ladder = [state(backup, session: nil, resetIn: nil, weekly: 45, weeklyResetIn: 161, ratio: 0.95, at: then),
+                      state(hexorda, session: 44, resetIn: 19, weekly: 6, weeklyResetIn: 110, ratio: 3.0, at: then),
+                      state(cybrio, session: 87, resetIn: 39, weekly: 12, weeklyResetIn: 30.1, ratio: 6.73, at: then),
+                      current]
+        var unfloored = settings()
+        unfloored.balanceMovingTokensPerHour = 0
+        guard case .switchTo(cybrio, .balance(let hours)) = FailoverPlanner(settings: unfloored)
+            .plan(current: current, ladder: ladder, lastSwitch: nil, now: then) else {
+            return XCTFail("judged by fluxon's learned rate alone, the switch goes to cybrio")
+        }
+        XCTAssertEqual(hours, 7.6, accuracy: 0.2)
+
+        // The sign-in's work counted at a typical session's rate at least.
+        var floored = settings()
+        floored.balanceMovingTokensPerHour = SessionPacer.typicalNewSessionRate(sessions())
+        let planner = FailoverPlanner(settings: floored)
+        XCTAssertFalse(planner.carries(ladder[2], from: current, at: then, floor: floored.balanceMovingTokensPerHour))
+        XCTAssertEqual(planner.plan(current: current, ladder: ladder, lastSwitch: nil, now: then), .stay(.healthy),
+                       "the shared sign-in stays on fluxon's fresh window")
+        // Even refilled, a Max 5x window spends a typical session's hour in
+        // 42 minutes; a Max 20x window carries it.
+        let refilled = state(cybrio, session: 0, resetIn: 300, weekly: 12, weeklyResetIn: 29.5, ratio: 6.73, at: then)
+        XCTAssertFalse(planner.carries(refilled, from: current, at: then, floor: floored.balanceMovingTokensPerHour))
+        let large = state(backup, session: 0, resetIn: 300, weekly: 12, weeklyResetIn: 29.5, ratio: 0.95, at: then)
+        XCTAssertTrue(planner.carries(large, from: current, at: then, floor: floored.balanceMovingTokensPerHour))
+    }
+
+    /// While the shared sign-in sits on cybrio, failover projects it back to
+    /// fluxon within minutes, and the pacer keeps fluxon's room for it: no
+    /// new session goes there. With the sign-in left on fluxon, fluxon
+    /// takes new sessions again.
+    func testTheSignInProjectedBackOntoFluxonKeepsFluxonsRoomForIt() {
+        let projected = SessionPacer.SharedGroup(account: cybrio, tokensPerHour: 60_000_000, contextTokens: 300_000, models: [],
+                                                 nextAccount: fluxon, switchAt: at(minutes: 5), sessionCount: 1)
+        let bounced = SessionPacer().plan(accounts: accounts(), sessions: sessions(), now: now, sharedGroup: projected)
+        XCTAssertEqual(bounced.weights[fluxon], 0)
+
+        let stayed = SessionPacer.SharedGroup(account: fluxon, tokensPerHour: 20_000_000, contextTokens: 300_000, models: [],
+                                              sessionCount: 1)
+        let kept = SessionPacer().plan(accounts: accounts(), sessions: sessions(), now: now, sharedGroup: stayed)
+        XCTAssertGreaterThan(kept.weights[fluxon] ?? 0, 0)
+    }
+
+    // MARK: - A window that resets soon has the whole next window after it
+
+    /// Backup reaches its weekly limit at about 7:30 pm and would then wait
+    /// days. Counted without the windows hexorda, bytrix and cybrio get
+    /// back within the half hour, the accounts together last no longer
+    /// than Backup, so it gave nothing up; counted with them they last
+    /// hours longer, and Backup's sessions go where they fit: one to
+    /// fluxon's empty window, which lasts as long as Backup would, a light
+    /// one to bytrix's last 7%, which it spends no faster than the reset
+    /// refills it.
+    func testBackupGivesSessionsToFluxonAndToTheWindowsThatResetSoon() throws {
+        let pacer = SessionPacer()
+        let backupAccount = accounts()[0]
+        let burn = Dictionary(uniqueKeysWithValues: accounts().map { ($0.id, $0.burnPerHour) })
+        let runOut = try XCTUnwrap(pacer.poolRunOut(accounts(), burn: burn, spent: [:], shares: [:], sharedGroup: nil, now: now))
+        let backupLimit = try XCTUnwrap(pacer.outlook(backupAccount, burn: 95, now: now).limitAt)
+        XCTAssertGreaterThan(runOut.timeIntervalSince(backupLimit), 2 * 3600)
+        XCTAssertEqual(pacer.roomBy(accounts()[3], at(minutes: 40), spent: 0, now: now), 6 + 99, accuracy: 0.001,
+                       "bytrix's 6% to its limit, then a whole window from 3:30 pm")
+
+        let plan = pacer.plan(accounts: accounts(), sessions: sessions(), now: now)
+        XCTAssertNotNil(plan.shedding[backup])
+        let toFluxon = plan.moves.filter { $0.value == fluxon }.keys
+        XCTAssertEqual(toFluxon.count, 1)
+        XCTAssertTrue(toFluxon.allSatisfy { ["4822c359", "583fb354", "33962de2"].contains($0) },
+                      "one heavy session, from Backup or from hexorda, whose next window it would fill by 4:30 pm")
+        XCTAssertEqual(plan.moves["19496bb9"], bytrix)
+        XCTAssertNil(plan.moves["8c64c5f8"], "two such sessions would fill fluxon's window long before Backup runs out")
+        XCTAssertFalse(plan.moves.values.contains(cybrio), "cybrio's 13% at its cost holds none of them until 3:29 pm")
+        // Counted without the refills the accounts together ran out with
+        // Backup, which then gave nothing up.
+        let blindRoom = accounts().reduce(0.0) { total, account in
+            total + pacer.millions(max(0, pacer.windowsLeft(account, spent: 0, now: now).map(\.left).min() ?? 0), on: account)
+        }
+        let blindHours = blindRoom / accounts().reduce(0.0) { $0 + pacer.millions($1.burnPerHour, on: $1) }
+        XCTAssertLessThan(blindHours * 3600, backupLimit.timeIntervalSince(now) + 3600)
+    }
+
+    /// A new session needs the room until the reset and a whole window
+    /// after it, not the room left now for the whole hour.
+    @MainActor
+    func testAWindowResettingWithinTheHourCarriesANewSessionByItsRoomUntilThen() {
+        XCTAssertTrue(AppState.carriesNewSession(sessionRoom: 20, weeklyRoom: 500, resetIn: 15 * 60, burn: 10, newSessionBurn: 30))
+        XCTAssertFalse(AppState.carriesNewSession(headroom: 20, burn: 10, newSessionBurn: 30),
+                       "the 20% counted for the whole hour")
+        // bytrix: 7% for 33 minutes at its own 5% and a typical session's
+        // 24.5% an hour; cybrio: 13% for 32 minutes at 143% an hour.
+        XCTAssertFalse(AppState.carriesNewSession(sessionRoom: 7, weeklyRoom: 696, resetIn: 33 * 60, burn: 5, newSessionBurn: 24.5))
+        XCTAssertFalse(AppState.carriesNewSession(sessionRoom: 13, weeklyRoom: 704, resetIn: 32 * 60, burn: 0, newSessionBurn: 143))
+        // The weekly allowance still binds over the whole hour.
+        XCTAssertFalse(AppState.carriesNewSession(sessionRoom: 20, weeklyRoom: 30, resetIn: 15 * 60, burn: 10, newSessionBurn: 30))
+    }
+
+    /// cybrio at 87% with its reset 32 minutes away, spending 20% an hour,
+    /// does not reach its limit in this window, so failover projects no
+    /// switch off it then.
+    func testAWindowThatResetsBeforeItsLimitIsNotHeadingForIt() {
+        let planner = FailoverPlanner(settings: settings())
+        let slow = state(cybrio, session: 87, resetIn: 32, weekly: 12, weeklyResetIn: 30, ratio: 6.73, active: true, burn: 20)
+        XCTAssertNil(planner.secondsUntilExhaustion(slow, now: now))
+        XCTAssertNil(planner.secondsUntilTrigger(slow, now: now))
+        let fast = state(cybrio, session: 87, resetIn: 32, weekly: 12, weeklyResetIn: 30, ratio: 6.73, active: true, burn: 60)
+        XCTAssertNotNil(planner.secondsUntilExhaustion(fast, now: now), "60% an hour spends the 13% in 13 minutes")
+    }
+
+    // MARK: - Room is spent by sessions that spend
+
+    /// bytrix's week has room it would leave unused at its 1:00 am reset.
+    /// The lightest session by its last hour went quiet 40 minutes ago: moved
+    /// there it spends nothing, the room still expires, and it pays its whole
+    /// context's write when it next speaks. The light session still working
+    /// goes instead.
+    func testAnIdleSessionIsNeverMovedToSpendARemainder() {
+        let quietBackup = account(backup, used: 0, resetIn: nil, weekly: 46, weeklyResetIn: 161, ratio: 0.95, burn: 1,
+                                  window: false)
+        let roomy = account(bytrix, used: 60, resetIn: 33, weekly: 13, weeklyResetIn: 10, ratio: 1.151, weight: 0)
+        let sessions = [session("1603da04", on: backup, rate: 500_000, context: 100_000, quiet: 40),
+                        session("19496bb9", on: backup, rate: 1_300_000, context: 100_000, quiet: 5)]
+        let spending = SessionPacer.RemainderSpending(accounts: [bytrix], sessions: Set(sessions.map(\.id)))
+        let plan = SessionPacer().plan(accounts: [quietBackup, roomy], sessions: sessions, now: now, remainders: spending)
+        XCTAssertEqual(plan.moves, ["19496bb9": bytrix])
+        XCTAssertFalse(SessionPacer().spends(sessions[0], now: now))
+        XCTAssertTrue(SessionPacer().spends(sessions[1], now: now))
+    }
+
+    /// While Backup alone carries the work and runs out long before its
+    /// week resets, the small windows' room is spent. bytrix's last 6%
+    /// before 3:30 pm takes the session whose use until then fits it, not
+    /// the 33.8M-an-hour one with a small context, which would spend it in
+    /// ten minutes and be refused until the reset.
+    func testTheLastFewPercentBeforeAResetGoToASessionSizedToThem() throws {
+        let carrier = account(backup, used: 0, resetIn: nil, weekly: 46, weeklyResetIn: 161, ratio: 0.95, burn: 95, window: false)
+        // Its week unread, so the window alone is spent.
+        var window = account(bytrix, used: 93, resetIn: 33, weekly: 13, weeklyResetIn: 10, ratio: 1.151, weight: 0)
+        window.weeklyRemaining = nil
+        let sessions = [session("4822c359", on: backup, rate: 33_800_000, context: 42_000, quiet: 3, turn: 52),
+                        session("medium", on: backup, rate: 5_000_000, context: 300_000, quiet: 3, turn: 10),
+                        session("3a862465", on: backup, rate: 0, context: 200_000, quiet: 25)]
+        let spending = SessionPacer.RemainderSpending(accounts: [bytrix], sessions: Set(sessions.map(\.id)))
+        let pacer = SessionPacer()
+        XCTAssertTrue(pacer.windowsWorthSpending(carriers: [carrier], burn: [backup: 95], spent: [:], shares: [:],
+                                                 sharedGroup: nil, now: now))
+        let plan = pacer.plan(accounts: [carrier, window], sessions: sessions, now: now, remainders: spending)
+        XCTAssertEqual(plan.moves, ["medium": bytrix])
+        let use = try XCTUnwrap(plan.windowUses["medium"])
+        XCTAssertEqual(use.until, at(minutes: 33), "5M an hour lasts there until the reset")
+        // A window with the hour's room takes the heavy one for its runway.
+        var fresh = account(bytrix, used: 0, resetIn: 300, weekly: 13, weeklyResetIn: 10, ratio: 1.151, weight: 0)
+        fresh.weeklyRemaining = nil
+        let refilled = pacer.plan(accounts: [carrier, fresh], sessions: sessions, now: now, remainders: spending)
+        XCTAssertEqual(refilled.moves["4822c359"], bytrix)
+    }
+
+    /// A rebalance counts a session gone quiet at what it uses now, so it
+    /// moves no idle session to make the others last longer; one never
+    /// heard from counts as a new session would.
+    @MainActor
+    func testARebalanceCountsAnIdleSessionAtWhatItUsesNow() {
+        XCTAssertEqual(AppState.rebalanceRate(current: 10_000, recent: 4_000_000, lastSeen: at(minutes: -40), now: now), 10_000)
+        XCTAssertEqual(AppState.rebalanceRate(current: 3_000_000, recent: 4_000_000, lastSeen: at(minutes: -3), now: now),
+                       4_000_000)
+        XCTAssertEqual(AppState.rebalanceRate(current: 0, recent: nil, lastSeen: nil, now: now), SessionPacer.defaultSessionRate)
+        let idle = SessionPacer.RebalanceSession(id: "075198d6", account: cybrio, tokensPerHour: 0, contextTokens: 611_000,
+                                                 model: nil, movable: true, cacheLifetime: 3600)
+        let rebalanced = SessionPacer().rebalance(accounts: accounts(), sessions: [idle], destinations: Set(accounts().map(\.id)),
+                                                  now: now)
+        XCTAssertTrue(rebalanced.moves.isEmpty)
+    }
+
+    /// A window placement holds its window only while its session spends:
+    /// one quiet past `SessionPacer.idleAfter` frees the window for the
+    /// sessions the other rules send there.
+    @MainActor
+    func testAnIdleSessionsPlacementNoLongerHoldsItsWindow() {
+        XCTAssertTrue(AppState.placementHolds(lastSeen: at(minutes: -5), placedAt: at(minutes: -30), until: at(minutes: 20), now: now))
+        XCTAssertFalse(AppState.placementHolds(lastSeen: at(minutes: -20), placedAt: at(minutes: -30), until: at(minutes: 20), now: now))
+        XCTAssertTrue(AppState.placementHolds(lastSeen: nil, placedAt: at(minutes: -2), until: at(minutes: 20), now: now),
+                      "a session just placed has its first turn to come")
+        XCTAssertFalse(AppState.placementHolds(lastSeen: at(minutes: -1), placedAt: at(minutes: -30), until: at(minutes: -1), now: now))
+    }
+
+    // MARK: - A move is not followed by giving the session up; a reset is no run-out
+
+    /// At 2:49 pm the automatic rebalance looks for room for Backup's work:
+    /// fluxon is at its limit for another minute, hexorda has 56% left for
+    /// 21 minutes. 33962de2's 64% an hour fits hexorda until its reset, but
+    /// spends the window that starts there by 4:43 pm, which then waits
+    /// three and a half hours: counted to the reset alone, hexorda looked
+    /// able to carry it on its week, and six minutes after the move the
+    /// pacer, counting the next window, found it giving the session up.
+    func testTheRebalanceCountsTheWindowAfterAResetSoItPutsNoSessionWhereItWouldBeGivenUp() {
+        let then = at(minutes: -8)
+        func early(_ account: SessionPacer.Account, used: Double, resetIn minutes: Double?) -> SessionPacer.Account {
+            var account = account
+            account.utilization = used
+            account.resetsAt = minutes.map { then.addingTimeInterval($0 * 60) }
+            return account
+        }
+        let before = accounts().map { account -> SessionPacer.Account in
+            switch account.id {
+            case fluxon: return early(account, used: 99, resetIn: 1)
+            case hexorda: var idle = early(account, used: 44, resetIn: 21); idle.burnPerHour = 0; return idle
+            default: return early(account, used: account.utilization, resetIn: account.resetsAt.map { $0.timeIntervalSince(then) / 60 })
+            }
+        }
+        let running = sessions().filter { $0.account == backup || $0.id == "33962de2" }.map { session in
+            SessionPacer.RebalanceSession(id: session.id, account: backup, tokensPerHour: session.recentTokensPerHour ?? 0,
+                                          contextTokens: session.contextTokens, model: nil, movable: session.recentTokensPerHour ?? 0 > 0,
+                                          cacheLifetime: 3600)
+        }
+        let rebalanced = SessionPacer().rebalance(accounts: before, sessions: running,
+                                                  destinations: [backup, hexorda, bytrix, cybrio], now: then)
+        XCTAssertNotEqual(rebalanced.moves["33962de2"], hexorda)
+        let hexordaBefore = before.first { $0.id == hexorda }!
+        let heavy = SessionPacer().outlook(hexordaBefore, burn: 64, now: then)
+        XCTAssertEqual(heavy.limitAt?.timeIntervalSince(then) ?? 0, (21 + 99.0 / 64 * 60) * 60, accuracy: 1)
+
+        // Moved there all the same, and within its hold, it is no reason
+        // for hexorda to give sessions up, nor for an event saying so.
+        let plan = SessionPacer().plan(accounts: accounts(), sessions: sessions(), now: now, held: ["33962de2"])
+        XCTAssertNil(plan.shedding[hexorda])
+        XCTAssertNil(plan.moves["33962de2"])
+        XCTAssertNotNil(SessionPacer().plan(accounts: accounts(), sessions: sessions(), now: now).shedding[hexorda],
+                        "outside its hold it would go")
+    }
+
+    /// hexorda reaches its limit three minutes before its 3:09 pm reset, a
+    /// wait the router holds a request over, and serves on from there: no
+    /// run-out, so the rebalance names none at the reset.
+    func testAWindowFillingJustBeforeItsResetIsNoRunOut() {
+        let full = account(hexorda, used: 97.6, resetIn: 12, weekly: 8, weeklyResetIn: 110, ratio: 3.0)
+        let roomy = account(fluxon, used: 0, resetIn: 293, weekly: 26, weeklyResetIn: 32, ratio: 0.966)
+        let light = SessionPacer.RebalanceSession(id: "33962de2", account: hexorda, tokensPerHour: 3_000_000, contextTokens: 300_000,
+                                                  model: nil, movable: false, cacheLifetime: 3600)
+        let pacer = SessionPacer()
+        let filling = pacer.outlook(full, burn: 9, now: now)
+        XCTAssertEqual(filling.limitAt?.timeIntervalSince(now) ?? 0, 1.4 / 9 * 3600, accuracy: 1,
+                       "9% an hour spends the last 1.4% in nine minutes")
+        XCTAssertGreaterThan(pacer.runway(full, sessions: [light], spent: 0, now: now), 24 * 3600,
+                             "after the reset its week binds, days later")
+        let rebalanced = pacer.rebalance(accounts: [full, roomy], sessions: [light], destinations: [hexorda, fluxon], now: now)
+        XCTAssertGreaterThan(rebalanced.earliestRunOutBefore?.timeIntervalSince(now) ?? .infinity, 24 * 3600)
+        // Twenty minutes' wait is a run-out: the sessions there stop.
+        let early = account(hexorda, used: 97, resetIn: 30, weekly: 8, weeklyResetIn: 110, ratio: 3.0)
+        XCTAssertEqual(pacer.runway(early, sessions: [light], spent: 0, now: now), 2.0 / 9 * 3600, accuracy: 1)
+    }
+
+    /// At 3:31 pm bytrix's window has reset and starts empty. Its week,
+    /// resetting at 1:00 am, would otherwise go unused, so the lightest of
+    /// Backup's sessions still working moves there at once; the heavy ones,
+    /// which would spend a Max 5x window in under three hours and wait, and
+    /// cybrio at its cost, take nothing.
+    func testAtTheResetTheFreshWindowStartsBeingUsedAtOnce() throws {
+        let later = at(minutes: 34)
+        func fixture(_ id: UUID, used: Double, resetIn minutes: Double?, weekly: Double, weeklyResetIn hours: Double,
+                     ratio: Double, burn: Double = 0, window: Bool = true) -> SessionPacer.Account {
+            var account = SessionPacer.Account(id: id, utilization: used, resetsAt: minutes.map { later.addingTimeInterval($0 * 60) },
+                                               burnPerHour: burn, baseWeight: 1, percentPerMillion: ratio, hasSessionWindow: window)
+            account.weeklyRemaining = (99 - weekly) * 8
+            account.weeklyResetsAt = later.addingTimeInterval(hours * 3600)
+            return account
+        }
+        let accounts = [fixture(backup, used: 0, resetIn: nil, weekly: 49, weeklyResetIn: 160, ratio: 0.95, burn: 95, window: false),
+                        fixture(fluxon, used: 15, resetIn: 259, weekly: 27, weeklyResetIn: 31.5, ratio: 0.966, burn: 28),
+                        fixture(hexorda, used: 22, resetIn: 279, weekly: 10, weeklyResetIn: 109, ratio: 3.0, burn: 64),
+                        fixture(bytrix, used: 0, resetIn: nil, weekly: 13, weeklyResetIn: 9.5, ratio: 1.151),
+                        fixture(cybrio, used: 0, resetIn: 298, weekly: 12, weeklyResetIn: 29.5, ratio: 6.73)]
+        func session(_ id: String, on account: UUID, rate: Double, context: Int) -> SessionPacer.Session {
+            SessionPacer.Session(id: id, account: account, tokensPerHour: rate, contextTokens: context,
+                                 lastSeen: later.addingTimeInterval(-180), cacheLifetime: 3600,
+                                 lastTurnStart: later.addingTimeInterval(-600), recentTokensPerHour: rate)
+        }
+        let running = [session("8c64c5f8", on: backup, rate: 32_600_000, context: 465_000),
+                       session("583fb354", on: backup, rate: 22_300_000, context: 418_000),
+                       session("a78ddf66", on: backup, rate: 13_200_000, context: 693_000),
+                       session("4822c359", on: fluxon, rate: 30_000_000, context: 42_000),
+                       session("33962de2", on: hexorda, rate: 21_300_000, context: 300_000)]
+        let spending = SessionPacer.RemainderSpending(accounts: [hexorda, bytrix, cybrio], sessions: Set(running.map(\.id)))
+        let plan = SessionPacer().plan(accounts: accounts, sessions: running, now: later, remainders: spending,
+                                       held: ["33962de2", "4822c359"])
+        XCTAssertEqual(plan.moves["a78ddf66"], bytrix)
+        XCTAssertNotNil(plan.remainders["a78ddf66"])
+        XCTAssertNil(plan.moves["8c64c5f8"])
+        XCTAssertFalse(plan.moves.values.contains(cybrio))
+        XCTAssertNil(plan.shedding[hexorda], "its only session moved there within its hold")
+    }
+}

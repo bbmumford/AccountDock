@@ -161,13 +161,23 @@ final class WindowPlacementTests: XCTestCase {
 
     func testTheShedderLeavesAHeldSessionAndSaysWhy() {
         // 1603da04 moved to hexorda by another rule minutes ago, with no
-        // placement: hexorda still gives sessions up, but not that one.
+        // placement: it is all hexorda has to give up, and its move was
+        // planned against the same outlook, so hexorda gives nothing up and
+        // reports nothing.
         let plan = SessionPacer().plan(accounts: accounts(), sessions: sessions(), now: now, held: ["1603da04"])
-        XCTAssertNotNil(plan.shedding[hexorda])
+        XCTAssertNil(plan.shedding[hexorda])
         XCTAssertNil(plan.moves["1603da04"])
-        XCTAssertEqual(plan.heldBack["1603da04"], backup, "the move the hold stopped, for its event")
+        XCTAssertNil(plan.heldBack["1603da04"])
         XCTAssertEqual(plan.moves["a78ddf66"], backup, "a session outside its hold still moves")
         XCTAssertNil(plan.heldBack["a78ddf66"])
+        // Beside a session outside its hold, hexorda still gives sessions
+        // up, and the held one stays.
+        let other = SessionPacer.Session(id: "c9", account: hexorda, tokensPerHour: 11_700_000, contextTokens: 640_000,
+                                         lastSeen: now.addingTimeInterval(-5 * 60), cacheLifetime: 3600,
+                                         lastTurnStart: now.addingTimeInterval(-6 * 60), recentTokensPerHour: 11_700_000)
+        let shared = SessionPacer().plan(accounts: accounts(), sessions: sessions() + [other], now: now, held: ["1603da04"])
+        XCTAssertNotNil(shared.shedding[hexorda])
+        XCTAssertNil(shared.moves["1603da04"])
     }
 
     func testTheAutomaticRebalanceLeavesHeldSessionsUnlessTheirAccountCannotServe() {
