@@ -42,23 +42,23 @@ struct Account: Identifiable, Codable, Hashable {
     /// then serves no workload (`workloadAvailability`) until a re-check
     /// (`AppState.recheckCLIAccessIfDue`) is served again.
     var cliAccessRefusedAt: Date?
-    /// The plan the provider's account profile last named (Claude's
-    /// `organization.organization_type` without its `claude_` prefix, or
-    /// "free" once the profile or a usage reply shows the plan ended); nil
-    /// until a profile check answered. A credential keeps the plan it was
-    /// issued under through an upgrade or a downgrade, so once this is known
-    /// it is the account's plan (`currentPlan`): `applyProfilePlan` writes
-    /// it, and the credential, `claude auth status` and sign-in writers go
-    /// through `applyCredentialPlan`, which leaves the plan alone.
+    /// The plan the provider's plan authority last named
+    /// (`ProviderCapabilities.planAuthority`: Claude's account profile,
+    /// Kimi's `/me`, Codex's usage reply), or "free" once it or a usage
+    /// reply shows the plan ended; nil until one answered. A credential
+    /// keeps the plan it was issued under through an upgrade or a
+    /// downgrade, so once this is known it is the account's plan
+    /// (`currentPlan`): `applyProfilePlan` writes it, and the credential,
+    /// CLI status and sign-in writers go through `applyCredentialPlan`,
+    /// which leaves the plan alone.
     var profilePlan: String?
-    /// The rate-limit tier the account profile last named
-    /// (`organization.rate_limit_tier`), which sizes the plan; nil until a
-    /// profile check named one. Wins over the credential's
-    /// (`currentRateLimitTier`).
+    /// The rate-limit tier the plan authority last named (Claude's
+    /// `organization.rate_limit_tier`), which sizes the plan; nil until one
+    /// named one. Wins over the credential's (`currentRateLimitTier`).
     var profileRateLimitTier: String?
-    /// When a profile check last answered for the account, kept across
-    /// launches so `AppState.claudeProfileCheckDue` checks it again only
-    /// every `AppState.profileRecheckInterval`.
+    /// When the plan authority last answered for the account, kept across
+    /// launches so `AppState.planCheckDue` checks it again only every
+    /// `AppState.profileRecheckInterval`.
     var profileCheckedAt: Date?
 
     /// The account's plan: the profile's when a profile check named one,

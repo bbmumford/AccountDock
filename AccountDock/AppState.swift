@@ -138,7 +138,7 @@ final class AppState: ObservableObject {
     /// provider.
     var usageRetryAfter: [UUID: Date] = [:]
     /// When a profile check of each Claude account was last sent, answered
-    /// or not; `claudeProfileCheckDue` spaces a failed one by
+    /// or not; `planCheckDue` spaces a failed one by
     /// `profileRetryInterval`, and the answered time is the account's own
     /// (`Account.profileCheckedAt`).
     var lastProfileCheck: [UUID: Date] = [:]
@@ -668,7 +668,7 @@ final class AppState: ObservableObject {
         let readingsStarted = Date()
         await ingestPassiveTelemetry()
         await fetchAllAccountUsage(forceUnavailablePlanCheck: forceUnavailablePlanCheck)
-        await recheckClaudeProfilesIfDue(forced: forceUnavailablePlanCheck, since: readingsStarted)
+        await recheckProviderPlansIfDue(forced: forceUnavailablePlanCheck, since: readingsStarted)
         await evaluateFailover()
         lastUsageRefresh = Date()
 
@@ -849,11 +849,12 @@ final class AppState: ObservableObject {
         }
     }
 
+    @discardableResult
     private func registerManagedAccount(
         _ identity: ManagedProviderIdentity,
         using adapter: ManagedProviderAdapter,
         makeActive: Bool
-    ) throws {
+    ) throws -> UUID {
         if accounts.contains(where: {
             $0.provider == adapter.provider &&
                 $0.email.caseInsensitiveCompare(identity.identifier) == .orderedSame
@@ -880,6 +881,7 @@ final class AppState: ObservableObject {
         excludeAddedAccountFromFailover(added)
         saveAccounts(refreshWidget: true)
         log.info("[provider-auth] Imported \(adapter.provider.rawValue) account; total=\(accounts.count)")
+        return added.id
     }
 
     private func loginNewManagedAccount(provider: AIProviderType) async {
@@ -896,7 +898,8 @@ final class AppState: ObservableObject {
             // The login is isolated from the live credential, so the account
             // active before stays active; the first of a provider becomes it.
             let first = activeAccount(for: provider) == nil
-            try registerManagedAccount(identity, using: adapter, makeActive: first)
+            let added = try registerManagedAccount(identity, using: adapter, makeActive: first)
+            await checkProviderPlan(of: added, forced: true, reason: "loginNewManagedAccount")
         } catch {
             guard loginAttemptID == loginID else { return }
             errorMessage = error.localizedDescription
@@ -911,8 +914,9 @@ final class AppState: ObservableObject {
             // before is put back live and stays active; the first of a
             // provider becomes it.
             let previous = activeAccount(for: provider)
-            try registerManagedAccount(try await adapter.captureCurrent(), using: adapter, makeActive: previous == nil)
+            let added = try registerManagedAccount(try await adapter.captureCurrent(), using: adapter, makeActive: previous == nil)
             if let location = previous?.credentialLocation { try adapter.activate(location, "captureCurrentManagedAccount.restorePrevious") }
+            await checkProviderPlan(of: added, forced: true, reason: "captureCurrentManagedAccount")
         } catch {
             errorMessage = error.localizedDescription
             log.error("[provider-auth] \(provider.rawValue) capture failed: \(error.localizedDescription)")
@@ -939,7 +943,7 @@ final class AppState: ObservableObject {
             accounts[index].credentialLocation = identity.credentialLocation
             accounts[index].displayName = identity.displayName
             accounts[index].orgName = identity.accountMetadata
-            accounts[index].subscriptionType = identity.planType
+            accounts[index].applyCredentialPlan(identity.planType)
             if account.isActive { try adapter.activate(identity.credentialLocation, "reauthenticateManagedAccount.active") }
             credentialQuarantine[account.id] = nil
             rejectedCredentialAccounts.remove(account.id)
@@ -948,6 +952,7 @@ final class AppState: ObservableObject {
                 try? adapter.remove(oldLocation, "reauthenticateManagedAccount.replaced")
             }
             log.info("[provider-auth] Re-authenticated \(account.provider.rawValue) account")
+            await checkProviderPlan(of: account.id, forced: true, reason: "reauthenticateManagedAccount")
         } catch {
             guard loginAttemptID == loginID else { return }
             errorMessage = error.localizedDescription
@@ -1050,7 +1055,7 @@ final class AppState: ObservableObject {
             accounts.append(account)
             excludeAddedAccountFromFailover(account)
             await keepActiveAfterAdding(account.id, previous: previous)
-            await checkClaudeProfile(of: account.id, forced: true, reason: "addAccount")
+            await checkProviderPlan(of: account.id, forced: true, reason: "addAccount")
             log.info("[addAccount] Account saved. Total accounts: \(self.accounts.count)")
         } catch {
             errorMessage = error.localizedDescription
@@ -1081,7 +1086,7 @@ final class AppState: ObservableObject {
                 log.info("[loginNewAccount] Account already exists, refreshing its saved sign-in")
                 guard let existing = accounts.first(where: { $0.id == id }) else { return }
                 saveIsolatedSignIn(signIn, for: existing, reason: "loginNewAccount.refresh")
-                await checkClaudeProfile(of: existing.id, forced: true, reason: "loginNewAccount.refresh")
+                await checkProviderPlan(of: existing.id, forced: true, reason: "loginNewAccount.refresh")
                 errorMessage = String(localized: "Account already exists - credentials refreshed", bundle: L10n.bundle)
                 return
             case .add(let email):
@@ -1101,7 +1106,7 @@ final class AppState: ObservableObject {
                 excludeAddedAccountFromFailover(account)
                 saveIsolatedSignIn(signIn, for: account, reason: "loginNewAccount.add")
                 saveAccounts(refreshWidget: true)
-                await checkClaudeProfile(of: account.id, forced: true, reason: "loginNewAccount.add")
+                await checkProviderPlan(of: account.id, forced: true, reason: "loginNewAccount.add")
                 log.info("[loginNewAccount] Added \(account.id) (active: \(first)). Total: \(self.accounts.count)")
             }
 
@@ -1467,7 +1472,7 @@ final class AppState: ObservableObject {
                     accounts[i].applyCredentialPlan(status.subscriptionType)
                 }
             }
-            if let profile { _ = applyClaudeProfile(profile, to: account.id) }
+            if let profile { applyProviderPlan(profile.answer, to: account.id) }
             // Preserve any token rotation performed while validating the newly
             // active profile so the managed copy is current on the next switch.
             _ = await captureOwnCredential(of: account, reason: "switchTo.keepRenewed")
@@ -1542,7 +1547,7 @@ final class AppState: ObservableObject {
                 saveAccounts()
             }
             // The new sign-in can follow a change of plan its token does not name.
-            await checkClaudeProfile(of: account.id, forced: true, reason: "reauthenticate")
+            await checkProviderPlan(of: account.id, forced: true, reason: "reauthenticate")
 
             finishLoginAttempt(loginID)
             await refresh()
@@ -1711,13 +1716,13 @@ final class AppState: ObservableObject {
                 codexHome: account.isActive ? nil : account.credentialLocation,
                 resetDetails: resetDetails
             )
-            setSubscriptionType(snapshot.planType, for: account.id)
+            applyProviderPlan(ProviderPlanAnswer(plan: snapshot.planType), to: account.id)
             guard Account.supportsProviderWorkloads(provider: .codex, subscriptionType: snapshot.planType) else {
                 return .workloadUnavailable(unavailableMessage(for: account.provider))
             }
             return .reading(snapshot.usage)
         } catch CodexServiceError.subscriptionUnavailable {
-            setSubscriptionType("inactive", for: account.id)
+            applyProviderPlan(ProviderPlanAnswer(plan: "inactive"), to: account.id)
             return .workloadUnavailable(unavailableMessage(for: account.provider))
         } catch CodexServiceError.rateLimited(let retryAt) {
             return .throttled(retryAt: retryAt)
@@ -1730,22 +1735,17 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Kimi reports the signed-in identity and plan through a separate
-    /// request, made only with `includeMetadata`.
+    /// Kimi reports the plan through its profile endpoint, a separate
+    /// request (`checkProviderPlan`), made with `includeMetadata` when the
+    /// account's plan check is due and whether or not the usage reply can
+    /// be read: a plan that changed can change the reply too.
     private func readKimiUsage(_ account: Account, includeMetadata: Bool) async -> UsageReadOutcome {
         guard let location = account.credentialLocation else { return .skipped }
+        if includeMetadata, planCheckIsDue(account, forced: false) {
+            await checkProviderPlan(of: account.id, forced: false, reason: "readKimiUsage")
+        }
         do {
             let usage = try await kimiService.getUsageLimits(location: location, isActive: readsLiveCredential(account))
-            if includeMetadata, let identity = try? await kimiService.identity(location: location, reason: "readKimiUsage.metadata"),
-               let index = accounts.firstIndex(where: { $0.id == account.id }),
-               accounts[index].email != identity.identifier
-                || accounts[index].displayName != identity.displayName
-                || accounts[index].subscriptionType != identity.planType {
-                accounts[index].email = identity.identifier
-                accounts[index].displayName = identity.displayName
-                accounts[index].subscriptionType = identity.planType
-                saveAccounts(refreshWidget: true)
-            }
             return .reading(usage)
         } catch KimiServiceError.rateLimited {
             return .throttled(retryAt: nil)
@@ -1793,7 +1793,7 @@ final class AppState: ObservableObject {
             guard Self.recordsReading(after: check) else { return .skipped }
         }
         setRateLimitTier(ClaudeService.rateLimitTier(from: tokenJSON), for: account.id)
-        if includeMetadata || forced, shouldCheckClaudeProfile(account, forced: forced),
+        if includeMetadata || forced, planCheckIsDue(account, forced: forced),
            await refreshClaudeSubscriptionMetadata(accountID: account.id, accessToken: accessToken, forced: forced) {
             return .workloadUnavailable(unavailableMessage(for: account.provider))
         }
@@ -1885,13 +1885,6 @@ final class AppState: ObservableObject {
     func setRateLimitTier(_ tier: String?, for accountID: UUID) {
         guard let index = accounts.firstIndex(where: { $0.id == accountID }),
               accounts[index].applyCredentialPlan(nil, tier: tier) else { return }
-        saveAccounts(refreshWidget: true)
-    }
-
-    private func setSubscriptionType(_ type: String?, for accountID: UUID) {
-        guard let index = accounts.firstIndex(where: { $0.id == accountID }),
-              accounts[index].subscriptionType != type else { return }
-        accounts[index].subscriptionType = type
         saveAccounts(refreshWidget: true)
     }
 
@@ -2020,7 +2013,7 @@ final class AppState: ObservableObject {
     }
 
     /// Asks the account profile which plan the account is on now and
-    /// applies the answer (`applyClaudeProfile`). Returns true only when
+    /// applies the answer (`applyProviderPlan`). Returns true only when
     /// Anthropic explicitly reports an inactive plan.
     private func refreshClaudeSubscriptionMetadata(accountID: UUID, accessToken: String, forced: Bool = false) async -> Bool {
         // Profile requests count against the same Anthropic allowance as
@@ -2030,7 +2023,7 @@ final class AppState: ObservableObject {
         lastProfileCheck[accountID] = Date()
         do {
             let live = try await claudeService.getLiveSubscription(accessToken: accessToken)
-            return applyClaudeProfile(live, to: accountID)
+            return applyProviderPlan(live.answer, to: accountID)
         } catch {
             // Usage remains independently useful. Preserve last verified plan
             // through transient profile/network failures instead of guessing.
@@ -2039,73 +2032,102 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Applies what an account profile answered to the account it names
+    /// Applies what a provider's plan authority answered
+    /// (`ProviderCapabilities.planAuthority`) to the account asked about
     /// (`Account.applyProfilePlan`): its plan and tier become the account's
-    /// and are kept with it, so no credential, `claude auth status` or
-    /// sign-in writer can put back the plan its token was issued under. A
-    /// profile naming another account's address is not applied, since a
-    /// credential read from the shared slot can be another account's. A
-    /// change of plan is logged and told in the failover events; an ended
-    /// plan drops the account's stored reading. Called by
-    /// `refreshClaudeSubscriptionMetadata` and `switchTo`. Returns whether
-    /// the profile reports the plan inactive.
+    /// and are kept with it, so no credential, CLI status or sign-in writer
+    /// can put back the plan the credential was issued under. An answer
+    /// naming another account (`owner`) is not applied, since a live
+    /// credential can be another account's; the name the provider shows
+    /// becomes the display name. A change of plan is logged and told in the
+    /// failover events; an ended plan drops the account's stored reading.
+    /// The answer's time is saved with the accounts when the plan changed
+    /// or none was saved within `planCheckSaveSpacing`, since a provider
+    /// whose usage replies are the authority answers with every reading.
+    /// Called by `checkProviderPlan`, `refreshClaudeSubscriptionMetadata`,
+    /// `switchTo` and `readCodexUsage`. Returns whether the answer reports
+    /// the plan ended.
     @discardableResult
-    func applyClaudeProfile(_ live: ClaudeSubscriptionSnapshot, to accountID: UUID, now: Date = Date()) -> Bool {
+    func applyProviderPlan(_ answer: ProviderPlanAnswer, to accountID: UUID, now: Date = Date()) -> Bool {
         guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { return false }
-        if let email = live.email, !accounts[index].matches(email: email) {
-            log.warning("[profile] The profile read for \(accounts[index].email) names another account; its plan is left as it was")
+        let provider = accounts[index].provider
+        if let owner = answer.owner, !accounts[index].matches(email: owner) {
+            log.warning("[plan] The \(provider.rawValue) plan read for \(accounts[index].email) names another account; its plan is left as it was")
             return false
         }
-        let change = accounts[index].applyProfilePlan(live.planType, inactive: live.isInactive,
-                                                      tier: live.rateLimitTier, checkedAt: now)
-        if live.isInactive, change != nil {
+        let savedAt = accounts[index].profileCheckedAt
+        let change = accounts[index].applyProfilePlan(answer.plan, inactive: answer.inactive, tier: answer.tier, checkedAt: now)
+        var renamed = false
+        if let name = answer.displayName, !name.isEmpty, accounts[index].displayName != name {
+            accounts[index].displayName = name
+            renamed = true
+        }
+        if answer.inactive, change != nil {
             accountUsage[accountID] = nil
             accountUsageUpdatedAt[accountID] = nil
             saveUsageSnapshots()
         }
-        saveAccounts(refreshWidget: change != nil)
+        if change != nil || renamed || savedAt.map({ now.timeIntervalSince($0) >= Self.planCheckSaveSpacing }) ?? true {
+            saveAccounts(refreshWidget: change != nil || renamed)
+        }
         if let change {
             let account = accounts[index]
-            log.info("[profile] Claude plan changed for \(account.email): \(change.detail)")
-            failoverEvents.record(account.provider, "\(messageName(account)) is on \(change.after) now (was \(change.before)), as its account profile says.")
+            let source = provider.capabilities.planAuthority?.name ?? "provider"
+            log.info("[plan] \(provider.rawValue) plan changed for \(account.email): \(change.detail), from its \(source)")
+            failoverEvents.record(provider, "\(messageName(account)) is on \(change.after) now (was \(change.before)), as its \(source) says.")
             refreshAccountStatuses()
         }
-        return live.isInactive
+        return answer.inactive
     }
 
-    /// Checks the account profile of a Claude account with its own
-    /// credential: the live one while it reads the shared sign-in
-    /// (`readsLiveCredential`), otherwise its saved copy. `forced` checks
-    /// regardless of the request allowance, as after a sign-in, a
-    /// re-authentication and the user's refresh. Called by the sign-in
-    /// paths and `recheckClaudeProfilesIfDue`.
-    func checkClaudeProfile(of accountID: UUID, forced: Bool, reason: String) async {
-        guard let account = accounts.first(where: { $0.id == accountID }), account.provider == .claudeCode,
-              !needsSignIn(account) else { return }
-        let token = readsLiveCredential(account)
-            ? keychain.readClaudeToken(reason: "\(reason).profile", account: account.id)
-            : keychain.getAccountBackup(forAccountId: account.id.uuidString, reason: "\(reason).profile")?.token
-        guard let accessToken = token.flatMap(ClaudeService.extractAccessToken(from:)) else { return }
-        _ = await refreshClaudeSubscriptionMetadata(accountID: account.id, accessToken: accessToken, forced: forced)
+    /// How often a plan answer that changed nothing is saved with the
+    /// accounts (`applyProviderPlan`).
+    nonisolated static let planCheckSaveSpacing: TimeInterval = 60 * 60
+
+    /// Asks the plan authority of an account's provider
+    /// (`PlanAuthority.Source.profileEndpoint`) which plan it is on, with
+    /// its own credential: the live one while it reads the provider's live
+    /// sign-in (`readsLiveCredential`), otherwise its saved copy
+    /// (`ProviderCredentialModule.planAnswer`). `forced` asks regardless of
+    /// the request allowance, as after a sign-in, a re-authentication and
+    /// the user's refresh; otherwise the check spends a background request.
+    /// A failed check is logged and tried again after
+    /// `profileRetryInterval` (`planCheckDue`). Called by the sign-in paths,
+    /// `readKimiUsage` and `recheckProviderPlansIfDue`.
+    func checkProviderPlan(of accountID: UUID, forced: Bool, reason: String) async {
+        guard let account = accounts.first(where: { $0.id == accountID }),
+              account.provider.capabilities.planAuthority?.source == .profileEndpoint, !needsSignIn(account),
+              let module = credentialModule(for: account.provider) else { return }
+        guard forced || spendUsageRequest(account.provider, .background) else { return }
+        lastProfileCheck[accountID] = Date()
+        do {
+            guard let answer = try await module.planAnswer(of: account, readsLive: readsLiveCredential(account),
+                                                           reason: "\(reason).plan") else {
+                log.warning("[plan] No \(account.provider.rawValue) credential to check the plan of \(account.email) with")
+                return
+            }
+            applyProviderPlan(answer, to: accountID)
+        } catch {
+            log.warning("[plan] \(account.provider.rawValue) plan check of \(account.email) failed: \(error.localizedDescription)")
+        }
     }
 
-    /// Checks the profile of every signed-in Claude account whose check is
-    /// due (`claudeProfileCheckDue`), including accounts only passive
-    /// readings cover, whose usage is never read with its plan. With
-    /// `forced` (the user's refresh), every account not checked since
-    /// `since` is checked whatever the allowance. An account whose plan
-    /// serves no workload is left to its usage reading's own spacing
-    /// (`shouldDeferUnavailablePlanCheck`) unless `forced`. Called by
-    /// `performRefresh` after the usage readings, which check the accounts
-    /// they read.
-    func recheckClaudeProfilesIfDue(forced: Bool, since: Date, now: Date = Date()) async {
-        for account in accounts where account.provider == .claudeCode && !needsSignIn(account) {
+    /// Checks the plan of every signed-in account whose provider has a plan
+    /// endpoint and whose check is due (`planCheckIsDue`), including
+    /// accounts only passive readings cover, whose usage is never read with
+    /// its plan. With `forced` (the user's refresh), every such account not
+    /// checked since `since` is checked whatever the allowance. An account
+    /// whose plan serves no workload is left to its usage reading's own
+    /// spacing (`shouldDeferUnavailablePlanCheck`) unless `forced`. Called
+    /// by `performRefresh` after the usage readings, which check the
+    /// accounts they read.
+    func recheckProviderPlansIfDue(forced: Bool, since: Date, now: Date = Date()) async {
+        for account in accounts where account.provider.capabilities.planAuthority?.source == .profileEndpoint
+            && !needsSignIn(account) {
             if let attempted = lastProfileCheck[account.id], attempted >= since { continue }
-            guard forced || account.supportsProviderWorkloads,
-                  Self.claudeProfileCheckDue(checkedAt: account.profileCheckedAt, attemptedAt: lastProfileCheck[account.id],
-                                             forced: forced, available: true, now: now) else { continue }
-            if !forced, !(usageBudgets[.claudeCode]?.canSpend(.background) ?? true) { break }
-            await checkClaudeProfile(of: account.id, forced: forced, reason: "recheckClaudeProfiles")
+            guard forced || account.supportsProviderWorkloads, planCheckIsDue(account, forced: forced, now: now) else { continue }
+            if !forced, !(usageBudgets[account.provider]?.canSpend(.background) ?? true) { continue }
+            await checkProviderPlan(of: account.id, forced: forced, reason: "recheckProviderPlans")
         }
     }
 
@@ -3119,9 +3141,10 @@ final class AppState: ObservableObject {
                 accounts[accountIndex].displayName = identity.displayName
                 accounts[accountIndex].orgName = identity.accountID
                 // The login JWT can outlive a plan change. Use it only until
-                // the first successful live usage response supplies plan_type.
+                // the first successful live usage response supplies plan_type
+                // (`applyProviderPlan`).
                 if accounts[accountIndex].subscriptionType == nil {
-                    accounts[accountIndex].subscriptionType = identity.planType
+                    accounts[accountIndex].applyCredentialPlan(identity.planType)
                 }
             }
         }

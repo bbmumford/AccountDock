@@ -55,8 +55,14 @@ struct ClaudeSubscriptionSnapshot: Equatable, Sendable {
     var rateLimitTier: String? = nil
     /// The address of the account the profile describes, so a profile read
     /// with a credential found in the shared slot is applied only to the
-    /// account it names (`AppState.applyClaudeProfile`); nil when it names none.
+    /// account it names (`AppState.applyProviderPlan`); nil when it names none.
     var email: String? = nil
+
+    /// The snapshot as the provider-neutral plan answer
+    /// (`AppState.applyProviderPlan`).
+    var answer: ProviderPlanAnswer {
+        ProviderPlanAnswer(plan: planType, inactive: isInactive, tier: rateLimitTier, owner: email)
+    }
 }
 
 /// The account a Claude access token belongs to, from the account profile.

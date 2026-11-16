@@ -310,35 +310,47 @@ The token stored in keychain is a single JSON object (captured from real keychai
 - `scopes` is an **array of strings** (not a single string)
 - The token JSON does **NOT** contain email or account identity — the only way to determine which account a token belongs to is by calling `claude auth status` while that token is active
 - This lack of embedded identity is why AccountDock asks the profile endpoint whose a live token is before it saves it under an account.
-- `subscriptionType` and `rateLimitTier` are the plan the token was issued under: an upgrade or a downgrade does not change them, and `claude auth status` reports the same. See "Claude plans" below.
+- `subscriptionType` and `rateLimitTier` are the plan the token was issued under: an upgrade or a downgrade does not change them, and `claude auth status` reports the same. See "Plans" below.
 
-### Claude plans
+### Plans
 
-A Claude account's plan and tier come from its account profile
-(`/api/oauth/profile`: `organization.organization_type` without its
-`claude_` prefix, `organization.rate_limit_tier`), which
-`Account.applyProfilePlan` keeps with the account (`profilePlan`,
-`profileRateLimitTier`, `profileCheckedAt`) and copies into the stored
-plan and tier. Once a profile has answered, every writer that reads a
-token, `claude auth status` or a sign-in's identity goes through
+A credential keeps the plan it was issued under: a Claude token's
+`subscriptionType` and `rateLimitTier` (and `claude auth status`), a Codex
+sign-in's ID token, a Kimi sign-in's identity. Each provider declares where
+it states the plan an account is on now (`ProviderCapabilities.planAuthority`):
+Claude's account profile (`/api/oauth/profile`:
+`organization.organization_type` without its `claude_` prefix,
+`organization.rate_limit_tier`), Kimi's profile (`/me`:
+`user_level_name`), both asked with the account's own credential
+(`ProviderCredentialModule.planAnswer`), and Codex's usage reply
+(`plan_type`), which comes with every reading. Their answer
+(`ProviderPlanAnswer`) is applied by `AppState.applyProviderPlan` through
+`Account.applyProfilePlan`, which keeps it with the account
+(`profilePlan`, `profileRateLimitTier`, `profileCheckedAt`) and copies it
+into the stored plan and tier. Once one has answered, every writer that
+reads a credential, a CLI's status or a sign-in's identity goes through
 `Account.applyCredentialPlan`, which leaves the plan and tier alone, and
 `planSize`, `planHasSessionWindow`, `displaySubscriptionType`,
-`workloadAvailability` and the learned plan read the profile's first
+`workloadAvailability` and the learned plan read the authority's first
 (`currentPlan`, `currentRateLimitTier`). An account saved before any
-profile answered decodes as before and keeps its token's plan until one
-does. A profile naming another account's address than the account it was
-read for is not applied (`AppState.applyClaudeProfile`). An ended plan, in
-the profile or as a usage reply's refusal (`markClaudeCodeUnavailable`), is
-kept as "free".
+answer decodes as before and keeps its credential's plan until one comes.
+An answer naming another account than the one it was asked for is not
+applied. An ended plan, in Claude's profile or as a Claude usage reply's
+refusal (`markClaudeCodeUnavailable`), is kept as "free".
 
-The profile is checked after a sign-in, a re-authentication and a switch,
-on the user's refresh for every account, and otherwise every
-`profileRecheckInterval` (three hours; a check that got no answer is tried
-again after `profileRetryInterval`), with the usage reading of an account
-or, for accounts only passive readings cover, by
-`recheckClaudeProfilesIfDue` after a refresh's readings, from the
-background allowance. A check that changes the plan or tier is logged
-(`[profile]`) and told in the failover events.
+An endpoint authority is asked after a sign-in, a re-authentication and a
+Claude switch, on the user's refresh for every account, and otherwise
+every `profileRecheckInterval` (three hours; a check that got no answer is
+logged and tried again after `profileRetryInterval`), with the usage
+reading of an account or, for accounts only passive readings cover, by
+`recheckProviderPlansIfDue` after a refresh's readings, from the background
+allowance (`checkProviderPlan`). Kimi's check does not wait on its usage
+reply, whose shape follows the plan: a reply is read window by window, and
+one with no quota window fails naming the keys it carries. A change of
+plan or tier is logged (`[plan]`) and told in the failover events. Kimi
+lists no plan sizes, so a Kimi account's cost is learned or plan-wide
+whatever its level; a change of level still makes its cost be learned
+again (`TurnCostModel.notePlan`).
 
 ### Codex and Kimi
 

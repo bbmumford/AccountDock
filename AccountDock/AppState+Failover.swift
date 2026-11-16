@@ -503,28 +503,28 @@ extension AppState {
         failoverLog.warning("\(account.provider.rawValue) usage endpoint throttled; shared cool-down until \(budget.blockedUntil?.description ?? "unknown")")
     }
 
-    /// Whether a Claude account's profile is checked with its usage reading
-    /// (`claudeProfileCheckDue`). Profile requests share the usage budget.
-    func shouldCheckClaudeProfile(_ account: Account, forced: Bool, now: Date = Date()) -> Bool {
-        Self.claudeProfileCheckDue(checkedAt: account.profileCheckedAt, attemptedAt: lastProfileCheck[account.id],
-                                   forced: forced, available: account.supportsProviderWorkloads, now: now)
+    /// Whether an account's plan is due a check by its provider's plan
+    /// authority (`planCheckDue`). Plan requests share the usage budget.
+    func planCheckIsDue(_ account: Account, forced: Bool, now: Date = Date()) -> Bool {
+        Self.planCheckDue(checkedAt: account.profileCheckedAt, attemptedAt: lastProfileCheck[account.id],
+                          forced: forced, available: account.supportsProviderWorkloads, now: now)
     }
 
-    /// How long an answered profile check stands: plans change rarely, but
+    /// How long an answered plan check stands: plans change rarely, but
     /// an upgrade or a downgrade changes how much work the account holds.
     nonisolated static let profileRecheckInterval: TimeInterval = 3 * 60 * 60
-    /// How long after a profile check that got no answer it is tried again.
+    /// How long after a plan check that got no answer it is tried again.
     nonisolated static let profileRetryInterval: TimeInterval = 15 * 60
 
-    /// Whether a Claude account's profile is due a check: on the user's
+    /// Whether an account's plan is due a check by its provider's plan
+    /// authority (`ProviderCapabilities.planAuthority`): on the user's
     /// refresh and on an account whose plan serves no workload (`forced`,
     /// `available`), when no check has answered (`checkedAt`, kept with the
     /// account), `profileRecheckInterval` after the last answer, and no
     /// sooner than `profileRetryInterval` after a check that got none
-    /// (`attemptedAt`). Read by `shouldCheckClaudeProfile` and
-    /// `recheckClaudeProfilesIfDue`.
-    nonisolated static func claudeProfileCheckDue(checkedAt: Date?, attemptedAt: Date?, forced: Bool, available: Bool,
-                                                 now: Date) -> Bool {
+    /// (`attemptedAt`). Read by `planCheckIsDue`.
+    nonisolated static func planCheckDue(checkedAt: Date?, attemptedAt: Date?, forced: Bool, available: Bool,
+                                        now: Date) -> Bool {
         if forced || !available { return true }
         if let attemptedAt, checkedAt.map({ attemptedAt > $0 }) ?? true,
            now.timeIntervalSince(attemptedAt) < profileRetryInterval { return false }

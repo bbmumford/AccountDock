@@ -154,23 +154,92 @@ final class ProfilePlanTests: XCTestCase {
     func testTheProfileIsCheckedAgainEveryFewHoursAndOnTheUsersRefresh() {
         let interval = AppState.profileRecheckInterval
         XCTAssertLessThanOrEqual(interval, 6 * 60 * 60)
-        XCTAssertTrue(AppState.claudeProfileCheckDue(checkedAt: nil, attemptedAt: nil, forced: false, available: true, now: now),
+        XCTAssertTrue(AppState.planCheckDue(checkedAt: nil, attemptedAt: nil, forced: false, available: true, now: now),
                       "an account no profile has answered for is checked")
-        XCTAssertFalse(AppState.claudeProfileCheckDue(checkedAt: now.addingTimeInterval(-interval + 60), attemptedAt: nil,
+        XCTAssertFalse(AppState.planCheckDue(checkedAt: now.addingTimeInterval(-interval + 60), attemptedAt: nil,
                                                       forced: false, available: true, now: now))
-        XCTAssertTrue(AppState.claudeProfileCheckDue(checkedAt: now.addingTimeInterval(-interval), attemptedAt: nil,
+        XCTAssertTrue(AppState.planCheckDue(checkedAt: now.addingTimeInterval(-interval), attemptedAt: nil,
                                                      forced: false, available: true, now: now))
-        XCTAssertTrue(AppState.claudeProfileCheckDue(checkedAt: now.addingTimeInterval(-60), attemptedAt: nil,
+        XCTAssertTrue(AppState.planCheckDue(checkedAt: now.addingTimeInterval(-60), attemptedAt: nil,
                                                      forced: true, available: true, now: now),
                       "the user's refresh checks every account")
         // A check that got no answer waits before it is tried again.
-        XCTAssertFalse(AppState.claudeProfileCheckDue(checkedAt: nil, attemptedAt: now.addingTimeInterval(-60),
+        XCTAssertFalse(AppState.planCheckDue(checkedAt: nil, attemptedAt: now.addingTimeInterval(-60),
                                                       forced: false, available: true, now: now))
-        XCTAssertTrue(AppState.claudeProfileCheckDue(checkedAt: nil,
+        XCTAssertTrue(AppState.planCheckDue(checkedAt: nil,
                                                      attemptedAt: now.addingTimeInterval(-AppState.profileRetryInterval),
                                                      forced: false, available: true, now: now))
         // An answered check's own send time is older than its answer.
-        XCTAssertFalse(AppState.claudeProfileCheckDue(checkedAt: now.addingTimeInterval(-60), attemptedAt: now.addingTimeInterval(-61),
+        XCTAssertFalse(AppState.planCheckDue(checkedAt: now.addingTimeInterval(-60), attemptedAt: now.addingTimeInterval(-61),
                                                       forced: false, available: true, now: now))
+    }
+
+    func testEveryProviderNamesWhereItStatesThePlan() {
+        XCTAssertEqual(AIProviderType.claudeCode.capabilities.planAuthority?.source, .profileEndpoint)
+        XCTAssertEqual(AIProviderType.kimi.capabilities.planAuthority?.source, .profileEndpoint)
+        XCTAssertEqual(AIProviderType.codex.capabilities.planAuthority?.source, .usageReply,
+                       "Codex's ID token outlives a plan change; its usage reply names the plan now")
+    }
+
+    func testAKimiPlanTheProfileShowsEndedReplacesTheStoredOne() throws {
+        // A `/me` reply after the paid level ended.
+        let reply = Data("""
+        {"user_id":"u-1","nickname":"Personal","user_level_name":"Free","email":"kimi@mail.example"}
+        """.utf8)
+        let signedIn = try KimiService.profileIdentity(from: reply)
+        XCTAssertEqual(signedIn.planType, "Free")
+        var account = Account(email: "kimi@mail.example", displayName: "Personal", provider: .kimi, subscriptionType: "Ultra")
+        let answer = ProviderPlanAnswer(plan: signedIn.planType, owner: signedIn.identifier, displayName: signedIn.displayName)
+        XCTAssertTrue(account.matches(email: answer.owner))
+        let change = account.applyProfilePlan(answer.plan, inactive: answer.inactive, tier: answer.tier, checkedAt: now)
+        XCTAssertEqual(change, Account.PlanChange(before: "Ultra", after: "Free", detail: "Ultra -> Free"))
+        XCTAssertEqual(account.subscriptionType, "Free")
+        XCTAssertEqual(account.profileCheckedAt, now)
+        // A re-authentication's identity from before the change cannot put it back.
+        XCTAssertFalse(account.applyCredentialPlan("Ultra"))
+        XCTAssertEqual(account.displaySubscriptionType, "Free")
+        XCTAssertNil(account.planSize, "Kimi lists no plan sizes, so its cost is learned or plan-wide")
+        XCTAssertTrue(account.supportsProviderWorkloads, "Kimi does not require a paid plan for Kimi Code")
+        XCTAssertEqual(AppState.learnedPlan(account), TurnCostModel.LearnedPlan(plan: "Free", tier: nil))
+    }
+
+    func testAKimiProfileWithoutAnAddressNamesTheAccountByItsUserID() throws {
+        let signedIn = try KimiService.profileIdentity(from: Data(#"{"user_id":"u-2","user_level_name":" "}"#.utf8))
+        XCTAssertEqual(signedIn.identifier, "u-2")
+        XCTAssertEqual(signedIn.displayName, "u-2")
+        XCTAssertNil(signedIn.planType, "a blank level names no plan, so the one known stays")
+    }
+
+    func testAKimiUsageReplyIsReadWindowByWindow() throws {
+        let full = try KimiService.usage(fromReply: Data("""
+        {"usages":{"limit_5h":{"used_ratio":0.25,"reset_time":"2027-01-15T10:00:00Z"},
+                   "limit_month_total":{"used_ratio":0.4,"reset_time":"2027-02-01T00:00:00Z"},
+                   "limit_month_code":{"used_ratio":0.6,"reset_time":"2027-02-01T00:00:00Z"}}}
+        """.utf8))
+        XCTAssertEqual(full.fiveHour?.utilization, 25)
+        XCTAssertEqual(full.sevenDay?.utilization, 60)
+        // A plan without the code window still reads.
+        let partial = try KimiService.usage(fromReply: Data("""
+        {"usages":{"limit_month_total":{"used_ratio":1.0,"reset_time":"2027-02-01T00:00:00Z"}}}
+        """.utf8))
+        XCTAssertNil(partial.fiveHour)
+        XCTAssertEqual(partial.sevenDay?.utilization, 100)
+        // A reply with no window says what it carried.
+        XCTAssertThrowsError(try KimiService.usage(fromReply: Data(#"{"usages":{},"user":{"level":"free"}}"#.utf8))) { error in
+            XCTAssertTrue(error.localizedDescription.contains("usages{}"), error.localizedDescription)
+            XCTAssertTrue(error.localizedDescription.contains("user{level}"), error.localizedDescription)
+        }
+        XCTAssertThrowsError(try KimiService.usage(fromReply: Data(#"{"usages":{"limit_5h":{"reset_time":"x"}}}"#.utf8))) { error in
+            XCTAssertTrue(error.localizedDescription.contains("used_ratio"), error.localizedDescription)
+        }
+    }
+
+    func testACodexPlanItsUsageReplyNamesWinsOverItsIDToken() {
+        var account = Account(email: "codex@mail.example", displayName: "C", provider: .codex, subscriptionType: "plus")
+        let change = account.applyProfilePlan("pro", inactive: false, tier: nil, checkedAt: now)
+        XCTAssertEqual(change?.after, "Pro")
+        XCTAssertFalse(account.applyCredentialPlan("plus"), "the ID token's claim is the plan it was issued under")
+        XCTAssertEqual(account.planHasSessionWindow, true)
+        XCTAssertNil(account.applyProfilePlan("pro", inactive: false, tier: nil, checkedAt: now), "the same plan is no change")
     }
 }
