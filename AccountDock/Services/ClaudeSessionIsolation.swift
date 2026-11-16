@@ -43,11 +43,24 @@ struct ClaudeSessionIsolation: ProviderSessionIsolation {
     static let footerLines = 8
     static let exitQuestionLines = 20
 
+    /// The lines below the prompt box's bottom border: Claude Code's footer,
+    /// and under it the agents and tasks panel, which can run to many lines
+    /// and push the footer out of the last `footerLines`. The transcript
+    /// above the box, which may quote the footer, is left out. Without a
+    /// border on screen, the last `footerLines`.
+    static func footerRegion(_ screen: String) -> [Substring] {
+        let lines = screen.split(separator: "\n").filter { !$0.allSatisfy(\.isWhitespace) }
+        guard let border = lines.lastIndex(where: { line in
+            line.filter { $0 == "─" }.count >= 20
+        }) else { return Array(lines.suffix(footerLines)) }
+        return Array(lines[lines.index(after: border)...])
+    }
+
     /// Claude Code's footer counts what still runs in the session, as in
     /// `· 1 shell` or `· 2 agents`, including commands it started directly
     /// rather than through a shell under its process.
     func screenReportsRunningWork(_ screen: String) -> Bool {
-        Self.bottomLines(screen, count: Self.footerLines).contains { line in
+        Self.footerRegion(screen).contains { line in
             line.range(of: #"·\s*[1-9][0-9]*\s+(shell|agent|task|monitor|workflow)s?\b"#,
                        options: .regularExpression) != nil
         }
@@ -69,7 +82,7 @@ struct ClaudeSessionIsolation: ProviderSessionIsolation {
     /// `Wait here, then continue automatically …`. The footer is read only
     /// at the bottom, where the transcript cannot quote it.
     func screenWaitsAtLimit(_ screen: String) -> Bool {
-        let footer = Self.bottomLines(screen, count: Self.footerLines)
+        let footer = Self.footerRegion(screen)
         if footer.contains(where: { line in
             line.range(of: "continuing automatically", options: .caseInsensitive) != nil
                 && line.range(of: "esc to cancel", options: .caseInsensitive) != nil
