@@ -187,10 +187,12 @@ struct SessionsView: View {
         .accessibilityElement(children: .contain)
     }
 
-    /// When a held session goes on: when its account is expected to serve
-    /// it again, or, paused by the user, when the user plays it.
+    /// When a held session goes on: where and when its wait for a lane
+    /// resumes it, else when its account is expected to serve it again, or,
+    /// paused by the user, when the user plays it.
     private func pauseNote(_ row: SessionRow) -> String? {
         if row.pausedByYou { return "until you play it" }
+        if let plan = row.waitPlan { return plan }
         return row.resumeAt.map { "resumes about \(UsageFormat.clock($0))" }
     }
 

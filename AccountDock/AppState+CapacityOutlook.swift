@@ -46,29 +46,7 @@ extension AppState {
     func projectCapacityOutlook(_ provider: AIProviderType, now: Date) -> CapacityOutlook? {
         let live = liveSessions[provider] ?? []
         guard live.contains(where: { sessionRates.entries[$0.sessionID] != nil }) else { return nil }
-        let policy = failoverConfig.policy(for: provider)
-        let planner = FailoverPlanner(settings: plannerSettings(provider))
-        let outlookAccounts = accounts.filter { $0.provider == provider }.map { account -> CapacityOutlook.Account in
-            let state = quotaState(for: account, now: now, wholeAllowance: true)
-            let availability: CapacityOutlook.Availability
-            if policy.excludedAccountIDs.contains(account.id) {
-                availability = .excluded
-            } else if needsSignIn(account) {
-                availability = .unavailable
-            } else {
-                switch planner.servingVerdict(state, now: now, lead: 0) {
-                case .canServe, .nearLimit: availability = .serves
-                case .atLimit: availability = .atLimit
-                case .ineligible: availability = .unavailable
-                }
-            }
-            return CapacityOutlook.Account(
-                pacer: pacerAccount(account.id, state: state, weight: 1, planner: planner, now: now),
-                name: messageName(account),
-                sessionPerWeekly: state.sessionPerWeekly ?? FailoverPlanner.defaultSessionPerWeekly,
-                availability: availability
-            )
-        }
+        let outlookAccounts = capacityOutlookAccounts(provider, now: now)
         let pause = AgentPauseGate.read(provider)
         let userHeld = pause?.userHeld(running: Set(live.map(\.sessionID))) ?? []
         let pacing = pacerSessions(provider, now: now).reduce(into: [String: SessionPacer.Session]()) { $0[$1.id] = $1 }
@@ -92,5 +70,35 @@ extension AppState {
         }
         return CapacityOutlook.project(accounts: outlookAccounts, sessions: sessions, now: now,
                                        pacer: SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor))
+    }
+
+    /// Every account of the provider as `CapacityOutlook` takes it: as the
+    /// pacer sees it (`pacerAccount`), named, with the weekly allowance a new
+    /// week brings, and whether it takes part. Read by
+    /// `projectCapacityOutlook` and `planHeldSessions`.
+    func capacityOutlookAccounts(_ provider: AIProviderType, now: Date) -> [CapacityOutlook.Account] {
+        let policy = failoverConfig.policy(for: provider)
+        let planner = FailoverPlanner(settings: plannerSettings(provider))
+        return accounts.filter { $0.provider == provider }.map { account -> CapacityOutlook.Account in
+            let state = quotaState(for: account, now: now, wholeAllowance: true)
+            let availability: CapacityOutlook.Availability
+            if policy.excludedAccountIDs.contains(account.id) {
+                availability = .excluded
+            } else if needsSignIn(account) {
+                availability = .unavailable
+            } else {
+                switch planner.servingVerdict(state, now: now, lead: 0) {
+                case .canServe, .nearLimit: availability = .serves
+                case .atLimit: availability = .atLimit
+                case .ineligible: availability = .unavailable
+                }
+            }
+            return CapacityOutlook.Account(
+                pacer: pacerAccount(account.id, state: state, weight: 1, planner: planner, now: now),
+                name: messageName(account),
+                sessionPerWeekly: state.sessionPerWeekly ?? FailoverPlanner.defaultSessionPerWeekly,
+                availability: availability
+            )
+        }
     }
 }

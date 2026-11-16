@@ -257,6 +257,10 @@ final class AppState: ObservableObject {
     /// Each provider's Outlook as last projected (`capacityOutlook`), so a
     /// redraw shows it without projecting it again.
     var capacityOutlooks: [AIProviderType: CachedCapacityOutlook] = [:]
+    /// What each session lane admission left waiting does, by provider
+    /// (`planHeldSessions`): for its event, recorded when the plan changes,
+    /// and the Sessions page row.
+    var heldSessionPlans: [AIProviderType: [String: HeldSessionPlan]] = [:]
     /// The terminal session each of those runs in, when
     /// `sessionTerminal` can reach it.
     @Published var unisolatedTerminals: [String: String] = [:]

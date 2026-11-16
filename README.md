@@ -497,6 +497,18 @@ says so ("Session balancing admitted 2 of 9 waiting sessions to cybrio's fresh
 window: they fit until its reset at 8:29 pm; 7 wait for their own
 accounts.").
 
+A session no lane admits does not only wait for its own account: it waits for
+whichever account's reset first frees room for an hour of it, and moves there
+once a reading confirms that reset. It moves now instead only when a lane with
+room serves more work that way until an hour past that reset, counting the
+sessions already on the lane that it would leave without room, and only when
+its own account resets after its prompt cache expires; on a tie it waits. Its
+row on the Sessions page says where and when it resumes ("resumes on fluxon
+about 12:50 am"), and the event says why ("platform-execution waits: no lane
+carries it for an hour; it resumes on fluxon at 12:50 am, when fluxon's window
+resets — 40 min before bytrix's."). Until then no other rule moves it off its
+account, even after you play it; moving it yourself still does.
+
 When the router serves the sessions, a session also stays on its account while
 its prompt cache lasts, and one refused at the limit with the reset at most
 five minutes away is held by the router and continues with its cache.

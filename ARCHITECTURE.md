@@ -1580,6 +1580,25 @@ the pool weights and which sessions move, each time the pool is rebuilt
   reads "Session balancing admitted 2 of 9 waiting session(s) to cybrio's
   fresh window: they fit until its reset at 8:29 pm; 7 wait for their own
   accounts."
+- Each session admission leaves waiting gets a plan (`HeldSessionPlan`,
+  through `AppState.planHeldSessions`, kept in `heldSessionPlans`): it waits
+  for the earliest lane, the account whose 5-hour window, week or limit
+  resets first with room for an hour of it beside the sessions there, by
+  admission's own measure, its own account included and charged no rewrite.
+  It moves now instead to a lane with room only when that serves more work
+  until an hour past that reset, each account weighed alone
+  (`CapacityOutlook.servedAlone`: what the session adds there, less what the
+  sessions already on it lose once it fills the lane early, less its
+  rewrite), and only when its own account resets later than its cache lasts;
+  a tie waits. A planned wait whose reset has come is placed on its lane once
+  that lane is a destination (`HeldSessionPlan.due`: a reading confirms the
+  reset), and stands for `accountHoldGrace` until one does. The plan is the
+  session's row note ("resumes on fluxon about 12:50 am") and an event when
+  it changes. While admission keeps a session on its account, played or not,
+  `slotChoice`'s path for an account that can no longer serve keeps it there
+  (`heldOn`, from `admissionHolds`) rather than sending it to the pool's
+  `fallback`; admission's placement or the user's own move takes it
+  elsewhere.
 - An account a threshold switch left with room still on it drains
   (`AppState.drainingAccounts`): above its thresholds it keeps a pool weight
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when

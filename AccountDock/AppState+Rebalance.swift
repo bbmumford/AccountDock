@@ -242,8 +242,12 @@ extension AppState {
                 pacerAccount(account.id, state: quotaState(for: account, now: now, wholeAllowance: true), weight: 0,
                              planner: planner, now: now)
             })
-            let admission = pacer.admitToLanes(stranded, accounts: everyAccount, running: others,
-                                               destinations: Set(pacerAccounts.map(\.id)), now: now, sharedGroup: shared)
+            let admitted = pacer.admitToLanes(stranded, accounts: everyAccount, running: others,
+                                              destinations: Set(pacerAccounts.map(\.id)), now: now, sharedGroup: shared)
+            // Each session left waiting waits for the earliest lane, or moves
+            // now where that serves more (`planHeldSessions`).
+            let admission = planHeldSessions(provider, admission: admitted, candidates: stranded, running: others,
+                                             destinations: Set(pacerAccounts.map(\.id)), now: now)
             noteLaneAdmission(provider, admission: admission, candidates: stranded, accounts: everyAccount, now: now)
             if let admission { return admission.placements }
         }
