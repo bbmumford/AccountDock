@@ -216,17 +216,26 @@ extension AppState {
     /// priority of a passed reset's confirmation, within the provider's
     /// request budget; a reading not taken is tried again after
     /// `idleFreshness`.
+    ///
+    /// While sessions wait for room (a pause holds them, or lane admission
+    /// keeps them), every account that shows room, those serving sessions
+    /// included, is kept read within `arrivalReadingAge`, since no session is
+    /// sent or released onto an account without a reading that fresh
+    /// (`freshForArrivals`).
     func readIdleDestinationIfDue(now: Date) async {
         for provider in monitoredProviders where failoverConfig.policy(for: provider).distributeSessions {
             let policy = failoverConfig.policy(for: provider)
             let planner = FailoverPlanner(settings: plannerSettings(provider))
-            let serving = Set(accountsServingSessions(provider).map(\.id))
+            let scarce = AgentPauseGate.read(provider) != nil
+                || (sessionWaits[provider] ?? [:]).values.contains { $0.reason == .awaitingLane }
+            let serving = scarce ? [] : Set(accountsServingSessions(provider).map(\.id))
             let candidates = accounts.filter { account in
                 account.provider == provider && !policy.excludedAccountIDs.contains(account.id) && !serving.contains(account.id)
                     && !needsSignIn(account) && account.cliUnavailableReason == nil
                     && planner.tier(quotaState(for: account, now: now), now: now) <= .usable
             }.map { (id: $0.id, readAt: accountUsageUpdatedAt[$0.id]) }
-            guard let id = Self.idleDestinationDue(candidates, tried: idleDestinationReadAt, now: now),
+            guard let id = Self.idleDestinationDue(candidates, tried: idleDestinationReadAt, now: now,
+                                                   freshness: scarce ? Self.arrivalReadingAge : FailoverPlanner.idleFreshness),
                   let account = accounts.first(where: { $0.id == id }) else { continue }
             idleDestinationReadAt[id] = now
             await fetchUsageNow(account, priority: .verification)
@@ -235,14 +244,15 @@ extension AppState {
     }
 
     /// The idle account to read next (`readIdleDestinationIfDue`): of
-    /// `candidates`, one whose reading is older than
-    /// `FailoverPlanner.idleFreshness` and that was not tried within it,
-    /// the one read longest ago first; nil when none is due.
+    /// `candidates`, one whose reading is older than `freshness`
+    /// (`FailoverPlanner.idleFreshness` unless sessions wait for room) and
+    /// that was not tried within it, the one read longest ago first; nil
+    /// when none is due.
     nonisolated static func idleDestinationDue(_ candidates: [(id: UUID, readAt: Date?)], tried: [UUID: Date],
-                                               now: Date) -> UUID? {
+                                               now: Date, freshness: TimeInterval = FailoverPlanner.idleFreshness) -> UUID? {
         candidates.filter { candidate in
-            (candidate.readAt.map { now.timeIntervalSince($0) > FailoverPlanner.idleFreshness } ?? true)
-                && (tried[candidate.id].map { now.timeIntervalSince($0) >= FailoverPlanner.idleFreshness } ?? true)
+            (candidate.readAt.map { now.timeIntervalSince($0) > freshness } ?? true)
+                && (tried[candidate.id].map { now.timeIntervalSince($0) >= freshness } ?? true)
         }.min { ($0.readAt ?? .distantPast) < ($1.readAt ?? .distantPast) }?.id
     }
 
@@ -1545,9 +1555,17 @@ extension AppState {
     /// it is in the failover order, signed in and neither. A slot session on
     /// an account at or near its limit moves where `SessionPacer.place`
     /// puts it among the accounts that also carry one more typical session
-    /// for `SessionPacer.newSessionRunway` (`carriesNewSession`); with none,
-    /// it waits.
-    func limitPauseScope(_ provider: AIProviderType, current: Account, now: Date) -> PauseScope {
+    /// for `SessionPacer.newSessionRunway` (`carriesNewSession`) and were
+    /// read fresh (`freshForArrivals`); with none, it waits.
+    ///
+    /// `holding` names the sessions the pause in effect holds now and when
+    /// it began. Each of those goes on only where `releaseFits` lets it, the
+    /// cycle's ledger charged for each one released, so a pause ends, or
+    /// sessions go on, only as far as their accounts have room for all of
+    /// them by a fresh reading; the rest stay held. Nil when no pause holds
+    /// any session yet, as when one begins.
+    func limitPauseScope(_ provider: AIProviderType, current: Account, now: Date,
+                         holding: (sessions: Set<String>, pausedAt: Date)? = nil) -> PauseScope {
         let policy = failoverConfig.policy(for: provider)
         let planner = FailoverPlanner(settings: plannerSettings(provider))
         var verdicts: [UUID: Bool] = [:]
@@ -1555,7 +1573,7 @@ extension AppState {
             if let known = verdicts[id] { return known }
             guard let account = accounts.first(where: { $0.id == id }) else { return true }
             let state = quotaState(for: account, now: now)
-            let value = state.refusedAtLimit
+            let value = state.refusedAtLimit || refusedUntilReset(id, now: now)
                 || planner.servingVerdict(planner.servingView(state), now: now, lead: Self.suspensionLead).atOrNearLimit
             verdicts[id] = value
             return value
@@ -1572,6 +1590,7 @@ extension AppState {
         let destinations = Set(roomy.filter { account in
             Self.carriesNewSession(quotaState(for: account, now: now), planner: planner,
                                    newSessionBurn: typical / 1_000_000 * accountRatio(account.id), now: now)
+                && freshForArrivals(account.id, now: now)
         }.map(\.id))
         var placements: [String: UUID] = [:]
         // A session waiting on its account stays there, held.
@@ -1603,13 +1622,33 @@ extension AppState {
             }
             laneLedgers[provider] = ledger
         }
+        // The sessions the pause holds go on only as far as the ledger has
+        // room for all of them (`releaseFits`).
+        var releasing = laneLedger(provider, now: now)
+        var released: [String: Bool] = [:]
+        let outlook = holding == nil ? [] : capacityOutlookAccounts(provider, now: now)
+        let slotted = holding == nil ? [] : SessionSlots(provider).map { slotRebalanceSessions(provider, slots: $0, now: now) } ?? []
+        func goesOn(_ session: String, _ account: UUID) -> Bool {
+            guard let holding, holding.sessions.contains(session) else { return true }
+            if let known = released[session] { return known }
+            let value = releaseFits(provider, session: session, account: account, pausedAt: holding.pausedAt,
+                                    holding: holding.sessions, running: slotted, accounts: outlook, ledger: &releasing,
+                                    now: now)
+            released[session] = value
+            return value
+        }
         let pinned = pinnedSessionAccounts(provider)
         var pinnedLimits: [UUID: PinnedHold?] = [:]
+        defer { if holding != nil { laneLedgers[provider] = releasing } }
         return Self.pauseScope(sessions: sessions, active: current.id, atOrNearLimit: atOrNearLimit,
                                anyRoom: !roomy.isEmpty, destination: { placements[$0] },
                                pinnedHeld: { session in
             if pinned[session] == nil, let account = waiting[session] {
-                return !self.servesAgain(account, planner: planner, now: now)
+                return !self.servesAgain(account, planner: planner, now: now) || !goesOn(session, account)
+            }
+            if pinned[session] == nil, holding?.sessions.contains(session) == true {
+                let account = (sessions[session] ?? nil) ?? current.id
+                if !atOrNearLimit(account) { return !goesOn(session, account) }
             }
             guard let account = pinned[session] else { return nil }
             if self.pinnedHoldsPlayed[session] == account { return false }
@@ -1758,7 +1797,11 @@ extension AppState {
     /// every cycle by `prunePausedSessions`, also for a pause file found
     /// after a relaunch.
     func rescopeLimitPause(_ provider: AIProviderType, pause: AgentPauseGate.PauseFile, current: Account, now: Date) {
-        let scope = limitPauseScope(provider, current: current, now: now)
+        // The sessions it holds go on only as far as a fresh reading of
+        // their accounts shows room for all of them (`releaseFits`).
+        let holding = pause.holdsNewTurns == true
+            ? Set((liveSessions[provider] ?? []).map(\.sessionID)) : Set(pause.sessions)
+        let scope = limitPauseScope(provider, current: current, now: now, holding: (holding, pause.pausedAt))
         if pause.holdsNewTurns == true && scope.holdsNewTurns { return }
         requestPauseMoves(provider, scope.moves)
         let held = Set(scope.held)
@@ -1783,7 +1826,9 @@ extension AppState {
         if pause.holdsNewTurns == true {
             failoverEvents.record(provider, "An account has room again: sessions on accounts with room continue, and \(sessions.count) session(s) whose own account is still at its limit keep waiting.")
         } else if !released.isEmpty {
-            failoverEvents.record(provider, "Resumed \(released.count) paused session(s): the account each runs on has room again.")
+            let left = sessions.subtracting(chosen).count
+            failoverEvents.record(provider, "Resumed \(released.count) paused session(s): the account each runs on has room again for them."
+                                  + (left > 0 ? " \(left) keep waiting until their account has room for them too." : ""))
         }
     }
 
@@ -1938,9 +1983,27 @@ extension AppState {
                 account: entry.flatMap { accountIDs.contains($0.account) ? $0.account : nil }
             )
         }
-        let admitted = SessionPacer().admit(candidates, accounts: candidatesAccounts,
-                                            running: pacerSessions(provider, now: now), now: now)
+        // Each account also carries what this cycle already sent, planned or
+        // released onto it (`LaneLedger`), and is charged for each session
+        // resumed there.
+        var ledger = laneLedger(provider, now: now)
+        for id in held { ledger.remove(id) }
+        let charged = ledger.charges.values.filter { $0.from <= now.addingTimeInterval(SessionPacer.newSessionRunway) }
+        let running = pacerSessions(provider, now: now).filter { ledger.charge(of: $0.id) == nil }
+            + charged.map { charge in
+                SessionPacer.Session(id: charge.session, account: charge.lane, tokensPerHour: charge.tokensPerHour,
+                                     contextTokens: 0, lastSeen: now, cacheLifetime: nil)
+            }
+        let admitted = SessionPacer().admit(candidates, accounts: candidatesAccounts, running: running, now: now)
         guard !admitted.isEmpty else { return }
+        for (id, placement) in admitted {
+            let arrival = placement.account == sessionRates.entries[id]?.account ? 0
+                : SessionSizing.arrivalTokens(sessionRates.entries[id]?.contextTokens ?? 0,
+                                              cacheLifetime: sessionRates.entries[id]?.cacheLifetime)
+            ledger.charge(LaneLedger.Charge(session: id, lane: placement.account, tokensPerHour: demands[id] ?? typical,
+                                            arrivalTokens: arrival, from: now, kind: .released))
+        }
+        laneLedgers[provider] = ledger
         for (id, placement) in admitted {
             AgentPauseGate.resume(provider, session: id)
             sessionRates.resume(id, tokensPerHour: demands[id] ?? typical, at: now)
@@ -1966,11 +2029,11 @@ extension AppState {
     }
 
     /// The accounts paused sessions may continue on: any that is not at a
-    /// limit and not about to reach one, read recently enough to trust.
+    /// limit and not about to reach one, read fresh (`freshForArrivals`).
     private func admissionAccounts(_ provider: AIProviderType, planner: FailoverPlanner, now: Date) -> [SessionPacer.Account] {
         let policy = failoverConfig.policy(for: provider)
         func usable(_ state: QuotaAccountState) -> Bool {
-            planner.canSwitchWithoutReading(state, now: now)
+            planner.canSwitchWithoutReading(state, now: now) && freshForArrivals(state.id, now: now)
                 && planner.servingVerdict(state, now: now, lead: Self.suspensionLead) == .canServe
         }
         if provider == AIProviderType.routedProvider, policy.distributeSessions, routerInUse {

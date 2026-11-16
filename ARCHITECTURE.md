@@ -1595,6 +1595,28 @@ the pool weights and which sessions move, each time the pool is rebuilt
   there and the session itself, grown by 1/`windowFitShare`, fits the room
   the account has then, its resets refilling it on the way. An account at
   its limit carries nothing before the reset that frees it.
+- No session is sent, moved or released onto an account on a belief of
+  room (`AppState.freshForArrivals`): the account must have been read
+  within `arrivalReadingAge` (5 minutes), with no passed reset still
+  unconfirmed, and must have refused no request since with a reset still
+  to come (`refusedUntilReset`: a refusal keeps its account at its limit
+  until the reset its words state, `refusalHolds`, whatever older readings
+  show; one of a session whose model has an allowance of its own there is
+  left to `recordedLimitRefusal`). That holds for the stranded placement's
+  destinations, the slot path's fallback, `limitPauseScope`'s destinations
+  and `admitPausedSessions`' accounts. While sessions wait for room,
+  `readIdleDestinationIfDue` keeps every account showing room, those
+  serving sessions included, read within that age. A pause at a limit
+  releases the sessions it holds only as far as the ledger lets them
+  (`releaseFits`, from `rescopeLimitPause` through `limitPauseScope`'s
+  `holding`): each goes on where its account, read fresh, carries its rate
+  before it was held for the hour beside the sessions running there and
+  everything the cycle already sent or released there, the other held
+  sessions competing rather than loading it, and is charged once released;
+  one no window holds for the hour goes on alone on an account nothing
+  else uses. "The account each paused session runs on has room again;
+  resumed N session(s) and ended the pause." is recorded only once every
+  held session has gone on so.
 - Each session admission leaves waiting gets a plan (`HeldSessionPlan`,
   through `AppState.planHeldSessions`, kept in `heldSessionPlans`), and they
   are planned together (`HeldSessionPlan.planTogether`), the heaviest first,

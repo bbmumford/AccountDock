@@ -518,6 +518,12 @@ serve it that no rule places goes to another account only where that account
 has room for it for the hour beside everything sent there that cycle; it
 otherwise waits where it is.
 
+No session is moved or resumed onto an account on an old belief of room: the
+account must have been read within the last five minutes, and an account that
+refused a request stays at its limit until the reset the refusal names. When
+the accounts have room again, a pause releases only as many of its sessions as
+a fresh reading shows room for together; the rest keep waiting.
+
 When the router serves the sessions, a session also stays on its account while
 its prompt cache lasts, and one refused at the limit with the reset at most
 five minutes away is held by the router and continues with its cache.

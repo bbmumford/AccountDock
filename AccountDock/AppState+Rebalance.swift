@@ -213,8 +213,11 @@ extension AppState {
             noteLaneAdmission(provider, admission: nil, candidates: [], accounts: [], now: now)
             return [:]
         }
+        // A destination's room is taken from a fresh reading, never from an
+        // old belief or one a refusal since contradicts (`freshForArrivals`).
         let chosen = Self.strandedDestinations(members) { id in
             !accountCannotServe(id, provider: provider, planner: planner, now: now, wholeAllowance: true)
+                && freshForArrivals(id, now: now)
         }
         var pacerAccounts: [SessionPacer.Account] = []
         for member in chosen {
