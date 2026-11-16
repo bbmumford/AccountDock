@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Hover tooltip that works inside MenuBarExtra panels (where `.help()` doesn't).
@@ -29,20 +30,21 @@ private struct SessionCountLabel: View {
     @EnvironmentObject private var appState: AppState
     let provider: AIProviderType
     let sessions: Set<String>
-    /// Kept open by a click until the user dismisses it.
+    /// Open until the user clicks elsewhere: set by a click on the label,
+    /// or once the pointer reaches the open list, so its controls can be used.
     @State private var pinnedOpen = false
-    /// Whether the pointer is on the label or on the list it opened; the
-    /// list stays open while it is on either.
-    @State private var overLabel = false
-    @State private var overList = false
-    /// Closes the list a moment after the pointer leaves both, so moving
-    /// from the label onto the list does not close it on the way.
-    @State private var closing: Task<Void, Never>?
+    /// Opened by resting the pointer on the label.
+    @State private var hoverOpen = false
+    @State private var labelProbe = ScreenFrameProbe()
+    @State private var listProbe = ScreenFrameProbe()
+    @State private var watcher: Task<Void, Never>?
 
     var body: some View {
         let pinned = sessions.filter { appState.sessionPins.isPinned($0) }.count
         let refused = sessions.filter { appState.sessionRefusals[$0] != nil }.count
-        Button { pinnedOpen.toggle() } label: {
+        Button {
+            if pinnedOpen { close() } else { pinnedOpen = true }
+        } label: {
             HStack(spacing: 4) {
                 Text((sessions.count == 1 ? "1 session" : "\(sessions.count) sessions") + (pinned > 0 ? " · \(pinned) pinned" : ""))
                     .font(.caption2)
@@ -55,38 +57,61 @@ private struct SessionCountLabel: View {
             }
         }
         .buttonStyle(.plain)
-        // Resting the pointer on it opens the list with its controls (pin,
-        // pause or play, move) at once; it stays open while the pointer is
-        // on the label or the list, and a click keeps it open.
-        .onHover { hovering in
-            overLabel = hovering
-            hoverChanged()
+        .background(ScreenFrameProbeView(probe: labelProbe))
+        .onHover { inside in
+            if inside { openOnHover() }
         }
-        .popover(isPresented: Binding(get: { pinnedOpen || overLabel || overList },
-                                      set: { if !$0 { pinnedOpen = false; overLabel = false; overList = false } }),
+        .popover(isPresented: Binding(get: { pinnedOpen || hoverOpen },
+                                      set: { if !$0 { close() } }),
                  arrowEdge: .bottom) {
             SessionPinList(provider: provider, sessions: sessions.sorted {
                 appState.sessionSummary([$0]).localizedCaseInsensitiveCompare(appState.sessionSummary([$1])) == .orderedAscending
             })
             .environmentObject(appState)
-            .onHover { hovering in
-                overList = hovering
-                hoverChanged()
+            .background(ScreenFrameProbeView(probe: listProbe))
+        }
+        .onDisappear { close() }
+    }
+
+    /// Opens the list once the pointer has rested on the label briefly,
+    /// then follows the pointer by position: reaching the list keeps it
+    /// open (`pinnedOpen`) until the user clicks elsewhere, so a menu opened
+    /// from it does not close it; leaving the label for half a second
+    /// without reaching the list closes it.
+    private func openOnHover() {
+        guard !pinnedOpen, watcher == nil else { return }
+        watcher = Task { @MainActor in
+            defer { watcher = nil }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled, labelProbe.contains(NSEvent.mouseLocation) else { return }
+            hoverOpen = true
+            var outsideSince: Date?
+            while !Task.isCancelled, hoverOpen, !pinnedOpen {
+                let point = NSEvent.mouseLocation
+                if listProbe.windowContains(point) {
+                    pinnedOpen = true
+                    break
+                }
+                if labelProbe.contains(point) {
+                    outsideSince = nil
+                } else if let since = outsideSince {
+                    if Date().timeIntervalSince(since) > 0.5 {
+                        hoverOpen = false
+                        break
+                    }
+                } else {
+                    outsideSince = Date()
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
     }
 
-    /// Keeps the list open while the pointer is on the label or the list,
-    /// and closes it shortly after it has left both.
-    private func hoverChanged() {
-        closing?.cancel()
-        guard !overLabel, !overList, !pinnedOpen else { return }
-        closing = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            guard !Task.isCancelled else { return }
-            overLabel = false
-            overList = false
-        }
+    private func close() {
+        watcher?.cancel()
+        watcher = nil
+        pinnedOpen = false
+        hoverOpen = false
     }
 }
 
