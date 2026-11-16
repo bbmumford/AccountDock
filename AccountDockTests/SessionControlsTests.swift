@@ -44,6 +44,15 @@ final class SessionControlsTests: XCTestCase {
         return !process.isRunning
     }
 
+    /// Whether `condition` holds within `seconds`, checked every tenth of a
+    /// second, so a gate script slow to start on a loaded machine is waited
+    /// for rather than missed.
+    private func waitUntil(within seconds: Double, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !condition(), Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+        return condition()
+    }
+
     // MARK: - Pausing and playing one session
 
     func testPausingOneSessionWithNoPauseHoldsOnlyIt() throws {
@@ -59,16 +68,21 @@ final class SessionControlsTests: XCTestCase {
         let mineTurn = try runGate(event: "UserPromptSubmit", session: "mine")
         let otherStep = try runGate(event: "PostToolUse", session: "other")
         let otherTurn = try runGate(event: "UserPromptSubmit", session: "other")
-        XCTAssertTrue(waitForExit(otherStep, within: 3), "another session's tool call passes")
-        XCTAssertTrue(waitForExit(otherTurn, within: 3), "another session's new turn passes")
-        XCTAssertFalse(waitForExit(mineStep, within: 1.5), "the paused session waits at its tool call")
+        XCTAssertTrue(waitForExit(otherStep, within: 30), "another session's tool call passes")
+        XCTAssertTrue(waitForExit(otherTurn, within: 30), "another session's new turn passes")
+        // The paused session's gate has reached its wait, which it marks,
+        // rather than merely not started yet on a loaded machine.
+        XCTAssertTrue(waitUntil(within: 30) {
+            AgentPauseGate.waitingGates(.claudeCode, directory: pauseDirectory)["mine"] != nil
+        }, "the paused session waits at its tool call")
+        XCTAssertTrue(mineStep.isRunning, "the paused session waits at its tool call")
         XCTAssertTrue(mineTurn.isRunning, "and at its new turn")
 
         // Playing it, the last session held, ends the pause.
         XCTAssertTrue(AgentPauseGate.playOne(.claudeCode, session: "mine", running: ["mine", "other"],
                                              continuation: "on account Work", directory: pauseDirectory))
-        XCTAssertTrue(waitForExit(mineStep, within: 5))
-        XCTAssertTrue(waitForExit(mineTurn, within: 5))
+        XCTAssertTrue(waitForExit(mineStep, within: 30))
+        XCTAssertTrue(waitForExit(mineTurn, within: 30))
         XCTAssertNil(AgentPauseGate.read(.claudeCode, directory: pauseDirectory))
         XCTAssertTrue(AgentPauseGate.resumedSessions(.claudeCode, directory: pauseDirectory).isEmpty, "nothing is left behind")
     }
