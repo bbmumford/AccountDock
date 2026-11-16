@@ -796,10 +796,20 @@ with most of its week.
 
 Whether an account has a session window is read from each reading, account by
 account, because a plan can drop it while others keep it (Claude's Ultra plan
-for verified accounts; Max keeps it). A reading with the long window and no
-session window means the account has none: `merged(withNewer:clearingSession:)`
-drops a stored window, `FailoverPlanner`, `QuotaSimulator` and `SessionPacer`
+for verified accounts; Max keeps it). The usage endpoint also leaves out a
+window nothing has started, so for a plan known to have one
+(`Account.planHasSessionWindow`, from `ProviderCapabilities.sessionWindowPlans`:
+Claude's Pro, Max 5x and Team, Codex's Plus and Pro, every Kimi plan) a whole
+reading with the long window alone carries the window unstarted
+(`fillingUnstartedSessionWindow`, applied by `recordUsage`): the card shows it
+at 0% as "5-hour window not started" (`sessionWindowDisplay`) and a warm-up
+starts it, whether or not failover includes the account. For any other plan,
+a reading with the long window and no session window means the account has
+none: `merged(withNewer:clearingSession:)` drops a stored window, the card says
+it has no session limit, `FailoverPlanner`, `QuotaSimulator` and `SessionPacer`
 limit the account by its long window alone, and no warm-up probe runs for it.
+No warm-up runs for an account that needs signing in or whose plan does not
+include the CLI.
 `QuotaTrend` then holds its long-window baseline until it has risen two points
 or for 30 minutes, since a whole-percent step in a short interval is rounding.
 

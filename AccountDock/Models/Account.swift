@@ -55,6 +55,24 @@ struct Account: Identifiable, Codable, Hashable {
         return sizes[plan]
     }
 
+    /// Whether the account's plan has a session window: always where the
+    /// provider requires one, never where it has none, and where its plans
+    /// differ, when the plan, with its tier or alone, is one it lists
+    /// (`ProviderCapabilities.sessionWindowPlans`). Nil when the plan does
+    /// not say, and the replies decide. Read by `AppState.recordUsage` and
+    /// the account cards.
+    var planHasSessionWindow: Bool? {
+        switch provider.capabilities.sessionQuotaMode {
+        case .required: return true
+        case .unsupported: return false
+        case .whenPresent:
+            guard let plan = subscriptionType?.lowercased() else { return nil }
+            let plans = provider.capabilities.sessionWindowPlans
+            if let tier = rateLimitTier, plans.contains("\(plan):\(tier)") { return true }
+            return plans.contains(plan) ? true : nil
+        }
+    }
+
     /// Whether this profile is a viable destination for provider workloads.
     /// A ChatGPT Free login remains a valid identity, but does not provide the
     /// Codex subscription capacity needed for account switching/failover.

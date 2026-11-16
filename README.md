@@ -279,7 +279,11 @@ provider's failover order when it should take work.
   work until a reading confirms the reset; it is never assumed to be at 0%.
 - **Keep windows warm.** Optionally start each window as soon as its reset is
   confirmed, with one minimal request that never becomes a resumable session,
-  so the next countdown starts immediately. The reading and the warm-up use a
+  so the next countdown starts immediately. Every signed-in account whose plan
+  includes the CLI is warmed, whether or not failover includes it, and an
+  account whose plan has a five-hour window that has not started (Claude
+  reports none until it starts) shows it at 0% as "5-hour window not started"
+  rather than as having no session limit. The reading and the warm-up use a
   share of the provider's request allowance that background reads cannot use
   up.
 - **Intelligent balancing.** Optionally spend accounts in the order their weekly

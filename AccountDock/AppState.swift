@@ -1987,6 +1987,11 @@ final class AppState: ObservableObject {
         confirmsReset: Bool = true,
         whole: Bool = false
     ) {
+        // A whole reply of a plan with a session window that leaves the
+        // window out reports it not started.
+        let usage = whole && accounts.first(where: { $0.id == accountID })?.planHasSessionWindow == true
+            ? usage.fillingUnstartedSessionWindow(hasSessionWindow: true, length: Allowance.sessionWindow)
+            : usage
         let previousUsage = accountUsage[accountID]
         let reconciled = usage.preservingEstablishedCountdowns(from: accountUsage[accountID])
         accountUsage[accountID] = reconciled.expiringPassedResets()
@@ -2351,7 +2356,9 @@ final class AppState: ObservableObject {
     private func performWindowWarmup(accountID: UUID, windows requested: PendingWindowWarmup) async -> Bool {
         guard let account = accounts.first(where: { $0.id == accountID }) else { return false }
         let policy = failoverConfig.policy(for: account.provider)
-        guard policy.keepWindowsWarm,
+        // Every signed-in account that can serve the CLI is warmed, whether
+        // or not failover includes it; one that cannot serve gains nothing.
+        guard policy.keepWindowsWarm, account.supportsProviderWorkloads, !needsSignIn(account),
               let probe = quotaWindowProbe(for: account, readsLive: readsLiveCredential(account)) else { return false }
 
         guard accountWarmupsInFlight.insert(accountID).inserted else {
