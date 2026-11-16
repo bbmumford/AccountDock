@@ -492,7 +492,9 @@ extension AIProviderType {
                 iconName: "moon.stars",
                 configDirectory: "~/.kimi-code",
                 isImplemented: true,
-                requiresPaidPlanForWorkloads: false,
+                // Kimi Code is part of Kimi's paid memberships; a Free
+                // account cannot run it.
+                requiresPaidPlanForWorkloads: true,
                 sessionQuotaMode: .required,
                 sessionQuotaLabel: "5-hour",
                 supportsWeeklyQuota: true,

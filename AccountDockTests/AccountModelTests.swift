@@ -46,6 +46,9 @@ final class AccountModelTests: XCTestCase {
     func testFreeTierEligibilityIsProviderCapabilityDriven() {
         XCTAssertFalse(Account.supportsProviderWorkloads(provider: .claudeCode, subscriptionType: "free"))
         XCTAssertFalse(Account.supportsProviderWorkloads(provider: .codex, subscriptionType: "free"))
+        // Kimi Code is part of Kimi's paid memberships; its profile names the plan "Free".
+        XCTAssertFalse(Account.supportsProviderWorkloads(provider: .kimi, subscriptionType: "Free"))
+        XCTAssertTrue(Account.supportsProviderWorkloads(provider: .kimi, subscriptionType: "Ultra"))
         XCTAssertTrue(Account.supportsProviderWorkloads(provider: .gemini, subscriptionType: "free"))
     }
 
