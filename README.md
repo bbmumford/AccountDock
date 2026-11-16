@@ -390,7 +390,11 @@ While the accounts taking sessions will have spent what they hold before
 their reset anyway, AccountDock also spends smaller plans' 5-hour windows,
 whose unused room would expire at their reset: sessions between turns with
 small contexts and light use move into them first, and a window that fills
-passes its sessions on to the next account with room.
+passes its sessions on to the next account with room. A session placed in a
+window stays there until the window is used up, refuses it, or the time the
+event named passes: nothing else (the pacing above, a rebalance by hand or
+automatically) moves it back, or treats that window filling as a reason to
+move work off it.
 
 **When no account has allowance for a session's model, switch it to another
 model** (off by default): a session whose model's own weekly allowance is spent

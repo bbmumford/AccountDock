@@ -661,8 +661,11 @@ extension AppState {
                               now: now)
         }
         let pacer = SessionPacer(moveCostFactor: movesSessions ? 1 : provider.capabilities.sessionMoveCostFactor)
+        // Window placements are slot sessions'; the router's sessions have
+        // none.
+        let placements = movesSessions ? [:] : windowPlacementsInForce(provider, now: now)
         let plan = pacer.plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
-                              fixed: pinned, remainders: remainders)
+                              fixed: pinned, remainders: remainders, placements: placements)
         // A session is never moved to an account without allowance for the
         // model it uses, nor off a draining account before its limit.
         var moves = plan.moves.filter { session, destination in
@@ -789,11 +792,14 @@ extension AppState {
     /// (`pooled`) other than the active one that cannot carry the work a
     /// switch would move there (`FailoverPlanner.carries`, judged as
     /// `nextActiveSwitch` judges it, slot sessions staying where they are),
-    /// leaving out any a session moved to for a remainder within
-    /// `balanceMoveInterval`; and the `slotted` sessions not mid-turn. A
-    /// balance switch moves the whole shared group, so such an account's
-    /// remainder is otherwise left to expire. Nil when balancing is off or
-    /// no account qualifies.
+    /// those a session moved to for a remainder or a window within
+    /// `balanceMoveInterval` among them as `resting`; and the `slotted`
+    /// sessions not mid-turn. A balance switch moves the whole shared group,
+    /// so such an account's remainder is otherwise left to expire. A resting
+    /// account stays among the accounts: left out, it would count as a
+    /// carrier whose window the move just began to fill, and the shedding
+    /// rule and a rebalance would take the session straight back. Nil when
+    /// balancing is off or no account qualifies.
     func remainderSpending(_ provider: AIProviderType, pooled: Set<UUID>, slotted: Set<String>,
                            now: Date) -> SessionPacer.RemainderSpending? {
         let policy = failoverConfig.policy(for: provider)
@@ -805,11 +811,13 @@ extension AppState {
         guard let current = states.first(where: { $0.id == active }) else { return nil }
         let small = Set(states.filter { state in
             state.id != active && !planner.carries(state, from: current, at: now)
-                && (remainderMovedAt[state.id].map { now.timeIntervalSince($0) >= Self.balanceMoveInterval } ?? true)
         }.map(\.id))
         guard !small.isEmpty else { return nil }
+        let resting = small.filter { id in
+            remainderMovedAt[id].map { now.timeIntervalSince($0) < Self.balanceMoveInterval } ?? false
+        }
         let working = Set((liveSessions[provider] ?? []).filter(\.isWorking).map(\.sessionID))
-        return SessionPacer.RemainderSpending(accounts: small, sessions: slotted.subtracting(working))
+        return SessionPacer.RemainderSpending(accounts: small, sessions: slotted.subtracting(working), resting: resting)
     }
 
     /// The event for a slot session moved to use an account's session

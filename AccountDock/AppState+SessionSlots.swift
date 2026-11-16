@@ -665,11 +665,28 @@ extension AppState {
                 : requested ? "a request asked for it"
                 : spent.map { "\(from) has no \($0) allowance left" + (modelSpent ? "; its other sessions stay" : "") }
                 ?? "\(from) can no longer serve it"
+            // A session leaving the account of its window placement leaves
+            // the placement.
+            if let session, windowPlacements[session.sessionID].map({ $0.account != target }) == true {
+                windowPlacements[session.sessionID] = nil
+            }
+            // A rebalance's move into a session window is a window
+            // placement as the pacer's own is.
+            if requested, let session, let use = requestedWindowUses.removeValue(forKey: session.sessionID),
+               use.account == target {
+                remainderMovedAt[target] = now
+                recordWindowPlacement(session.sessionID, use: use, now: now)
+            }
             // A move to spend an allowance that would otherwise expire names
-            // that allowance, and holds the account for `balanceMoveInterval`.
+            // that allowance, and rests the account for `balanceMoveInterval`;
+            // a move into a session window is recorded as a window placement.
             if balanced, let session, let remainder = sessionSlotStates[provider]?.remainderMoves[session.sessionID],
                remainder.account == target {
                 remainderMovedAt[target] = now
+                if remainder.window {
+                    recordWindowPlacement(session.sessionID, use: SessionPacer.WindowUse(account: target, until: remainder.resetsAt),
+                                          now: now)
+                }
                 failoverEvents.record(provider, remainder.window
                     ? Self.windowMoveEvent(session: subject, from: from, account: to, until: remainder.resetsAt, now: now)
                     : Self.remainderMoveEvent(session: subject, account: to, percentLeft: remainder.percentLeft,
@@ -688,6 +705,8 @@ extension AppState {
             }.value
             sparesOf[id, default: 0] += made
         }
+        // A rebalance's window outlives no request it belongs to.
+        requestedWindowUses = requestedWindowUses.filter { requestedSlotMoves[$0.key] != nil }
         if !remove.isEmpty || !removeSpares.isEmpty {
             for directory in remove {
                 sessionSlotStates[provider]?.directoryServing[directory.path] = nil

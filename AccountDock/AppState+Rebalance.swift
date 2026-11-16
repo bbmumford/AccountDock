@@ -27,6 +27,9 @@ extension AppState {
         /// How many of `moves` go to use session windows that would
         /// otherwise expire unused (`SessionPacer.Rebalance.windowUses`).
         var windowMoves = 0
+        /// Those moves' windows, by session, which `applyRebalance` hands to
+        /// `serveSessionSlots` as window placements.
+        var windowUses: [String: SessionPacer.WindowUse] = [:]
         /// How many of `moves` take a session off an account that cannot
         /// serve it (`SessionPacer.Rebalance.unblocked`).
         var unblockedMoves = 0
@@ -73,11 +76,13 @@ extension AppState {
         // The sessions on the shared sign-in are none of these and never
         // move; they count where the active account is and will be.
         let shared = sharedGroup(provider, sessions: pacerSessions(provider, now: now), now: now)?.group
-        // The accounts `plan` may spend the session windows of, so both
-        // follow one rule while those windows are worth spending.
-        let windows = remainderSpending(provider, pooled: destinations, slotted: Set(sessions.map(\.id)), now: now)?.accounts
+        // The accounts `plan` may spend the session windows of, and the
+        // window placements in force, so both follow one rule while those
+        // windows are worth spending and while a placement fills one.
+        let spending = remainderSpending(provider, pooled: destinations, slotted: Set(sessions.map(\.id)), now: now)
         let plan = pacer.rebalance(accounts: pacerAccounts, sessions: sessions, destinations: destinations, now: now,
-                                   sharedGroup: shared, windows: windows)
+                                   sharedGroup: shared, windows: spending?.accounts, resting: spending?.resting ?? [],
+                                   placements: windowPlacementsInForce(provider, now: now))
         let from = sessions.reduce(into: [String: UUID]()) { $0[$1.id] = $1.account }
         let moves = plan.moves.compactMap { id, to in from[id].map { RebalanceMove(session: id, from: $0, to: to) } }
             .sorted { $0.session < $1.session }
@@ -91,6 +96,7 @@ extension AppState {
             },
             sharedNote: sharedGroupNote(shared),
             windowMoves: plan.windowUses.count,
+            windowUses: plan.windowUses,
             unblockedMoves: plan.unblocked.count
         )
     }
@@ -177,8 +183,13 @@ extension AppState {
         }
         let strandedIDs = Set(stranded.map(\.id))
         let shared = sharedGroup(provider, sessions: pacerSessions(provider, now: now), now: now)?.group
-        return SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor).place(stranded, accounts: pacerAccounts, running: running.filter { !strandedIDs.contains($0.id) },
-                                    destinations: Set(pacerAccounts.map(\.id)), now: now, sharedGroup: shared)
+        // A window a placement fills has its room planned for that
+        // placement; it takes a stranded session only when nothing else can.
+        let all = Set(pacerAccounts.map(\.id))
+        let open = all.subtracting(windowPlacementsInForce(provider, now: now).values.map(\.account))
+        return SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
+            .place(stranded, accounts: pacerAccounts, running: running.filter { !strandedIDs.contains($0.id) },
+                   destinations: open.isEmpty ? all : open, now: now, sharedGroup: shared)
     }
 
     /// The pool members a session whose account can no longer serve it may
@@ -201,7 +212,10 @@ extension AppState {
     func applyRebalance(_ provider: AIProviderType, now: Date = Date()) async -> RebalancePreview {
         let preview = rebalancePreview(provider, now: now)
         guard !preview.moves.isEmpty else { return preview }
-        for move in preview.moves { requestedSlotMoves[move.session] = move.to }
+        for move in preview.moves {
+            requestedSlotMoves[move.session] = move.to
+            requestedWindowUses[move.session] = preview.windowUses[move.session]
+        }
         lastRebalance[provider] = now
         failoverEvents.record(provider, "Rebalancing sessions: \(preview.outcome)"
                               + (preview.sharedNote.map { " " + $0 } ?? ""))

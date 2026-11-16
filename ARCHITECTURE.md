@@ -777,11 +777,14 @@ group's share, now or from the projected switch, spends nothing this way,
 and an account giving sessions up takes none. The move goes through the
 pacer's moves and `serveSessionSlots`, which records "Moved session X
 (light use) to Backup to use its last 2% before it resets on Mon 7:59 am;
-it rebuilds its cache there." (`AppState.remainderMoveEvent`) and offers
-that account again only `balanceMoveInterval` later
-(`AppState.remainderMovedAt`). A session placed so reaches no limit there
-before the reset, so shedding leaves it; if the account reaches its limit
-after all, the session moves on as any stranded slot session does.
+it rebuilds its cache there." (`AppState.remainderMoveEvent`) and keeps
+that account among the accounts it offers, but resting
+(`RemainderSpending.resting`, from `AppState.remainderMovedAt`): for
+`balanceMoveInterval` it takes no further session, yet it is still no
+carrier, so the shedding rule and a rebalance do not take the session
+straight back. A session placed so reaches no limit there before the
+reset, so shedding leaves it; if the account reaches its limit after all,
+the session moves on as any stranded slot session does.
 
 A small plan's 5-hour window is a refilling allowance: room it has left at
 its reset expires, and the window starts again full. While the accounts that
@@ -804,10 +807,25 @@ hour each account would otherwise leave unused: the windows' room until
 their resets, and a carrier's room until the first carrier's reset, which is
 none once its own sessions spend it. `serveSessionSlots` records "Moved
 session X from Personal to hexorda, using hexorda's session window until
-12:20 pm, …" (`AppState.windowMoveEvent`). A window that fills leaves its
-sessions to the stranded placement above, so they move on to the next
-account with room, or back, and a window spent again once it refills. The
-shared group stays where `FailoverPlanner.carries` lets it.
+12:20 pm, …" (`AppState.windowMoveEvent`).
+
+Every such move, the pacer's or a rebalance's, is a **window placement**
+(`AppState.windowPlacements`): the session is planned to stay on that
+account until its window is used up or the placement's "until" time, and
+every rule that moves slot sessions follows that one intent. While the
+session's slot serves the account and "until" has not passed
+(`AppState.windowPlacementsInForce`), `SessionPacer.plan` and `rebalance`
+take it as a session that stays, and the account it fills
+(`Plan.filling`, `Rebalance.filling`) as filling as planned: reaching its
+session window's limit is no reason to shed (only a weekly limit binding
+first still is), the shedding rule sends it no session given up elsewhere,
+a stranded session goes there only when nothing else can serve, and
+rebalancing settles it, neither moving a session off it or onto it nor
+counting its planned fill as a run-out to improve, so neither the manual
+nor the automatic rebalance undoes the move. A window that fills, or
+refuses, leaves its sessions to the stranded placement above, so they move
+on to the next account with room, and a window spent again once it
+refills. The shared group stays where `FailoverPlanner.carries` lets it.
 
 For new
 sessions, `carriesNewSession` and the pacer's runway rule let such an
