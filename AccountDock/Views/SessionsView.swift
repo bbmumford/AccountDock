@@ -78,6 +78,13 @@ struct SessionsView: View {
             Text(section.pauseLine)
                 .font(.caption)
                 .foregroundStyle(.textSecondary)
+            // Why a small plan's window with room takes no running session.
+            ForEach(appState.laneNotes[provider] ?? [], id: \.self) { note in
+                Label(note, systemImage: "info.circle")
+                    .font(.caption2)
+                    .foregroundStyle(.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let outcome = moveOutcomes[provider] {
                 Label(outcome.detail, systemImage: outcome.ok ? "checkmark.circle" : "exclamationmark.triangle")
                     .font(.caption2)

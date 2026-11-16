@@ -37,6 +37,10 @@ extension AppState {
         /// (`SessionPacer.Rebalance.heldBack`), with when each hold began.
         var heldBack: [String: UUID] = [:]
         var holds: [String: Date] = [:]
+        /// Why each small plan's window with room takes no running session
+        /// (`AppState.laneNotes`), so the preview says why it moves nothing
+        /// there.
+        var laneNotes: [String] = []
 
         /// How the earliest run-out changes, in words.
         var outcome: String {
@@ -113,7 +117,8 @@ extension AppState {
             windowUses: plan.windowUses,
             unblockedMoves: plan.unblocked.count,
             heldBack: plan.heldBack,
-            holds: holds
+            holds: holds,
+            laneNotes: laneNotes[provider] ?? []
         )
     }
 
@@ -168,17 +173,19 @@ extension AppState {
     }
 
     /// The rate a slot session counts at in `slotRebalanceSessions`: its
-    /// rate over its last hour (`recent`), at least its `current` one;
+    /// rate over its last hour (`recent`), at least its `current` one, while
+    /// it was heard from within that hour (`SessionRates.demandWindow`), as
+    /// `SessionPacer.spends` judges a light session that is still in use;
     /// `SessionPacer.defaultSessionRate` for one never heard from
-    /// (`lastSeen` nil); and for one quiet past `SessionPacer.idleAfter`,
-    /// what it uses now, near nothing. Such a session waits on its user and
-    /// spends nothing wherever it is, so no rebalance moves it to make the
-    /// others last longer (`SessionPacer.rebalance` and its window rule
-    /// gain nothing from a rate of nothing), and moved anyway it would
-    /// rewrite its whole context when it next speaks.
+    /// (`lastSeen` nil); and for one quiet longer than that, what it uses
+    /// now, near nothing. Such a session waits on its user and spends
+    /// nothing wherever it is, so no rebalance moves it to make the others
+    /// last longer (`SessionPacer.rebalance` and its window rule gain
+    /// nothing from a rate of nothing), and moved anyway it would rewrite
+    /// its whole context when it next speaks.
     nonisolated static func rebalanceRate(current: Double, recent: Double?, lastSeen: Date?, now: Date) -> Double {
         guard let lastSeen else { return SessionPacer.defaultSessionRate }
-        if now.timeIntervalSince(lastSeen) > SessionPacer.idleAfter { return current }
+        if now.timeIntervalSince(lastSeen) > SessionRates.demandWindow { return current }
         return max(current, recent ?? 0)
     }
 

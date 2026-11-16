@@ -84,6 +84,7 @@ extension AppState {
                 if due { await fetchUsageNow(account, priority: account.isActive ? .critical : .candidate) }
             }
         }
+        await readIdleDestinationIfDue(now: now)
         await verifyPassedResets(now: now)
         await recheckCLIAccessIfDue(now: now)
         await refreshLimitResetsIfDue(now: now)
@@ -199,6 +200,47 @@ extension AppState {
     func accountsServingSessions(_ provider: AIProviderType) -> [Account] {
         accounts.filter { $0.provider == provider && ($0.isActive || accountSessions[$0.id]?.isEmpty == false) }
             .sorted { $0.isActive && !$1.isActive }
+    }
+
+    /// Reads one idle account that could take sessions, so it stays a
+    /// destination: for each provider serving sessions from several
+    /// accounts, an included, signed-in account serving no session whose
+    /// last reading shows room and is older than
+    /// `FailoverPlanner.idleFreshness` (`idleDestinationDue`). A reading
+    /// that old keeps the account out of the moves the pacer makes
+    /// (`buildPool`'s `stale`), and nothing else reads an account no
+    /// session uses until its reset. One account per quota cycle, at the
+    /// priority of a passed reset's confirmation, within the provider's
+    /// request budget; a reading not taken is tried again after
+    /// `idleFreshness`.
+    func readIdleDestinationIfDue(now: Date) async {
+        for provider in monitoredProviders where failoverConfig.policy(for: provider).distributeSessions {
+            let policy = failoverConfig.policy(for: provider)
+            let planner = FailoverPlanner(settings: plannerSettings(provider))
+            let serving = Set(accountsServingSessions(provider).map(\.id))
+            let candidates = accounts.filter { account in
+                account.provider == provider && !policy.excludedAccountIDs.contains(account.id) && !serving.contains(account.id)
+                    && !needsSignIn(account) && account.cliUnavailableReason == nil
+                    && planner.tier(quotaState(for: account, now: now), now: now) <= .usable
+            }.map { (id: $0.id, readAt: accountUsageUpdatedAt[$0.id]) }
+            guard let id = Self.idleDestinationDue(candidates, tried: idleDestinationReadAt, now: now),
+                  let account = accounts.first(where: { $0.id == id }) else { continue }
+            idleDestinationReadAt[id] = now
+            await fetchUsageNow(account, priority: .verification)
+            return
+        }
+    }
+
+    /// The idle account to read next (`readIdleDestinationIfDue`): of
+    /// `candidates`, one whose reading is older than
+    /// `FailoverPlanner.idleFreshness` and that was not tried within it,
+    /// the one read longest ago first; nil when none is due.
+    nonisolated static func idleDestinationDue(_ candidates: [(id: UUID, readAt: Date?)], tried: [UUID: Date],
+                                               now: Date) -> UUID? {
+        candidates.filter { candidate in
+            (candidate.readAt.map { now.timeIntervalSince($0) > FailoverPlanner.idleFreshness } ?? true)
+                && (tried[candidate.id].map { now.timeIntervalSince($0) >= FailoverPlanner.idleFreshness } ?? true)
+        }.min { ($0.readAt ?? .distantPast) < ($1.readAt ?? .distantPast) }?.id
     }
 
     /// One reading of an account taken whole from its provider's endpoint.

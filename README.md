@@ -425,7 +425,16 @@ that moves the session, by the usual rules.
 While the accounts taking sessions will have spent what they hold before
 their reset anyway, AccountDock also spends smaller plans' 5-hour windows,
 whose unused room would expire at their reset: sessions between turns with
-small contexts and light use move into them first, and a window that fills
+small contexts and light use move into them first. A session counts as light
+but in use by what it used over its last hour, not by how long it has been
+quiet, and moves only when the room its move frees exceeds the cache rewrite
+it costs there (a 295k-token session using 0.5M an hour goes; an 892k-token
+one using 0.4M stays). Why a small plan's window takes no running session is
+shown under the provider on the Sessions page and in the rebalance preview
+("voltrix: no running session fits; the lightest active one would use its
+window in 40 min."), and an idle account that could take sessions is read
+again once its reading is a quarter of an hour old, so it stays a
+destination. A window that fills
 passes its sessions on to the next account with room. A session placed in a
 window stays there until the window is used up, refuses it, or the time the
 event named passes: nothing else (the pacing above, a rebalance by hand or

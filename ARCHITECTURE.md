@@ -832,12 +832,17 @@ and whose weekly allowance the accounts' present rates would leave unused
 at its reset takes the lightest slot session (by `SessionPacer.lightRate`,
 the larger of its current rate and its last hour's) that is between turns
 (quiet for `betweenTurns`, and not working by its record) yet still spends
-(heard from within `idleAfter`, 15 minutes, at a rate above nothing:
-`SessionPacer.spends`), not pinned, not
+(`SessionPacer.spends`: at a rate above nothing, heard from within
+`idleAfter`, 15 minutes, or using tokens over its last hour and heard from
+within it, as a session its user answers every half hour does; such a
+session is a candidate although quiet past `activeWithin`), not pinned, not
 on a draining account and not on another such account, whose use until the
 reset plus its cache rewrite (`moveCost`) fits in what is left, keeping the
-account within every window and its model's own allowance, and whose use
-is at least `remainderWorth` (2) times the rewrite. A second session
+account within every window and its model's own allowance, and whose move
+is worth its rewrite (`SessionPacer.worthMoving`): the use it makes by the
+account's session-window reset (by the weekly reset for an account without
+a session window) is at least `remainderWorth` (2) times the rewrite, or
+exceeds it by `minimumLeftover` (2%), a net gain of room. A second session
 follows only while more than half of the remainder would still go unused.
 Accounts that reset first are served first; the account carrying the
 group's share, now or from the projected switch, spends nothing this way,
@@ -870,9 +875,13 @@ leave once its own rate has run; one at a time, the slot session between
 turns whose arrival costs the fewest tokens per hour it then stays goes to
 the window where that is least, so small contexts and light rates go first
 and heavy sessions spread over the windows by their token room. A session
-goes only when it spends (`spends`), its whole arrival write fits and the
-use it makes of the room is worth `remainderWorth` times that write, so an
-800k-token session moves only into room no cheaper session takes; and only
+goes only when it spends (`spends`), its whole arrival write fits and its
+move is worth that write (`worthMoving`: the use it makes of the room, which
+is room freed where it was, is twice the write or exceeds it by
+`minimumLeftover`), so an 800k-token session moves only into room no cheaper
+session takes and 892k tokens of context are never rewritten to move 0.4M an
+hour; 19496bb9's 0.5M an hour and 295k of context go into a fresh Pro window
+two hours from its reset (5.3% to arrive, 8.9% of use); and only
 when that write and its rate until the reset, or for `newSessionRunway`
 when the reset is later, fit `windowFitShare` (90%) of the room. A window's
 last few percent before an imminent reset take a session sized to them (5M
@@ -1427,6 +1436,23 @@ the pool weights and which sessions move, each time the pool is rebuilt
   expires, so it keeps its cache." A pause file that names one account
   (`PauseFile.account`), kept from before sessions waited one by one, still
   ends at that account's reset.
+- Why a small plan's window with room takes no running session is said
+  (`AppState.noteLaneShortfalls`, `SessionPacer.laneShortfall`, kept in
+  `laneNotes`): under the provider on the Sessions page and in the rebalance
+  preview, as "voltrix: no running session fits; the lightest active one
+  (session X) would use its window in 40 min.", or that none elsewhere has
+  used anything in its last hour, that the lightest one's rewrite outweighs
+  its use, that the accounts carrying the work still have room until their
+  resets, or that its reading is too old.
+- An idle account that could take sessions stays a destination
+  (`AppState.readIdleDestinationIfDue`, `idleDestinationDue`): while
+  sessions are served from several accounts, each quota cycle reads one
+  included, signed-in account serving no session whose last reading shows
+  room and is older than `FailoverPlanner.idleFreshness` (15 minutes), the
+  one read longest ago first, at the priority of a passed reset's
+  confirmation within the provider's request budget; a reading not taken is
+  tried again after `idleFreshness`. Nothing else reads an account no session
+  uses, and a reading too old keeps it out of the pacer's moves (`stale`).
 - New sessions go to accounts by unused rate, the pool weight times the
   rate the account can still add without reaching its limit; with none
   left anywhere, by the share of the time to its reset each account lasts
@@ -1599,8 +1625,8 @@ provider whose sessions run in one-session slots; also the requests action
 slot sessions so the first account to reach a limit does so as late as
 possible (`SessionPacer.rebalance`). Each session counts at its rate over
 its last hour (`AppState.rebalanceRate`: `defaultSessionRate` with no
-history, and what it uses now, near nothing, once quiet past `idleAfter`,
-so no idle session is moved to make the others last longer) against every
+history, and what it uses now, near nothing, once it has used nothing over
+its last hour, so no idle session is moved to make the others last longer) against every
 window and its model's own allowance, and each account also carries the use
 its readings show beyond its sessions and the shared group
 (`SessionPacer.unseenBurn`), which stays wherever the sessions go: the rate
