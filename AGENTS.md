@@ -24,6 +24,7 @@ screenshots, release), `RELEASE_NOTES.md`.
   - `ProviderCapabilities.swift`: one declaration per provider; shared code reads it.
   - `FailoverPlanner.swift`: pure account-selection logic; `QuotaSimulator.swift`, `QuotaTrend.swift`, `UsageLearning.swift` feed it.
   - `FailoverConfig.swift`: per-provider policy and its store.
+  - `CapacityOutlook.swift`: the Sessions page's Outlook, projecting the sessions' rates over the accounts' windows (`AppState+CapacityOutlook.swift` builds it, `Components/CapacityOutlookView.swift` draws it).
   - `RouteTarget.swift`: services Claude Code requests can be routed to.
   - `Account.swift`, `*Data.swift`: accounts, usage, costs, activity.
 - **Services**:

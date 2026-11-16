@@ -1580,6 +1580,25 @@ the pool weights and which sessions move, each time the pool is rebuilt
   reads "Session balancing admitted 2 of 9 waiting session(s) to cybrio's
   fresh window: they fit until its reset at 8:29 pm; 7 wait for their own
   accounts."
+- Each session admission leaves waiting gets a plan (`HeldSessionPlan`,
+  through `AppState.planHeldSessions`, kept in `heldSessionPlans`): it waits
+  for the earliest lane, the account whose 5-hour window, week or limit
+  resets first with room for an hour of it beside the sessions there, by
+  admission's own measure, its own account included and charged no rewrite.
+  It moves now instead to a lane with room only when that serves more work
+  until an hour past that reset, each account weighed alone
+  (`CapacityOutlook.servedAlone`: what the session adds there, less what the
+  sessions already on it lose once it fills the lane early, less its
+  rewrite), and only when its own account resets later than its cache lasts;
+  a tie waits. A planned wait whose reset has come is placed on its lane once
+  that lane is a destination (`HeldSessionPlan.due`: a reading confirms the
+  reset), and stands for `accountHoldGrace` until one does. The plan is the
+  session's row note ("resumes on fluxon about 12:50 am") and an event when
+  it changes. While admission keeps a session on its account, played or not,
+  `slotChoice`'s path for an account that can no longer serve keeps it there
+  (`heldOn`, from `admissionHolds`) rather than sending it to the pool's
+  `fallback`; admission's placement or the user's own move takes it
+  elsewhere.
 - An account a threshold switch left with room still on it drains
   (`AppState.drainingAccounts`): above its thresholds it keeps a pool weight
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when
@@ -1880,6 +1899,36 @@ forecast use fits (`SessionPacer.admit`):
 
 The user's own pause still ends whole, and a provider without router token
 counts resumes as before.
+
+### Outlook
+
+`CapacityOutlook.project` answers, for the Sessions page and the usage tab
+(`CapacityOutlookView`), how long a provider's sessions run at their current
+rates and when they run again. `AppState.capacityOutlook` builds its inputs
+and keeps the result until the next usage refresh or for a minute
+(`capacityOutlookLifetime`), so a redraw does not project again: every account
+of the provider as `pacerAccount` sees it, with its `sessionPerWeekly` to size
+a new week, taking part unless excluded, needing sign-in or ineligible, and
+blocked until its `bindingReset` when at its limit; and every live session at
+`SessionPacer.lightRate`, a session a limit holds at `SessionRates.heldDemand`
+and one the user holds at nothing. Nil until the router has measured a
+session's rate.
+
+The projection steps forward five minutes at a time, and to every reset in
+between. At each step a passed 5-hour window starts again empty, a passed week
+starts again full a week on, and the step's demand is served from the
+accounts with room (`roomBy` at that moment) in the order session balancing
+spends them: first the accounts whose week would expire unused even with
+every window filled (`SessionPacer.useBy`), soonest use-by time first, each up
+to its window's limit, then the rest by weekly balancing's latest start
+(`Allowance.latestStart`). Within a step the served part runs first, so
+the moment the last room goes is exact to the step's share. The first step
+with demand left over is the pause (`allPausedAt`); after it, a running stretch
+of at least `resumeRun` is the resume, named by the refill that frees the most
+tokens at its start, and shorter ones are bursts. It stops shortly after the
+resume, or after seven days. The what-if runs it again without the heaviest
+session. Moves' cache rewrites and use the router does not see are not
+counted.
 
 ### Lifecycle
 

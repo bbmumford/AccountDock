@@ -520,8 +520,10 @@ extension AppState {
         let placements = members.isEmpty ? [:]
             : strandedPlacements(provider, slots: slots, members: members, unrecorded: unrecorded, now: now)
         maintainPins(provider, sessionsBySlot: sessionsByDirectory.mapValues(\.sessionID), now: now)
-        // Sessions waiting on their account for its reset keep it.
+        // Sessions waiting on their account for its reset keep it, and one
+        // lane admission keeps there stays even once the user plays it.
         let waiting = waitingSessions(provider)
+        let admissionHeld = admissionHolds(provider)
         var credentials: [UUID: SlotCredential] = [:]
         func credential(_ id: UUID) async -> SlotCredential? {
             if let known = credentials[id] { return known }
@@ -599,7 +601,8 @@ extension AppState {
                                          requested: session.flatMap { requestedSlotMoves.removeValue(forKey: $0.sessionID) },
                                          balance: balance, cannotServe: cannotServe, modelSpent: modelSpent,
                                          byWeight: byWeight, placed: session.map { placements[$0.sessionID] } ?? placements[path],
-                                         fallback: fallback, waitsOn: session.flatMap { waiting[$0.sessionID] })
+                                         fallback: fallback, waitsOn: session.flatMap { waiting[$0.sessionID] },
+                                         heldOn: session.flatMap { admissionHeld[$0.sessionID] })
             let target = choice.target
             let balanced = choice.balanced
             let requested = choice.requested
@@ -803,13 +806,18 @@ extension AppState {
     /// whatever else would apply, and a request for it is dropped: only
     /// unpinning frees it. A session that waits on its account
     /// (`waitsOn`, from `sessionWaits`) keeps that account although it
-    /// cannot serve it now; only a requested move takes it elsewhere.
+    /// cannot serve it now; only a requested move takes it elsewhere. One
+    /// lane admission keeps on an account (`heldOn`, from `admissionHolds`,
+    /// played or not) goes only where admission places it, never to
+    /// `fallback`, since admission found no lane that carries it.
     nonisolated static func slotChoice(current: UUID?, pinned: UUID?, requested: UUID?, balance: UUID?,
                                        cannotServe: (UUID) -> Bool, modelSpent: Bool, byWeight: [UUID],
-                                       placed: UUID? = nil, fallback: UUID?, waitsOn: UUID? = nil) -> SlotChoice {
+                                       placed: UUID? = nil, fallback: UUID?, waitsOn: UUID? = nil,
+                                       heldOn: UUID? = nil) -> SlotChoice {
         if let pinned { return SlotChoice(target: pinned, keptPinned: cannotServe(pinned)) }
         let target = current.flatMap { cannotServe($0) ? nil : $0 }
-            ?? (modelSpent ? byWeight.first { !cannotServe($0) } : placed.flatMap { cannotServe($0) ? nil : $0 } ?? fallback)
+            ?? (modelSpent ? byWeight.first { !cannotServe($0) }
+                : placed.flatMap { cannotServe($0) ? nil : $0 } ?? heldOn ?? fallback)
         if let requested { return SlotChoice(target: requested, requested: true) }
         if let waitsOn { return SlotChoice(target: waitsOn) }
         if let balance, balance != target { return SlotChoice(target: balance, balanced: true) }

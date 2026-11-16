@@ -57,6 +57,16 @@ struct SessionsView: View {
         return providers.map { appState.sessionsSection($0) }
     }
 
+    /// The Outlook is projected from the live sessions and accounts, so the
+    /// screenshot renderer's sample sections show none.
+    private var showsOutlook: Bool {
+        #if DEBUG
+        return sampleSections == nil
+        #else
+        return true
+        #endif
+    }
+
     private var providers: [AIProviderType] {
         let hidden = ProviderVisibility.hidden(in: hiddenProviders)
         return appState.sessionControlProviders.filter { provider in
@@ -78,12 +88,24 @@ struct SessionsView: View {
             Text(section.pauseLine)
                 .font(.caption)
                 .foregroundStyle(.textSecondary)
-            // Why a small plan's window with room takes no running session.
-            ForEach(appState.laneNotes[provider] ?? [], id: \.self) { note in
-                Label(note, systemImage: "info.circle")
-                    .font(.caption2)
-                    .foregroundStyle(.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            // The Outlook for the pool as a whole, then the pacer's notes on
+            // single accounts: what an account with free room does with it
+            // (`useByNotes`) and why a small plan's window with room takes
+            // no running session.
+            let outlook = showsOutlook && !section.entries.isEmpty ? appState.capacityOutlook(provider) : nil
+            let notes = appState.laneNotes[provider] ?? []
+            if outlook != nil || !notes.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let outlook {
+                        CapacityOutlookView(provider: provider, outlook: outlook)
+                    }
+                    ForEach(notes, id: \.self) { note in
+                        Label(note, systemImage: "info.circle")
+                            .font(.caption2)
+                            .foregroundStyle(.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
             if let outcome = moveOutcomes[provider] {
                 Label(outcome.detail, systemImage: outcome.ok ? "checkmark.circle" : "exclamationmark.triangle")
@@ -165,10 +187,12 @@ struct SessionsView: View {
         .accessibilityElement(children: .contain)
     }
 
-    /// When a held session goes on: when its account is expected to serve
-    /// it again, or, paused by the user, when the user plays it.
+    /// When a held session goes on: where and when its wait for a lane
+    /// resumes it, else when its account is expected to serve it again, or,
+    /// paused by the user, when the user plays it.
     private func pauseNote(_ row: SessionRow) -> String? {
         if row.pausedByYou { return "until you play it" }
+        if let plan = row.waitPlan { return plan }
         return row.resumeAt.map { "resumes about \(UsageFormat.clock($0))" }
     }
 

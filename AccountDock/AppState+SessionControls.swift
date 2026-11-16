@@ -31,6 +31,9 @@ struct SessionRow: Identifiable, Equatable {
     /// While a pause holds it for its account's limit, when that account is
     /// expected to serve it again (`AppState.pausedSessions`).
     var resumeAt: Date? = nil
+    /// While lane admission keeps it waiting, where and when it resumes
+    /// (`AppState.heldSessionNote`): "resumes on fluxon about 12:50 am".
+    var waitPlan: String? = nil
 }
 
 /// One provider's part of the Sessions page: its running sessions, each
@@ -114,7 +117,8 @@ extension AppState {
                 inSlot: slotAccounts[id] != nil,
                 gated: provider.capabilities.pauseGate != nil && !ungated.contains(id),
                 pausedByYou: chosen.contains(id),
-                resumeAt: chosen.contains(id) ? nil : held[id]?.resumeAt
+                resumeAt: chosen.contains(id) ? nil : held[id]?.resumeAt,
+                waitPlan: chosen.contains(id) ? nil : heldSessionNote(provider, session: id, now: now)
             )
         }
         .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
