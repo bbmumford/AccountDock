@@ -44,6 +44,64 @@ final class PlanRatioTests: XCTestCase {
         XCTAssertEqual(model.ratio(for: cybrio, sizes: [fluxon: 20]).source, .learned)
     }
 
+    /// The night every account reached its limit: fluxon, a Max 20x
+    /// account, had learned 0.176% of its window per million weighted tokens
+    /// from 21 readings when one reading of 7.5% per million, its window
+    /// moved by use AccountDock did not count, took it to 2.37%, against
+    /// 4.25% for hexorda, a Max 5x account a quarter its size, and fluxon
+    /// was then planned for nearly seven times the work its window holds.
+    func testOneStrayReadingIsBlendedTowardThePlanSizeUntilReadingsAgreeAgain() {
+        var model = TurnCostModel()
+        model.accountPercentPerMillion = [fluxon: 0.176, hexorda: 4.25]
+        model.accountReadings = [fluxon: 21, hexorda: 28]
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        model.recordReading(account: fluxon, session: 40)
+        model.recordRequest(session: nil, account: fluxon, context: 0, cacheWrite: 0, output: 80_000, at: now)
+        model.recordReading(account: fluxon, session: 43)
+        XCTAssertEqual(model.accountPercentPerMillion?[fluxon] ?? 0, 2.373, accuracy: 0.001)
+        XCTAssertEqual(model.accountReadings?[fluxon], 1, "a reading 42 times its learned cost starts its count again")
+
+        let sizes: [UUID: Double] = [fluxon: 20, hexorda: 5]
+        let blended = model.ratio(for: fluxon, sizes: sizes)
+        XCTAssertEqual(blended.source, .blendedWithPlanSize)
+        XCTAssertEqual(blended.ratio, exp(0.1 * log(2.373) + 0.9 * log(4.25 * 5 / 20)), accuracy: 0.001)
+        XCTAssertLessThan(blended.ratio, 4.25 / 2, "a Max 20x percent holds more work than half a Max 5x one")
+
+        // Readings that agree with each other count again, and with
+        // `trustedReadings` of them the account's own cost stands.
+        model.accountReadings = [fluxon: TurnCostModel.trustedReadings, hexorda: 28]
+        XCTAssertEqual(model.ratio(for: fluxon, sizes: sizes).source, .learned)
+    }
+
+    func testAReadingNearTheLearnedCostKeepsCounting() {
+        var model = TurnCostModel()
+        model.accountPercentPerMillion = [fluxon: 0.5]
+        model.accountReadings = [fluxon: 12]
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        model.recordReading(account: fluxon, session: 40)
+        model.recordRequest(session: nil, account: fluxon, context: 0, cacheWrite: 0, output: 500_000, at: now)
+        model.recordReading(account: fluxon, session: 42)
+        XCTAssertEqual(model.accountReadings?[fluxon], 13, "0.8% per million is within four times 0.5%")
+    }
+
+    func testAfterAPlanChangeACostThatDisagreesWithItsSizeIsBlendedUntilEnoughReadings() {
+        // fluxon's plan changed to Max 20x and it has learned 2.37% from
+        // three readings since; hexorda, on Max 5x, has 4.25%.
+        var model = TurnCostModel()
+        let max20x = TurnCostModel.LearnedPlan(plan: "max", tier: "default_claude_max_20x")
+        let max5x = TurnCostModel.LearnedPlan(plan: "max", tier: "default_claude_max_5x")
+        model.accountPercentPerMillion = [fluxon: 0.9, hexorda: 4.25]
+        model.notePlan(max5x, for: fluxon)
+        model.notePlan(max5x, for: hexorda)
+        XCTAssertTrue(model.notePlan(max20x, for: fluxon))
+        model.accountPercentPerMillion?[fluxon] = 2.37
+        model.accountReadings = [fluxon: 3, hexorda: 28]
+        let plans = [fluxon: max20x, hexorda: max5x]
+        let ratio = model.ratio(for: fluxon, sizes: [fluxon: 20, hexorda: 5], plans: plans)
+        XCTAssertEqual(ratio.source, .blendedWithPlanSize)
+        XCTAssertEqual(ratio.ratio, exp(0.3 * log(2.37) + 0.7 * log(4.25 * 5 / 20)), accuracy: 0.001)
+    }
+
     func testEachLearnedReadingIsCounted() {
         var model = TurnCostModel()
         let now = Date(timeIntervalSince1970: 1_800_000_000)

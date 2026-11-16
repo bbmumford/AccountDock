@@ -1089,7 +1089,14 @@ makes of the other measured accounts' costs (their median, so one stray
 account sets no expectation) is therefore blended toward that expectation,
 in log terms, by how many of `trustedReadings` (10) readings it has learned
 from (`TurnCostModel.accountReadings`), and stands alone after that
-(`RatioSource.blendedWithPlanSize`). Each measured cost is kept with the
+(`RatioSource.blendedWithPlanSize`). One reading whose sample strays more
+than `strayReading` (4) times either way from the account's learned cost
+starts that count again at one (`recordReading`): a single sample of 7.5%
+per million took a Max 20x account trusted at 0.18% to 2.37%, over twice the
+1.06% a Max 5x account at 4.25% makes of a window four times its size, and
+the cost is then blended toward
+the plan-size expectation again, as after a plan change, until
+`trustedReadings` readings agree. Each measured cost is kept with the
 plan it was measured on (`TurnCostModel.accountPlans`, the plan and the
 rate-limit tier): once the account is on another plan, as an upgrade from
 Pro to Max, which makes each percent five times the work, that cost is not
