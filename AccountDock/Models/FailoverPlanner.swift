@@ -502,14 +502,27 @@ struct FailoverPlanner {
                                      sessionPerWeekly: uncapped ? nil : state.sessionPerWeekly ?? Self.defaultSessionPerWeekly)
     }
 
+    /// Whether `seconds` from `now` comes before the 5-hour window's reset
+    /// (`reset`, nil when none is known). A session-window crossing after
+    /// it never happens in that window, which starts again empty at the
+    /// reset, so `secondsUntilTrigger` and `secondsUntilExhaustion` count
+    /// none: `nextSwitch` would otherwise project a switch, and the pacer
+    /// keep another account's room for the shared group, on a window the
+    /// reset refills first.
+    private func beforeSessionReset(_ seconds: TimeInterval, reset: Date?, now: Date) -> Bool {
+        reset.map { now.addingTimeInterval(seconds) < $0 } ?? true
+    }
+
     /// Seconds until the active account is expected to cross a trigger, or
-    /// nil when it is not being consumed measurably.
+    /// nil when it is not being consumed measurably. A 5-hour window counts
+    /// only when it crosses before its reset (`beforeSessionReset`).
     func secondsUntilTrigger(_ state: QuotaAccountState, now: Date) -> TimeInterval? {
         guard let projection = projection(state, now: now) else { return nil }
         var times: [TimeInterval] = []
         if let session = projection.session, state.sessionBurnPerHour > 0 {
             let target = session >= settings.sessionTrigger ? 100 : settings.sessionTrigger
-            times.append(max(0, (target - session) / state.sessionBurnPerHour * 3600))
+            let seconds = max(0, (target - session) / state.sessionBurnPerHour * 3600)
+            if beforeSessionReset(seconds, reset: projection.sessionReset, now: now) { times.append(seconds) }
         }
         if let weekly = projection.weekly, state.weeklyBurnPerHour > 0 {
             let target = weekly >= settings.weeklyTrigger ? 100 : settings.weeklyTrigger
@@ -520,14 +533,17 @@ struct FailoverPlanner {
 
     /// Seconds until the active account is forecast to reach a provider
     /// limit. A forecast: it can keep new sessions off the account
-    /// (`servingVerdict`) and time readings, never mark it exhausted.
+    /// (`servingVerdict`) and time readings, never mark it exhausted. A
+    /// 5-hour window counts only when it is spent before its reset
+    /// (`beforeSessionReset`).
     func secondsUntilExhaustion(_ state: QuotaAccountState, now: Date) -> TimeInterval? {
         guard let projection = projection(state, now: now) else { return nil }
         var times: [TimeInterval] = []
         let sessionRate = state.sessionBurnPerHour + state.sessionBurnStdDev
         let weeklyRate = state.weeklyBurnPerHour + state.weeklyBurnStdDev
         if let session = projection.session, state.sessionBurnPerHour > 0 {
-            times.append(max(0, (100 - session) / sessionRate * 3600))
+            let seconds = max(0, (100 - session) / sessionRate * 3600)
+            if beforeSessionReset(seconds, reset: projection.sessionReset, now: now) { times.append(seconds) }
         }
         if let weekly = projection.weekly, state.weeklyBurnPerHour > 0 {
             times.append(max(0, (100 - weekly) / weeklyRate * 3600))

@@ -1275,7 +1275,18 @@ the pool weights and which sessions move, each time the pool is rebuilt
   weekly allowance (in 5-hour percent, by the plan's measured ratio) over the
   time to the weekly reset. The limit reached first decides, so an account
   about to run out for the week gives sessions up, and one whose week resets
-  soon takes more new sessions before its allowance is lost.
+  soon takes more new sessions before its allowance is lost. A 5-hour
+  window that resets before its limit starts again empty there and the
+  rate carries on into the next one (`SessionPacer.refilled`): 64% an hour
+  on a Max 5x window twelve minutes from its reset reaches the next
+  window's limit 93 minutes after the reset and waits there three and a
+  half hours, which counts as that limit; a wait of under a cache
+  lifetime at the end of the next window does not. The accounts' joint
+  run-out (`poolRunOut`) counts a whole window for every reset before it
+  (`roomBy`), so bytrix's last 7% minutes from its reset counts the window
+  after it, and failover's forecasts (`secondsUntilTrigger`,
+  `secondsUntilExhaustion`) count no 5-hour crossing after the window's
+  reset, so no switch is projected off a window the reset refills first.
 - An account that would reach its limit and then wait there longer than its
   sessions' prompt cache lasts (the longest `cache_control` lifetime they
   sent, an hour when unknown) gives sessions up when moving them keeps the
@@ -1293,7 +1304,11 @@ the pool weights and which sessions move, each time the pool is rebuilt
   with the session's rate and the cost of writing its context into that
   account's cache, reaches no limit before its reset, or none until within
   an hour of the pool's run-out, and in either case none within the hour,
-  by whichever of its windows binds first. The router moves it at its next turn
+  by whichever of its windows binds first. Since that run-out counts the
+  windows refilled on the way, a heavy session takes any one account to a
+  limit long before it; with no such destination, one reaching no limit
+  until within an hour of the source's own takes it, which serves it no
+  shorter than staying would. The router moves it at its next turn
   (`RouterState.moves`). The event names the reason ("… while the other
   accounts still have room (together they last until …)").
 - An account that would reach its limit only shortly before its reset keeps
@@ -1352,7 +1367,9 @@ the pool weights and which sessions move, each time the pool is rebuilt
   in the pacer's weights, and before pacing in `buildPool`, where any
   account that could not carry one more session of the running sessions'
   typical rate for that hour beside its own rate
-  (`AppState.carriesNewSession`) has weight 0 while another could, a
+  (`AppState.carriesNewSession`; a 5-hour window resetting within the hour
+  needs the room until its reset and a whole window after it) has weight 0
+  while another could, a
   draining one at `drainingPreferred` included, unless its session window
   would otherwise leave room unused at its reset (`AppState.windowShare`,
   under Balancing above). The drain ends when a reading or a refusal shows its limit, when it is

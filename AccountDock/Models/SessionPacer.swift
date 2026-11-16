@@ -393,7 +393,12 @@ struct SessionPacer {
 
     /// The account's outlook at `burn` percent per hour, after `spent`
     /// percent more than its readings show. The weekly allowance binds when
-    /// it runs out before the 5-hour window's does.
+    /// it runs out before the 5-hour window's does. A 5-hour window that
+    /// resets before its limit starts again empty there, and the same rate
+    /// carries on into the next one (`refilled`): a rate that spends a
+    /// whole window in under five hours reaches its limit in that next
+    /// window. Counted only to the reset, a small plan's window minutes from
+    /// its reset would look able to carry any rate.
     func outlook(_ account: Account, spent: Double = 0, burn: Double, now: Date, shared: SharedShare? = nil) -> Outlook {
         func projected(_ remaining: Double, until end: Date) -> Outlook {
             self.projected(remaining, burn: burn, until: end, now: now, shared: shared)
@@ -402,13 +407,39 @@ struct SessionPacer {
            let weeklyEnd = account.weeklyResetsAt, weeklyEnd > now {
             return projected(weeklyLeft - spent, until: weeklyEnd)
         }
-        let session = projected(remaining(account, now: now) - spent,
-                             until: account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window))
+        let session = refilled(projected(remaining(account, now: now) - spent,
+                                         until: account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)),
+                               burn: burn, shared: shared)
         guard let weeklyLeft = account.weeklyRemaining, let weeklyEnd = account.weeklyResetsAt, weeklyEnd > now else { return session }
         let weekly = projected(weeklyLeft - spent, until: weeklyEnd)
         let first = [session, weekly].compactMap { outlook in outlook.limitAt.map { ($0, outlook) } }.min { $0.0 < $1.0 }?.1
         return Outlook(allowedPerHour: min(session.allowedPerHour, weekly.allowedPerHour), burnPerHour: burn,
                        limitAt: first?.limitAt, windowEndsAt: first?.windowEndsAt ?? session.windowEndsAt)
+    }
+
+    /// `current`, a 5-hour window's outlook to its reset, carried into the
+    /// window that starts empty there when it reaches no limit before it:
+    /// at `burn`, and the shared group's rate while its share runs then,
+    /// the next window's limit at `limit` over that rate after the reset,
+    /// when it then waits longer than `defaultCacheLifetime` for the next
+    /// reset, with that reset as the window's end. A shorter wait at the
+    /// end of a window a rate fills in just under five hours is what the
+    /// holds for an imminent reset bridge, and closes no account to new
+    /// sessions. The rate allowed stays the current window's. Read by
+    /// `outlook`.
+    func refilled(_ current: Outlook, burn: Double, shared: SharedShare?) -> Outlook {
+        guard current.limitAt == nil else { return current }
+        let reset = current.windowEndsAt
+        let carried = shared.map { share in
+            share.from <= reset && (share.until.map { $0 > reset } ?? true) ? share.percentPerHour : 0
+        } ?? 0
+        let rate = burn + carried
+        guard rate > 0 else { return current }
+        let next = reset.addingTimeInterval(limit / rate * 3600)
+        let nextReset = reset.addingTimeInterval(window)
+        guard nextReset.timeIntervalSince(next) > Self.defaultCacheLifetime else { return current }
+        return Outlook(allowedPerHour: current.allowedPerHour, burnPerHour: current.burnPerHour, limitAt: next,
+                       windowEndsAt: nextReset)
     }
 
     /// How `remaining` percent goes at `burn` percent per hour until `end`,
@@ -509,18 +540,56 @@ struct SessionPacer {
     /// present rates (`burn`, which leaves out the group) and the group's:
     /// the latest the slowest account can run out if every one runs out at
     /// once. Counted in tokens, since each account counts them at its own
-    /// ratio. Nil when nothing is spending.
+    /// ratio. A session window that resets before that moment starts again
+    /// full (`roomBy`), so a small plan a few percent from its limit with
+    /// its reset minutes away counts the window after it: counted without
+    /// it, the pool runs out with the small windows' last percent and no
+    /// account runs out early enough beside it to give sessions up.
+    /// Nil when nothing is spending.
     func poolRunOut(_ accounts: [Account], burn: [UUID: Double], spent: [UUID: Double], shares: [UUID: SharedShare],
                     sharedGroup: SharedGroup?, now: Date) -> Date? {
-        var tokensLeft = 0.0
         var tokensPerHour = shares.isEmpty ? 0 : sharedGroup?.tokensPerHour ?? 0
-        for account in accounts where (account.baseWeight > 0 || shares[account.id] != nil) && account.percentPerMillion > 0 {
-            let left = windowsLeft(account, spent: spent[account.id] ?? 0, now: now).map(\.left).min() ?? 0
-            tokensLeft += Allowance.millions(max(0, left), percentPerMillion: account.percentPerMillion) * 1_000_000
+        let counted = accounts.filter {
+            ($0.baseWeight > 0 || shares[$0.id] != nil) && $0.percentPerMillion > 0
+        }
+        for account in counted {
             tokensPerHour += Allowance.millions(max(0, burn[account.id] ?? 0),
                                                 percentPerMillion: account.percentPerMillion) * 1_000_000
         }
-        return Allowance.runOut(left: tokensLeft, perHour: tokensPerHour, now: now)
+        func tokensLeft(by horizon: Date) -> Double {
+            counted.reduce(0) { total, account in
+                let left = roomBy(account, horizon, spent: spent[account.id] ?? 0, now: now)
+                return total + Allowance.millions(max(0, left), percentPerMillion: account.percentPerMillion) * 1_000_000
+            }
+        }
+        // The room grows with every reset the run-out passes, which moves
+        // the run-out later; it stops once no further reset comes before it.
+        var runOut = Allowance.runOut(left: tokensLeft(by: now), perHour: tokensPerHour, now: now)
+        for _ in 0..<64 {
+            guard let current = runOut,
+                  let next = Allowance.runOut(left: tokensLeft(by: current), perHour: tokensPerHour, now: now),
+                  next > current else { break }
+            runOut = next
+        }
+        return runOut
+    }
+
+    /// Window percent the account can spend by `horizon` after `spent`:
+    /// its 5-hour window's rest plus a whole window (`limit`) for each of
+    /// its resets up to `horizon`, at most what its weekly allowance has
+    /// left; the weekly allowance alone without a session window. Read by
+    /// `poolRunOut`.
+    func roomBy(_ account: Account, _ horizon: Date, spent: Double, now: Date) -> Double {
+        let windows = windowsLeft(account, spent: spent, now: now)
+        guard account.hasSessionWindow, let session = windows.first else { return windows.map(\.left).min() ?? 0 }
+        var refills = 0.0
+        var reset = session.end
+        while reset <= horizon && refills < 64 {
+            refills += 1
+            reset = reset.addingTimeInterval(window)
+        }
+        let sessionRoom = session.left + refills * limit
+        return ([sessionRoom] + windows.dropFirst().map(\.left)).min() ?? sessionRoom
     }
 
     /// Window percent the account has left at `horizon` (or at a window's
@@ -838,16 +907,16 @@ struct SessionPacer {
         func sheds(_ account: Account) -> Bool { wholeReason(account) != nil }
         func shedsScoped(_ account: Account, _ key: String) -> Bool { scopedReason(account, key) != nil }
         // A destination takes a session only if it then reaches no limit
-        // before its reset, or none until within `newSessionRunway` of the
-        // pool's run-out: that run-out is an estimate at the present rates,
-        // and the account the work ends on reaches its limit about then.
-        // Either way it must carry the session for `newSessionRunway`, by
+        // before its reset, or none until within `newSessionRunway` of
+        // `deadline`: the pool's run-out, an estimate at the present rates,
+        // about when the account the work ends on reaches its limit. Either
+        // way it must carry the session for `newSessionRunway`, by
         // whichever of its windows binds first, or the session would write
         // its cache there and move on again within the hour.
-        func lastsEnough(_ outlook: Outlook) -> Bool {
+        func lastsEnough(_ outlook: Outlook, until deadline: Date? = poolEnd) -> Bool {
             guard let limitAt = outlook.limitAt else { return true }
             guard limitAt >= now.addingTimeInterval(Self.newSessionRunway) else { return false }
-            return poolEnd.map { limitAt >= $0.addingTimeInterval(-Self.newSessionRunway) } ?? false
+            return deadline.map { limitAt >= $0.addingTimeInterval(-Self.newSessionRunway) } ?? false
         }
         // An account a window placement fills reaches its session window's
         // limit as planned; only a limit that binds before that window's
@@ -894,7 +963,13 @@ struct SessionPacer {
             }
             for session in candidates where session.tokensPerHour > 0 {
                 guard source.key.map({ shedsScoped(source.account, $0) }) ?? sheds(source.account) else { break }
-                var best: (id: UUID, spare: Double)?
+                // Destinations lasting until the pool's run-out come first.
+                // The run-out counts the windows that refill on the way, and
+                // a heavy session takes any single account to a limit long
+                // before it; failing those, one lasting about as long as the
+                // source does, whose limit it reaches far sooner than any
+                // other's, serves the session no shorter than staying would.
+                var best: (id: UUID, early: Bool, spare: Double)?
                 for destination in accounts where destination.id != source.account.id
                     && plan.shedding[destination.id] == nil && destination.baseWeight > 0 && filling[destination.id] == nil {
                     let keys = scopedKeys(session, on: destination)
@@ -903,14 +978,23 @@ struct SessionPacer {
                     let rate = percent(session.tokensPerHour, on: destination)
                     let after = outlook(destination, spent: (spent[destination.id] ?? 0) + cost,
                                         burn: (burn[destination.id] ?? 0) + rate, now: now, shared: shares[destination.id])
-                    guard lastsEnough(after) else { continue }
                     // The destination must carry the session within its
                     // model's own allowance too.
                     let scoped = keys.compactMap { currentScoped(destination, $0, spending: cost, burning: rate) }
-                    guard scoped.allSatisfy(lastsEnough) else { continue }
-                    let spare = millions(([after] + scoped).map { $0.allowedPerHour - $0.burnPerHour }.min() ?? 0,
-                                         on: destination)
-                    if best.map({ spare > $0.spare }) ?? true { best = (destination.id, spare) }
+                    let outlooks = [after] + scoped
+                    let early: Bool
+                    if outlooks.allSatisfy({ lastsEnough($0) }) {
+                        early = false
+                    } else if source.limitAt < .distantFuture,
+                              outlooks.allSatisfy({ lastsEnough($0, until: min(poolEnd ?? source.limitAt, source.limitAt)) }) {
+                        early = true
+                    } else {
+                        continue
+                    }
+                    let spare = millions(outlooks.map { $0.allowedPerHour - $0.burnPerHour }.min() ?? 0, on: destination)
+                    if best.map({ early != $0.early ? !early : spare > $0.spare }) ?? true {
+                        best = (destination.id, early, spare)
+                    }
                 }
                 guard let best, let target = accounts.first(where: { $0.id == best.id }) else { continue }
                 // A held session stays; the next candidate is tried instead.

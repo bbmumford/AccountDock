@@ -189,7 +189,11 @@ final class SessionPacerTests: XCTestCase {
                                        sessions: [], now: now)
         XCTAssertGreaterThan(plan.weights[b] ?? 0, plan.weights[a] ?? 0)
         XCTAssertTrue(plan.moves.isEmpty)
-        XCTAssertTrue(plan.shedding.isEmpty)
+        // a's window resets first, but 50% an hour spends the next one in
+        // two hours, which then waits three for its reset.
+        XCTAssertEqual(Set(plan.shedding.keys), [a])
+        XCTAssertNil(SessionPacer().plan(accounts: [account(a, used: 40, resetIn: 1, burn: 20), account(b, used: 10, resetIn: 4)],
+                                         sessions: [], now: now).shedding[a], "20% an hour lasts the next window")
     }
 
     func testAnAccountThatWouldWaitPastTheCacheGivesUpSessionsUntilItFits() {

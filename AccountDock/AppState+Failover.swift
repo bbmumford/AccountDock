@@ -1398,11 +1398,8 @@ extension AppState {
         // Where the slot sessions on an account at or near its limit can go.
         let typical = SessionPacer.typicalNewSessionRate(pacerSessions(provider, now: now))
         let destinations = Set(roomy.filter { account in
-            let state = quotaState(for: account, now: now)
-            guard let projection = planner.projection(state, now: now) else { return false }
-            return Self.carriesNewSession(headroom: planner.headroom(state, projection),
-                                          burn: planner.expectedSessionBurn(of: state),
-                                          newSessionBurn: typical / 1_000_000 * accountRatio(account.id))
+            Self.carriesNewSession(quotaState(for: account, now: now), planner: planner,
+                                   newSessionBurn: typical / 1_000_000 * accountRatio(account.id), now: now)
         }.map(\.id))
         var placements: [String: UUID] = [:]
         if !destinations.isEmpty, let slots = SessionSlots(provider) {
