@@ -287,4 +287,110 @@ final class SmallWindowLaneTests: XCTestCase {
                       "a session just placed has its first turn to come")
         XCTAssertFalse(AppState.placementHolds(lastSeen: at(minutes: -1), placedAt: at(minutes: -30), until: at(minutes: -1), now: now))
     }
+
+    // MARK: - A move is not followed by giving the session up; a reset is no run-out
+
+    /// At 2:49 pm the automatic rebalance looks for room for Backup's work:
+    /// fluxon is at its limit for another minute, hexorda has 56% left for
+    /// 21 minutes. 33962de2's 64% an hour fits hexorda until its reset, but
+    /// spends the window that starts there by 4:43 pm, which then waits
+    /// three and a half hours: counted to the reset alone, hexorda looked
+    /// able to carry it on its week, and six minutes after the move the
+    /// pacer, counting the next window, found it giving the session up.
+    func testTheRebalanceCountsTheWindowAfterAResetSoItPutsNoSessionWhereItWouldBeGivenUp() {
+        let then = at(minutes: -8)
+        func early(_ account: SessionPacer.Account, used: Double, resetIn minutes: Double?) -> SessionPacer.Account {
+            var account = account
+            account.utilization = used
+            account.resetsAt = minutes.map { then.addingTimeInterval($0 * 60) }
+            return account
+        }
+        let before = accounts().map { account -> SessionPacer.Account in
+            switch account.id {
+            case fluxon: return early(account, used: 99, resetIn: 1)
+            case hexorda: var idle = early(account, used: 44, resetIn: 21); idle.burnPerHour = 0; return idle
+            default: return early(account, used: account.utilization, resetIn: account.resetsAt.map { $0.timeIntervalSince(then) / 60 })
+            }
+        }
+        let running = sessions().filter { $0.account == backup || $0.id == "33962de2" }.map { session in
+            SessionPacer.RebalanceSession(id: session.id, account: backup, tokensPerHour: session.recentTokensPerHour ?? 0,
+                                          contextTokens: session.contextTokens, model: nil, movable: session.recentTokensPerHour ?? 0 > 0,
+                                          cacheLifetime: 3600)
+        }
+        let rebalanced = SessionPacer().rebalance(accounts: before, sessions: running,
+                                                  destinations: [backup, hexorda, bytrix, cybrio], now: then)
+        XCTAssertNotEqual(rebalanced.moves["33962de2"], hexorda)
+        let hexordaBefore = before.first { $0.id == hexorda }!
+        let heavy = SessionPacer().outlook(hexordaBefore, burn: 64, now: then)
+        XCTAssertEqual(heavy.limitAt?.timeIntervalSince(then) ?? 0, (21 + 99.0 / 64 * 60) * 60, accuracy: 1)
+
+        // Moved there all the same, and within its hold, it is no reason
+        // for hexorda to give sessions up, nor for an event saying so.
+        let plan = SessionPacer().plan(accounts: accounts(), sessions: sessions(), now: now, held: ["33962de2"])
+        XCTAssertNil(plan.shedding[hexorda])
+        XCTAssertNil(plan.moves["33962de2"])
+        XCTAssertNotNil(SessionPacer().plan(accounts: accounts(), sessions: sessions(), now: now).shedding[hexorda],
+                        "outside its hold it would go")
+    }
+
+    /// hexorda reaches its limit three minutes before its 3:09 pm reset, a
+    /// wait the router holds a request over, and serves on from there: no
+    /// run-out, so the rebalance names none at the reset.
+    func testAWindowFillingJustBeforeItsResetIsNoRunOut() {
+        let full = account(hexorda, used: 97.6, resetIn: 12, weekly: 8, weeklyResetIn: 110, ratio: 3.0)
+        let roomy = account(fluxon, used: 0, resetIn: 293, weekly: 26, weeklyResetIn: 32, ratio: 0.966)
+        let light = SessionPacer.RebalanceSession(id: "33962de2", account: hexorda, tokensPerHour: 3_000_000, contextTokens: 300_000,
+                                                  model: nil, movable: false, cacheLifetime: 3600)
+        let pacer = SessionPacer()
+        let filling = pacer.outlook(full, burn: 9, now: now)
+        XCTAssertEqual(filling.limitAt?.timeIntervalSince(now) ?? 0, 1.4 / 9 * 3600, accuracy: 1,
+                       "9% an hour spends the last 1.4% in nine minutes")
+        XCTAssertGreaterThan(pacer.runway(full, sessions: [light], spent: 0, now: now), 24 * 3600,
+                             "after the reset its week binds, days later")
+        let rebalanced = pacer.rebalance(accounts: [full, roomy], sessions: [light], destinations: [hexorda, fluxon], now: now)
+        XCTAssertGreaterThan(rebalanced.earliestRunOutBefore?.timeIntervalSince(now) ?? .infinity, 24 * 3600)
+        // Twenty minutes' wait is a run-out: the sessions there stop.
+        let early = account(hexorda, used: 97, resetIn: 30, weekly: 8, weeklyResetIn: 110, ratio: 3.0)
+        XCTAssertEqual(pacer.runway(early, sessions: [light], spent: 0, now: now), 2.0 / 9 * 3600, accuracy: 1)
+    }
+
+    /// At 3:31 pm bytrix's window has reset and starts empty. Its week,
+    /// resetting at 1:00 am, would otherwise go unused, so the lightest of
+    /// Backup's sessions still working moves there at once; the heavy ones,
+    /// which would spend a Max 5x window in under three hours and wait, and
+    /// cybrio at its cost, take nothing.
+    func testAtTheResetTheFreshWindowStartsBeingUsedAtOnce() throws {
+        let later = at(minutes: 34)
+        func fixture(_ id: UUID, used: Double, resetIn minutes: Double?, weekly: Double, weeklyResetIn hours: Double,
+                     ratio: Double, burn: Double = 0, window: Bool = true) -> SessionPacer.Account {
+            var account = SessionPacer.Account(id: id, utilization: used, resetsAt: minutes.map { later.addingTimeInterval($0 * 60) },
+                                               burnPerHour: burn, baseWeight: 1, percentPerMillion: ratio, hasSessionWindow: window)
+            account.weeklyRemaining = (99 - weekly) * 8
+            account.weeklyResetsAt = later.addingTimeInterval(hours * 3600)
+            return account
+        }
+        let accounts = [fixture(backup, used: 0, resetIn: nil, weekly: 49, weeklyResetIn: 160, ratio: 0.95, burn: 95, window: false),
+                        fixture(fluxon, used: 15, resetIn: 259, weekly: 27, weeklyResetIn: 31.5, ratio: 0.966, burn: 28),
+                        fixture(hexorda, used: 22, resetIn: 279, weekly: 10, weeklyResetIn: 109, ratio: 3.0, burn: 64),
+                        fixture(bytrix, used: 0, resetIn: nil, weekly: 13, weeklyResetIn: 9.5, ratio: 1.151),
+                        fixture(cybrio, used: 0, resetIn: 298, weekly: 12, weeklyResetIn: 29.5, ratio: 6.73)]
+        func session(_ id: String, on account: UUID, rate: Double, context: Int) -> SessionPacer.Session {
+            SessionPacer.Session(id: id, account: account, tokensPerHour: rate, contextTokens: context,
+                                 lastSeen: later.addingTimeInterval(-180), cacheLifetime: 3600,
+                                 lastTurnStart: later.addingTimeInterval(-600), recentTokensPerHour: rate)
+        }
+        let running = [session("8c64c5f8", on: backup, rate: 32_600_000, context: 465_000),
+                       session("583fb354", on: backup, rate: 22_300_000, context: 418_000),
+                       session("a78ddf66", on: backup, rate: 13_200_000, context: 693_000),
+                       session("4822c359", on: fluxon, rate: 30_000_000, context: 42_000),
+                       session("33962de2", on: hexorda, rate: 21_300_000, context: 300_000)]
+        let spending = SessionPacer.RemainderSpending(accounts: [hexorda, bytrix, cybrio], sessions: Set(running.map(\.id)))
+        let plan = SessionPacer().plan(accounts: accounts, sessions: running, now: later, remainders: spending,
+                                       held: ["33962de2", "4822c359"])
+        XCTAssertEqual(plan.moves["a78ddf66"], bytrix)
+        XCTAssertNotNil(plan.remainders["a78ddf66"])
+        XCTAssertNil(plan.moves["8c64c5f8"])
+        XCTAssertFalse(plan.moves.values.contains(cybrio))
+        XCTAssertNil(plan.shedding[hexorda], "its only session moved there within its hold")
+    }
 }

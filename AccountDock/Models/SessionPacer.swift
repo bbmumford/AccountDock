@@ -955,15 +955,29 @@ struct SessionPacer {
             let sessionEnd = account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
             return current(account).windowEndsAt == sessionEnd
         }
+        // An account whose sessions that could relieve it all moved there
+        // within their hold gives none up: the move that brought them was
+        // planned against the same outlook, and moving them on would write
+        // a cache that has not yet paid off, so the account is not reported
+        // as giving sessions up minutes after it took them. Its limit or a
+        // refusal still moves them (`AppState.strandedPlacements`).
+        func onlyHeldRelieve(_ account: Account, _ key: String?) -> Bool {
+            let relieving = active.filter { session in
+                session.account == account.id && session.tokensPerHour > 0 && !staying.contains(session.id)
+                    && (key.map { scopedKeys(session, on: account).contains($0) } ?? true)
+            }
+            return !relieving.isEmpty && relieving.allSatisfy { held.contains($0.id) }
+        }
         var plan = Plan()
         plan.filling = filling
         for account in accounts {
-            if !fillsAsPlanned(account), let why = wholeReason(account) {
+            if !fillsAsPlanned(account), !onlyHeldRelieve(account, nil), let why = wholeReason(account) {
                 plan.shedding[account.id] = current(account)
                 plan.shedReasons[account.id] = why
             }
             for key in account.scoped.keys.sorted() {
-                guard let why = scopedReason(account, key), let outlook = currentScoped(account, key) else { continue }
+                guard !onlyHeldRelieve(account, key), let why = scopedReason(account, key),
+                      let outlook = currentScoped(account, key) else { continue }
                 plan.scopedShedding[account.id, default: [:]][key] = outlook
                 plan.scopedShedReasons[account.id, default: [:]][key] = why
             }
@@ -998,7 +1012,7 @@ struct SessionPacer {
                 // before it; failing those, one lasting about as long as the
                 // source does, whose limit it reaches far sooner than any
                 // other's, serves the session no shorter than staying would.
-                var best: (id: UUID, early: Bool, spare: Double)?
+                var best: (id: UUID, rank: Int, spare: Double)?
                 for destination in accounts where destination.id != source.account.id
                     && plan.shedding[destination.id] == nil && destination.baseWeight > 0 && filling[destination.id] == nil {
                     let keys = scopedKeys(session, on: destination)
@@ -1011,18 +1025,18 @@ struct SessionPacer {
                     // model's own allowance too.
                     let scoped = keys.compactMap { currentScoped(destination, $0, spending: cost, burning: rate) }
                     let outlooks = [after] + scoped
-                    let early: Bool
+                    let sourceDeadline = source.limitAt < .distantFuture ? min(poolEnd ?? source.limitAt, source.limitAt) : nil
+                    let rank: Int
                     if outlooks.allSatisfy({ lastsEnough($0) }) {
-                        early = false
-                    } else if source.limitAt < .distantFuture,
-                              outlooks.allSatisfy({ lastsEnough($0, until: min(poolEnd ?? source.limitAt, source.limitAt)) }) {
-                        early = true
+                        rank = 0
+                    } else if let sourceDeadline, outlooks.allSatisfy({ lastsEnough($0, until: sourceDeadline) }) {
+                        rank = 1
                     } else {
                         continue
                     }
                     let spare = millions(outlooks.map { $0.allowedPerHour - $0.burnPerHour }.min() ?? 0, on: destination)
-                    if best.map({ early != $0.early ? !early : spare > $0.spare }) ?? true {
-                        best = (destination.id, early, spare)
+                    if best.map({ rank != $0.rank ? rank < $0.rank : spare > $0.spare }) ?? true {
+                        best = (destination.id, rank, spare)
                     }
                 }
                 guard let best, let target = accounts.first(where: { $0.id == best.id }) else { continue }
@@ -1512,7 +1526,7 @@ extension SessionPacer {
                 scopedSpent: [String: Double] = [:], shared: SharedShare? = nil, unseen: Double = 0,
                 now: Date) -> TimeInterval {
         let burn = sessions.reduce(0) { $0 + percent($1.tokensPerHour, on: account) } + unseen
-        var times = [outlook(account, spent: spent, burn: burn, now: now, shared: shared).limitAt]
+        var times = [runOutOutlook(account, spent: spent, burn: burn, now: now, shared: shared).limitAt]
         for (key, allowance) in account.scoped where allowance.resetsAt > now {
             let users = sessions.filter { session in session.model?.lowercased().contains(key) == true }
             let fraction = shared?.scopedFractions[key] ?? 0
@@ -1523,6 +1537,29 @@ extension SessionPacer {
                                    shared: fraction > 0 ? shared : nil, fraction: fraction).limitAt)
         }
         return times.compactMap { $0?.timeIntervalSince(now) }.min() ?? .infinity
+    }
+
+    /// `outlook` as a run-out, which `runway` measures for `rebalance` and
+    /// `place`: a 5-hour window's limit reached within the router's hold
+    /// (`RouterLogic.maximumHold`) of its reset is none, since a request
+    /// refused there is held over the reset and the account serves on; the
+    /// outlook carries on from that reset instead, to the next window's
+    /// limit (`refilled`) or the weekly allowance's, whichever comes first.
+    /// A window filling a minute before its reset is then no rebalance's
+    /// first run-out. A longer wait still counts: the sessions there stop
+    /// until the reset, which is what a session placed in a window's last
+    /// few percent would do.
+    func runOutOutlook(_ account: Account, spent: Double, burn: Double, now: Date, shared: SharedShare?) -> Outlook {
+        let first = outlook(account, spent: spent, burn: burn, now: now, shared: shared)
+        guard first.limitAt != nil, account.hasSessionWindow, let reset = account.resetsAt, reset > now,
+              first.windowEndsAt == reset, first.waitAtLimit <= RouterLogic.maximumHold else { return first }
+        var candidates = [refilled(Outlook(allowedPerHour: first.allowedPerHour, burnPerHour: first.burnPerHour, limitAt: nil,
+                                           windowEndsAt: reset), burn: burn, shared: shared)]
+        if let weeklyLeft = account.weeklyRemaining, let weeklyEnd = account.weeklyResetsAt, weeklyEnd > now {
+            candidates.append(projected(weeklyLeft - spent, burn: burn, until: weeklyEnd, now: now, shared: shared))
+        }
+        return candidates.compactMap { outlook in outlook.limitAt.map { ($0, outlook) } }.min { $0.0 < $1.0 }?.1
+            ?? candidates[0]
     }
 
     /// Places the movable sessions so the first account to reach a limit

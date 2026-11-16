@@ -1516,7 +1516,15 @@ and the search goes on with the account that runs out next, so such an
 account does not end the search before the accounts the sessions crowd. The
 run-outs reported then leave out the accounts settled before the first move.
 The result never runs out earlier than before and every move pays for itself;
-it is a local optimum, not always the best assignment.
+it is a local optimum, not always the best assignment. A run-out is measured
+with the pacer's outlook, the window after a reset included (`refilled`), so
+64% an hour on a Max 5x window twenty minutes from its reset runs out 93
+minutes into the next window, and the search puts no such session there for
+the shedding rule to give up minutes later. A 5-hour limit reached within the
+router's hold of its reset (`RouterLogic.maximumHold`) is no run-out
+(`SessionPacer.runOutOutlook`): the account serves on from the reset, so a
+window filling a minute before its reset is not reported as "the first
+account runs out" at that reset.
 Excluded accounts, those needing sign-in and those at their limit are no
 destination. A movable session on an account that is no destination, one at
 its limit or refusing it, gains from any room however short: before the
@@ -1542,7 +1550,11 @@ pacer's shedding, remainder and window rules (`SessionPacer.plan`'s `held`,
 and `serveSessionSlots`, which applies a pacer move only after the hold) nor
 the automatic rebalance (`rebalance`'s `held`). Its account refusing it or
 reaching its limit still moves it, through the stranded placement or as a
-rebalance's blocked session, and a move the user asks for is never held.
+rebalance's blocked session, and a move the user asks for is never held. An
+account whose only sessions that could relieve it are within their hold
+gives none up (`SessionPacer.plan`): their move was planned against the same
+outlook, so it records no event saying it gives sessions up minutes after
+it took them.
 A move a hold stops is recorded once per hold (`Plan.heldBack`,
 `Rebalance.heldBack`, `AppState.noteHeldMoves`): "Kept session X on hexorda
 although pacing would move it to Backup: it moved there at 11:42 am, and
