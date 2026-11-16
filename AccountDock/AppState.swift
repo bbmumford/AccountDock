@@ -261,6 +261,14 @@ final class AppState: ObservableObject {
     /// (`planHeldSessions`): for its event, recorded when the plan changes,
     /// and the Sessions page row.
     var heldSessionPlans: [AIProviderType: [String: HeldSessionPlan]] = [:]
+    /// What the current quota cycle sent or planned onto each account, by
+    /// provider (`LaneLedger`, through `laneLedger(_:now:)`), so every rule
+    /// that sends sessions somewhere in that cycle charges each account for
+    /// all of them.
+    var laneLedgers: [AIProviderType: LaneLedger] = [:]
+    /// The held-session plans' summary event last recorded, by provider, so
+    /// it is recorded once while it says the same.
+    var heldPlanSummaryNoted: [AIProviderType: String] = [:]
     /// The terminal session each of those runs in, when
     /// `sessionTerminal` can reach it.
     @Published var unisolatedTerminals: [String: String] = [:]

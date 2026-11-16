@@ -543,6 +543,9 @@ extension AppState {
                                    process: session?.processID, now: now)
         }
         let spareTarget = Self.spareTarget(peakSessions: recentSessionPeak(provider, now: now))
+        // Read once, when a slot first needs the fallback.
+        var fallbackRunning: [SessionPacer.RebalanceSession]?
+        var fallbackAccounts: [CapacityOutlook.Account]?
         var sparesOf: [UUID: Int] = [:]
         var remove: [URL] = []
         var removeSpares: [URL] = []
@@ -597,12 +600,33 @@ extension AppState {
                 else { return nil }
                 return destination
             }
+            let placed = session.map { placements[$0.sessionID] } ?? placements[path]
+            let waitsOn = session.flatMap { waiting[$0.sessionID] }
+            let heldOn = session.flatMap { admissionHeld[$0.sessionID] }
+            // An account that can no longer serve sends its session to the
+            // pool's fallback only where the cycle's ledger shows room for
+            // it beside everything else sent there (`ledgerFallback`).
+            let falling = pinned == nil && !modelSpent && (slot.account.map(cannotServe) ?? false)
+                && (placed.map(cannotServe) ?? true) && heldOn == nil && waitsOn == nil
+            var fallen: (lane: UUID, charge: LaneLedger.Charge)?
+            if falling {
+                if fallbackRunning == nil { fallbackRunning = slotRebalanceSessions(provider, slots: slots, now: now) }
+                if fallbackAccounts == nil { fallbackAccounts = capacityOutlookAccounts(provider, now: now) }
+                let candidates = ([fallback].compactMap { $0 } + byWeight).reduce(into: [UUID]()) { result, id in
+                    if !result.contains(id) { result.append(id) }
+                }
+                fallen = ledgerFallback(provider, id: session?.sessionID ?? path, from: slot.account, byWeight: candidates,
+                                        cannotServe: cannotServe, running: fallbackRunning ?? [],
+                                        accounts: fallbackAccounts ?? [], now: now)
+            }
             let choice = Self.slotChoice(current: slot.account, pinned: pinned,
                                          requested: session.flatMap { requestedSlotMoves.removeValue(forKey: $0.sessionID) },
                                          balance: balance, cannotServe: cannotServe, modelSpent: modelSpent,
-                                         byWeight: byWeight, placed: session.map { placements[$0.sessionID] } ?? placements[path],
-                                         fallback: fallback, waitsOn: session.flatMap { waiting[$0.sessionID] },
-                                         heldOn: session.flatMap { admissionHeld[$0.sessionID] })
+                                         byWeight: byWeight, placed: placed,
+                                         fallback: falling ? fallen?.lane : fallback, waitsOn: waitsOn, heldOn: heldOn)
+            if let fallen, choice.target == fallen.lane, !choice.requested {
+                laneLedgers[provider] = { var ledger = laneLedger(provider, now: now); ledger.charge(fallen.charge); return ledger }()
+            }
             let target = choice.target
             let balanced = choice.balanced
             let requested = choice.requested
@@ -800,7 +824,9 @@ extension AppState {
     /// session, else, when only the session's model is spent there, the
     /// first account by weight with room for it, else the account
     /// `strandedPlacements` placed it on (`placed`) while that can serve it,
-    /// else `fallback`; a requested move (`requested`) wins, and failing
+    /// else `fallback`, which `serveSessionSlots` gives only when the
+    /// cycle's ledger shows it carries the session (`ledgerFallback`), and
+    /// nil otherwise, so the slot stays; a requested move (`requested`) wins, and failing
     /// one a balancing move (`balance`, already checked by the caller to be
     /// allowed). A pinned session (`pinned`) keeps its pinned account
     /// whatever else would apply, and a request for it is dropped: only

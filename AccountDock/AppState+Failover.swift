@@ -99,10 +99,13 @@ extension AppState {
         await handleExternalRequests()
         await ingestTranscriptRequests()
         // Before the slots are served, so no rule moves a session that waits
-        // for its account's reset this cycle.
+        // for its account's reset this cycle, and every rule after this
+        // charges each account for the sessions waiting on it.
+        startLaneLedgers(now: Date())
         for provider in AgentPauseGate.providers {
             await holdSessionsForImminentReset(provider)
             await holdSharedSessionsOnStayingAccount(provider)
+            chargeHeldWaits(provider, now: Date())
         }
         await maintainSessionSlots(processesRead: true)
         await applyModelFallbacks()
@@ -1586,9 +1589,19 @@ extension AppState {
             // rest have no destination and wait.
             let pacer = SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
             let others = running.filter { !ids.contains($0.id) }
+            // Each destination is charged for what this cycle already sent
+            // or planned onto it (`LaneLedger`).
+            var ledger = laneLedger(provider, now: now)
+            for id in ids { ledger.remove(id) }
             placements = pacer.admitToLanes(leaving, accounts: pacerAccounts, running: others, destinations: destinations,
-                                            now: now)?.placements
-                ?? pacer.place(leaving, accounts: pacerAccounts, running: others, destinations: destinations, now: now)
+                                            now: now, ledger: ledger)?.placements
+                ?? pacer.place(leaving, accounts: pacerAccounts, running: others, destinations: destinations, now: now,
+                               ledger: ledger)
+            for (id, lane) in placements {
+                guard let session = leaving.first(where: { $0.id == id }) else { continue }
+                ledger.charge(placedCharge(session, on: lane, pacer: pacer, now: now))
+            }
+            laneLedgers[provider] = ledger
         }
         let pinned = pinnedSessionAccounts(provider)
         var pinnedLimits: [UUID: PinnedHold?] = [:]

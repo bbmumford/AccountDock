@@ -1580,25 +1580,55 @@ the pool weights and which sessions move, each time the pool is rebuilt
   reads "Session balancing admitted 2 of 9 waiting session(s) to cybrio's
   fresh window: they fit until its reset at 8:29 pm; 7 wait for their own
   accounts."
+- Every rule that sends a session to an account within one quota cycle
+  charges that account in one ledger (`LaneLedger`, kept per provider in
+  `AppState.laneLedgers` and started afresh by `runQuotaCycle`): each
+  session once, at the weighted tokens per hour it is expected to use from
+  when it starts there (now for a placement, a move or a release from a
+  pause; the account's reset for a planned wait or a session a wait holds
+  there, `chargeHeldWaits`) plus its arrival's cache rewrite in that
+  account's cost. Lane admission and the stranded placement count the
+  charges started by now beside each lane's own sessions; the held-session
+  plans, the slot path's fallback (`ledgerFallback`) and the sessions a
+  pause releases test the destination with `CapacityOutlook.carries`: from
+  when the session starts there until an hour later, everything charged
+  there and the session itself, grown by 1/`windowFitShare`, fits the room
+  the account has then, its resets refilling it on the way. An account at
+  its limit carries nothing before the reset that frees it.
 - Each session admission leaves waiting gets a plan (`HeldSessionPlan`,
-  through `AppState.planHeldSessions`, kept in `heldSessionPlans`): it waits
-  for the earliest lane, the account whose 5-hour window, week or limit
-  resets first with room for an hour of it beside the sessions there, by
-  admission's own measure, its own account included and charged no rewrite.
-  It moves now instead to a lane with room only when that serves more work
-  until an hour past that reset, each account weighed alone
-  (`CapacityOutlook.servedAlone`: what the session adds there, less what the
-  sessions already on it lose once it fills the lane early, less its
-  rewrite), and only when its own account resets later than its cache lasts;
-  a tie waits. A planned wait whose reset has come is placed on its lane once
-  that lane is a destination (`HeldSessionPlan.due`: a reading confirms the
-  reset), and stands for `accountHoldGrace` until one does. The plan is the
-  session's row note ("resumes on fluxon about 12:50 am") and an event when
-  it changes. While admission keeps a session on its account, played or not,
+  through `AppState.planHeldSessions`, kept in `heldSessionPlans`), and they
+  are planned together (`HeldSessionPlan.planTogether`), the heaviest first,
+  each against the ledger, which then charges its lane: it waits for the
+  earliest lane, the account whose 5-hour window, week or limit resets
+  first and carries an hour of it beside the sessions there and everything
+  already planned onto it, its own account included and charged no
+  rewrite. A lane's fresh window is so planned only as full as it holds for
+  the hour; the next sessions go to the next lane by its reset, and a
+  session no lane carries for an hour within a 5-hour window of its own
+  account's reset waits for its own account, charged there from that
+  reset. With every account at its limit, admission has no
+  lane and every stranded session is planned so. It moves now instead to a
+  lane with room only when that serves more work until an hour past that
+  reset (`CapacityOutlook.servedAlone`, counting the lane's ledger charges:
+  what the session adds there, less what the sessions already on it lose
+  once it fills the lane early, less its rewrite), and only when its own
+  account resets later than its cache lasts; a tie waits. A planned wait
+  whose reset has come is placed on its lane once that lane is a
+  destination (`HeldSessionPlan.due`: a reading confirms the reset) and
+  still carries it beside what the cycle sent there, and stands for
+  `accountHoldGrace` until one does. The plan is the session's row note
+  ("resumes on fluxon about 12:50 am"); a move is an event when it changes,
+  and the waits one event while it says the same
+  (`HeldSessionPlan.summary`): "At 12:50 am fluxon's fresh window takes
+  platform-execution and continues-field (≈ 60 min of its window); 5 others
+  wait for hexorda at 1:10 am, bytrix and cybrio at 1:30 am." While admission keeps a session on its account, played or not,
   `slotChoice`'s path for an account that can no longer serve keeps it there
   (`heldOn`, from `admissionHolds`) rather than sending it to the pool's
   `fallback`; admission's placement or the user's own move takes it
-  elsewhere.
+  elsewhere. Any other session on such an account goes to the first account
+  by pool weight that can serve it and, by the ledger, carries it for the
+  hour (`AppState.ledgerFallback`), which is then charged with it, and
+  stays where it is when none does, held by the pause at the limit.
 - An account a threshold switch left with room still on it drains
   (`AppState.drainingAccounts`): above its thresholds it keeps a pool weight
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when

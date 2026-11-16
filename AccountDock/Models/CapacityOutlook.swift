@@ -404,17 +404,29 @@ struct CapacityOutlook: Equatable {
 // MARK: - One account alone
 
 extension CapacityOutlook {
+    /// Work an account takes on from `from`: `tokensPerHour` from then on,
+    /// after its arrival writes `arrivalTokens` into the account's cache.
+    /// The charges of a cycle's `LaneLedger`, as `servedAlone` and
+    /// `carries` step through them.
+    struct Load: Equatable {
+        var from: Date
+        var tokensPerHour: Double
+        var arrivalTokens: Double = 0
+    }
+
     /// Weighted tokens `account` serves on its own from `now` until `end`:
-    /// `base`, the rate of the sessions on it, throughout, and `extra` from
-    /// `extraFrom` (now when nil), whose arrival first writes `arrival` tokens
-    /// into its cache. It serves while it has room and refuses what it cannot
-    /// carry until a reset frees more, the way the main projection steps;
-    /// none of its work goes elsewhere, so work added there takes room from
-    /// the sessions already on it. Also the window percent it has room for at
-    /// `end`, once the resets due then have refilled it. Excluded and
-    /// unavailable accounts serve nothing. Read by `HeldSessionPlan`.
-    static func servedAlone(_ account: Account, base: Double, extra: Double = 0, extraFrom: Date? = nil,
-                            arrival: Double = 0, now: Date, until end: Date, pacer: SessionPacer,
+    /// `base`, the rate of the sessions on it, throughout, each of `loads`
+    /// from its start, and `extra` from `extraFrom` (now when nil), whose
+    /// arrival first writes `arrival` tokens into its cache. It serves while
+    /// it has room and refuses what it cannot carry until a reset frees
+    /// more, the way the main projection steps; none of its work goes
+    /// elsewhere, so work added there takes room from the sessions already
+    /// on it. Also the window percent it has room for at `end`, once the
+    /// resets due then have refilled it. Excluded and unavailable accounts
+    /// serve nothing. Read by `HeldSessionPlan`.
+    static func servedAlone(_ account: Account, base: Double, loads: [Load] = [], extra: Double = 0,
+                            extraFrom: Date? = nil, arrival: Double = 0, now: Date, until end: Date,
+                            pacer: SessionPacer,
                             step: TimeInterval = CapacityOutlook.defaultStep) -> (served: Double, room: Double) {
         var state: State
         switch account.availability {
@@ -430,10 +442,16 @@ extension CapacityOutlook {
         }
         let start = max(now, extraFrom ?? now)
         var arrived = extra <= 0 && arrival <= 0
+        var loadsArrived = Set<Int>()
         var served = 0.0
         var time = now
         while time < end {
             _ = applyResets(&state, at: time, pacer: pacer)
+            for (index, load) in loads.enumerated() where !loadsArrived.contains(index) && load.from <= time {
+                loadsArrived.insert(index)
+                let written = min(load.arrivalTokens, tokens(room(state, at: time, pacer: pacer)))
+                if written > 0 { spend(&state, percent: percent(written), at: time, pacer: pacer) }
+            }
             if !arrived, time >= start {
                 arrived = true
                 let written = min(arrival, tokens(room(state, at: time, pacer: pacer)))
@@ -441,8 +459,10 @@ extension CapacityOutlook {
             }
             var next = min(time.addingTimeInterval(step), end)
             let resets = [state.account.pacer.resetsAt, state.account.pacer.weeklyResetsAt, state.blockedUntil, start]
+                + loads.map(\.from)
             for reset in resets.compactMap({ $0 }) where reset > time && reset < next { next = reset }
             let rate = base + (time >= start ? extra : 0)
+                + loads.filter { $0.from <= time }.reduce(0) { $0 + $1.tokensPerHour }
             let taken = min(rate * next.timeIntervalSince(time) / 3600, tokens(room(state, at: time, pacer: pacer)))
             if taken > 0 { spend(&state, percent: percent(taken), at: time, pacer: pacer) }
             served += max(0, taken)
@@ -450,6 +470,110 @@ extension CapacityOutlook {
         }
         _ = applyResets(&state, at: end, pacer: pacer)
         return (served, room(state, at: end, pacer: pacer))
+    }
+
+    /// Whether `account` carries `adding` from its start until `end`, beside
+    /// `base` (from now) and `loads` (each from its start): at every step
+    /// from `adding.from` on, everything it then serves, arrivals included,
+    /// grown by 1 / `share` to keep the margin lane admission keeps
+    /// (`SessionPacer.windowFitShare`), fits the room it has, resets
+    /// refilling it on the way. Before `adding.from` the others spend what
+    /// they would. An account blocked at its limit carries nothing before
+    /// the reset that frees it; excluded and unavailable accounts carry
+    /// nothing. The one test every rule that sends sessions to an account
+    /// in a cycle applies with that cycle's `LaneLedger`: the held-session
+    /// plans, the slot path's fallback and the sessions a pause releases.
+    static func carries(_ account: Account, base: Double, loads: [Load], adding: Load, until end: Date, now: Date,
+                        pacer: SessionPacer, share: Double = SessionPacer.windowFitShare,
+                        step: TimeInterval = CapacityOutlook.defaultStep) -> Bool {
+        var state: State
+        switch account.availability {
+        case .serves: state = State(account: account, blockedUntil: nil)
+        case .atLimit:
+            state = State(account: account,
+                          blockedUntil: pacer.bindingReset(account.pacer, now: now) ?? now.addingTimeInterval(pacer.window))
+        case .excluded, .unavailable: return false
+        }
+        func tokens(_ percent: Double) -> Double { pacer.millions(percent, on: state.account.pacer) * 1_000_000 }
+        func percent(_ tokens: Double) -> Double {
+            Allowance.percent(millions: tokens / 1_000_000, percentPerMillion: state.account.pacer.percentPerMillion)
+        }
+        let all = loads + [adding]
+        let start = max(now, adding.from)
+        let scale = share > 0 ? 1 / share : 1
+        var arrived = Set<Int>()
+        var time = now
+        while time < end {
+            _ = applyResets(&state, at: time, pacer: pacer)
+            let checking = time >= start
+            for (index, load) in all.enumerated() where !arrived.contains(index) && load.from <= time {
+                arrived.insert(index)
+                guard load.arrivalTokens > 0 else { continue }
+                let room = tokens(room(state, at: time, pacer: pacer))
+                let need = load.arrivalTokens * (checking ? scale : 1)
+                if checking && need > room + 1 { return false }
+                spend(&state, percent: percent(min(need, room)), at: time, pacer: pacer)
+            }
+            var next = min(time.addingTimeInterval(step), end)
+            let resets = [state.account.pacer.resetsAt, state.account.pacer.weeklyResetsAt, state.blockedUntil, start]
+                + all.map(\.from)
+            for reset in resets.compactMap({ $0 }) where reset > time && reset < next { next = reset }
+            let rate = base + all.filter { $0.from <= time }.reduce(0) { $0 + $1.tokensPerHour }
+            let demand = rate * next.timeIntervalSince(time) / 3600 * (checking ? scale : 1)
+            let room = tokens(room(state, at: time, pacer: pacer))
+            if checking && demand > room + 1 { return false }
+            let taken = min(demand, room)
+            if taken > 0 { spend(&state, percent: percent(taken), at: time, pacer: pacer) }
+            time = next
+        }
+        return true
+    }
+
+    /// How long `account` serves `base` and `loads` from `start` before it
+    /// refuses some of them, at most until `end`: the minutes a planned
+    /// lane's fresh window lasts the sessions planned onto it, which the
+    /// held-session plans' event names. Zero for an account that serves
+    /// nothing.
+    static func lasting(_ account: Account, base: Double, loads: [Load], from start: Date, until end: Date, now: Date,
+                        pacer: SessionPacer, step: TimeInterval = 60) -> TimeInterval {
+        var state: State
+        switch account.availability {
+        case .serves: state = State(account: account, blockedUntil: nil)
+        case .atLimit:
+            state = State(account: account,
+                          blockedUntil: pacer.bindingReset(account.pacer, now: now) ?? now.addingTimeInterval(pacer.window))
+        case .excluded, .unavailable: return 0
+        }
+        func tokens(_ percent: Double) -> Double { pacer.millions(percent, on: state.account.pacer) * 1_000_000 }
+        func percent(_ tokens: Double) -> Double {
+            Allowance.percent(millions: tokens / 1_000_000, percentPerMillion: state.account.pacer.percentPerMillion)
+        }
+        var arrived = Set<Int>()
+        var time = now
+        while time < end {
+            _ = applyResets(&state, at: time, pacer: pacer)
+            let counting = time >= start
+            for (index, load) in loads.enumerated() where !arrived.contains(index) && load.from <= time {
+                arrived.insert(index)
+                let room = tokens(room(state, at: time, pacer: pacer))
+                if counting && load.arrivalTokens > room + 1 { return time.timeIntervalSince(start) }
+                spend(&state, percent: percent(min(load.arrivalTokens, room)), at: time, pacer: pacer)
+            }
+            var next = min(time.addingTimeInterval(step), end)
+            let resets = [state.account.pacer.resetsAt, state.account.pacer.weeklyResetsAt, state.blockedUntil, start]
+                + loads.map(\.from)
+            for reset in resets.compactMap({ $0 }) where reset > time && reset < next { next = reset }
+            let rate = base + loads.filter { $0.from <= time }.reduce(0) { $0 + $1.tokensPerHour }
+            let demand = rate * next.timeIntervalSince(time) / 3600
+            let room = tokens(room(state, at: time, pacer: pacer))
+            if counting && demand > room + 1 {
+                let share = rate > 0 ? room / rate * 3600 : 0
+                return time.addingTimeInterval(max(0, share)).timeIntervalSince(start)
+            }
+            spend(&state, percent: percent(min(demand, room)), at: time, pacer: pacer)
+            time = next
+        }
+        return end.timeIntervalSince(start)
     }
 
     /// The account's resets from `now` until `end`, each with what it renews:
