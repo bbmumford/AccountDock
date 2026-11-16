@@ -315,6 +315,9 @@ extension AppState {
     /// excludes, which it always pins to); a move by restarting is pinned
     /// once it lands (`movePins`). Each move made is recorded.
     func moveSession(_ sessionID: String, to wanted: Account?, now: Date = Date()) async -> SessionMoveOutcome {
+        // The cards and the Sessions page show the session on its new
+        // account as soon as its slot is rewritten, not at the next cycle.
+        defer { refreshSessions() }
         func outcome(_ ok: Bool, _ detail: String, _ account: Account? = nil) -> SessionMoveOutcome {
             SessionMoveOutcome(ok: ok, detail: detail, account: account)
         }

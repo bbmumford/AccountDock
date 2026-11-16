@@ -22,21 +22,27 @@ private struct StatWithTooltip<Content: View>: View {
 
 /// An account card's session count, with how many of its sessions are
 /// pinned (`AppState.sessionPins`) and how many were refused at a usage
-/// limit. Clicking it lists the sessions in a popover, one row each
-/// (`AppState.sessionSummary`) with the Sessions page's controls (pin,
-/// pause or play, move); resting the pointer on it shows the same list as
-/// text.
+/// limit. Resting the pointer on it, or clicking it, lists the sessions in
+/// a popover, one row each (`AppState.sessionSummary`) with the Sessions
+/// page's controls (pin, pause or play, move).
 private struct SessionCountLabel: View {
     @EnvironmentObject private var appState: AppState
     let provider: AIProviderType
     let sessions: Set<String>
-    @State private var showsList = false
-    @State private var isHovering = false
+    /// Kept open by a click until the user dismisses it.
+    @State private var pinnedOpen = false
+    /// Whether the pointer is on the label or on the list it opened; the
+    /// list stays open while it is on either.
+    @State private var overLabel = false
+    @State private var overList = false
+    /// Closes the list a moment after the pointer leaves both, so moving
+    /// from the label onto the list does not close it on the way.
+    @State private var closing: Task<Void, Never>?
 
     var body: some View {
         let pinned = sessions.filter { appState.sessionPins.isPinned($0) }.count
         let refused = sessions.filter { appState.sessionRefusals[$0] != nil }.count
-        Button { showsList.toggle() } label: {
+        Button { pinnedOpen.toggle() } label: {
             HStack(spacing: 4) {
                 Text((sessions.count == 1 ? "1 session" : "\(sessions.count) sessions") + (pinned > 0 ? " · \(pinned) pinned" : ""))
                     .font(.caption2)
@@ -49,31 +55,37 @@ private struct SessionCountLabel: View {
             }
         }
         .buttonStyle(.plain)
-        // Resting the pointer on it lists the sessions at once, as `.help`
-        // does only after a delay; a click keeps the list open with its locks.
-        .onHover { isHovering = $0 }
-        .popover(isPresented: Binding(get: { showsList || isHovering },
-                                      set: { if !$0 { showsList = false; isHovering = false } }),
+        // Resting the pointer on it opens the list with its controls (pin,
+        // pause or play, move) at once; it stays open while the pointer is
+        // on the label or the list, and a click keeps it open.
+        .onHover { hovering in
+            overLabel = hovering
+            hoverChanged()
+        }
+        .popover(isPresented: Binding(get: { pinnedOpen || overLabel || overList },
+                                      set: { if !$0 { pinnedOpen = false; overLabel = false; overList = false } }),
                  arrowEdge: .bottom) {
-            if showsList {
-                SessionPinList(provider: provider, sessions: sessions.sorted {
-                    appState.sessionSummary([$0]).localizedCaseInsensitiveCompare(appState.sessionSummary([$1])) == .orderedAscending
-                })
-                .environmentObject(appState)
-            } else {
-                // One line per session, so the list always shows as many
-                // as the count beside the card's title.
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(sessions.sorted(), id: \.self) { id in
-                        Text(verbatim: appState.sessionSummary([id]))
-                            .font(.caption)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .padding(8)
-                .frame(minWidth: 180, maxWidth: 440, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+            SessionPinList(provider: provider, sessions: sessions.sorted {
+                appState.sessionSummary([$0]).localizedCaseInsensitiveCompare(appState.sessionSummary([$1])) == .orderedAscending
+            })
+            .environmentObject(appState)
+            .onHover { hovering in
+                overList = hovering
+                hoverChanged()
             }
+        }
+    }
+
+    /// Keeps the list open while the pointer is on the label or the list,
+    /// and closes it shortly after it has left both.
+    private func hoverChanged() {
+        closing?.cancel()
+        guard !overLabel, !overList, !pinnedOpen else { return }
+        closing = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            overLabel = false
+            overList = false
         }
     }
 }
