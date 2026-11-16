@@ -128,6 +128,10 @@ struct ProviderCapabilities: Sendable {
     /// the window at 0% and a warm-up starts it. A plan left out is judged
     /// by its replies alone.
     var sessionWindowPlans: Set<String> = []
+    /// Where the provider states the plan an account is on now, which wins
+    /// over the plan its credential names (`Account.profilePlan`); nil for
+    /// a provider with none, whose credential's plan stands.
+    var planAuthority: PlanAuthority? = nil
     /// What its CLI settings tab offers (`CLISettingsTabView`); nil for a
     /// provider whose CLI has no settings of AccountDock's.
     var cliSettings: CLISettings? = nil
@@ -162,6 +166,46 @@ struct ProviderCapabilities: Sendable {
 
 /// A model a session can be switched to: the identifier its CLI's model
 /// command takes, and the name shown in settings.
+/// Where a provider states the plan an account is on now
+/// (`ProviderCapabilities.planAuthority`). Its answer
+/// (`ProviderPlanAnswer`) is kept with the account and wins over the plan
+/// a credential, a CLI's status or a sign-in names
+/// (`Account.applyProfilePlan`, `Account.applyCredentialPlan`).
+struct PlanAuthority: Sendable {
+    enum Source: Sendable {
+        /// An endpoint asked with the account's own credential
+        /// (`ProviderCredentialModule.planAnswer`), on the schedule
+        /// `AppState.planCheckDue` sets.
+        case profileEndpoint
+        /// Every usage reply names the plan, so each reading is a check
+        /// (`AppState.readCodexUsage`).
+        case usageReply
+    }
+
+    let source: Source
+    /// What the log and the failover events call it ("account profile").
+    let name: String
+}
+
+/// What a provider's plan authority answered for one account
+/// (`PlanAuthority`), applied by `AppState.applyProviderPlan`.
+struct ProviderPlanAnswer: Equatable, Sendable {
+    /// The plan named; nil keeps the one known.
+    var plan: String?
+    /// The plan has ended; kept as "free".
+    var inactive = false
+    /// The rate-limit tier named, which sizes some providers' plans; nil
+    /// keeps the one known.
+    var tier: String? = nil
+    /// The account the answer describes, as the provider names it (an
+    /// address, or its own identifier where it names none); an answer
+    /// naming another account than the one asked for is not applied.
+    var owner: String? = nil
+    /// The name the provider shows for the account, which becomes its
+    /// display name; nil leaves it.
+    var displayName: String? = nil
+}
+
 struct SessionModelChoice: Sendable, Hashable, Identifiable {
     let id: String
     let label: String
@@ -389,6 +433,9 @@ extension AIProviderType {
                 // starts. Max 20x is left to its replies: a verified
                 // account on it can have no session window.
                 sessionWindowPlans: ["pro", "max:default_claude_max_5x", "team"],
+                // The token keeps the plan it was issued under; the account
+                // profile names the organisation's plan and tier now.
+                planAuthority: PlanAuthority(source: .profileEndpoint, name: "account profile"),
                 cliSettings: .claudeCode
             )
         case .codex:
@@ -434,6 +481,9 @@ extension AIProviderType {
                 activityMetrics: [.turns, .linesChanged, .cost],
                 longWindowReportsLength: true,
                 sessionWindowPlans: ["plus", "pro"],
+                // The sign-in's ID token keeps the plan it was issued under;
+                // every usage reply names the plan now (`plan_type`).
+                planAuthority: PlanAuthority(source: .usageReply, name: "usage reply"),
                 cliSettings: .codex
             )
         case .kimi:
@@ -486,7 +536,10 @@ extension AIProviderType {
                 storageKey: "kimi",
                 longWindowStorageName: "Monthly",
                 longShortLabel: "MO",
-                shortBadge: "K"
+                shortBadge: "K",
+                // The profile endpoint (`/me`, `user_level_name`) names the
+                // membership level now; the usage reply does not.
+                planAuthority: PlanAuthority(source: .profileEndpoint, name: "profile")
             )
         case .gemini:
             ProviderCapabilities(

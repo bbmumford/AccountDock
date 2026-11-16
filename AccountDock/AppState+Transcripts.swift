@@ -73,6 +73,8 @@ extension AppState {
     /// against fresh readings (`verifyRefusals`), together with those whose
     /// check an earlier cycle could not finish.
     func ingestTranscriptRequests(now: Date = Date()) async {
+        // A day covers every reset a status line can be compared with.
+        sessionRequestSeenAt = sessionRequestSeenAt.filter { now.timeIntervalSince($0.value) < 24 * 60 * 60 }
         for provider in AIProviderType.implementedProviders where provider.capabilities.transcriptSource != nil {
             let requests = await TranscriptRequestFeed.shared.newRequests(provider, now: now)
             // Only a refusal of a session's own request is process evidence.
@@ -101,6 +103,11 @@ extension AppState {
         var refused: [String] = []
         for request in requests {
             if let name = request.sessionName, sessionNames[request.session] != name { sessionNames[request.session] = name }
+            // A request served, not refused, is one the account's windows count.
+            if request.limitRefusal == nil, request.accessRefusal == nil,
+               sessionRequestSeenAt[request.session].map({ $0 < request.at }) ?? true {
+                sessionRequestSeenAt[request.session] = request.at
+            }
             if let model = request.model { noteSessionModel(request.session, model: model, at: request.at) }
             let process = processes[request.session]
             var decision = attribution.decide(session: request.session, process: process)

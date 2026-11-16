@@ -14,6 +14,17 @@ struct ClaudeCredentialModule: ProviderCredentialModule, LiveCredentialModule {
 
     var liveCredential: LiveCredentialModule? { self }
 
+    /// The account profile's plan and tier, asked with the live credential
+    /// or the account's saved copy; its address names the account it
+    /// describes.
+    func planAnswer(of account: Account, readsLive: Bool, reason: String) async throws -> ProviderPlanAnswer? {
+        let token = readsLive
+            ? keychain.readClaudeToken(reason: reason, account: account.id)
+            : keychain.getAccountBackup(forAccountId: account.id.uuidString, reason: reason)?.token
+        guard let accessToken = token.flatMap(ClaudeService.extractAccessToken(from:)) else { return nil }
+        return try await service.getLiveSubscription(accessToken: accessToken).answer
+    }
+
     func hasSavedCopy(_ account: Account) -> Bool? {
         if keychain.hasAccountBackup(forAccountId: account.id.uuidString) { return true }
         return keychain.backupStoreAvailable ? false : nil

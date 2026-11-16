@@ -68,17 +68,20 @@ final class KimiService: @unchecked Sendable {
                 case resetTime = "reset_time"
             }
         }
+        /// Each window is read when the reply carries it: a plan without
+        /// one of them leaves it out, and the windows it does carry still
+        /// describe the account.
         struct Usages: Decodable {
-            let session: Window
-            let monthTotal: Window
-            let monthCode: Window
+            let session: Window?
+            let monthTotal: Window?
+            let monthCode: Window?
             enum CodingKeys: String, CodingKey {
                 case session = "limit_5h"
                 case monthTotal = "limit_month_total"
                 case monthCode = "limit_month_code"
             }
         }
-        let usages: Usages
+        let usages: Usages?
     }
 
     private struct UserProfile: Decodable {
@@ -179,28 +182,54 @@ final class KimiService: @unchecked Sendable {
     }
 
     /// The account the credential at `location` signs in as, from Kimi's
-    /// profile endpoint; recorded as an `ownershipCheck` by `reason`.
-    func identity(location: String, reason: String) async throws -> KimiIdentity {
-        let credential = try readCredential(at: URL(fileURLWithPath: location))
+    /// profile endpoint, asked with `accessToken` when the caller holds a
+    /// newer one than the saved copy (`planAnswer`); recorded as an
+    /// `ownershipCheck` by `reason`.
+    func identity(location: String, reason: String, accessToken: String? = nil) async throws -> KimiIdentity {
+        let token = try accessToken ?? readCredential(at: URL(fileURLWithPath: location)).accessToken
         var request = URLRequest(url: apiRoot.appendingPathComponent("me"))
         request.httpMethod = "GET"
-        applyHeaders(to: &request, accessToken: credential.accessToken)
+        applyHeaders(to: &request, accessToken: token)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            audit.record(.ownershipCheck, .kimi, location: location, accessToken: credential.accessToken,
+            audit.record(.ownershipCheck, .kimi, location: location, accessToken: token,
                          outcome: "status \((response as? HTTPURLResponse)?.statusCode ?? 0)", reason: reason)
             throw KimiServiceError.requestFailed(
                 "profile endpoint returned \((response as? HTTPURLResponse)?.statusCode ?? 0)"
             )
         }
+        let signedIn = try Self.profileIdentity(from: data)
+        audit.record(.ownershipCheck, .kimi, location: location, accessToken: token,
+                     outcome: "answered", reason: reason, owner: signedIn.identifier)
+        return signedIn
+    }
+
+    /// The plan Kimi's profile endpoint names now (`user_level_name`) for
+    /// the account whose copy is at `location`, asked with the newest copy
+    /// of its credential, renewed first when it has expired, as
+    /// `getUsageLimits` reads: the active account's live copy (`isActive`)
+    /// can be newer than the saved one. Recorded as an `ownershipCheck` by
+    /// `reason`. Called by `KimiCredentialModule.planAnswer`.
+    func planAnswer(location: String, isActive: Bool, reason: String) async throws -> ProviderPlanAnswer {
+        let managedURL = URL(fileURLWithPath: location)
+        var credential = try newestCredential(at: managedURL, isActive: isActive, reason: reason)
+        if credential.expiresAt.map({ Date(timeIntervalSince1970: $0) <= Date().addingTimeInterval(60) }) != false {
+            credential = try await renewed(credential, managedURL: managedURL, isActive: isActive, reason: reason)
+        }
+        let signedIn = try await identity(location: location, reason: reason, accessToken: credential.accessToken)
+        return ProviderPlanAnswer(plan: signedIn.planType, owner: signedIn.identifier, displayName: signedIn.displayName)
+    }
+
+    /// The account and membership level a `/me` reply names: its address,
+    /// or its user ID where it has none; its nickname, or else that
+    /// identifier; and `user_level_name` ("Free" once a paid level ends).
+    static func profileIdentity(from data: Data) throws -> KimiIdentity {
         let profile = try JSONDecoder().decode(UserProfile.self, from: data)
         let email = profile.email?.trimmingCharacters(in: .whitespacesAndNewlines)
         let identifier = email?.isEmpty == false ? email! : profile.userID
         let nickname = profile.nickname?.trimmingCharacters(in: .whitespacesAndNewlines)
         let displayName = nickname?.isEmpty == false ? nickname! : identifier
         let tier = profile.userLevelName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        audit.record(.ownershipCheck, .kimi, location: location, accessToken: credential.accessToken,
-                     outcome: "answered", reason: reason, owner: identifier)
         return KimiIdentity(
             identifier: identifier,
             displayName: displayName,
@@ -488,12 +517,28 @@ final class KimiService: @unchecked Sendable {
             throw KimiServiceError.requestFailed("usage endpoint returned \(status)")
         }
         LimitResetShapes.note(.kimi, reply: data)
-        let body = try JSONDecoder().decode(UsageEnvelope.self, from: data)
-        let month = body.usages.monthCode.usedRatio > body.usages.monthTotal.usedRatio
-            ? body.usages.monthCode : body.usages.monthTotal
+        return try Self.usage(fromReply: data)
+    }
+
+    /// A usage reply as a reading: the 5-hour window, and the fuller of the
+    /// month's total and code windows as the long one. A reply carrying none
+    /// of them throws, naming the keys it does carry, so the log shows what
+    /// the provider sent for the plan.
+    static func usage(fromReply data: Data) throws -> UsageAPIResponse {
+        let body: UsageEnvelope
+        do {
+            body = try JSONDecoder().decode(UsageEnvelope.self, from: data)
+        } catch {
+            throw KimiServiceError.requestFailed("usage reply could not be read (\(Self.describe(error)))")
+        }
+        let session = body.usages?.session
+        let month = [body.usages?.monthCode, body.usages?.monthTotal].compactMap { $0 }.max { $0.usedRatio < $1.usedRatio }
+        guard session != nil || month != nil else {
+            throw KimiServiceError.requestFailed("usage reply carries no quota window (keys: \(Self.keys(of: data)))")
+        }
         return UsageAPIResponse(
-            fiveHour: UsageWindow(utilization: body.usages.session.usedRatio * 100, resetsAt: body.usages.session.resetTime, windowSeconds: 18_000),
-            sevenDay: UsageWindow(utilization: month.usedRatio * 100, resetsAt: month.resetTime),
+            fiveHour: session.map { UsageWindow(utilization: $0.usedRatio * 100, resetsAt: $0.resetTime, windowSeconds: 18_000) },
+            sevenDay: month.map { UsageWindow(utilization: $0.usedRatio * 100, resetsAt: $0.resetTime) },
             sevenDayOauthApps: nil,
             sevenDayOpus: nil,
             sevenDaySonnet: nil,
@@ -501,6 +546,29 @@ final class KimiService: @unchecked Sendable {
             iguanaNecktie: nil,
             extraUsage: nil
         )
+    }
+
+    /// The top-level keys of a JSON reply, with the keys of each object
+    /// among them ("usages{limit_month_total}"), for a failure's words.
+    private static func keys(of data: Data) -> String {
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return "none" }
+        return root.keys.sorted().map { key in
+            (root[key] as? [String: Any]).map { "\(key){\($0.keys.sorted().joined(separator: ","))}" } ?? key
+        }.joined(separator: ", ")
+    }
+
+    /// A decoding failure in words that name the key or value at fault,
+    /// which `localizedDescription` leaves out.
+    private static func describe(_ error: Error) -> String {
+        switch error {
+        case DecodingError.keyNotFound(let key, let context):
+            return "missing " + (context.codingPath + [key]).map(\.stringValue).joined(separator: ".")
+        case DecodingError.valueNotFound(_, let context), DecodingError.typeMismatch(_, let context),
+             DecodingError.dataCorrupted(let context):
+            return context.codingPath.map(\.stringValue).joined(separator: ".") + ": " + context.debugDescription
+        default:
+            return error.localizedDescription
+        }
     }
 
     private func usageResponse(accessToken: String) async throws -> (data: Data, status: Int) {

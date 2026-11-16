@@ -47,4 +47,9 @@ struct KimiCredentialModule: ProviderCredentialModule {
         guard let location = account.credentialLocation else { return false }
         return service.credentialLasts(location: location, for: interval)
     }
+
+    func planAnswer(of account: Account, readsLive: Bool, reason: String) async throws -> ProviderPlanAnswer? {
+        guard let location = account.credentialLocation else { return nil }
+        return try await service.planAnswer(location: location, isActive: readsLive, reason: reason)
+    }
 }

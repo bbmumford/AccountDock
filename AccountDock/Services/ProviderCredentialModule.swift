@@ -40,6 +40,18 @@ protocol ProviderCredentialModule {
     /// The live credential the CLI's sessions share and renew in place;
     /// nil when the provider keeps none.
     var liveCredential: LiveCredentialModule? { get }
+    /// Asks the provider's plan authority
+    /// (`ProviderCapabilities.planAuthority`, `.profileEndpoint`) which
+    /// plan `account` is on now, with the account's own credential: the
+    /// live one when `readsLive`, otherwise its saved copy. Nil when there
+    /// is no credential to ask with or the provider has no such endpoint;
+    /// throws when the request fails. Recorded in the credential audit by
+    /// `reason`. Called by `AppState.checkProviderPlan`.
+    func planAnswer(of account: Account, readsLive: Bool, reason: String) async throws -> ProviderPlanAnswer?
+}
+
+extension ProviderCredentialModule {
+    func planAnswer(of account: Account, readsLive: Bool, reason: String) async throws -> ProviderPlanAnswer? { nil }
 }
 
 /// The steps for a live credential that every running session of a CLI

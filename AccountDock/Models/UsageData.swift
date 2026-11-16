@@ -191,6 +191,19 @@ extension UsageAPIResponse {
         "\(Int((length / 3600).rounded()))-hour window not started"
     }
 
+    /// The reading with `window` as its session window; nil leaves it out.
+    /// Used by `AppState.passiveApplication` to set aside a session window
+    /// a status line cannot vouch for.
+    func replacingFiveHour(_ window: UsageWindow?) -> UsageAPIResponse {
+        UsageAPIResponse(
+            fiveHour: window, sevenDay: sevenDay, sevenDayOauthApps: sevenDayOauthApps,
+            sevenDayOpus: sevenDayOpus, sevenDaySonnet: sevenDaySonnet, sevenDayCowork: sevenDayCowork,
+            iguanaNecktie: iguanaNecktie, extraUsage: extraUsage,
+            limits: limits, weeklyScopedShares: weeklyScopedShares,
+            limitResets: limitResets
+        )
+    }
+
     func replacingSevenDay(_ window: UsageWindow?) -> UsageAPIResponse {
         UsageAPIResponse(
             fiveHour: fiveHour, sevenDay: window, sevenDayOauthApps: sevenDayOauthApps,

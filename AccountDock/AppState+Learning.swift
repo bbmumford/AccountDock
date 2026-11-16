@@ -103,7 +103,7 @@ extension AppState {
 
     /// The account's plan as `TurnCostModel` keys what it learned by.
     nonisolated static func learnedPlan(_ account: Account) -> TurnCostModel.LearnedPlan {
-        TurnCostModel.LearnedPlan(plan: account.subscriptionType, tier: account.rateLimitTier)
+        TurnCostModel.LearnedPlan(plan: account.currentPlan, tier: account.currentRateLimitTier)
     }
 
     /// The account's token cost, in session percent per million weighted
