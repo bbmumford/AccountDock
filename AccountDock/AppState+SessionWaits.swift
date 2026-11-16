@@ -55,19 +55,28 @@ extension AppState {
     /// on its own account (`SessionWait.Reason.awaitingLane`) until it
     /// serves again or a later cycle admits it, held by the pause gate; an
     /// admitted one no longer waits. Records the admission once while it
-    /// stays the same (`laneAdmissionNoted`).
+    /// stays the same (`laneAdmissionNoted`). A run with no session record
+    /// (keyed by its slot's path, `isUnrecordedRun`) left waiting is kept
+    /// in `admissionHeldRuns` instead: no pause can list it, and its slot
+    /// stays on its account rather than going to the pool's fallback.
     func noteLaneAdmission(_ provider: AIProviderType, admission: SessionPacer.LaneAdmission?,
                            candidates: [SessionPacer.RebalanceSession], accounts pacerAccounts: [SessionPacer.Account],
                            now: Date) {
         var waits = sessionWaits[provider] ?? [:]
         let considered = Set(candidates.map(\.id))
         let waiting = Set(admission?.waiting ?? [])
+        admissionHeldRuns[provider] = candidates.reduce(into: [String: UUID]()) { runs, session in
+            if Self.isUnrecordedRun(session.id), waiting.contains(session.id) { runs[session.id] = session.account }
+        }
         // Waits for a lane end for every session weighed again and admitted,
         // or no longer short of room.
-        waits = waits.filter { id, wait in wait.reason != .awaitingLane || !considered.contains(id) || waiting.contains(id) }
+        waits = waits.filter { id, wait in
+            !Self.isUnrecordedRun(id) && (wait.reason != .awaitingLane || !considered.contains(id) || waiting.contains(id))
+        }
         var added: [String] = []
         let pacer = SessionPacer()
-        for session in candidates where waiting.contains(session.id) && waits[session.id] == nil {
+        for session in candidates where waiting.contains(session.id) && waits[session.id] == nil
+            && !Self.isUnrecordedRun(session.id) {
             let back = pacerAccounts.first { $0.id == session.account }.flatMap { pacer.bindingReset($0, now: now) }
             waits[session.id] = SessionWait(account: session.account, reason: .awaitingLane,
                                             until: back ?? now.addingTimeInterval(FailoverPlanner.sessionWindow), since: now)
@@ -93,6 +102,11 @@ extension AppState {
         laneAdmissionNoted[provider] = event
         failoverEvents.record(provider, event)
     }
+
+    /// Whether a key the stranded placement weighs is a run with no session
+    /// record: those are keyed by their slot's absolute path, sessions by
+    /// their ID.
+    nonisolated static func isUnrecordedRun(_ id: String) -> Bool { id.hasPrefix("/") }
 
     /// The event for an admission while capacity is scarce: how many of the
     /// waiting sessions each lane took and until when they fit there, and

@@ -16,6 +16,10 @@ extension AppState {
         /// The slot directory each running process reads; read by
         /// `sessionAttribution` and `slotAccount(forSession:)`.
         var directoryByProcess: [Int32: String] = [:]
+        /// The folder each slot's process runs in (its `PWD`), by slot path,
+        /// read with `directoryByProcess` (`slotFolders`); names a run with
+        /// no session record in the events (`unrecordedRunName`).
+        var folderByDirectory: [String: String] = [:]
         /// The account serving each slot that has running sessions.
         var directoryServing: [String: UUID] = [:]
         /// Accounts whose slot a running session reads; they are read and
@@ -234,20 +238,23 @@ extension AppState {
             SessionSlots(provider).map { (provider, $0) }
         }
         guard !isolated.isEmpty else { return }
-        let read = await Task.detached(priority: .utility) { () -> [([Int32: String], BackgroundSessionProcesses)] in
+        let read = await Task.detached(priority: .utility) {
+            () -> [([Int32: String], BackgroundSessionProcesses, [String: String])] in
             let table = ProcessTable.read() ?? ProcessTable(entries: [])
             return isolated.map { _, slots in
                 let background = slots.background.map {
                     BackgroundSessionProcesses(table: table, executable: slots.executable, support: $0)
                 } ?? BackgroundSessionProcesses()
-                return (slots.directoriesByProcess(in: table), background)
+                let directories = slots.directoriesByProcess(in: table)
+                return (directories, background, Self.slotFolders(directories, table: table))
             }
 
         }.value
-        for ((provider, slots), (directories, background)) in zip(isolated, read) {
+        for ((provider, slots), (directories, background, folders)) in zip(isolated, read) {
             sessionSlotStates[provider, default: SessionSlotState()].background = background
             let byProcess = Self.sessionSlotDirectories(directories, background: background)
             sessionSlotStates[provider, default: SessionSlotState()].directoryByProcess = byProcess
+            sessionSlotStates[provider, default: SessionSlotState()].folderByDirectory = folders
             // A slot in use that `serveSessionSlots` has not served yet, as
             // on the first cycle after launch, serves the account the slot
             // itself records; `refreshSessions` would otherwise count its
@@ -273,6 +280,34 @@ extension AppState {
     nonisolated static func sessionSlotDirectories(_ directories: [Int32: String],
                                                    background: BackgroundSessionProcesses) -> [Int32: String] {
         directories.filter { !background.nonSessions.contains($0.key) }
+    }
+
+    /// The folder each slot's process runs in, by slot path: the `PWD` in
+    /// the environment of the process reading it (`directories`, by process
+    /// ID, from `table`), the lowest process ID first when several read
+    /// one. A run that keeps no session record is named by it.
+    nonisolated static func slotFolders(_ directories: [Int32: String], table: ProcessTable) -> [String: String] {
+        var folders: [String: String] = [:]
+        for (pid, directory) in directories.sorted(by: { $0.key < $1.key }) where folders[directory] == nil {
+            guard let entry = table.entries.first(where: { $0.pid == pid }),
+                  let folder = entry.environmentValue("PWD"), folder.hasPrefix("/") else { continue }
+            folders[directory] = folder
+        }
+        return folders
+    }
+
+    /// How the events and plans name a run with no session record in the
+    /// slot at `slot`: by the folder it runs in ("a run in ~/ORBTR"), never
+    /// by the slot's path.
+    func unrecordedRunName(_ provider: AIProviderType, slot: String) -> String {
+        Self.runName(folder: sessionSlotStates[provider]?.folderByDirectory[slot])
+    }
+
+    /// "a run in ~/ORBTR" for a run in `folder`; "a run with no session
+    /// record" when its folder is unknown.
+    nonisolated static func runName(folder: String?) -> String {
+        guard let folder else { return eventName(of: nil) }
+        return "a run in " + (folder as NSString).abbreviatingWithTildeInPath
     }
 
     /// The account serving the slot a running session reads, when the
@@ -521,9 +556,11 @@ extension AppState {
             : strandedPlacements(provider, slots: slots, members: members, unrecorded: unrecorded, now: now)
         maintainPins(provider, sessionsBySlot: sessionsByDirectory.mapValues(\.sessionID), now: now)
         // Sessions waiting on their account for its reset keep it, and one
-        // lane admission keeps there stays even once the user plays it.
+        // lane admission keeps there stays even once the user plays it; so
+        // does a run with no session record admission keeps, by its slot.
         let waiting = waitingSessions(provider)
         let admissionHeld = admissionHolds(provider)
+        let admissionHeldRuns = admissionHeldRuns[provider] ?? [:]
         var credentials: [UUID: SlotCredential] = [:]
         func credential(_ id: UUID) async -> SlotCredential? {
             if let known = credentials[id] { return known }
@@ -602,7 +639,7 @@ extension AppState {
             }
             let placed = session.map { placements[$0.sessionID] } ?? placements[path]
             let waitsOn = session.flatMap { waiting[$0.sessionID] }
-            let heldOn = session.flatMap { admissionHeld[$0.sessionID] }
+            let heldOn = session.map { admissionHeld[$0.sessionID] } ?? admissionHeldRuns[path]
             // An account that can no longer serve sends its session to the
             // pool's fallback only where the cycle's ledger shows room for
             // it beside everything else sent there (`ledgerFallback`).
@@ -690,7 +727,7 @@ extension AppState {
             quotaTrends[target]?.settle(at: now)
             let from = slot.account.flatMap { id in accounts.first { $0.id == id } }.map { messageName($0) } ?? "its account"
             let to = accounts.first { $0.id == target }.map { messageName($0) } ?? "another account"
-            let subject = Self.eventName(of: session)
+            let subject = session.map { Self.eventName(of: $0) } ?? unrecordedRunName(provider, slot: path)
             slotDirectoryMovedAt[path] = now
             noteSlotAssignment(path, from: slot.account, to: target, at: now)
             // The model's own limit is named when it is what the account

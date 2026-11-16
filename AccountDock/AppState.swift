@@ -269,6 +269,12 @@ final class AppState: ObservableObject {
     /// The held-session plans' summary event last recorded, by provider, so
     /// it is recorded once while it says the same.
     var heldPlanSummaryNoted: [AIProviderType: String] = [:]
+    /// The runs with no session record lane admission keeps on their
+    /// account, by slot path, with that account (`noteLaneAdmission`): no
+    /// pause can list a run it knows no session of, so `serveSessionSlots`
+    /// keeps its slot there (`slotChoice`'s `heldOn`) until admission or a
+    /// plan places it.
+    var admissionHeldRuns: [AIProviderType: [String: UUID]] = [:]
     /// The terminal session each of those runs in, when
     /// `sessionTerminal` can reach it.
     @Published var unisolatedTerminals: [String: String] = [:]

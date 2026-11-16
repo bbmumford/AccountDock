@@ -1554,8 +1554,15 @@ the pool weights and which sessions move, each time the pool is rebuilt
   is charged the whole cache write of the session's arrival
   (`SessionPacer.arrivalCost`: its context at 2 a token for the one-hour
   cache, 1.25 for the five-minute one), not only what the move adds over
-  staying. A run whose process left no session record is placed by its
-  slot's path at `defaultSessionRate`. The sessions an exhausted account, or
+  staying. A run whose process left no session record, as every session
+  is for the first cycle after AccountDock starts, is placed by its slot's
+  path at `defaultSessionRate`, weighed and charged in the cycle's ledger
+  with the sessions; one admission leaves waiting is kept on its account
+  by its slot (`admissionHeldRuns`, `slotChoice`'s `heldOn`) and never
+  listed in a pause, which knows no session of it. The events and plans
+  name it by the folder its process runs in ("a run in ~/ORBTR",
+  `AppState.unrecordedRunName`, from the `PWD` `refreshSlotProcesses`
+  reads, `slotFolders`), never by its slot's path. The sessions an exhausted account, or
   a small plan's filled session window, gives up spread over the accounts
   with room by how long each then lasts, instead of all going to the account
   with the largest pool weight: a session that must leave is served rather

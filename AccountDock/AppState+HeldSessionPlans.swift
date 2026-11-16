@@ -141,10 +141,11 @@ extension AppState {
 
     /// How the events name a held session or run: its record's folder and
     /// ID, or, for a run with no session record (keyed by its slot's path),
-    /// what it is.
+    /// the folder it runs in (`unrecordedRunName`), never the path cut to
+    /// an ID's length.
     func heldSessionName(_ provider: AIProviderType, _ id: String) -> String {
         if let live = liveSession(id) { return Self.eventName(of: live.1) }
-        if id.hasPrefix("/") { return Self.eventName(of: nil) }
+        if Self.isUnrecordedRun(id) { return unrecordedRunName(provider, slot: id) }
         return "session \(id.prefix(8))"
     }
 
