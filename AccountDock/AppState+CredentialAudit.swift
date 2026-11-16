@@ -124,9 +124,12 @@ extension AppState {
         // no turn has started or ended since its slot last moved, plus the
         // time the CLI takes to read the slot again, that reply came from
         // before the move and says nothing about the token held now.
+        // The move time is the slot's own record when this launch made it,
+        // else when the slot's account file was last written, which a
+        // relaunch keeps.
         if source == "statusLineResets", believed.source == "slot", let process,
            let directory = slotDirectoryByProcess[process],
-           let moved = slotAccountHistory[directory]?.last?.at {
+           let moved = slotAccountHistory[directory]?.last?.at ?? Self.slotAssignedAt(directory) {
             let lastTurn = AgentSessions.records(provider)[session]?.observedAt ?? .distantPast
             if lastTurn < moved.addingTimeInterval(Self.slotMoveSettling) {
                 flaggedCredentialProcesses[session] = nil
@@ -151,6 +154,14 @@ extension AppState {
         } else {
             flaggedCredentialProcesses[session] = nil
         }
+    }
+
+    /// When the slot at `directory` was last assigned to an account: the
+    /// modification time of its `account` file, which every assignment
+    /// rewrites.
+    nonisolated static func slotAssignedAt(_ directory: String) -> Date? {
+        let url = URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent(SessionSlots.accountFile)
+        return (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
     /// How old a process table `noteProcessCredential`'s callers read may
