@@ -663,6 +663,44 @@ which asks the user to check the seat or licence. `recheckCLIAccessIfDue` tries
 the account again with the warm-up's request daily and on the user's refresh;
 served, the mark ends.
 
+## Failover, weekly balancing and session balancing
+
+Three mechanisms move work, each with its own code and events:
+
+- **The active account** (`activeAccount(for:)`, the account the shared
+  sign-in holds) is moved only by `performAutomaticSwitch`, for
+  `FailoverPlanner.plan`'s switch reasons: failover's `.threshold`,
+  `.exhausted` and `.workloadUnavailable` (with `policy.enabled`), and weekly
+  balancing's `.balance` (with `intelligentBalancingEnabled`), which orders
+  accounts by `latestStart`, the latest moment each must start being used
+  for its remaining weekly allowance to be spent before its own reset, so an
+  account resetting sooner is used sooner. A switch moves every session on
+  the shared sign-in (`moveRunningSessions`). Events read "Failover switches
+  the active account from …" and "Weekly balancing switches …".
+- **Session balancing** moves slot sessions one at a time: the pool's
+  weights for new sessions, `SessionPacer.plan`'s shedding, remainder and
+  window rules, the stranded placement and lane admission
+  (`strandedPlacements`, `admitToLanes`), and the rebalance, all through
+  `serveSessionSlots`, whose events read "Session balancing moved …". It
+  does not depend on the active account moving.
+- **Pausing** (`AgentPauseGate`, `limitPauseScope`) holds sessions account
+  by account; the sessions a wait keeps on their account
+  (`AppState.SessionWait`: a reset before their cache expires, the active
+  account staying, no lane admitting them) are listed in it like pinned ones.
+
+`ProviderFailoverPolicy.activeAccountLocked`, shown as "Move the active
+account automatically" (`movesActiveAccountAutomatically`), gates the first
+alone: off, `performAutomaticSwitch` makes no switch and records which
+mechanism asked (`lockedSwitchEvent`), `nextActiveSwitch` projects none, and
+once the active account is at or near its limit
+`holdSharedSessionsOnStayingAccount` restarts the shared sessions that can
+restart in a slot of their own and holds the rest
+(`SessionWait.Reason.activeAccountStays`) until it serves again, the user
+moves them or the switch is on again. The menu footer's switches
+(`FooterSwitches`, `AppState+MenuToggles`) set it, and `distributeSessions`
+for session balancing, for every provider at once; `ProviderFailoverSwitch`
+sets it for one.
+
 ## Failover planning
 
 `FailoverPlanner` is a pure function from accounts, readings and settings to a
@@ -1434,8 +1472,7 @@ the pool weights and which sessions move, each time the pool is rebuilt
   wait no longer holds it (`SessionWait.played`). The event reads "Holding
   session X on hexorda until its reset at 3:09 pm: sooner than its cache
   expires, so it keeps its cache." A pause file that names one account
-  (`PauseFile.account`), kept from before sessions waited one by one, still
-  ends at that account's reset.
+  (`PauseFile.account`) ends at that account's reset (`endAccountHoldIfDue`).
 - Why a small plan's window with room takes no running session is said
   (`AppState.noteLaneShortfalls`, `SessionPacer.laneShortfall`, kept in
   `laneNotes`): under the provider on the Sessions page and in the rebalance

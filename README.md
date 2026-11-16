@@ -233,6 +233,35 @@ slot** does so itself, at most once every ten minutes per session.
 Pins are kept by session ID, so a pinned session that is resumed
 (`claude --resume`) goes back to the account it was pinned to.
 
+## Failover, weekly balancing and session balancing
+
+Three separate things move work, and every event names which one acted.
+
+- **The active account** is the account the CLI's shared sign-in uses, and
+  with it every session outside a slot of its own. Two things move it:
+  **failover**, when the active account reaches a threshold or its limit
+  ("Failover switches the active account from …"), and **weekly balancing**,
+  which moves it early so each account's weekly allowance is used in line
+  with when it actually resets, the one resetting soonest first, so none
+  expires with allowance left ("Weekly balancing switches …"). Moving it moves
+  every session on the shared sign-in at once.
+- **Session balancing** moves sessions in slots of their own between
+  accounts one at a time: where new sessions start, pacing, rebalancing, the
+  small plans' windows, and admitting waiting sessions to a lane that frees up
+  ("Session balancing moved …"). It keeps running whatever the active account
+  does.
+- **Pausing** holds a session at its next step while its own account is at
+  its limit, account by account, including a session waiting on its account
+  for a reset that comes before its prompt cache expires.
+
+**Move the active account automatically** (Settings → Failover, the footer's
+Failover switch, or the provider headings' switch) decides whether failover
+and weekly balancing may move the active account at all. Off, it stays where
+you put it: when it reaches its limit, the sessions on the shared sign-in are
+not moved together; those that can restart in a slot of their own do, so
+session balancing can place them, and the rest are paused until it resets or
+you move them. Session balancing and pausing go on either way.
+
 ## Automatic failover
 
 <p align="center">
