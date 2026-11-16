@@ -424,7 +424,7 @@ struct FailoverSettingsView: View {
                     get: { store.policy(for: provider).rebalanceAutomatically },
                     set: { on in store.update(provider) { $0.rebalanceAutomatically = on } }
                 ))
-                .help("Makes the moves the Sessions page's rebalance offers without being asked, at most once every \(Int(AppState.balanceMoveInterval / 60)) minutes, and only when the first account then runs out more than an hour later, so prompt caches are not rewritten for little.")
+                .help("Makes the moves the Sessions page's rebalance offers without being asked, at most once every \(Int(AppState.balanceMoveInterval / 60)) minutes, and only when the first account then runs out more than an hour later, so prompt caches are not rewritten for little. A session that moved within the last hour stays where it went unless that account refuses it or reaches its limit.")
                 .padding(.leading, 20)
                 .disabled(!appState.rebalanceAvailable(provider))
                 Toggle("Resume sessions left waiting at a limit once their slot has room", isOn: Binding(

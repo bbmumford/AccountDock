@@ -523,6 +523,16 @@ extension AppState {
                                           burn: planner.expectedSessionBurn(of: state),
                                           newSessionBurn: typical / 1_000_000 * accountRatio(id)) ? id : nil
         })
+        // Of the rest, those whose session window would otherwise leave
+        // room unused at its reset, with a share of new sessions sized to
+        // that room (`windowShare`): they stay open to new sessions.
+        let windowShares = carrying.isEmpty ? [:] : candidates.reduce(into: [UUID: Double]()) { result, candidate in
+            let id = candidate.0.id
+            guard !carrying.contains(id), let state = states[id] else { return }
+            let share = Self.windowShare(pacerAccount(id, state: state, weight: 1, planner: planner, now: now),
+                                         typicalRate: typical, now: now)
+            if share > 0 { result[id] = share }
+        }
         var members: [RouterPoolMember] = []
         for (account, tier, latestStart) in candidates {
             let name = Self.poolTokenFile(account)
@@ -534,7 +544,7 @@ extension AppState {
                 tier: tier, urgent: latestStart.timeIntervalSince(now) < 24 * 60 * 60, anyBelow: anyBelow,
                 forecastAtLimit: forecastAtLimit.contains(account.id), anyOpen: anyOpen,
                 draining: draining.contains(account.id), othersLowOnWeeklyRoom: othersLowOnWeek,
-                shortOfRunway: !carrying.contains(account.id) && !carrying.isEmpty
+                shortOfRunway: !carrying.contains(account.id) && !carrying.isEmpty && windowShares[account.id] == nil
             ) * (current.contains(account.id) ? 1 : 0)
             members.append(RouterPoolMember(accountID: account.id.uuidString, tokenFile: name, weight: weight))
         }
@@ -552,7 +562,13 @@ extension AppState {
             routerSessionMoves = [:]
             pacingShedding = []
             pacingScopedShedding = []
-            return members
+            // Unpaced, the weight is the share itself; the pacer sizes the
+            // room in tokens on its own.
+            return members.map { member in
+                var member = member
+                if let id = UUID(uuidString: member.accountID), let share = windowShares[id] { member.weight *= share }
+                return member
+            }
         }
         return paced(provider, members: members, states: states, planner: planner, movesSessions: forRouter,
                      draining: draining, stale: Set(candidates.map(\.0.id)).subtracting(current), now: now)
@@ -574,7 +590,9 @@ extension AppState {
     /// more typical session for `SessionPacer.newSessionRunway` while
     /// another can, `carriesNewSession`) takes none: whatever its tier or
     /// drain, the session would be refused there, or moved and made to
-    /// write its cache again, within the hour. Otherwise a draining one
+    /// write its cache again, within the hour. `buildPool` counts no account
+    /// short of the runway whose session window would otherwise leave room
+    /// unused (`windowShare`). Otherwise a draining one
     /// above its thresholds takes `drainingShare`, or `drainingPreferred`
     /// when the others are low on weekly room; one below its thresholds
     /// takes 1, or 2 when its allowance must start being used within a day;
@@ -593,6 +611,21 @@ extension AppState {
     /// `newSessionBurn` for `SessionPacer.newSessionRunway`.
     nonisolated static func carriesNewSession(headroom: Double, burn: Double, newSessionBurn: Double) -> Bool {
         headroom >= (max(0, burn) + newSessionBurn) * SessionPacer.newSessionRunway / 3600
+    }
+
+    /// The share of new sessions an account that cannot carry a typical
+    /// session for the runway takes while another can: the tokens per hour
+    /// of room its session window would otherwise leave unused at its reset
+    /// (`SessionPacer.expiringWindowRate`, at its own rate), over
+    /// `typicalRate`, at most 1. 0 for a window its own sessions will fill,
+    /// or no session window, which keeps the runway rule. The next
+    /// session's rate is unknown when it starts, so a share sized to the
+    /// room lets a light one use what would be lost, and a heavy one that
+    /// fills it moves on as from any full window. Read by `buildPool`.
+    nonisolated static func windowShare(_ account: SessionPacer.Account, typicalRate: Double, now: Date) -> Double {
+        guard typicalRate > 0 else { return 0 }
+        let room = SessionPacer().expiringWindowRate(account, burn: account.burnPerHour, now: now) * 1_000_000
+        return min(1, room / typicalRate)
     }
 
     /// Whether every one of `weekly` (accounts' long-window use, nil when
@@ -661,8 +694,13 @@ extension AppState {
                               now: now)
         }
         let pacer = SessionPacer(moveCostFactor: movesSessions ? 1 : provider.capabilities.sessionMoveCostFactor)
+        // Window placements and holds are slot sessions'; the router's
+        // sessions have neither.
+        let placements = movesSessions ? [:] : windowPlacementsInForce(provider, now: now)
+        let holds = movesSessions ? [:] : slotSessionsWithinHold(provider, now: now)
         let plan = pacer.plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
-                              fixed: pinned, remainders: remainders)
+                              fixed: pinned, remainders: remainders, placements: placements, held: Set(holds.keys))
+        noteHeldMoves(provider, heldBack: plan.heldBack, holds: holds, rule: "pacing", now: now)
         // A session is never moved to an account without allowance for the
         // model it uses, nor off a draining account before its limit.
         var moves = plan.moves.filter { session, destination in
@@ -789,11 +827,14 @@ extension AppState {
     /// (`pooled`) other than the active one that cannot carry the work a
     /// switch would move there (`FailoverPlanner.carries`, judged as
     /// `nextActiveSwitch` judges it, slot sessions staying where they are),
-    /// leaving out any a session moved to for a remainder within
-    /// `balanceMoveInterval`; and the `slotted` sessions not mid-turn. A
-    /// balance switch moves the whole shared group, so such an account's
-    /// remainder is otherwise left to expire. Nil when balancing is off or
-    /// no account qualifies.
+    /// those a session moved to for a remainder or a window within
+    /// `balanceMoveInterval` among them as `resting`; and the `slotted`
+    /// sessions not mid-turn. A balance switch moves the whole shared group,
+    /// so such an account's remainder is otherwise left to expire. A resting
+    /// account stays among the accounts: left out, it would count as a
+    /// carrier whose window the move just began to fill, and the shedding
+    /// rule and a rebalance would take the session straight back. Nil when
+    /// balancing is off or no account qualifies.
     func remainderSpending(_ provider: AIProviderType, pooled: Set<UUID>, slotted: Set<String>,
                            now: Date) -> SessionPacer.RemainderSpending? {
         let policy = failoverConfig.policy(for: provider)
@@ -805,11 +846,13 @@ extension AppState {
         guard let current = states.first(where: { $0.id == active }) else { return nil }
         let small = Set(states.filter { state in
             state.id != active && !planner.carries(state, from: current, at: now)
-                && (remainderMovedAt[state.id].map { now.timeIntervalSince($0) >= Self.balanceMoveInterval } ?? true)
         }.map(\.id))
         guard !small.isEmpty else { return nil }
+        let resting = small.filter { id in
+            remainderMovedAt[id].map { now.timeIntervalSince($0) < Self.balanceMoveInterval } ?? false
+        }
         let working = Set((liveSessions[provider] ?? []).filter(\.isWorking).map(\.sessionID))
-        return SessionPacer.RemainderSpending(accounts: small, sessions: slotted.subtracting(working))
+        return SessionPacer.RemainderSpending(accounts: small, sessions: slotted.subtracting(working), resting: resting)
     }
 
     /// The event for a slot session moved to use an account's session

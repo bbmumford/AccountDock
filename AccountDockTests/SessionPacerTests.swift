@@ -166,8 +166,15 @@ final class SessionPacerTests: XCTestCase {
         let roomy = account(b, used: 10, resetIn: 4)
         let idle = [session("s1", on: b, burn: 0.5, idle: 10), session("s2", on: b, burn: 0.3, idle: 10)]
         let plan = pacer.plan(accounts: [nearlySpent, roomy], sessions: idle, now: now)
-        XCTAssertEqual(plan.weights[a] ?? -1, 0, "between turns the running sessions' decayed rates are no guide")
+        // Between turns the running sessions' decayed rates are no guide: `a`
+        // carries no new session for the runway, and takes only the share
+        // its window's room, unused by its reset, gives it.
+        XCTAssertEqual(plan.weights[a] ?? -1, pacer.expiringWindowRate(nearlySpent, burn: 0, now: now), accuracy: 0.0001)
+        XCTAssertLessThan(plan.weights[a] ?? 0, plan.weights[b] ?? 0)
         XCTAssertGreaterThan(plan.weights[b] ?? 0, 0)
+        // With its own use filling that room before the reset, none.
+        let filling = account(a, used: 85, resetIn: 3, burn: 5)
+        XCTAssertEqual(pacer.plan(accounts: [filling, roomy], sessions: idle, now: now).weights[a] ?? -1, 0)
 
         // A session's last hour counts even when its current rate has faded.
         var busy = session("s3", on: b, burn: 0.1, idle: 10)

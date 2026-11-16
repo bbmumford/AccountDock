@@ -777,11 +777,14 @@ group's share, now or from the projected switch, spends nothing this way,
 and an account giving sessions up takes none. The move goes through the
 pacer's moves and `serveSessionSlots`, which records "Moved session X
 (light use) to Backup to use its last 2% before it resets on Mon 7:59 am;
-it rebuilds its cache there." (`AppState.remainderMoveEvent`) and offers
-that account again only `balanceMoveInterval` later
-(`AppState.remainderMovedAt`). A session placed so reaches no limit there
-before the reset, so shedding leaves it; if the account reaches its limit
-after all, the session moves on as any stranded slot session does.
+it rebuilds its cache there." (`AppState.remainderMoveEvent`) and keeps
+that account among the accounts it offers, but resting
+(`RemainderSpending.resting`, from `AppState.remainderMovedAt`): for
+`balanceMoveInterval` it takes no further session, yet it is still no
+carrier, so the shedding rule and a rebalance do not take the session
+straight back. A session placed so reaches no limit there before the
+reset, so shedding leaves it; if the account reaches its limit after all,
+the session moves on as any stranded slot session does.
 
 A small plan's 5-hour window is a refilling allowance: room it has left at
 its reset expires, and the window starts again full. While the accounts that
@@ -804,16 +807,57 @@ hour each account would otherwise leave unused: the windows' room until
 their resets, and a carrier's room until the first carrier's reset, which is
 none once its own sessions spend it. `serveSessionSlots` records "Moved
 session X from Personal to hexorda, using hexorda's session window until
-12:20 pm, …" (`AppState.windowMoveEvent`). A window that fills leaves its
-sessions to the stranded placement above, so they move on to the next
-account with room, or back, and a window spent again once it refills. The
-shared group stays where `FailoverPlanner.carries` lets it.
+12:20 pm, …" (`AppState.windowMoveEvent`).
+
+Every such move, the pacer's or a rebalance's, is a **window placement**
+(`AppState.windowPlacements`): the session is planned to stay on that
+account until its window is used up or the placement's "until" time, and
+every rule that moves slot sessions follows that one intent. While the
+session's slot serves the account and "until" has not passed
+(`AppState.windowPlacementsInForce`), `SessionPacer.plan` and `rebalance`
+take it as a session that stays, and the account it fills
+(`Plan.filling`, `Rebalance.filling`) as filling as planned: reaching its
+session window's limit is no reason to shed (only a weekly limit binding
+first still is), the shedding rule sends it no session given up elsewhere,
+a stranded session goes there only when nothing else can serve, and
+rebalancing settles it, neither moving a session off it or onto it nor
+counting its planned fill as a run-out to improve, so neither the manual
+nor the automatic rebalance undoes the move. A window that fills, or
+refuses, leaves its sessions to the stranded placement above, so they move
+on to the next account with room, and a window spent again once it
+refills. The shared group stays where `FailoverPlanner.carries` lets it.
+
+The events tell each placement as one story. The move into the window says
+until when (`windowMoveEvent`, for a rebalance's window moves too), and the
+move that takes the session off says why (`AppState.windowLeaveReason`):
+"Moved session X from hexorda to Backup: hexorda's session window is used
+up, as its placement there until 12:57 pm planned.", or "hexorda refused it
+at its limit, ending its placement there until 12:57 pm", or, for a later
+move, "since its placement on hexorda's session window ended at 12:57 pm as
+planned". No event says an account a placement fills gives sessions up for
+reaching that window's limit, since the pacer does not shed it. A move the
+automatic rebalance makes says so ("the automatic rebalance makes the
+sessions last longer that way"), and its summary reads "Rebalancing sessions
+automatically: …", rather than "a request asked for it".
 
 For new
 sessions, `carriesNewSession` and the pacer's runway rule let such an
 account take one while it can carry a typical session for an hour, and the
 pacer weighs it by the room it has left, a small share beside an account
-with most of its week.
+with most of its week. One that cannot carry a typical session for the hour
+still takes new sessions when its session window would otherwise leave room
+unused at its reset, at its own rate, at least `minimumLeftover` (2%)
+(`SessionPacer.expiringWindowRate`):
+the next session's rate is not known when it starts, and that room is lost
+whatever moves, so a light session may as well use it. `buildPool` keeps
+such an account open (`AppState.windowShare`, the room's tokens per hour
+until the reset over a typical session's rate, at most 1, which is its
+weight when pacing is off), and the pacer gives it a weight sized to that
+room, in tokens per hour, beside the accounts that carry the runway. A
+window its own sessions will fill before its reset gets none while another
+account carries the runway, and with none, the runway rule's fallback
+weighs every account as before. Moving a running session there still
+follows the runway, the window and the stranded rules.
 
 Whether an account has a session window is read from each reading, account by
 account, because a plan can drop it while others keep it (Claude's Ultra plan
@@ -900,6 +944,23 @@ from the median known size. A provider whose plan sizes are not listed, or an
 account whose size is unknown (a Max plan without its tier), keeps the
 plan-wide cost. The first measurement on the account replaces the seed, and
 the Learning log records each change in where an account's cost comes from.
+
+A few readings can mislead: a window that other use moved between two
+readings can make a Max 5x account read like a Max 20x one, which would send
+it four times the work it holds. A measured cost more than
+`sizeDisagreement` (2) times off, either way, from what the account's size
+makes of the other measured accounts' costs (their median, so one stray
+account sets no expectation) is therefore blended toward that expectation,
+in log terms, by how many of `trustedReadings` (10) readings it has learned
+from (`TurnCostModel.accountReadings`), and stands alone after that
+(`RatioSource.blendedWithPlanSize`). Each measured cost is kept with the
+plan it was measured on (`TurnCostModel.accountPlans`, the plan and the
+rate-limit tier): once the account is on another plan, as an upgrade from
+Pro to Max, which makes each percent five times the work, that cost is not
+used, and the next reading forgets it and its readings
+(`TurnCostModel.notePlan`, from `AppState.learnFromReading`), so the plan
+size seeds the account until it is measured again. A tier learned after the
+cost was is the same plan.
 
 ### Learning
 
@@ -1284,7 +1345,9 @@ the pool weights and which sessions move, each time the pool is rebuilt
   account that could not carry one more session of the running sessions'
   typical rate for that hour beside its own rate
   (`AppState.carriesNewSession`) has weight 0 while another could, a
-  draining one at `drainingPreferred` included. The drain ends when a reading or a refusal shows its limit, when it is
+  draining one at `drainingPreferred` included, unless its session window
+  would otherwise leave room unused at its reset (`AppState.windowShare`,
+  under Balancing above). The drain ends when a reading or a refusal shows its limit, when it is
   active again, or a session window after the switch.
 - A session that starts a turn after its cache has expired is placed again
   like a new session (`RouterState.cacheAwareSessions`), since moving it
@@ -1429,6 +1492,24 @@ recorded. With **Rebalance automatically** (off by default) the quota cycle
 makes the same moves at most once per `balanceMoveInterval`, and only when
 they move a session off an account that cannot serve it or into a session
 window, or the first account then runs out more than an hour later.
+
+A move writes the session's whole context into its new account's cache,
+which pays off only while the session stays for that cache's lifetime. A
+slot session whose slot moved, by any rule or by hand, is therefore within
+its **hold** for its cache's lifetime, at least an hour
+(`AppState.moveHold`, `slotSessionsWithinHold`, from
+`slotDirectoryMovedAt`): no automatic rule moves it again, neither the
+pacer's shedding, remainder and window rules (`SessionPacer.plan`'s `held`,
+and `serveSessionSlots`, which applies a pacer move only after the hold) nor
+the automatic rebalance (`rebalance`'s `held`). Its account refusing it or
+reaching its limit still moves it, through the stranded placement or as a
+rebalance's blocked session, and a move the user asks for is never held.
+A move a hold stops is recorded once per hold (`Plan.heldBack`,
+`Rebalance.heldBack`, `AppState.noteHeldMoves`): "Kept session X on hexorda
+although pacing would move it to Backup: it moved there at 11:42 am, and
+moving it again before 12:42 pm would write its cache a second time before
+the first has paid off. It moves sooner only if hexorda refuses it or
+reaches its limit."
 
 A slot session can be **pinned** to its subscription (`SessionPins`, kept by
 session ID under `app.accountdock.failover.pins`, so `--resume` of the same

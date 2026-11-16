@@ -1540,7 +1540,11 @@ extension AppState {
     private func requestPauseMoves(_ provider: AIProviderType, _ moves: [String: UUID]) {
         let fresh = moves.filter { requestedSlotMoves[$0.key] != $0.value }
         guard !fresh.isEmpty else { return }
-        for (session, target) in fresh { requestedSlotMoves[session] = target }
+        for (session, target) in fresh {
+            requestedSlotMoves[session] = target
+            requestedWindowUses[session] = nil
+            automaticSlotMoves.remove(session)
+        }
         let names = Set(fresh.values).compactMap { id in accounts.first { $0.id == id }.map { messageName($0) } }.sorted()
         failoverEvents.record(provider, "Moving \(fresh.count) session(s) off accounts at or near their limit to \(names.joined(separator: ", ")), which have room, instead of pausing them.")
     }

@@ -261,8 +261,13 @@ provider's failover order when it should take work.
   percent: one percent of a Pro week is about a twentieth of one percent of a
   Max 20x week. Each account's cost is learned from its own readings, and a
   new account starts from its plan's size (Pro, Max 5x, Max 20x) until they
-  take over, so a small plan never receives a session that would empty its
-  window within the hour.
+  take over. A learned cost more than twice off what the plan's size and the
+  other accounts' costs suggest counts only in part until ten readings back
+  it, and a plan change starts the account's learning again, so a small plan
+  never receives a running session that would
+  empty its window within the hour. New sessions, whose use is not known yet,
+  still start on a small plan whose 5-hour window would otherwise reset with
+  room unused, in proportion to that room.
 - **The shared sign-in.** The sessions on the shared sign-in all move with the
   active account. AccountDock counts them on the active account and, from the
   switch failover expects to make, on the account they will move to, so no
@@ -390,7 +395,11 @@ While the accounts taking sessions will have spent what they hold before
 their reset anyway, AccountDock also spends smaller plans' 5-hour windows,
 whose unused room would expire at their reset: sessions between turns with
 small contexts and light use move into them first, and a window that fills
-passes its sessions on to the next account with room.
+passes its sessions on to the next account with room. A session placed in a
+window stays there until the window is used up, refuses it, or the time the
+event named passes: nothing else (the pacing above, a rebalance by hand or
+automatically) moves it back, or treats that window filling as a reason to
+move work off it.
 
 **When no account has allowance for a session's model, switch it to another
 model** (off by default): a session whose model's own weekly allowance is spent
@@ -402,7 +411,10 @@ With slots, two more settings apply:
 - **Rebalance automatically** (off by default) makes the moves **Rebalance
   sessions now** would, at most once every half hour, and only when they move a
   session off an account that cannot serve it or into a session window, or the
-  first account then runs out more than an hour later.
+  first account then runs out more than an hour later. A session that has just
+  moved stays where it went for its prompt cache's lifetime, at least an hour,
+  before pacing or an automatic rebalance moves it again, unless that account
+  refuses it or reaches its limit; the events say when such a move waits.
 - **Resume sessions left waiting at a limit once their slot has room** (on by
   default). When Claude Code stops at a usage limit and waits for the reset on
   its own, and AccountDock has since moved the session's slot to an account

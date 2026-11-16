@@ -274,9 +274,27 @@ final class AppState: ObservableObject {
     var lastRebalance: [AIProviderType: Date] = [:]
     /// When a slot session last moved to each account to spend an allowance
     /// that would otherwise expire (`serveSessionSlots`);
-    /// `remainderSpending` offers that account again only
-    /// `balanceMoveInterval` later.
+    /// `remainderSpending` keeps that account among the ones it offers but
+    /// resting, taking no further session, until `balanceMoveInterval`
+    /// later.
     var remainderMovedAt: [UUID: Date] = [:]
+    /// Slot sessions a window move placed to use an account's session
+    /// window (`WindowPlacement`), by session ID, recorded by
+    /// `serveSessionSlots` and kept until the session leaves that account;
+    /// `windowPlacementsInForce` passes those still running to
+    /// `SessionPacer.plan` and `rebalance`.
+    var windowPlacements: [String: WindowPlacement] = [:]
+    /// The session windows the moves `applyRebalance` requested go to use,
+    /// by session, so `serveSessionSlots` records each as a window
+    /// placement when it makes the move.
+    var requestedWindowUses: [String: SessionPacer.WindowUse] = [:]
+    /// The sessions among `requestedSlotMoves` the automatic rebalance asked
+    /// to move, so `serveSessionSlots` says so in the move's event.
+    var automaticSlotMoves: Set<String> = []
+    /// Sessions whose automatic move a hold has stopped and been recorded,
+    /// with the move that began the hold (`noteHeldMoves`), so each hold is
+    /// recorded once.
+    var holdNoted: [String: Date] = [:]
     /// Where each account's token cost last came from (`accountRatio`),
     /// so the log records each change of seed once.
     var ratioSources: [UUID: TurnCostModel.RatioSource] = [:]
@@ -1224,6 +1242,7 @@ final class AppState: ObservableObject {
         sessionAdmissions = sessionAdmissions.mapValues { $0.filter { $0.value.account != id } }
         requestedSlotMoves = requestedSlotMoves.filter { $0.value != id }
         remainderMovedAt[id] = nil
+        windowPlacements = windowPlacements.filter { $0.value.account != id }
         routerSessionMoves = routerSessionMoves.filter { $0.value != id }
         routedSessionSeen = routedSessionSeen.filter { $0.value.account != id }
         sessionServedBy = sessionServedBy.filter { $0.value.account != id }
@@ -1235,6 +1254,8 @@ final class AppState: ObservableObject {
             credentialFingerprintSeen[fingerprint] = nil
         }
         turnCostModel.accountPercentPerMillion?[id] = nil
+        turnCostModel.accountReadings?[id] = nil
+        turnCostModel.accountPlans?[id] = nil
         turnCostModel.pending[id] = nil
         turnCostModel.lastSession[id] = nil
         turnCostModel.sessionAccount = turnCostModel.sessionAccount.filter { $0.value != id }

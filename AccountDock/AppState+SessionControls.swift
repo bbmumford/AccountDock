@@ -367,7 +367,10 @@ extension AppState {
             failoverEvents.record(provider, Self.handMoveEvent(how, session: subject, to: name, pins: pins))
         }
         if inSlot, let slot {
+            // The user's move is neither a rebalance's window nor automatic.
             requestedSlotMoves[sessionID] = target.id
+            requestedWindowUses[sessionID] = nil
+            automaticSlotMoves.remove(sessionID)
             if pins { movePins[sessionID] = MovePin(provider: provider, account: target.id, at: now) }
             await maintainSessionSlots(now: now)
             if provider.capabilities.sessionMovesNeedRestart {
