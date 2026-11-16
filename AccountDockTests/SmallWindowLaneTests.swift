@@ -215,15 +215,17 @@ final class SmallWindowLaneTests: XCTestCase {
     // MARK: - Room is spent by sessions that spend
 
     /// bytrix's week has room it would leave unused at its 1:00 am reset.
-    /// The lightest session by its last hour went quiet 40 minutes ago: moved
-    /// there it spends nothing, the room still expires, and it pays its whole
-    /// context's write when it next speaks. The light session still working
-    /// goes instead.
+    /// The lightest session went quiet 70 minutes ago and used nothing in
+    /// its last hour: moved there it spends nothing, the room still expires,
+    /// and it pays its whole context's write when it next speaks. The light
+    /// session still working goes instead.
     func testAnIdleSessionIsNeverMovedToSpendARemainder() {
         let quietBackup = account(backup, used: 0, resetIn: nil, weekly: 46, weeklyResetIn: 161, ratio: 0.95, burn: 1,
                                   window: false)
         let roomy = account(bytrix, used: 60, resetIn: 33, weekly: 13, weeklyResetIn: 10, ratio: 1.151, weight: 0)
-        let sessions = [session("1603da04", on: backup, rate: 500_000, context: 100_000, quiet: 40),
+        var idle = session("1603da04", on: backup, rate: 500_000, context: 100_000, quiet: 70)
+        idle.recentTokensPerHour = 0
+        let sessions = [idle,
                         session("19496bb9", on: backup, rate: 1_300_000, context: 100_000, quiet: 5)]
         let spending = SessionPacer.RemainderSpending(accounts: [bytrix], sessions: Set(sessions.map(\.id)))
         let plan = SessionPacer().plan(accounts: [quietBackup, roomy], sessions: sessions, now: now, remainders: spending)
@@ -265,7 +267,9 @@ final class SmallWindowLaneTests: XCTestCase {
     /// heard from counts as a new session would.
     @MainActor
     func testARebalanceCountsAnIdleSessionAtWhatItUsesNow() {
-        XCTAssertEqual(AppState.rebalanceRate(current: 10_000, recent: 4_000_000, lastSeen: at(minutes: -40), now: now), 10_000)
+        XCTAssertEqual(AppState.rebalanceRate(current: 10_000, recent: 0, lastSeen: at(minutes: -70), now: now), 10_000)
+        XCTAssertEqual(AppState.rebalanceRate(current: 10_000, recent: 500_000, lastSeen: at(minutes: -43), now: now), 500_000,
+                       "a light session still in use counts at its last hour's rate")
         XCTAssertEqual(AppState.rebalanceRate(current: 3_000_000, recent: 4_000_000, lastSeen: at(minutes: -3), now: now),
                        4_000_000)
         XCTAssertEqual(AppState.rebalanceRate(current: 0, recent: nil, lastSeen: nil, now: now), SessionPacer.defaultSessionRate)

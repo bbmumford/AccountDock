@@ -716,7 +716,9 @@ extension AppState {
         let shared = movesSessions ? nil : sharedGroup(provider, sessions: sessions, now: now)
         if let shared { sessions.removeAll { shared.members.contains($0.id) } }
         noteSharedGroup(shared?.group, provider: provider)
-        let pinned = Set(sessionPins.pinned(provider).keys)
+        // Pinned sessions, and those waiting on their account for its reset,
+        // stay where they are.
+        let pinned = Set(sessionPins.pinned(provider).keys).union(waitingSessions(provider).keys)
         let onDraining = Set(sessions.filter { draining.contains($0.account) }.map(\.id))
         // Without the router only sessions in one-session slots can move.
         let movable = movesSessions ? nil : Set((liveSessions[provider] ?? []).compactMap { session -> String? in
@@ -736,6 +738,10 @@ extension AppState {
         let plan = pacer.plan(accounts: paced, sessions: sessions, now: now, sharedGroup: shared?.group,
                               fixed: pinned, remainders: remainders, placements: placements, held: Set(holds.keys))
         noteHeldMoves(provider, heldBack: plan.heldBack, holds: holds, rule: "pacing", now: now)
+        if !movesSessions {
+            noteLaneShortfalls(provider, plan: plan, accounts: paced, sessions: sessions, remainders: remainders,
+                               stale: stale, now: now)
+        }
         // A session is never moved to an account without allowance for the
         // model it uses, nor off a draining account before its limit.
         var moves = plan.moves.filter { session, destination in
@@ -844,6 +850,60 @@ extension AppState {
         return "\(reaches) at \(when(limitAt)), \(why); \(outcome)"
     }
 
+    /// Why each small plan's window with room takes no running session
+    /// this cycle (`SessionPacer.laneShortfall`), in words, kept in
+    /// `laneNotes` for the Sessions page's provider header and the
+    /// rebalance preview: the accounts `remainders` offers that take no
+    /// move, and those whose reading is too old to take one (`stale`).
+    func noteLaneShortfalls(_ provider: AIProviderType, plan: SessionPacer.Plan, accounts paced: [SessionPacer.Account],
+                            sessions: [SessionPacer.Session], remainders: SessionPacer.RemainderSpending?,
+                            stale: Set<UUID>, now: Date) {
+        let pacer = SessionPacer()
+        let taking = Set(plan.moves.values)
+        let placed = Set(windowPlacementsInForce(provider, now: now).values.map(\.account))
+        var notes: [String] = []
+        for lane in paced.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+            guard let account = accounts.first(where: { $0.id == lane.id }), lane.hasSessionWindow,
+                  !taking.contains(lane.id), !placed.contains(lane.id),
+                  stale.contains(lane.id) || remainders?.accounts.contains(lane.id) == true,
+                  !(remainders?.resting.contains(lane.id) ?? false) else { continue }
+            let own = sessions.filter { $0.account == lane.id && now.timeIntervalSince($0.lastSeen) <= SessionPacer.activeWithin }
+            let burn = max(lane.burnPerHour, own.reduce(0) { $0 + pacer.percent($1.tokensPerHour, on: lane) })
+            let end = lane.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(pacer.window)
+            let room = pacer.spare(lane, until: end, spent: 0, burn: burn, shared: nil, now: now)
+            let name = messageName(account)
+            if stale.contains(lane.id), room >= SessionPacer.minimumLeftover {
+                let age = accountUsageUpdatedAt[lane.id].map { UsageFormat.duration(now.timeIntervalSince($0)) } ?? "too long"
+                notes.append("\(name): its reading is \(age) old, so it takes no session until it is read again.")
+                continue
+            }
+            guard let shortfall = pacer.laneShortfall(lane, room: room, sessions: sessions, windowsOpen: plan.windowsOpen,
+                                                      now: now) else { continue }
+            let session = shortfall.session.map { id in
+                liveSession(id).map { Self.eventName(of: $0.1) } ?? "session \(id.prefix(8))"
+            } ?? ""
+            notes.append(Self.laneShortfallNote(account: name, shortfall: shortfall, session: session))
+        }
+        if laneNotes[provider] != notes { laneNotes[provider] = notes.isEmpty ? nil : notes }
+    }
+
+    /// The words for one `SessionPacer.LaneShortfall`: "voltrix: no running
+    /// session fits; the lightest active one would use its window in 40
+    /// min."
+    nonisolated static func laneShortfallNote(account: String, shortfall: SessionPacer.LaneShortfall,
+                                              session: String) -> String {
+        switch shortfall {
+        case .noActiveSession:
+            return "\(account): no running session fits; none elsewhere is between turns and has used anything in its last hour."
+        case .fillsTooSoon(_, let minutes):
+            return "\(account): no running session fits; the lightest active one (\(session)) would use its window in \(minutes) min."
+        case .rewriteOutweighsUse(_, let rewrite, let use):
+            return "\(account): no running session is worth moving; the lightest active one (\(session)) would spend \(Int(rewrite.rounded()))% of its window rewriting its cache to use \(Int(max(0, use).rounded()))%."
+        case .carriersHaveRoom:
+            return "\(account): the accounts carrying the work still have room until their resets, so no session moves to use its window; \(session) would fit."
+        }
+    }
+
     /// A slot session moving to spend an allowance that would otherwise
     /// expire: the account, the whole percent of its week left, and when
     /// that week resets, for `remainderMoveEvent`.
@@ -904,7 +964,7 @@ extension AppState {
     /// from where, and until when the room placed there lasts.
     nonisolated static func windowMoveEvent(session: String, from: String, account: String, until: Date,
                                             now: Date) -> String {
-        "Moved \(session) from \(from) to \(account), using \(account)'s session window until "
+        "Session balancing moved \(session) from \(from) to \(account), using \(account)'s session window until "
             + "\(UsageFormat.clock(until, now: now)), which would otherwise go unused before \(from)'s room returns; "
             + "it rebuilds its cache there."
     }
@@ -914,7 +974,7 @@ extension AppState {
     /// `serveSessionSlots`.
     nonisolated static func remainderMoveEvent(session: String, account: String, percentLeft: Int, resetsAt: Date,
                                                now: Date) -> String {
-        "Moved \(session) (light use) to \(account) to use its last \(percentLeft)% before it resets "
+        "Session balancing moved \(session) (light use) to \(account) to use its last \(percentLeft)% before it resets "
             + "\(UsageFormat.atClock(resetsAt, now: now)); it rebuilds its cache there."
     }
 

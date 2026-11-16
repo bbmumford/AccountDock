@@ -337,6 +337,8 @@ extension AppState {
         if sessionPins.isPinned(sessionID) {
             return outcome(false, "The session is pinned to its account; unpin it first.")
         }
+        // A move by hand ends the session's wait on its account.
+        sessionWaits[provider]?[sessionID] = nil
         let subject = Self.eventName(of: session)
         // A session on the shared sign-in keeps the token it holds until
         // it is told to read the sign-in again, so it can still be on an
@@ -424,7 +426,7 @@ extension AppState {
                 || credentialModule(for: provider)?.liveCredential != nil else {
             return outcome(false, "The session's sign-in cannot be changed while it runs.")
         }
-        if policy.activeAccountLocked { return outcome(false, "The active account is locked, and the session shares its sign-in.") }
+        if policy.activeAccountLocked { return outcome(false, "Moving the active account automatically is off, so it stays where you put it, and the session shares its sign-in.") }
         let previous = activeAccount(for: provider)?.id
         await switchTo(target, refreshAfter: false)
         let switched = activeAccount(for: provider)?.id == target.id

@@ -253,6 +253,7 @@ extension AppState {
            pinnedHold(account, planner: FailoverPlanner(settings: plannerSettings(provider)), now: Date()) != nil {
             pinnedHoldsPlayed[session.sessionID] = account
         }
+        notePlayedWait(provider, session: session.sessionID)
         let ended = AgentPauseGate.playOne(provider, session: session.sessionID, running: running,
                                            continuation: continuationDescription(provider))
         if ended {

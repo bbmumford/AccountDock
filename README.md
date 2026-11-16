@@ -233,6 +233,35 @@ slot** does so itself, at most once every ten minutes per session.
 Pins are kept by session ID, so a pinned session that is resumed
 (`claude --resume`) goes back to the account it was pinned to.
 
+## Failover, weekly balancing and session balancing
+
+Three separate things move work, and every event names which one acted.
+
+- **The active account** is the account the CLI's shared sign-in uses, and
+  with it every session outside a slot of its own. Two things move it:
+  **failover**, when the active account reaches a threshold or its limit
+  ("Failover switches the active account from …"), and **weekly balancing**,
+  which moves it early so each account's weekly allowance is used in line
+  with when it actually resets, the one resetting soonest first, so none
+  expires with allowance left ("Weekly balancing switches …"). Moving it moves
+  every session on the shared sign-in at once.
+- **Session balancing** moves sessions in slots of their own between
+  accounts one at a time: where new sessions start, pacing, rebalancing, the
+  small plans' windows, and admitting waiting sessions to a lane that frees up
+  ("Session balancing moved …"). It keeps running whatever the active account
+  does.
+- **Pausing** holds a session at its next step while its own account is at
+  its limit, account by account, including a session waiting on its account
+  for a reset that comes before its prompt cache expires.
+
+**Move the active account automatically** (Settings → Failover, the footer's
+Failover switch, or the provider headings' switch) decides whether failover
+and weekly balancing may move the active account at all. Off, it stays where
+you put it: when it reaches its limit, the sessions on the shared sign-in are
+not moved together; those that can restart in a slot of their own do, so
+session balancing can place them, and the rest are paused until it resets or
+you move them. Session balancing and pausing go on either way.
+
 ## Automatic failover
 
 <p align="center">
@@ -304,8 +333,12 @@ provider's failover order when it should take work.
   rather than as having no session limit. The reading and the warm-up use a
   share of the provider's request allowance that background reads cannot use
   up.
-- **Intelligent balancing.** Optionally spend accounts in the order their weekly
-  allowance would otherwise expire unused. Once AccountDock has learned a day of
+- **Weekly balancing.** Optionally move the active account early so each
+  account's weekly allowance is used in line with when it actually resets: one
+  that resets sooner is used sooner, so none expires with allowance left. It
+  ranks accounts by the latest moment each must start being used for its
+  remaining allowance to be spent before its own reset, not by how much each
+  has used. Once AccountDock has learned a day of
   your usage pattern, it simulates the coming week to choose, and shows a
   one-line outlook for the week. An allowance too small to carry the sessions
   on the shared sign-in is not switched to; with pacing on, one light, idle
@@ -314,9 +347,26 @@ provider's failover order when it should take work.
 - **Pace estimate.** Under each provider, while its active account is in use:
   when that account reaches its limit at the current pace, and when every
   included account would be used up and sessions paused.
-- **Lock the active account.** The lock beside the active account on the
-  Accounts tab keeps failover from switching away from it; sessions in slots
-  of their own still move.
+- **Move the active account automatically** (on unless you lock it). Off, the
+  active account stays where you put it: neither failover nor weekly balancing
+  switches it. When it reaches its limit, the sessions on the shared sign-in
+  are not moved together; each that can restart in a slot of its own (idle in
+  agterm, or a background session) does, so session balancing can place it on
+  an account with room, and the rest wait, with **Pause sessions**, for its
+  reset or for you to move them. Sessions in slots of their own keep moving.
+  The lock beside the active account on the Accounts tab is the same switch.
+- **Switches in the menu.** Left of Refresh, Settings and Quit at the bottom
+  of the menu, **Failover** turns Move the active account automatically on or
+  off for every provider at once, and **Balancing** turns session balancing
+  (Serve sessions from several accounts at once) on or off for every provider
+  whose sessions can use it. Each shows on, off, or mixed when providers
+  differ (a mixed one turns them all on), its tooltip lists each provider
+  ("Claude Code on · Codex off · Kimi Code off"), and each change is recorded
+  as Settings records it. Balancing changes that one setting alone, so pacing
+  and Rebalance automatically are as you left them when it is on again.
+  Beside each provider's Rebalance icon, on the Sessions page and the usage
+  tab, the same Failover switch sets that provider alone; the footer's shows
+  mixed as soon as the providers differ.
 - **Quarantine.** An account whose stored credential fails verification is left
   out of automatic switching until you re-authenticate it.
 
@@ -383,18 +433,49 @@ comes soon move before one deep in a long turn. Sessions an account at its
 limit gives up are spread over the accounts with room, by how long each then
 lasts.
 
+When capacity is scarce, so that the accounts with room cannot carry every
+waiting session, and **Pause sessions** is chosen, a lane that frees up (a
+reset, a small plan with room) does not take them all. It admits sessions in
+order of how long each would run there: each must fit, with its cache rewrite
+and its use until the lane's reset (or for the hour), within the lane's room
+with a margin. Sessions whose whole use until the reset fits go first, then
+those whose own account resets later than their cache lasts, then the lane
+whose weekly allowance would otherwise expire first. The rest wait where they
+are until their own account resets or another lane frees up, and the event
+says so ("Session balancing admitted 2 of 9 waiting sessions to cybrio's fresh
+window: they fit until its reset at 8:29 pm; 7 wait for their own
+accounts.").
+
 When the router serves the sessions, a session also stays on its account while
-its prompt cache lasts, and one that reaches the limit with the reset at most
-five minutes away waits for it on its own account and continues with its
-cache. When the reset is further away but still comes before the working
-sessions' caches expire, those sessions wait at their next tool call and
-continue on their account after it resets, instead of writing their whole
-context again elsewhere.
+its prompt cache lasts, and one refused at the limit with the reset at most
+five minutes away is held by the router and continues with its cache.
+
+**Wait on the account for a reset that comes before the session's cache
+expires** (on by default, with **Pause sessions**): a session whose account
+reaches its limit, refused or about to be, stays on that account when the
+account resets before the session's prompt cache expires (an hour after its
+last request, or its own cache lifetime). It waits at its next tool call and
+continues there at the reset with its cache, instead of writing its whole
+context into another account's cache; the event says so ("Holding session X on
+hexorda until its reset at 3:09 pm: sooner than its cache expires, so it keeps
+its cache."). This applies to sessions in slots of their own, sessions the
+router serves, and the sessions on the shared sign-in, which wait together on
+the active account while failover makes no switch. Only a reset later than
+that moves the session, by the usual rules.
 
 While the accounts taking sessions will have spent what they hold before
 their reset anyway, AccountDock also spends smaller plans' 5-hour windows,
 whose unused room would expire at their reset: sessions between turns with
-small contexts and light use move into them first, and a window that fills
+small contexts and light use move into them first. A session counts as light
+but in use by what it used over its last hour, not by how long it has been
+quiet, and moves only when the room its move frees exceeds the cache rewrite
+it costs there (a 295k-token session using 0.5M an hour goes; an 892k-token
+one using 0.4M stays). Why a small plan's window takes no running session is
+shown under the provider on the Sessions page and in the rebalance preview
+("voltrix: no running session fits; the lightest active one would use its
+window in 40 min."), and an idle account that could take sessions is read
+again once its reading is a quarter of an hour old, so it stays a
+destination. A window that fills
 passes its sessions on to the next account with room. A session placed in a
 window stays there until the window is used up, refuses it, or the time the
 event named passes: nothing else (the pacing above, a rebalance by hand or
@@ -414,7 +495,8 @@ With slots, two more settings apply:
   first account then runs out more than an hour later. A session that has just
   moved stays where it went for its prompt cache's lifetime, at least an hour,
   before pacing or an automatic rebalance moves it again, unless that account
-  refuses it or reaches its limit; the events say when such a move waits.
+  refuses it or reaches its limit with its reset later than its cache lasts;
+  the events say when such a move waits.
 - **Resume sessions left waiting at a limit once their slot has room** (on by
   default). When Claude Code stops at a usage limit and waits for the reset on
   its own, and AccountDock has since moved the session's slot to an account

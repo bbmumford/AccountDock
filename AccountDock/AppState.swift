@@ -250,6 +250,10 @@ final class AppState: ObservableObject {
     /// Running sessions that read no slot of their own, by provider
     /// (`noteUnisolatedSessions`), for the usage tab.
     @Published var unisolatedSessions: [AIProviderType: [AgentSession]] = [:]
+    /// Why each small plan's window with room takes no running session, by
+    /// provider (`noteLaneShortfalls`); shown under the provider on the
+    /// Sessions page and in the rebalance preview.
+    @Published var laneNotes: [AIProviderType: [String]] = [:]
     /// The terminal session each of those runs in, when
     /// `sessionTerminal` can reach it.
     @Published var unisolatedTerminals: [String: String] = [:]
@@ -473,9 +477,12 @@ final class AppState: ObservableObject {
     /// and `holdPinnedSessionsAtLimit` leave each running until the account
     /// has room again or the session is no longer pinned to it.
     var pinnedHoldsPlayed: [String: UUID] = [:]
-    /// The reset each provider's last account hold waited for, so one reset
-    /// holds its account's sessions once.
-    var accountHoldResets: [AIProviderType: Date] = [:]
+    /// Sessions kept on the account they run on and held there by the pause
+    /// gate until it serves them again, by provider and session
+    /// (`SessionWait`). Written by `holdSessionsForImminentReset`; read by
+    /// `serveSessionSlots`, the pacer, the rebalance, `limitPauseScope` and
+    /// failover's plan, which all leave such a session where it is.
+    var sessionWaits: [AIProviderType: [String: SessionWait]] = [:]
 
     struct SessionAdmission: Equatable {
         let session: String
@@ -505,6 +512,18 @@ final class AppState: ObservableObject {
     /// The destination of the switch last withheld for a locked active
     /// account, so `performAutomaticSwitch` reports each once.
     var lockedSwitchNoted: [AIProviderType: UUID] = [:]
+    /// When each session on the shared sign-in was last restarted in a slot
+    /// of its own because the active account stays at its limit
+    /// (`holdSharedSessionsOnStayingAccount`), so a restart that did not
+    /// take is tried again only after `stuckRestartSpacing`.
+    var stayingRestartAt: [String: Date] = [:]
+    /// The last lane admission recorded for each provider
+    /// (`noteLaneAdmission`), so the same one is recorded once.
+    var laneAdmissionNoted: [AIProviderType: String] = [:]
+    /// When each idle account was last read to keep it a destination
+    /// (`readIdleDestinationIfDue`), so a reading not taken is tried again
+    /// only after `FailoverPlanner.idleFreshness`.
+    var idleDestinationReadAt: [UUID: Date] = [:]
     /// The digest of each account's saved sign-in the provider confirmed as
     /// that account's (`savedCopyIsOwn`).
     var savedCopyVerified: [UUID: String] = [:]

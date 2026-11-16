@@ -305,6 +305,10 @@ struct MainMenuView: View {
 
             Spacer()
 
+            // Failover and session balancing for every provider, without
+            // opening Settings.
+            FooterSwitches()
+
             Button {
                 Task {
                     await appState.readActiveUsageNow()

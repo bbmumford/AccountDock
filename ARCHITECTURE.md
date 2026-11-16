@@ -663,6 +663,44 @@ which asks the user to check the seat or licence. `recheckCLIAccessIfDue` tries
 the account again with the warm-up's request daily and on the user's refresh;
 served, the mark ends.
 
+## Failover, weekly balancing and session balancing
+
+Three mechanisms move work, each with its own code and events:
+
+- **The active account** (`activeAccount(for:)`, the account the shared
+  sign-in holds) is moved only by `performAutomaticSwitch`, for
+  `FailoverPlanner.plan`'s switch reasons: failover's `.threshold`,
+  `.exhausted` and `.workloadUnavailable` (with `policy.enabled`), and weekly
+  balancing's `.balance` (with `intelligentBalancingEnabled`), which orders
+  accounts by `latestStart`, the latest moment each must start being used
+  for its remaining weekly allowance to be spent before its own reset, so an
+  account resetting sooner is used sooner. A switch moves every session on
+  the shared sign-in (`moveRunningSessions`). Events read "Failover switches
+  the active account from …" and "Weekly balancing switches …".
+- **Session balancing** moves slot sessions one at a time: the pool's
+  weights for new sessions, `SessionPacer.plan`'s shedding, remainder and
+  window rules, the stranded placement and lane admission
+  (`strandedPlacements`, `admitToLanes`), and the rebalance, all through
+  `serveSessionSlots`, whose events read "Session balancing moved …". It
+  does not depend on the active account moving.
+- **Pausing** (`AgentPauseGate`, `limitPauseScope`) holds sessions account
+  by account; the sessions a wait keeps on their account
+  (`AppState.SessionWait`: a reset before their cache expires, the active
+  account staying, no lane admitting them) are listed in it like pinned ones.
+
+`ProviderFailoverPolicy.activeAccountLocked`, shown as "Move the active
+account automatically" (`movesActiveAccountAutomatically`), gates the first
+alone: off, `performAutomaticSwitch` makes no switch and records which
+mechanism asked (`lockedSwitchEvent`), `nextActiveSwitch` projects none, and
+once the active account is at or near its limit
+`holdSharedSessionsOnStayingAccount` restarts the shared sessions that can
+restart in a slot of their own and holds the rest
+(`SessionWait.Reason.activeAccountStays`) until it serves again, the user
+moves them or the switch is on again. The menu footer's switches
+(`FooterSwitches`, `AppState+MenuToggles`) set it, and `distributeSessions`
+for session balancing, for every provider at once; `ProviderFailoverSwitch`
+sets it for one.
+
 ## Failover planning
 
 `FailoverPlanner` is a pure function from accounts, readings and settings to a
@@ -832,12 +870,17 @@ and whose weekly allowance the accounts' present rates would leave unused
 at its reset takes the lightest slot session (by `SessionPacer.lightRate`,
 the larger of its current rate and its last hour's) that is between turns
 (quiet for `betweenTurns`, and not working by its record) yet still spends
-(heard from within `idleAfter`, 15 minutes, at a rate above nothing:
-`SessionPacer.spends`), not pinned, not
+(`SessionPacer.spends`: at a rate above nothing, heard from within
+`idleAfter`, 15 minutes, or using tokens over its last hour and heard from
+within it, as a session its user answers every half hour does; such a
+session is a candidate although quiet past `activeWithin`), not pinned, not
 on a draining account and not on another such account, whose use until the
 reset plus its cache rewrite (`moveCost`) fits in what is left, keeping the
-account within every window and its model's own allowance, and whose use
-is at least `remainderWorth` (2) times the rewrite. A second session
+account within every window and its model's own allowance, and whose move
+is worth its rewrite (`SessionPacer.worthMoving`): the use it makes by the
+account's session-window reset (by the weekly reset for an account without
+a session window) is at least `remainderWorth` (2) times the rewrite, or
+exceeds it by `minimumLeftover` (2%), a net gain of room. A second session
 follows only while more than half of the remainder would still go unused.
 Accounts that reset first are served first; the account carrying the
 group's share, now or from the projected switch, spends nothing this way,
@@ -870,9 +913,13 @@ leave once its own rate has run; one at a time, the slot session between
 turns whose arrival costs the fewest tokens per hour it then stays goes to
 the window where that is least, so small contexts and light rates go first
 and heavy sessions spread over the windows by their token room. A session
-goes only when it spends (`spends`), its whole arrival write fits and the
-use it makes of the room is worth `remainderWorth` times that write, so an
-800k-token session moves only into room no cheaper session takes; and only
+goes only when it spends (`spends`), its whole arrival write fits and its
+move is worth that write (`worthMoving`: the use it makes of the room, which
+is room freed where it was, is twice the write or exceeds it by
+`minimumLeftover`), so an 800k-token session moves only into room no cheaper
+session takes and 892k tokens of context are never rewritten to move 0.4M an
+hour; 19496bb9's 0.5M an hour and 295k of context go into a fresh Pro window
+two hours from its reset (5.3% to arrive, 8.9% of use); and only
 when that write and its rate until the reset, or for `newSessionRunway`
 when the reset is later, fit `windowFitShare` (90%) of the room. A window's
 last few percent before an imminent reset take a session sized to them (5M
@@ -1392,17 +1439,57 @@ the pool weights and which sessions move, each time the pool is rebuilt
   event-stream head goes out at once, a comment follows every 14 seconds,
   and the request goes to the same account again after the reset. Errors
   after that head are written as `event: error`.
-- An account at its limit, or within `suspensionLead` of it, whose limiting
-  window resets more than five minutes away but at least a minute before the
-  prompt caches of its working sessions expire, holds those sessions
-  (`AppState.holdSessionsForImminentReset`) instead of letting the router
-  move them onto an account that writes their whole context again. Only
-  sessions with at least `heldCacheMinimumContext` tokens of context are
-  held. The pause file names the account (`PauseFile.account`) and holds
-  them at their next tool call, not their new turns; they continue on that
-  account once it has reset, through `admitPausedSessions` restricted to it,
-  or wherever capacity is ten minutes after the reset if no reading shows
-  it. One reset holds its account's sessions once.
+- A session whose account is at its limit (refused at it) or within
+  `suspensionLead` of it, and whose account resets at least a minute
+  (`resetHoldMargin`) before the session's prompt cache expires (its last
+  request plus its cache lifetime, an hour when unknown), **waits** on that
+  account and continues there with its cache
+  (`AppState.holdSessionsForImminentReset`, `cacheOutlastsReset`), with the
+  policy's `waitForResetWithinCache` (on by default) and pausing at the
+  limit, since the gate is what holds it. It runs every quota cycle before
+  the slots are served, for every gated provider: a slot session waits on its
+  slot's account, a session the router serves from its pool on the account
+  serving it (a reset within `RouterLogic.maximumHold` left to the router),
+  and the sessions on the shared sign-in on the active account, all of them
+  or none (`sharedSignInWaits`: those whose caches outlast the reset hold at
+  least half the group's context), while failover's plan stays
+  (`FailoverPlanner.Settings.sharedSignInWaitsUntil`,
+  `.stay(.waitingForResetWithCache)`). The reset is
+  `FailoverPlanner.heldAvailableAt`, which after a refusal takes the fuller
+  window's. Each wait (`AppState.SessionWait`, in `sessionWaits`) is one more
+  session a pause at a limit lists: it joins the pause in effect or a pause
+  listing it (`pinnedHoldPause`), at its next tool call and new turn, and
+  `limitPauseScope` keeps it held, placing it nowhere, until its account
+  serves again (`servesAgain`: a fresh reading with room, no refusal since),
+  or `accountHoldGrace` after the reset with no reading showing it.
+  Meanwhile `serveSessionSlots` keeps its slot there (`slotChoice`'s
+  `waitsOn`), `paced` and the automatic rebalance leave it, the stranded
+  placement skips it, `admitPausedSessions` lets it go only where it is, and
+  steps within the active account's headroom go to no session waiting on
+  another account. Only sessions with at least `heldCacheMinimumContext`
+  tokens of context wait: a smaller one rewrites its context elsewhere for
+  less than its idle wait costs. A session the user plays goes on, and its
+  wait no longer holds it (`SessionWait.played`). The event reads "Holding
+  session X on hexorda until its reset at 3:09 pm: sooner than its cache
+  expires, so it keeps its cache." A pause file that names one account
+  (`PauseFile.account`) ends at that account's reset (`endAccountHoldIfDue`).
+- Why a small plan's window with room takes no running session is said
+  (`AppState.noteLaneShortfalls`, `SessionPacer.laneShortfall`, kept in
+  `laneNotes`): under the provider on the Sessions page and in the rebalance
+  preview, as "voltrix: no running session fits; the lightest active one
+  (session X) would use its window in 40 min.", or that none elsewhere has
+  used anything in its last hour, that the lightest one's rewrite outweighs
+  its use, that the accounts carrying the work still have room until their
+  resets, or that its reading is too old.
+- An idle account that could take sessions stays a destination
+  (`AppState.readIdleDestinationIfDue`, `idleDestinationDue`): while
+  sessions are served from several accounts, each quota cycle reads one
+  included, signed-in account serving no session whose last reading shows
+  room and is older than `FailoverPlanner.idleFreshness` (15 minutes), the
+  one read longest ago first, at the priority of a passed reset's
+  confirmation within the provider's request budget; a reading not taken is
+  tried again after `idleFreshness`. Nothing else reads an account no session
+  uses, and a reading too old keeps it out of the pacer's moves (`stale`).
 - New sessions go to accounts by unused rate, the pool weight times the
   rate the account can still add without reaching its limit; with none
   left anywhere, by the share of the time to its reset each account lasts
@@ -1428,6 +1515,26 @@ the pool weights and which sessions move, each time the pool is rebuilt
   with room by how long each then lasts, instead of all going to the account
   with the largest pool weight: a session that must leave is served rather
   than refused, even where it lasts less than an hour.
+- While capacity is scarce, with pausing at the limit, a lane with room
+  does not take every such session (`SessionPacer.admitToLanes`, through
+  `strandedPlacements` and `limitPauseScope`): each lane's room is what it has
+  left by its reset, or by `newSessionRunway` when the reset is later
+  (`spare`), beside the sessions it runs and the shared group's share; a
+  session fits when its arrival's cache rewrite (`arrivalCost`) plus its rate
+  until that horizon is within `windowFitShare` of the room still left, and
+  each admitted session's rewrite and rate are charged to the lane before the
+  next is weighed. One pair at a time, it admits the session that runs
+  longest: first one whose whole use until the lane's reset fits, then one
+  whose own account resets later than its cache lasts (`bindingReset`), then
+  the lane whose weekly allowance its own rate would leave unused soonest, as
+  weekly balancing orders accounts, then the longest run. When every session
+  fits (an account with ample room among the lanes), `place` spreads them as
+  above. The others wait on their own account
+  (`SessionWait.Reason.awaitingLane`, `noteLaneAdmission`), listed in the
+  pause, until it serves again or a later cycle admits them, and the event
+  reads "Session balancing admitted 2 of 9 waiting session(s) to cybrio's
+  fresh window: they fit until its reset at 8:29 pm; 7 wait for their own
+  accounts."
 - An account a threshold switch left with room still on it drains
   (`AppState.drainingAccounts`): above its thresholds it keeps a pool weight
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when
@@ -1555,8 +1662,8 @@ provider whose sessions run in one-session slots; also the requests action
 slot sessions so the first account to reach a limit does so as late as
 possible (`SessionPacer.rebalance`). Each session counts at its rate over
 its last hour (`AppState.rebalanceRate`: `defaultSessionRate` with no
-history, and what it uses now, near nothing, once quiet past `idleAfter`,
-so no idle session is moved to make the others last longer) against every
+history, and what it uses now, near nothing, once it has used nothing over
+its last hour, so no idle session is moved to make the others last longer) against every
 window and its model's own allowance, and each account also carries the use
 its readings show beyond its sessions and the shared group
 (`SessionPacer.unseenBurn`), which stays wherever the sessions go: the rate

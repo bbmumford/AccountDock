@@ -66,7 +66,9 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     var distributeSessions = false
     /// The active account stays active: `AppState.performAutomaticSwitch`
     /// makes no switch away from it until the user unlocks it or switches
-    /// themselves. Sessions with a slot of their own still move.
+    /// themselves. Sessions with a slot of their own still move. Settings
+    /// show it as "Move the active account automatically"
+    /// (`movesActiveAccountAutomatically`).
     var activeAccountLocked = false
     /// With `distributeSessions`, each account's sessions are paced to its
     /// 5-hour window: new sessions go to the accounts with the most unused
@@ -100,6 +102,12 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     /// serve it (`AppState.resumeSessionsLeftWaiting`). Acts only on slot
     /// sessions, so only for a provider with slot isolation.
     var resumeSessionsLeftWaiting = true
+    /// A session whose account reaches its limit, refused or about to be,
+    /// stays on that account, held by the pause gate, when the account
+    /// resets before the session's prompt cache expires, and continues
+    /// there with its cache (`AppState.holdSessionsForImminentReset`).
+    /// Needs `suspendAgentsWhenExhausted`, since the gate is what holds it.
+    var waitForResetWithinCache = true
     var switchMethod = FailoverSwitchMethod.safeRestart
     var accountOrder: [UUID] = []
     var excludedAccountIDs: Set<UUID> = []
@@ -110,6 +118,15 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     /// Failover, balancing and pausing switch the CLI's own account and send
     /// no request through it, so with neither set the CLI reaches its
     /// provider directly and the router does not run.
+    /// Whether failover and weekly balancing may move the active account,
+    /// the "Move the active account automatically" switch: the inverse of
+    /// `activeAccountLocked`, which stores it, so a lock set from the
+    /// Accounts tab and the switch are one setting.
+    var movesActiveAccountAutomatically: Bool {
+        get { !activeAccountLocked }
+        set { activeAccountLocked = !newValue }
+    }
+
     func usesRouter(for provider: AIProviderType) -> Bool {
         routeTarget != nil || (distributeSessions && provider.capabilities.sessionIsolation == nil)
     }
@@ -132,6 +149,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         case switchMethod, accountOrder, excludedAccountIDs, activeAccountLocked
         case codexSwitchMode
         case noRoomModelFallback, rebalanceAutomatically, restartStuckBackgroundSessions, resumeSessionsLeftWaiting
+        case waitForResetWithinCache
     }
 
     init() {}
@@ -169,6 +187,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         try values.encode(rebalanceAutomatically, forKey: .rebalanceAutomatically)
         try values.encode(restartStuckBackgroundSessions, forKey: .restartStuckBackgroundSessions)
         try values.encode(resumeSessionsLeftWaiting, forKey: .resumeSessionsLeftWaiting)
+        try values.encode(waitForResetWithinCache, forKey: .waitForResetWithinCache)
         try values.encode(switchMethod, forKey: .switchMethod)
         try values.encode(accountOrder, forKey: .accountOrder)
         try values.encode(excludedAccountIDs, forKey: .excludedAccountIDs)
@@ -207,6 +226,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         rebalanceAutomatically = try values.decodeIfPresent(Bool.self, forKey: .rebalanceAutomatically) ?? false
         restartStuckBackgroundSessions = try values.decodeIfPresent(Bool.self, forKey: .restartStuckBackgroundSessions) ?? false
         resumeSessionsLeftWaiting = try values.decodeIfPresent(Bool.self, forKey: .resumeSessionsLeftWaiting) ?? true
+        waitForResetWithinCache = try values.decodeIfPresent(Bool.self, forKey: .waitForResetWithinCache) ?? true
 
         // Settings saved when routing could only target Kimi.
         if routeTarget == nil, try values.decodeIfPresent(Bool.self, forKey: .routeToKimiWhenExhausted) == true {

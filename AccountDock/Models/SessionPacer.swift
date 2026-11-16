@@ -305,6 +305,9 @@ struct SessionPacer {
         /// stay because they moved within their hold (`plan`'s `held`); read
         /// by `AppState` for the event saying why they stay.
         var heldBack: [String: UUID] = [:]
+        /// Whether `plan` spent the small plans' session windows this time
+        /// (`windowsWorthSpending`); read by `AppState` for `laneShortfall`.
+        var windowsOpen = false
     }
 
     /// A session window a session moves to use (`Plan.windowUses`): the
@@ -394,12 +397,30 @@ struct SessionPacer {
     /// spread of its rate.
     static let windowFitShare = 0.9
 
-    /// Whether the session spends: heard from within `idleAfter`, at a rate
-    /// (`lightRate`) above nothing. Only such a session moves to spend a
-    /// remainder or a window's room (`plan`); one gone idle spends nothing
+    /// Whether the session spends: at a rate (`lightRate`) above nothing,
+    /// and heard from within `idleAfter`, or used tokens over its last hour
+    /// (`recentTokensPerHour`, idle time included) and was heard from within
+    /// that hour. A session its user answers every half hour uses a light,
+    /// steady rate although it is often quiet for longer than `idleAfter`.
+    /// Only such a session moves to spend a remainder or a window's room
+    /// (`plan`); one that used nothing in its last hour spends nothing
     /// there, so the room expires all the same.
     func spends(_ session: Session, now: Date) -> Bool {
-        now.timeIntervalSince(session.lastSeen) <= Self.idleAfter && Self.lightRate(session) > 0
+        let quiet = now.timeIntervalSince(session.lastSeen)
+        guard Self.lightRate(session) > 0 else { return false }
+        return quiet <= Self.idleAfter || (session.recentTokensPerHour ?? 0) > 0 && quiet <= SessionRates.demandWindow
+    }
+
+    /// Whether moving a session to use room elsewhere is worth the cache
+    /// rewrite its arrival costs: the use it makes of the room there
+    /// (`use`, window percent there, which is room freed where it was) is
+    /// at least `remainderWorth` times the rewrite (`cost`), or exceeds it by
+    /// `minimumLeftover`, a net gain of room worth a session's start. A
+    /// session whose context costs more to rewrite than it would use moves
+    /// nowhere for it: 892k tokens of context are not rewritten to move
+    /// 0.4M an hour. Read by `spendWindows` and `plan`'s remainder rule.
+    static func worthMoving(use: Double, cost: Double) -> Bool {
+        use > 0 && (use >= remainderWorth * cost || use - cost >= minimumLeftover)
     }
 
     /// Whether the session's move takes effect soon: a move applies when
@@ -723,7 +744,7 @@ struct SessionPacer {
                     let cost = arrivalCost(session.contextTokens, cacheLifetime: session.cacheLifetime, to: account)
                     let rate = percent(session.tokensPerHour, on: account)
                     let use = min(window.room - cost, rate * hours)
-                    guard cost < window.room, use > 0, use >= Self.remainderWorth * cost else { continue }
+                    guard cost < window.room, Self.worthMoving(use: use, cost: cost) else { continue }
                     // It must fit the room for as long as it stays: until
                     // the reset, or its runway when the reset is later, at
                     // its expected rate, within `windowFitShare`. A heavy
@@ -851,6 +872,10 @@ struct SessionPacer {
               placements: [String: WindowUse] = [:], held: Set<String> = []) -> Plan {
         let ids = Set(accounts.map(\.id))
         let active = sessions.filter { ids.contains($0.account) && now.timeIntervalSince($0.lastSeen) <= Self.activeWithin }
+        // The sessions that may move to spend room elsewhere (`spends`): a
+        // light one its user answers now and then is quiet for longer than
+        // `activeWithin` yet still uses its last hour's rate.
+        let spending = sessions.filter { ids.contains($0.account) && spends($0, now: now) }
         let placed = Set(sessions.filter { placements[$0.id]?.account == $0.account }.map(\.id))
         let filling = sessions.reduce(into: [UUID: Date]()) { result, session in
             guard placed.contains(session.id), let use = placements[session.id], ids.contains(use.account) else { return }
@@ -1083,13 +1108,15 @@ struct SessionPacer {
             }.sorted { $0.reset < $1.reset }
             for (account, reset) in targets {
                 let hours = reset.timeIntervalSince(now) / 3600
+                let sessionHours = max((account.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window))
+                    .timeIntervalSince(now), 60) / 3600
                 func unused() -> Double {
                     windowsLeft(account, spent: spent[account.id] ?? 0, now: now)
                         .filter { $0.end == reset }.map(\.left).min().map { $0 - (burn[account.id] ?? 0) * hours } ?? 0
                 }
                 let before = unused()
                 guard before > 0 else { continue }
-                let candidates = active.filter { session in
+                let candidates = spending.filter { session in
                     remainders.sessions.contains(session.id) && session.account != account.id
                         && !remainders.accounts.contains(session.account) && plan.moves[session.id] == nil
                         && !unmoved.contains(session.id) && now.timeIntervalSince(session.lastSeen) > Self.betweenTurns
@@ -1103,7 +1130,12 @@ struct SessionPacer {
                     let rate = percent(Self.lightRate(session), on: account)
                     let cost = moveCost(session.contextTokens, to: account)
                     let use = rate * hours
-                    guard use > 0, use >= Self.remainderWorth * cost, cost + use <= left else { continue }
+                    // Its worth is the room it frees by the account's session
+                    // window reset, the use it is sure to make before the
+                    // window refills: counted over days to the weekly reset,
+                    // any rate outweighs any rewrite.
+                    let worthUse = account.hasSessionWindow ? rate * min(hours, sessionHours) : use
+                    guard Self.worthMoving(use: worthUse, cost: cost), cost + use <= left else { continue }
                     let after = outlook(account, spent: (spent[account.id] ?? 0) + cost,
                                         burn: (burn[account.id] ?? 0) + rate, now: now)
                     guard after.limitAt == nil else { continue }
@@ -1145,10 +1177,11 @@ struct SessionPacer {
             let carriers = accounts.filter { $0.baseWeight > 0 && !remainders.accounts.contains($0.id) }
             windowsOpen = windowsWorthSpending(carriers: carriers, burn: burn, spent: spent, shares: shares,
                                                sharedGroup: sharedGroup, now: now)
+            plan.windowsOpen = windowsOpen
             if windowsOpen {
                 // Sessions already on one of the windows, resting ones
                 // included, stay where they are.
-                let candidates = active.filter { session in
+                let candidates = spending.filter { session in
                     remainders.sessions.contains(session.id) && plan.moves[session.id] == nil && !unmoved.contains(session.id)
                         && !remainders.accounts.contains(session.account)
                         && now.timeIntervalSince(session.lastSeen) > Self.betweenTurns && movable(session, now: now)
@@ -1489,6 +1522,9 @@ extension SessionPacer {
         /// How long its prompt cache lasts, which sets what its arrival
         /// elsewhere costs (`arrivalCost`); nil assumes `defaultCacheLifetime`.
         var cacheLifetime: TimeInterval? = nil
+        /// Its last request, which its prompt cache lasts from; nil when
+        /// unknown. Read by `admitToLanes`.
+        var lastSeen: Date? = nil
     }
 
     struct Rebalance: Equatable {
@@ -1862,5 +1898,204 @@ extension SessionPacer {
             result[session.id] = best.account.id
         }
         return result
+    }
+}
+
+extension SessionPacer {
+    /// What `admitToLanes` decided while capacity is scarce.
+    struct LaneAdmission: Equatable {
+        /// The lane each admitted session goes to.
+        var placements: [String: UUID] = [:]
+        /// The sessions no lane admitted, which stay where they are, held,
+        /// until their own account serves again or a lane admits them.
+        var waiting: [String] = []
+        /// Each lane that admitted a session: until when they all fit there,
+        /// its reset, or `newSessionRunway` from now when that is sooner
+        /// and the whole use of one of them until the reset does not fit.
+        var lanes: [UUID: Date] = [:]
+        /// The lanes in `lanes` whose time is their reset.
+        var untilReset: Set<UUID> = []
+    }
+
+    /// When an account that cannot serve now serves again: the latest reset
+    /// of its windows that are within `minimumLeftover` of their limit, or,
+    /// with none, the soonest reset of any.
+    func bindingReset(_ account: Account, now: Date) -> Date? {
+        let windows = windowsLeft(account, spent: 0, now: now)
+        return windows.filter { $0.left <= Self.minimumLeftover }.map(\.end).max() ?? windows.map(\.end).min()
+    }
+
+    /// Admits `sessions`, which their accounts can no longer serve, to the
+    /// `destinations` with room ("lanes"), only as far as each lane's room
+    /// carries them, instead of moving every one of them to wherever has
+    /// room. Each lane's room is what it has left by its reset, or by
+    /// `newSessionRunway` when the reset is later (`spare`), beside
+    /// `running` and the shared group's share; a session fits a lane when
+    /// its cache rewrite there (`arrivalCost`) plus its rate until that
+    /// horizon is within `windowFitShare` of the room left, every rewrite
+    /// counted in the lane's tokens. One pair at a time, it admits the
+    /// session that runs longest there: first a session whose whole use
+    /// until the lane's reset fits, then one whose own account resets later
+    /// than its prompt cache lasts (one that resets sooner keeps its cache
+    /// by waiting), then the lane whose weekly allowance would otherwise
+    /// expire with room left soonest, as weekly balancing orders accounts,
+    /// then the longest run. The rest wait. Nil when every session fits,
+    /// as when an account with ample room is among the lanes: `place`
+    /// spreads them then. Read by `AppState.strandedPlacements` and
+    /// `AppState.limitPauseScope`.
+    func admitToLanes(_ sessions: [RebalanceSession], accounts: [Account], running: [RebalanceSession],
+                      destinations: Set<UUID>, now: Date, sharedGroup: SharedGroup? = nil) -> LaneAdmission? {
+        let lanes = accounts.filter { destinations.contains($0.id) }
+        guard !sessions.isEmpty, !lanes.isEmpty else { return nil }
+        let shares = shares(sharedGroup, accounts: accounts, now: now)
+        let placed = running.filter { session in lanes.contains { $0.id == session.account } }
+        let unseen = unseenBurn(lanes, sessions: placed, sharedGroup: sharedGroup, shares: shares)
+        var burn: [UUID: Double] = [:]
+        var spent: [UUID: Double] = [:]
+        for lane in lanes {
+            burn[lane.id] = placed.filter { $0.account == lane.id }.reduce(0) { $0 + percent($1.tokensPerHour, on: lane) }
+                + (unseen[lane.id] ?? 0)
+        }
+        func reset(_ lane: Account) -> Date {
+            windowsLeft(lane, spent: 0, now: now).map(\.end).min() ?? now.addingTimeInterval(window)
+        }
+        func horizon(_ lane: Account) -> Date { min(reset(lane), now.addingTimeInterval(Self.newSessionRunway)) }
+        func room(_ lane: Account, until end: Date) -> Double {
+            spare(lane, until: end, spent: spent[lane.id] ?? 0, burn: burn[lane.id] ?? 0, shared: shares[lane.id], now: now)
+        }
+        // A lane whose weekly allowance its own rate leaves unused at its
+        // reset, by that reset; nil when none would be left.
+        func expires(_ lane: Account) -> Date? {
+            guard let left = lane.weeklyRemaining, let end = lane.weeklyResetsAt, end > now else { return nil }
+            let unused = left - (spent[lane.id] ?? 0) - Allowance.spent(perHour: burn[lane.id] ?? 0, from: now, until: end)
+            return unused > Self.minimumLeftover ? end : nil
+        }
+        func ownResetsLater(_ session: RebalanceSession) -> Bool {
+            guard let own = accounts.first(where: { $0.id == session.account }), let back = bindingReset(own, now: now),
+                  let lastSeen = session.lastSeen else { return true }
+            return back > lastSeen.addingTimeInterval(session.cacheLifetime ?? Self.defaultCacheLifetime)
+        }
+        struct Pair {
+            let session: RebalanceSession
+            let lane: Account
+            let whole: Bool
+            let ownLater: Bool
+            let expires: Date?
+            let runs: TimeInterval
+            let cost: Double
+            let rate: Double
+        }
+        func better(_ a: Pair, than b: Pair) -> Bool {
+            if a.whole != b.whole { return a.whole }
+            if a.ownLater != b.ownLater { return a.ownLater }
+            if a.expires != b.expires { return (a.expires ?? .distantFuture) < (b.expires ?? .distantFuture) }
+            if a.runs != b.runs { return a.runs > b.runs }
+            return a.session.id != b.session.id ? a.session.id < b.session.id : a.lane.id.uuidString < b.lane.id.uuidString
+        }
+        var result = LaneAdmission()
+        var waiting = sessions
+        while true {
+            var best: Pair?
+            for session in waiting {
+                for lane in lanes where lane.id != session.account {
+                    let end = horizon(lane)
+                    let hours = max(end.timeIntervalSince(now), 60) / 3600
+                    let left = room(lane, until: end)
+                    let cost = arrivalCost(session.contextTokens, cacheLifetime: session.cacheLifetime, to: lane)
+                    let rate = percent(session.tokensPerHour, on: lane)
+                    guard left > 0, cost + rate * hours <= left * Self.windowFitShare else { continue }
+                    let laneReset = reset(lane)
+                    let untilReset = max(laneReset.timeIntervalSince(now), 60) / 3600
+                    let whole = cost + rate * untilReset <= room(lane, until: laneReset) * Self.windowFitShare
+                    let runs = whole ? laneReset.timeIntervalSince(now)
+                        : rate > 0 ? min(untilReset, max(0, left - cost) / rate) * 3600 : laneReset.timeIntervalSince(now)
+                    let pair = Pair(session: session, lane: lane, whole: whole, ownLater: ownResetsLater(session),
+                                    expires: expires(lane), runs: runs, cost: cost, rate: rate)
+                    if best.map({ better(pair, than: $0) }) ?? true { best = pair }
+                }
+            }
+            guard let best else { break }
+            waiting.removeAll { $0.id == best.session.id }
+            result.placements[best.session.id] = best.lane.id
+            let until = best.whole ? reset(best.lane) : horizon(best.lane)
+            if until <= (result.lanes[best.lane.id] ?? .distantFuture) {
+                result.lanes[best.lane.id] = until
+                if best.whole { result.untilReset.insert(best.lane.id) } else { result.untilReset.remove(best.lane.id) }
+            }
+            spent[best.lane.id, default: 0] += best.cost
+            burn[best.lane.id, default: 0] += best.rate
+        }
+        guard !waiting.isEmpty else { return nil }
+        result.waiting = waiting.map(\.id).sorted()
+        return result
+    }
+}
+
+extension SessionPacer {
+    /// Why a small plan's window with room takes no running session
+    /// (`laneShortfall`), for the Sessions page and the rebalance preview.
+    enum LaneShortfall: Equatable {
+        /// No session elsewhere is between turns and has used anything in
+        /// its last hour (`spends`).
+        case noActiveSession
+        /// The lightest such session's cache rewrite and use would fill the
+        /// window in `minutes`, before its reset and within the hour.
+        case fillsTooSoon(session: String, minutes: Int)
+        /// The lightest such session's cache rewrite there costs more than
+        /// the room it would use, so moving it frees nothing
+        /// (`worthMoving`).
+        case rewriteOutweighsUse(session: String, rewrite: Double, use: Double)
+        /// It fits and is worth moving, but the accounts carrying the work
+        /// still have room until their resets (`windowsWorthSpending`), so
+        /// nothing moves to spend this window.
+        case carriersHaveRoom(session: String)
+
+        /// The session the shortfall names; nil for `noActiveSession`.
+        var session: String? {
+            switch self {
+            case .noActiveSession: nil
+            case .fillsTooSoon(let session, _), .rewriteOutweighsUse(let session, _, _), .carriersHaveRoom(let session): session
+            }
+        }
+    }
+
+    /// Why `lane`, with `room` window percent left by its reset at its own
+    /// rate, takes none of `sessions`: the lightest session elsewhere that
+    /// spends, is between turns and can move soon (`movable`) is weighed as
+    /// `spendWindows` weighs it. Nil with less room than `minimumLeftover`,
+    /// which no session's start is worth, or when that session would go.
+    func laneShortfall(_ lane: Account, room: Double, sessions: [Session], windowsOpen: Bool,
+                       now: Date) -> LaneShortfall? {
+        guard room >= Self.minimumLeftover else { return nil }
+        let candidates = sessions.filter { session in
+            session.account != lane.id && now.timeIntervalSince(session.lastSeen) > Self.betweenTurns
+                && movable(session, now: now) && spends(session, now: now)
+        }
+        let ordered = candidates.sorted { lhs, rhs in
+            Self.lightRate(lhs) != Self.lightRate(rhs) ? Self.lightRate(lhs) < Self.lightRate(rhs) : lhs.id < rhs.id
+        }
+        guard !ordered.isEmpty else { return .noActiveSession }
+        let end = lane.resetsAt.flatMap { $0 > now ? $0 : nil } ?? now.addingTimeInterval(window)
+        let hours = max(end.timeIntervalSince(now), 60) / 3600
+        func verdict(_ session: Session) -> LaneShortfall? {
+            let cost = arrivalCost(session.contextTokens, cacheLifetime: session.cacheLifetime, to: lane)
+            let rate = percent(Self.lightRate(session), on: lane)
+            let planned = rate * min(hours, Self.newSessionRunway / 3600)
+            if cost + planned > room * Self.windowFitShare {
+                let minutes = rate > 0 ? max(0, room - cost) / rate * 60 : 0
+                return .fillsTooSoon(session: session.id, minutes: Int(minutes.rounded()))
+            }
+            let use = min(room - cost, rate * hours)
+            guard Self.worthMoving(use: use, cost: cost) else {
+                return .rewriteOutweighsUse(session: session.id, rewrite: cost, use: use)
+            }
+            return nil
+        }
+        // One that fits and is worth it would go while the windows are
+        // spent; otherwise the lightest says why none goes.
+        if let fits = ordered.first(where: { verdict($0) == nil }) {
+            return windowsOpen ? nil : .carriersHaveRoom(session: fits.id)
+        }
+        return verdict(ordered[0])
     }
 }
