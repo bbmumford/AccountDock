@@ -513,6 +513,9 @@ final class AppState: ObservableObject {
     /// (`holdSharedSessionsOnStayingAccount`), so a restart that did not
     /// take is tried again only after `stuckRestartSpacing`.
     var stayingRestartAt: [String: Date] = [:]
+    /// The last lane admission recorded for each provider
+    /// (`noteLaneAdmission`), so the same one is recorded once.
+    var laneAdmissionNoted: [AIProviderType: String] = [:]
     /// The digest of each account's saved sign-in the provider confirmed as
     /// that account's (`savedCopyIsOwn`).
     var savedCopyVerified: [UUID: String] = [:]

@@ -1529,7 +1529,7 @@ extension AppState {
                                    newSessionBurn: typical / 1_000_000 * accountRatio(account.id), now: now)
         }.map(\.id))
         var placements: [String: UUID] = [:]
-        // A session waiting on its account for its reset stays there, held.
+        // A session waiting on its account stays there, held.
         let waiting = waitingSessions(provider)
         if !destinations.isEmpty, let slots = SessionSlots(provider) {
             let running = slotRebalanceSessions(provider, slots: slots, now: now)
@@ -1539,9 +1539,14 @@ extension AppState {
                 pacerAccount(account.id, state: quotaState(for: account, now: now, wholeAllowance: true), weight: 1,
                              planner: planner, now: now)
             }
-            placements = SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
-                .place(leaving, accounts: pacerAccounts, running: running.filter { !ids.contains($0.id) },
-                       destinations: destinations, now: now)
+            // While capacity is scarce, the accounts with room take only the
+            // sessions they carry until their reset (`admitToLanes`); the
+            // rest have no destination and wait.
+            let pacer = SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
+            let others = running.filter { !ids.contains($0.id) }
+            placements = pacer.admitToLanes(leaving, accounts: pacerAccounts, running: others, destinations: destinations,
+                                            now: now)?.placements
+                ?? pacer.place(leaving, accounts: pacerAccounts, running: others, destinations: destinations, now: now)
         }
         let pinned = pinnedSessionAccounts(provider)
         var pinnedLimits: [UUID: PinnedHold?] = [:]

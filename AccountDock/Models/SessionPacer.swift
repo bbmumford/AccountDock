@@ -1489,6 +1489,9 @@ extension SessionPacer {
         /// How long its prompt cache lasts, which sets what its arrival
         /// elsewhere costs (`arrivalCost`); nil assumes `defaultCacheLifetime`.
         var cacheLifetime: TimeInterval? = nil
+        /// Its last request, which its prompt cache lasts from; nil when
+        /// unknown. Read by `admitToLanes`.
+        var lastSeen: Date? = nil
     }
 
     struct Rebalance: Equatable {
@@ -1861,6 +1864,136 @@ extension SessionPacer {
             scopedSpent[best.account.id] = (scopedSpent[best.account.id] ?? [:]).merging(best.scoped) { $0 + $1 }
             result[session.id] = best.account.id
         }
+        return result
+    }
+}
+
+extension SessionPacer {
+    /// What `admitToLanes` decided while capacity is scarce.
+    struct LaneAdmission: Equatable {
+        /// The lane each admitted session goes to.
+        var placements: [String: UUID] = [:]
+        /// The sessions no lane admitted, which stay where they are, held,
+        /// until their own account serves again or a lane admits them.
+        var waiting: [String] = []
+        /// Each lane that admitted a session: until when they all fit there,
+        /// its reset, or `newSessionRunway` from now when that is sooner
+        /// and the whole use of one of them until the reset does not fit.
+        var lanes: [UUID: Date] = [:]
+        /// The lanes in `lanes` whose time is their reset.
+        var untilReset: Set<UUID> = []
+    }
+
+    /// When an account that cannot serve now serves again: the latest reset
+    /// of its windows that are within `minimumLeftover` of their limit, or,
+    /// with none, the soonest reset of any.
+    func bindingReset(_ account: Account, now: Date) -> Date? {
+        let windows = windowsLeft(account, spent: 0, now: now)
+        return windows.filter { $0.left <= Self.minimumLeftover }.map(\.end).max() ?? windows.map(\.end).min()
+    }
+
+    /// Admits `sessions`, which their accounts can no longer serve, to the
+    /// `destinations` with room ("lanes"), only as far as each lane's room
+    /// carries them, instead of moving every one of them to wherever has
+    /// room. Each lane's room is what it has left by its reset, or by
+    /// `newSessionRunway` when the reset is later (`spare`), beside
+    /// `running` and the shared group's share; a session fits a lane when
+    /// its cache rewrite there (`arrivalCost`) plus its rate until that
+    /// horizon is within `windowFitShare` of the room left, every rewrite
+    /// counted in the lane's tokens. One pair at a time, it admits the
+    /// session that runs longest there: first a session whose whole use
+    /// until the lane's reset fits, then one whose own account resets later
+    /// than its prompt cache lasts (one that resets sooner keeps its cache
+    /// by waiting), then the lane whose weekly allowance would otherwise
+    /// expire with room left soonest, as weekly balancing orders accounts,
+    /// then the longest run. The rest wait. Nil when every session fits,
+    /// as when an account with ample room is among the lanes: `place`
+    /// spreads them then. Read by `AppState.strandedPlacements` and
+    /// `AppState.limitPauseScope`.
+    func admitToLanes(_ sessions: [RebalanceSession], accounts: [Account], running: [RebalanceSession],
+                      destinations: Set<UUID>, now: Date, sharedGroup: SharedGroup? = nil) -> LaneAdmission? {
+        let lanes = accounts.filter { destinations.contains($0.id) }
+        guard !sessions.isEmpty, !lanes.isEmpty else { return nil }
+        let shares = shares(sharedGroup, accounts: accounts, now: now)
+        let placed = running.filter { session in lanes.contains { $0.id == session.account } }
+        let unseen = unseenBurn(lanes, sessions: placed, sharedGroup: sharedGroup, shares: shares)
+        var burn: [UUID: Double] = [:]
+        var spent: [UUID: Double] = [:]
+        for lane in lanes {
+            burn[lane.id] = placed.filter { $0.account == lane.id }.reduce(0) { $0 + percent($1.tokensPerHour, on: lane) }
+                + (unseen[lane.id] ?? 0)
+        }
+        func reset(_ lane: Account) -> Date {
+            windowsLeft(lane, spent: 0, now: now).map(\.end).min() ?? now.addingTimeInterval(window)
+        }
+        func horizon(_ lane: Account) -> Date { min(reset(lane), now.addingTimeInterval(Self.newSessionRunway)) }
+        func room(_ lane: Account, until end: Date) -> Double {
+            spare(lane, until: end, spent: spent[lane.id] ?? 0, burn: burn[lane.id] ?? 0, shared: shares[lane.id], now: now)
+        }
+        // A lane whose weekly allowance its own rate leaves unused at its
+        // reset, by that reset; nil when none would be left.
+        func expires(_ lane: Account) -> Date? {
+            guard let left = lane.weeklyRemaining, let end = lane.weeklyResetsAt, end > now else { return nil }
+            let unused = left - (spent[lane.id] ?? 0) - Allowance.spent(perHour: burn[lane.id] ?? 0, from: now, until: end)
+            return unused > Self.minimumLeftover ? end : nil
+        }
+        func ownResetsLater(_ session: RebalanceSession) -> Bool {
+            guard let own = accounts.first(where: { $0.id == session.account }), let back = bindingReset(own, now: now),
+                  let lastSeen = session.lastSeen else { return true }
+            return back > lastSeen.addingTimeInterval(session.cacheLifetime ?? Self.defaultCacheLifetime)
+        }
+        struct Pair {
+            let session: RebalanceSession
+            let lane: Account
+            let whole: Bool
+            let ownLater: Bool
+            let expires: Date?
+            let runs: TimeInterval
+            let cost: Double
+            let rate: Double
+        }
+        func better(_ a: Pair, than b: Pair) -> Bool {
+            if a.whole != b.whole { return a.whole }
+            if a.ownLater != b.ownLater { return a.ownLater }
+            if a.expires != b.expires { return (a.expires ?? .distantFuture) < (b.expires ?? .distantFuture) }
+            if a.runs != b.runs { return a.runs > b.runs }
+            return a.session.id != b.session.id ? a.session.id < b.session.id : a.lane.id.uuidString < b.lane.id.uuidString
+        }
+        var result = LaneAdmission()
+        var waiting = sessions
+        while true {
+            var best: Pair?
+            for session in waiting {
+                for lane in lanes where lane.id != session.account {
+                    let end = horizon(lane)
+                    let hours = max(end.timeIntervalSince(now), 60) / 3600
+                    let left = room(lane, until: end)
+                    let cost = arrivalCost(session.contextTokens, cacheLifetime: session.cacheLifetime, to: lane)
+                    let rate = percent(session.tokensPerHour, on: lane)
+                    guard left > 0, cost + rate * hours <= left * Self.windowFitShare else { continue }
+                    let laneReset = reset(lane)
+                    let untilReset = max(laneReset.timeIntervalSince(now), 60) / 3600
+                    let whole = cost + rate * untilReset <= room(lane, until: laneReset) * Self.windowFitShare
+                    let runs = whole ? laneReset.timeIntervalSince(now)
+                        : rate > 0 ? min(untilReset, max(0, left - cost) / rate) * 3600 : laneReset.timeIntervalSince(now)
+                    let pair = Pair(session: session, lane: lane, whole: whole, ownLater: ownResetsLater(session),
+                                    expires: expires(lane), runs: runs, cost: cost, rate: rate)
+                    if best.map({ better(pair, than: $0) }) ?? true { best = pair }
+                }
+            }
+            guard let best else { break }
+            waiting.removeAll { $0.id == best.session.id }
+            result.placements[best.session.id] = best.lane.id
+            let until = best.whole ? reset(best.lane) : horizon(best.lane)
+            if until <= (result.lanes[best.lane.id] ?? .distantFuture) {
+                result.lanes[best.lane.id] = until
+                if best.whole { result.untilReset.insert(best.lane.id) } else { result.untilReset.remove(best.lane.id) }
+            }
+            spent[best.lane.id, default: 0] += best.cost
+            burn[best.lane.id, default: 0] += best.rate
+        }
+        guard !waiting.isEmpty else { return nil }
+        result.waiting = waiting.map(\.id).sorted()
         return result
     }
 }

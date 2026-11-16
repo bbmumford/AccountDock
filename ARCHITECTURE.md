@@ -1452,6 +1452,26 @@ the pool weights and which sessions move, each time the pool is rebuilt
   with room by how long each then lasts, instead of all going to the account
   with the largest pool weight: a session that must leave is served rather
   than refused, even where it lasts less than an hour.
+- While capacity is scarce, with pausing at the limit, a lane with room
+  does not take every such session (`SessionPacer.admitToLanes`, through
+  `strandedPlacements` and `limitPauseScope`): each lane's room is what it has
+  left by its reset, or by `newSessionRunway` when the reset is later
+  (`spare`), beside the sessions it runs and the shared group's share; a
+  session fits when its arrival's cache rewrite (`arrivalCost`) plus its rate
+  until that horizon is within `windowFitShare` of the room still left, and
+  each admitted session's rewrite and rate are charged to the lane before the
+  next is weighed. One pair at a time, it admits the session that runs
+  longest: first one whose whole use until the lane's reset fits, then one
+  whose own account resets later than its cache lasts (`bindingReset`), then
+  the lane whose weekly allowance its own rate would leave unused soonest, as
+  weekly balancing orders accounts, then the longest run. When every session
+  fits (an account with ample room among the lanes), `place` spreads them as
+  above. The others wait on their own account
+  (`SessionWait.Reason.awaitingLane`, `noteLaneAdmission`), listed in the
+  pause, until it serves again or a later cycle admits them, and the event
+  reads "Session balancing admitted 2 of 9 waiting session(s) to cybrio's
+  fresh window: they fit until its reset at 8:29 pm; 7 wait for their own
+  accounts."
 - An account a threshold switch left with room still on it drains
   (`AppState.drainingAccounts`): above its thresholds it keeps a pool weight
   of `drainingShare` (0.5) instead of none, or `drainingPreferred` (2) when

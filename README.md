@@ -392,6 +392,19 @@ comes soon move before one deep in a long turn. Sessions an account at its
 limit gives up are spread over the accounts with room, by how long each then
 lasts.
 
+When capacity is scarce, so that the accounts with room cannot carry every
+waiting session, and **Pause sessions** is chosen, a lane that frees up (a
+reset, a small plan with room) does not take them all. It admits sessions in
+order of how long each would run there: each must fit, with its cache rewrite
+and its use until the lane's reset (or for the hour), within the lane's room
+with a margin. Sessions whose whole use until the reset fits go first, then
+those whose own account resets later than their cache lasts, then the lane
+whose weekly allowance would otherwise expire first. The rest wait where they
+are until their own account resets or another lane frees up, and the event
+says so ("Session balancing admitted 2 of 9 waiting sessions to cybrio's fresh
+window: they fit until its reset at 8:29 pm; 7 wait for their own
+accounts.").
+
 When the router serves the sessions, a session also stays on its account while
 its prompt cache lasts, and one refused at the limit with the reset at most
 five minutes away is held by the router and continues with its cache.

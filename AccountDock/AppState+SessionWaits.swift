@@ -18,6 +18,10 @@ extension AppState {
             /// automatically" is off, and it cannot restart in a slot of its
             /// own (`holdSharedSessionsOnStayingAccount`).
             case activeAccountStays
+            /// Capacity is scarce, and no lane with room admitted the
+            /// session (`SessionPacer.admitToLanes`): it waits on its own
+            /// account until that serves again or a lane admits it.
+            case awaitingLane
         }
 
         var account: UUID
@@ -34,13 +38,76 @@ extension AppState {
     }
 
     /// The provider's sessions a wait keeps on their account now, with
-    /// that account; played ones are none. Read by `serveSessionSlots`,
+    /// that account; played ones are none. `admitting` leaves out those
+    /// waiting for a lane, which `strandedPlacements` weighs again every
+    /// cycle. Read by `serveSessionSlots`,
     /// `paced`, `strandedPlacements`, `limitPauseScope`, the automatic
     /// rebalance and `admitPausedSessions`.
-    func waitingSessions(_ provider: AIProviderType) -> [String: UUID] {
+    func waitingSessions(_ provider: AIProviderType, admitting: Bool = false) -> [String: UUID] {
         (sessionWaits[provider] ?? [:]).reduce(into: [:]) { result, entry in
-            if !entry.value.played { result[entry.key] = entry.value.account }
+            guard !entry.value.played, !admitting || entry.value.reason != .awaitingLane else { return }
+            result[entry.key] = entry.value.account
         }
+    }
+
+    /// Records the outcome of `SessionPacer.admitToLanes` for the slot
+    /// sessions `strandedPlacements` placed: each one left waiting waits
+    /// on its own account (`SessionWait.Reason.awaitingLane`) until it
+    /// serves again or a later cycle admits it, held by the pause gate; an
+    /// admitted one no longer waits. Records the admission once while it
+    /// stays the same (`laneAdmissionNoted`).
+    func noteLaneAdmission(_ provider: AIProviderType, admission: SessionPacer.LaneAdmission?,
+                           candidates: [SessionPacer.RebalanceSession], accounts pacerAccounts: [SessionPacer.Account],
+                           now: Date) {
+        var waits = sessionWaits[provider] ?? [:]
+        let considered = Set(candidates.map(\.id))
+        let waiting = Set(admission?.waiting ?? [])
+        // Waits for a lane end for every session weighed again and admitted,
+        // or no longer short of room.
+        waits = waits.filter { id, wait in wait.reason != .awaitingLane || !considered.contains(id) || waiting.contains(id) }
+        var added: [String] = []
+        let pacer = SessionPacer()
+        for session in candidates where waiting.contains(session.id) && waits[session.id] == nil {
+            let back = pacerAccounts.first { $0.id == session.account }.flatMap { pacer.bindingReset($0, now: now) }
+            waits[session.id] = SessionWait(account: session.account, reason: .awaitingLane,
+                                            until: back ?? now.addingTimeInterval(FailoverPlanner.sessionWindow), since: now)
+            added.append(session.id)
+        }
+        sessionWaits[provider] = waits.isEmpty ? nil : waits
+        if !added.isEmpty {
+            writeWaits(provider, added, reason: "no account with room can carry them until its reset", now: now)
+        }
+        guard let admission else {
+            laneAdmissionNoted[provider] = nil
+            return
+        }
+        func name(_ id: UUID) -> String { accounts.first { $0.id == id }.map { messageName($0) } ?? "an account" }
+        let fresh = Set(pacerAccounts.filter { $0.hasSessionWindow && $0.utilization < 1 }.map(\.id))
+        let event = Self.laneAdmissionEvent(
+            admitted: admission.lanes.keys.sorted { name($0) < name($1) }.map { lane in
+                (name(lane), admission.placements.values.filter { $0 == lane }.count, admission.lanes[lane] ?? now,
+                 admission.untilReset.contains(lane), fresh.contains(lane))
+            },
+            waiting: admission.waiting.count, total: candidates.count, now: now)
+        guard laneAdmissionNoted[provider] != event else { return }
+        laneAdmissionNoted[provider] = event
+        failoverEvents.record(provider, event)
+    }
+
+    /// The event for an admission while capacity is scarce: how many of the
+    /// waiting sessions each lane took and until when they fit there, and
+    /// how many wait for their own accounts.
+    nonisolated static func laneAdmissionEvent(admitted: [(lane: String, count: Int, until: Date, atReset: Bool, fresh: Bool)],
+                                               waiting: Int, total: Int, now: Date) -> String {
+        let taken = admitted.filter { $0.count > 0 }
+        guard !taken.isEmpty else {
+            return "Session balancing admitted none of \(total) waiting session(s): no account with room can carry one until its reset; they wait for their own accounts."
+        }
+        let parts = taken.map { lane in
+            "\(lane.count) of \(total) waiting session(s) to \(lane.lane)'s \(lane.fresh ? "fresh window" : "room"): "
+                + "they fit until \(lane.atReset ? "its reset at " : "")\(UsageFormat.clock(lane.until, now: now))"
+        }
+        return "Session balancing admitted " + parts.joined(separator: "; ") + "; \(waiting) wait for their own accounts."
     }
 
     /// When the reset is due that the sessions on the shared sign-in wait
@@ -145,7 +212,9 @@ extension AppState {
         guard policy.waitForResetWithinCache, pausingProviders.contains(provider), routedStatus[provider] == nil,
               pauseOverrideUntil[provider].map({ $0 <= now }) ?? true,
               let active = activeAccount(for: provider)?.id else {
-            waits = waits.filter { $0.value.reason != .cacheOutlastsReset }
+            // Without pausing at the limit no gate holds a waiting session,
+            // so none is kept on its account.
+            waits = pausingProviders.contains(provider) ? waits.filter { $0.value.reason != .cacheOutlastsReset } : [:]
             sessionWaits[provider] = waits.isEmpty ? nil : waits
             return
         }

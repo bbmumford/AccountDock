@@ -161,7 +161,8 @@ extension AppState {
                 id: id, account: account, tokensPerHour: measured,
                 contextTokens: entry?.contextTokens ?? 0, model: model,
                 movable: !session.isWorking && pacer.movable(pacing, now: now) && !sessionPins.isPinned(id),
-                cacheLifetime: entry?.cacheLifetime
+                cacheLifetime: entry?.cacheLifetime,
+                lastSeen: entry?.lastSeen
             )
         }
     }
@@ -196,12 +197,15 @@ extension AppState {
             SessionPacer.RebalanceSession(id: slot.path, account: slot.account, tokensPerHour: SessionPacer.defaultSessionRate,
                                           contextTokens: 0, model: nil, movable: true)
         }
-        let waiting = waitingSessions(provider)
+        let waiting = waitingSessions(provider, admitting: true)
         let stranded = (running + unnamed).filter { session in
             !sessionPins.isPinned(session.id) && waiting[session.id] == nil
                 && accountCannotServe(session.account, provider: provider, planner: planner, now: now, wholeAllowance: true)
         }
-        guard !stranded.isEmpty else { return [:] }
+        guard !stranded.isEmpty else {
+            noteLaneAdmission(provider, admission: nil, candidates: [], accounts: [], now: now)
+            return [:]
+        }
         let chosen = Self.strandedDestinations(members) { id in
             !accountCannotServe(id, provider: provider, planner: planner, now: now, wholeAllowance: true)
         }
@@ -218,9 +222,26 @@ extension AppState {
         // placement; it takes a stranded session only when nothing else can.
         let all = Set(pacerAccounts.map(\.id))
         let open = all.subtracting(windowPlacementsInForce(provider, now: now).values.map(\.account))
-        return SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
-            .place(stranded, accounts: pacerAccounts, running: running.filter { !strandedIDs.contains($0.id) },
-                   destinations: open.isEmpty ? all : open, now: now, sharedGroup: shared)
+        let pacer = SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor)
+        let others = running.filter { !strandedIDs.contains($0.id) }
+        // While capacity is scarce, each lane with room takes only the
+        // sessions it carries until its reset, and the rest wait where they
+        // are, held by the pause gate; with pausing off nothing could hold
+        // them, so they are spread as before.
+        if pausingProviders.contains(provider), routedStatus[provider] == nil {
+            let everyAccount = pacerAccounts + (accounts.filter { account in
+                account.provider == provider && !pacerAccounts.contains { $0.id == account.id }
+            }.map { account in
+                pacerAccount(account.id, state: quotaState(for: account, now: now, wholeAllowance: true), weight: 0,
+                             planner: planner, now: now)
+            })
+            let admission = pacer.admitToLanes(stranded, accounts: everyAccount, running: others,
+                                               destinations: Set(pacerAccounts.map(\.id)), now: now, sharedGroup: shared)
+            noteLaneAdmission(provider, admission: admission, candidates: stranded, accounts: everyAccount, now: now)
+            if let admission { return admission.placements }
+        }
+        return pacer.place(stranded, accounts: pacerAccounts, running: others,
+                           destinations: open.isEmpty ? all : open, now: now, sharedGroup: shared)
     }
 
     /// The pool members a session whose account can no longer serve it may
