@@ -67,15 +67,16 @@ extension AppState {
     }
 
     /// The provider's sessions lane admission keeps on their account
-    /// (`SessionWait.Reason.awaitingLane`), the ones the user played
-    /// included, with that account. `serveSessionSlots` keeps each there
-    /// rather than moving it by the path for an account that can no longer
-    /// serve (`slotChoice`'s `heldOn`): admission decides where it goes, a
-    /// planned lane once its reset comes, and only the user's own move takes
-    /// it elsewhere sooner.
+    /// (`SessionWait.Reason.awaitingLane`), with that account.
+    /// `serveSessionSlots` keeps each there rather than moving it by the
+    /// path for an account that can no longer serve (`slotChoice`'s
+    /// `heldOn`): admission decides where it goes, a planned lane once its
+    /// reset comes. One the user played or moved is left out: playing a
+    /// held session means running it now, so that path takes it to the
+    /// account with room even though it may not last the hour there.
     func admissionHolds(_ provider: AIProviderType) -> [String: UUID] {
         (sessionWaits[provider] ?? [:]).reduce(into: [:]) { result, entry in
-            if entry.value.reason == .awaitingLane { result[entry.key] = entry.value.account }
+            if entry.value.reason == .awaitingLane, !entry.value.played { result[entry.key] = entry.value.account }
         }
     }
 

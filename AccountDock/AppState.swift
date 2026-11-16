@@ -1770,6 +1770,11 @@ final class AppState: ObservableObject {
         if includeMetadata, planCheckIsDue(account, forced: false) {
             await checkProviderPlan(of: account.id, forced: false, reason: "readKimiUsage")
         }
+        // A plan without Kimi Code (Free) is shown as such instead of a
+        // reply that carries no quota windows.
+        if let current = accounts.first(where: { $0.id == account.id }), !current.supportsProviderWorkloads {
+            return .workloadUnavailable(unavailableMessage(for: account.provider))
+        }
         do {
             let usage = try await kimiService.getUsageLimits(location: location, isActive: readsLiveCredential(account))
             return .reading(usage)
@@ -1921,7 +1926,7 @@ final class AppState: ObservableObject {
     }
 
     private func unavailableMessage(for provider: AIProviderType) -> String {
-        "This account's plan does not currently include \(provider.rawValue)."
+        "This account's plan does not currently include \(provider == .kimi ? "Kimi Code" : provider.rawValue)."
     }
 
     private func unavailableUsageState(for account: Account) -> UsageErrorState {
@@ -2120,11 +2125,12 @@ final class AppState: ObservableObject {
     /// A failed check is logged and tried again after
     /// `profileRetryInterval` (`planCheckDue`). Called by the sign-in paths,
     /// `readKimiUsage` and `recheckProviderPlansIfDue`.
-    func checkProviderPlan(of accountID: UUID, forced: Bool, reason: String) async {
+    func checkProviderPlan(of accountID: UUID, forced: Bool, reason: String,
+                           priority: UsageRequestBudget.Priority = .background) async {
         guard let account = accounts.first(where: { $0.id == accountID }),
               account.provider.capabilities.planAuthority?.source == .profileEndpoint, !needsSignIn(account),
               let module = credentialModule(for: account.provider) else { return }
-        guard forced || spendUsageRequest(account.provider, .background) else { return }
+        guard forced || spendUsageRequest(account.provider, priority) else { return }
         lastProfileCheck[accountID] = Date()
         do {
             guard let answer = try await module.planAnswer(of: account, readsLive: readsLiveCredential(account),
@@ -2152,8 +2158,13 @@ final class AppState: ObservableObject {
             && !needsSignIn(account) {
             if let attempted = lastProfileCheck[account.id], attempted >= since { continue }
             guard forced || account.supportsProviderWorkloads, planCheckIsDue(account, forced: forced, now: now) else { continue }
-            if !forced, !(usageBudgets[account.provider]?.canSpend(.background) ?? true) { continue }
-            await checkProviderPlan(of: account.id, forced: forced, reason: "recheckProviderPlans")
+            // An account whose plan its profile has never named is checked
+            // from the share background reads cannot use up: its plan and
+            // size otherwise come only from its credential, which keeps the
+            // plan it was issued under after an upgrade.
+            let priority: UsageRequestBudget.Priority = account.profileCheckedAt == nil ? .verification : .background
+            if !forced, !(usageBudgets[account.provider]?.canSpend(priority) ?? true) { continue }
+            await checkProviderPlan(of: account.id, forced: forced, reason: "recheckProviderPlans", priority: priority)
         }
     }
 
