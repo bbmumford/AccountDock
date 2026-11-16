@@ -487,9 +487,12 @@ struct UsageDashboardView: View {
                     Text(account.headerTitle(obfuscated: !showFullEmail))
                         .font(.subheadline.weight(.medium))
                         .lineLimit(1)
+                        .layoutPriority(1)
                     ForEach(status.cardTitleBadges, id: \.text) { Badge($0) }
                     if let sessions = appState.accountSessions[account.id], !sessions.isEmpty {
                         SessionCountLabel(provider: account.provider, sessions: sessions)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
                 AccountEmailLabel(email: account.email, alwaysVisible: showFullEmail)

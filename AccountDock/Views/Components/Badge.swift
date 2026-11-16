@@ -8,6 +8,10 @@ struct Badge: View {
     var body: some View {
         Text(text)
             .font(.caption2.weight(.semibold))
+            // A badge keeps its words on one line at their full width; the
+            // row around it gives way instead (account name, session count).
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(.brandOnAccent)
             .padding(.horizontal, AppStyle.badgeHPadding)
             .padding(.vertical, AppStyle.badgeVPadding)
