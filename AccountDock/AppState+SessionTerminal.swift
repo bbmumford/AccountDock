@@ -54,8 +54,10 @@ extension AppState {
     // MARK: - Sessions the CLI left waiting at a limit
 
     /// What a session left waiting at a limit is told once the wait is
-    /// closed.
-    nonisolated static let leftWaitingPrompt = "Continue where you stopped: the usage limit that stopped this session no longer applies, as its slot now serves an account with room."
+    /// closed. Its subagents, workflows and other lanes of work were refused
+    /// by the same limit, and some report that they finished when they
+    /// stopped on the error, so it is told to check and restart them.
+    nonisolated static let leftWaitingPrompt = "Continue where you stopped: the usage limit that stopped this session no longer applies, as its slot now serves an account with room. Resume all your work, and check every subagent, workflow, background task and lane of work you started: requests made while the limit applied were refused, so some may report that they completed when they actually stopped on the error. Restart or resume each one that stopped, without repeating work that already completed."
 
     /// How long after a refusal its session is still looked at.
     nonisolated static let leftWaitingWindow: TimeInterval = 6 * 60 * 60
