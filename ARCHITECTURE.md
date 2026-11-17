@@ -272,7 +272,13 @@ every later piece of such evidence; Settings → General → Audit, or the reque
 session whose process runs now (a live lifecycle record whose process the
 process table lists) is recorded and flagged: a status-line file or a
 transcript outlives its session, and a session that ended has no token to
-read again, so its flag is dropped.
+read again, so its flag is dropped. A status line repeats the resets of its
+session's last reply and is redrawn without a request, as when a held or
+quiet session's user answers it, so a slot session's status line is no
+evidence until the session has sent a request after its slot last moved and
+settled (`AppState.statusLinePredatesSlotMove`, by the requests its
+transcript or the router recorded, `lastRequestSeen`); until then it is no
+reading of the slot's account either.
 
 
 Query it with the request `{"action":"audit","since":"<ISO time>","account":"<id, label or email>"}`;
@@ -562,7 +568,15 @@ Accounts are read active first, then the accounts sessions run on, then the
 idle ones, each oldest reading first (`AppState.readUrgencyOrder`), so the
 account at the end of the list is not the one left unread whenever the
 budget runs short, and idle accounts at their limits do not spend the budget
-before an account sessions are using.
+before an account sessions are using. An account whose runway (the room left
+over its sessions' pace now, `FailoverPlanner.runway`) is shorter than
+`AppState.runwayWatch`, ten minutes, is read at verification rank whenever
+its newest reading, a session's live one included, is a minute old
+(`runwayReadingIsDue`), and the quota cycle runs every 30 seconds
+meanwhile; an account a heavy session (`heavyArrivalShare`, a quarter of its
+window an hour) was just moved onto is read once a request round after the
+move. Held sessions send nothing and leave the runway, so the frequent
+readings end once they are held or the room is ample.
 Throttling backs off for every account of that provider, from one minute up to
 fifteen. While a provider throttles, `QuotaTrend` projects the active account's
 usage forward from its learned burn rate so failover still acts on time.
@@ -634,6 +648,14 @@ refusal is never put down to the account the slot left. An account
 whose reading is older than its pool lifetime is read before it takes a new
 session (`FailoverPlanner.poolReadingIsCurrent`) and takes none while that
 reading cannot be made.
+
+A session's refusal is one event per limit it states (`AppState.refusalIsNews`,
+keyed by `refusalLimitKey`), whether the session's own transcript holds it or
+only a subagent's does: a session's subagents are refused one after another
+while replies they sent before the limit still land, so neither the count of
+refusals nor such a reply starts a new run. A served request answers the
+refusal, and clears it, only when the refused agent made it or it comes more
+than `refusalInFlightAllowance` after the refusal (`servedAnswersRefusal`).
 
 A reading a running session reports with a response (the status line, a
 Codex rollout: `PassiveUsageObservation.Source.reportsWithEachResponse`)
@@ -1491,6 +1513,32 @@ the pool weights and which sessions move, each time the pool is rebuilt
   event-stream head goes out at once, a comment follows every 14 seconds,
   and the request goes to the same account again after the reset. Errors
   after that head are written as `event: error`.
+- An account's runway (`FailoverPlanner.runway`) is how long the room its
+  last reading shows lasts the sessions running on it at their pace now
+  (`AppState.sessionsBurn`, `QuotaAccountState.sessionsBurnPerHour`: for
+  each session the larger of its decayed rate and what it sent over the
+  last five minutes, its subagents' requests included,
+  `SessionRates.recentRate`), less what they spent since that reading.
+  While it is shorter than `AppState.runwayLead` (two readings a minute
+  apart and one request round, at least `suspensionLead`) the account is
+  near its limit (`servingVerdict`) whatever lead a rule asks, and a live
+  reading with room does not outrank it: platform-engineer's sixteen agents
+  and platform-execution's five, its 800K-token context written afresh,
+  sent 11M weighted tokens in a minute, a quarter of hexorda's window, so
+  the 10% a status line showed at 6:05:05 pm was gone before the next
+  reading, and their subagents' requests were already on their way when the
+  gate would have held them. Each cycle `shedSessionsShortOfRunway` sends
+  the heaviest slot sessions off such an account, or one at or refused at
+  its limit, until the rest last `runwayLead` there (`runwayShed`): each to
+  the first account with room that carries it for the hour beside the
+  cycle's ledger (`fallbackLane`, at its arrival rate), through the
+  slot-move path; one mid-turn, or that no account carries, is held at its
+  next tool call by a pause at a limit listing it, which `rescopeLimitPause`
+  releases where a fresh reading shows room for it (`releaseFits`). The
+  event reads "Paused platform-engineer on hexorda: at its sessions' pace
+  now (about 275% of its window an hour) its room lasts about 2 min, less
+  than the 3 min a reading and a request round take, and no account with
+  room carries it; it continues when one has room for it."
 - A session whose account is at its limit (refused at it) or within
   `suspensionLead` of it, and whose account resets at least a minute
   (`resetHoldMargin`) before the session's prompt cache expires (its last
@@ -1643,7 +1691,19 @@ the pool weights and which sessions move, each time the pool is rebuilt
   first fresh Max 5x window, go on there together and are refused at its
   limit minutes later. At each reset, after the reading that confirms it,
   the lane takes only the held sessions it carries for the hour, and the
-  rest stay held for their own accounts or the next lane. Lane admission and the stranded placement count the
+  rest stay held for their own accounts or the next lane. That demand is
+  at least what the session used while it worked
+  (`SessionRates.workingDemand`: the hour's tokens over the time it
+  worked, each gap of more than `runGap` between its requests left out, at
+  least `runGap`), so a session held two minutes into a burst after an hour
+  of waiting on its user counts at the burst's rate, not at the burst
+  spread over the hour. A session the stranded placement, the slot path's
+  fallback or a pause at a limit sends to another account counts there at
+  least at its working rate before its last request
+  (`SessionRates.arrivalRate`): quiet for hours it uses nothing where it
+  is, but where it is sent it works at that rate once its user speaks
+  again, so two such sessions are not both sent to one window their work
+  empties within the hour. Lane admission and the stranded placement count the
   charges started by now beside each lane's own sessions; the held-session
   plans, the slot path's fallback (`ledgerFallback`) and the sessions a
   pause releases test the destination with `CapacityOutlook.carries`: from

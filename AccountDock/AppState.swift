@@ -444,6 +444,17 @@ final class AppState: ObservableObject {
     /// request of theirs is served. The account cards mark them, since such
     /// a session stops until someone tells it to go on.
     @Published var sessionRefusals: [String: SessionRefusal] = [:]
+    /// The limit each session's last refusal event named, and when, so
+    /// `noteRefusal` records one event per session and limit however many
+    /// of its agents are refused and served in between.
+    var refusalEventsNoted: [String: NotedRefusal] = [:]
+    /// Weighted tokens per hour the sessions running on each account use
+    /// now (`refreshSessionsBurn`), which `quotaState` turns into the
+    /// account's runway (`QuotaAccountState.sessionsBurnPerHour`).
+    var sessionsBurn: [UUID: Double] = [:]
+    /// When a heavy session last arrived on each account by a slot move,
+    /// until a reading of the account follows it (`runwayReadingIsDue`).
+    var runwayArrivals: [UUID: Date] = [:]
     var routedSessionSeen: [String: (account: UUID, at: Date)] = [:]
     /// The account each session's own status line last named by its reset
     /// times, kept by `ingestPassiveTelemetry` for `sessionAttribution`.

@@ -160,7 +160,7 @@ extension AppState {
     func ledgerFallback(_ provider: AIProviderType, id: String, from current: UUID?, byWeight: [UUID],
                         cannotServe: (UUID) -> Bool, running: [SessionPacer.RebalanceSession],
                         accounts outlook: [CapacityOutlook.Account], now: Date) -> (lane: UUID, charge: LaneLedger.Charge)? {
-        let session = running.first { $0.id == id }
+        let session = running.first { $0.id == id }.map(arriving)
             ?? SessionPacer.RebalanceSession(id: id, account: current ?? UUID(), tokensPerHour: SessionPacer.defaultSessionRate,
                                              contextTokens: 0, model: nil, movable: true)
         return Self.fallbackLane(session, from: current, candidates: byWeight,

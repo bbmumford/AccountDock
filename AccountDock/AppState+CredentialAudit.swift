@@ -120,21 +120,13 @@ extension AppState {
             return
         }
         let believed = believedCredentialAccount(provider, process: process)
-        // A status line repeats the limits of the session's last reply. When
-        // no turn has started or ended since its slot last moved, plus the
-        // time the CLI takes to read the slot again, that reply came from
-        // before the move and says nothing about the token held now.
-        // The move time is the slot's own record when this launch made it,
-        // else when the slot's account file was last written, which a
-        // relaunch keeps.
-        if source == "statusLineResets", believed.source == "slot", let process,
-           let directory = slotDirectoryByProcess[process],
-           let moved = slotAccountHistory[directory]?.last?.at ?? Self.slotAssignedAt(directory) {
-            let lastTurn = AgentSessions.records(provider)[session]?.observedAt ?? .distantPast
-            if lastTurn < moved.addingTimeInterval(Self.slotMoveSettling) {
-                flaggedCredentialProcesses[session] = nil
-                return
-            }
+        // A status line repeats the limits of the session's last reply, so
+        // one whose session has sent no request since its slot last moved
+        // says nothing about the token held now (`statusLinePredatesSlotMove`).
+        if source == "statusLineResets", believed.source == "slot",
+           statusLinePredatesSlotMove(session: session, process: process) {
+            flaggedCredentialProcesses[session] = nil
+            return
         }
         var detail: String?
         if believed.account != observed, believed.source != "slot", let away = lastSwitchedAway[observed] {
@@ -154,6 +146,31 @@ extension AppState {
         } else {
             flaggedCredentialProcesses[session] = nil
         }
+    }
+
+    /// Whether a slot session's status line still repeats a reply from
+    /// before its slot last moved: the session has sent no request seen
+    /// since the move settled (`statusLinePredatesMove`). A held or quiet
+    /// session's status line is redrawn without a request, as when its user
+    /// answers a question, and keeps showing the resets and use of the
+    /// account it was served by before the move. Read by
+    /// `noteProcessCredential`, which flags no mismatch from it, and by
+    /// `ingestPassiveTelemetry`, which applies no reading from it to the
+    /// slot's account. The move time is the slot's own record when this
+    /// launch made it, else when the slot's account file was last written,
+    /// which a relaunch keeps; false for a process reading no slot.
+    func statusLinePredatesSlotMove(session: String, process: Int32?) -> Bool {
+        guard let process, let directory = slotDirectoryByProcess[process],
+              let moved = slotAccountHistory[directory]?.last?.at ?? Self.slotAssignedAt(directory) else { return false }
+        return Self.statusLinePredatesMove(lastRequest: lastRequestSeen(bySession: session), movedAt: moved)
+    }
+
+    /// `statusLinePredatesSlotMove`'s rule: the session's last request seen
+    /// (its transcript or the router, `lastRequestSeen`) came before its
+    /// slot moved at `movedAt`, or within `slotMoveSettling` after, while
+    /// the CLI may still have held the token it read before.
+    nonisolated static func statusLinePredatesMove(lastRequest: Date?, movedAt: Date) -> Bool {
+        (lastRequest ?? .distantPast) < movedAt.addingTimeInterval(slotMoveSettling)
     }
 
     /// When the slot at `directory` was last assigned to an account: the

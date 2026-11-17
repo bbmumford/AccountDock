@@ -208,6 +208,16 @@ extension AppState {
         max(measured, held ?? 0)
     }
 
+    /// `session` as it counts on the account a rule sends it to: at its
+    /// arrival rate (`SessionRates.arrivalRate`), so two sessions quiet for
+    /// hours are not both sent to one window that their work, once their
+    /// users speak again, empties within the hour.
+    func arriving(_ session: SessionPacer.RebalanceSession) -> SessionPacer.RebalanceSession {
+        var arriving = session
+        arriving.tokensPerHour = sessionRates.arrivalRate(session.id, measured: session.tokensPerHour)
+        return arriving
+    }
+
     /// When each of the provider's sessions now kept from running was held:
     /// the pause's start for each session it lists, or for every running one
     /// while it holds every new turn, less those resumed in it; a wait's
@@ -242,10 +252,12 @@ extension AppState {
                                           contextTokens: 0, model: nil, movable: true)
         }
         let waiting = waitingSessions(provider, admitting: true)
+        // Each is weighed at the rate it works at once it runs where it is
+        // sent (`SessionRates.arrivalRate`).
         let stranded = (running + unnamed).filter { session in
             !sessionPins.isPinned(session.id) && waiting[session.id] == nil
                 && accountCannotServe(session.account, provider: provider, planner: planner, now: now, wholeAllowance: true)
-        }
+        }.map(arriving)
         guard !stranded.isEmpty else {
             noteLaneAdmission(provider, admission: nil, candidates: [], accounts: [], now: now)
             return [:]

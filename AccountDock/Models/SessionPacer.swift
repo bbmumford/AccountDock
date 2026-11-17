@@ -90,14 +90,63 @@ struct SessionRates: Codable, Equatable {
         return tokens / (span / 3600)
     }
 
+    /// An idle gap longer than this between a session's requests is no
+    /// work: its user's pause between turns, or a hold. A run of work
+    /// shorter than it counts as this long (`workingDemand`).
+    static let runGap: TimeInterval = 10 * 60
+
+    /// Weighted tokens per hour the session used over the hour before `end`
+    /// while it worked: `demand`'s tokens over the same span less every gap
+    /// of more than `runGap` between its requests (and before the first and
+    /// after the last), at least `runGap`. A session that worked steadily
+    /// all hour has its `demand`; one that waited on its user for most of
+    /// the hour and then worked a few minutes has the rate of those minutes,
+    /// which is what it uses when it runs again, where `demand` spreads them
+    /// over the hour. Nil for a session never seen.
+    func workingDemand(_ session: String, until end: Date) -> Double? {
+        guard let entry = entries[session] else { return nil }
+        let span = min(Self.demandWindow, max(Self.minimumDemandSpan, end.timeIntervalSince(entry.firstSeen)))
+        let start = end.addingTimeInterval(-span)
+        let requests = entry.requests.filter { $0.at > start && $0.at <= end }.sorted { $0.at < $1.at }
+        let tokens = requests.reduce(0) { $0 + $1.tokens }
+        var idle: TimeInterval = 0
+        var previous = start
+        for request in requests {
+            let gap = request.at.timeIntervalSince(previous)
+            if gap > Self.runGap { idle += gap }
+            previous = request.at
+        }
+        let tail = end.timeIntervalSince(previous)
+        if tail > Self.runGap { idle += tail }
+        return tokens / (max(Self.runGap, span - idle) / 3600)
+    }
+
     /// The demand of a session held by a pause that began at `pausedAt`,
     /// measured up to when the session was held: the pause's start, or its
     /// last request when it was resumed during the pause and held again,
-    /// since only the hour before its latest request is kept.
+    /// since only the hour before its latest request is kept. Its rate while
+    /// it worked (`workingDemand`) counts when that is more: a session held
+    /// minutes into a burst after a quiet hour runs again at the burst's
+    /// rate, which every lane it is planned, released or moved onto must
+    /// carry.
     func heldDemand(_ session: String, pausedAt: Date) -> Double? {
         guard let entry = entries[session] else { return nil }
         let heldAt = max(pausedAt, entry.requests.last?.at ?? pausedAt)
-        return demand(session, until: heldAt)
+        guard let average = demand(session, until: heldAt) else { return nil }
+        return max(average, workingDemand(session, until: heldAt) ?? 0)
+    }
+
+    /// The rate a session counts at on the account it arrives on: what it
+    /// uses now (`measured`), at least its rate over the hour before its
+    /// last request while it worked (`workingDemand` until `lastSeen`). A
+    /// session quiet for longer than an hour counts near nothing where it
+    /// runs (`AppState.rebalanceRate`), but where it is sent it works at
+    /// that rate once its user speaks again. Read by the stranded
+    /// placement, the slot path's fallback and a pause at a limit for the
+    /// sessions they send to another account.
+    func arrivalRate(_ session: String, measured: Double) -> Double {
+        guard let last = entries[session]?.requests.map(\.at).max() else { return measured }
+        return max(measured, workingDemand(session, until: last) ?? 0)
     }
 
     /// Restarts a resumed session's rate at its forecast demand, so it counts
@@ -107,6 +156,21 @@ struct SessionRates: Codable, Equatable {
         entry.decayedTokens = tokensPerHour * Self.timeConstant / 3600
         entry.lastSeen = date
         entries[session] = entry
+    }
+
+    /// The span `recentRate` measures a session's pace over.
+    static let burstSpan: TimeInterval = 5 * 60
+
+    /// Weighted tokens per hour the session sent over the last `burstSpan`,
+    /// its subagents' requests included: its pace now, which a burst
+    /// reaches at once, where `tokensPerHour`'s 20-minute decay counts a
+    /// burst of a few minutes at a fraction of its rate. Read by
+    /// `AppState.refreshSessionsBurn` for each account's runway.
+    func recentRate(_ session: String, now: Date) -> Double {
+        guard let entry = entries[session] else { return 0 }
+        let start = now.addingTimeInterval(-Self.burstSpan)
+        let tokens = entry.requests.filter { $0.at > start && $0.at <= now }.reduce(0) { $0 + $1.tokens }
+        return tokens / (Self.burstSpan / 3600)
     }
 
     /// Weighted tokens per hour the session is using now.
