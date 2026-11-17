@@ -234,7 +234,7 @@ private struct CapacityOutlookTimeline: View {
     /// 9:29 pm"); the longest paused stretch when nothing resumes in view.
     private var pauseSummary: String? {
         let end = outlook.resume?.at
-        let paused = outlook.segments.filter { !$0.running && (end.map { segment in segment.start < $0 } ?? true) }
+        let paused = outlook.segments.filter { segment in !segment.running && (end.map { segment.start < $0 } ?? true) }
         guard let first = paused.first else { return nil }
         let until = end ?? paused.map(\.end).max() ?? first.end
         let total = paused.reduce(0) { $0 + min($1.end, until).timeIntervalSince($1.start) }
