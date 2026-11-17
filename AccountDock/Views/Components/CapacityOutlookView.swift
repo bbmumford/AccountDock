@@ -132,6 +132,20 @@ private struct CapacityOutlookPanel: View {
         let detail: String
     }
 
+    /// Which of the account's limits still stops sessions after `event`
+    /// refilled the other one, and until when: "its 5-hour window is full
+    /// until 9:29 pm" after a new week, "its weekly limit is reached until
+    /// Sat 5:00 am" after a window refill. Taken from the account's next
+    /// refill of the other kind, or its spent event's return.
+    private func blockingLimit(after event: CapacityOutlook.Event) -> String {
+        let other: CapacityOutlook.Event.Kind = event.kind == .newWeek ? .windowRefill : .newWeek
+        let name = event.kind == .newWeek ? "its 5-hour window is full" : "its weekly limit is reached"
+        let sameAccount = outlook.events.filter { $0.account == event.account && $0.name == event.name }
+        let until = sameAccount.first { $0.kind == other && $0.at > event.at }?.at
+            ?? sameAccount.last { ($0.kind == .windowSpent || $0.kind == .weekSpent) && $0.at <= event.at }?.back
+        return until.map { "\(name) until \(UsageFormat.clock($0, now: outlook.now))" } ?? name
+    }
+
     private func row(_ event: CapacityOutlook.Event) -> Row {
         let detail: String
         switch event.kind {
@@ -142,7 +156,7 @@ private struct CapacityOutlookPanel: View {
             } else if let runs = event.runs {
                 text += " — runs about \(UsageFormat.duration(runs))"
             } else if !outlook.bringsRoom(event) {
-                text += " — nothing resumes yet: another of its limits is still reached"
+                text += " — nothing resumes yet: " + blockingLimit(after: event)
             }
             detail = text
         case .windowSpent:
