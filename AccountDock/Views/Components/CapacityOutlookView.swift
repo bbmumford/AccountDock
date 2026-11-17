@@ -194,8 +194,11 @@ private struct CapacityOutlookPanel: View {
 }
 
 /// The span from now to just past the resume (or the whole horizon) as one
-/// bar of running and paused stretches, with hour labels above it and a tick
-/// below it at each refill, account running out, the pause and the resume.
+/// bar of running and paused stretches, with hour labels above it, how long
+/// each paused stretch lasts written in it, and a tick below it at each
+/// refill, account running out, the pause and the resume, each with its time
+/// where there is room; a line under the bar gives the main pause's start,
+/// end and length.
 private struct CapacityOutlookTimeline: View {
     let outlook: CapacityOutlook
 
@@ -211,13 +214,32 @@ private struct CapacityOutlookTimeline: View {
                 Text(verbatim: endLabel)
             }
             Canvas { context, size in draw(&context, size: size) }
-                .frame(height: 38)
+                .frame(height: 50)
+            if let pause = mainPause {
+                Text(verbatim: "Paused \(UsageFormat.clock(pause.start, now: outlook.now)) → \(UsageFormat.clock(pause.end, now: outlook.now)) · \(UsageFormat.duration(pause.end.timeIntervalSince(pause.start)))")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.orange)
+            }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(outlook.line)
     }
 
     private var span: TimeInterval { max(60, outlook.spanEnd.timeIntervalSince(outlook.now)) }
+
+    /// The longest paused stretch: from everything pausing to the resume.
+    private var mainPause: CapacityOutlook.Segment? {
+        outlook.segments.filter { !$0.running }.max { $0.end.timeIntervalSince($0.start) < $1.end.timeIntervalSince($1.start) }
+    }
+
+    /// A tick's time label: "8:54", or "8:54 am" for the pause and resume.
+    private func tickLabel(_ date: Date, emphasised: Bool) -> String {
+        var style = Date.FormatStyle().hour().minute()
+        if !Calendar.current.isDate(date, inSameDayAs: outlook.now), emphasised { style = style.weekday(.abbreviated) }
+        let text = date.formatted(style)
+        return emphasised ? text : text.replacingOccurrences(of: " am", with: "").replacingOccurrences(of: " pm", with: "")
+            .replacingOccurrences(of: "\u{202F}am", with: "").replacingOccurrences(of: "\u{202F}pm", with: "")
+    }
 
     /// The resume, or the end of the horizon, as an hour: "Tue 9 pm".
     private var endLabel: String {
@@ -236,7 +258,7 @@ private struct CapacityOutlookTimeline: View {
 
     private func draw(_ context: inout GraphicsContext, size: CGSize) {
         let width = size.width
-        let barTop: CGFloat = 14, barHeight: CGFloat = 10
+        let barTop: CGFloat = 14, barHeight: CGFloat = 13
         // Hour labels, every 1, 2, 3, 6, 12 or 24 hours as the width allows.
         let hours = [1.0, 2, 3, 6, 12, 24].first { span / ($0 * 3600) * Double(labelSpacing) <= Double(width) } ?? 24
         let calendar = Calendar.current
@@ -265,15 +287,43 @@ private struct CapacityOutlookTimeline: View {
             let end = max(x(segment.end, width: width), start + 2)
             clipped.fill(Path(CGRect(x: start, y: barTop, width: end - start, height: barHeight)), with: .color(.brand))
         }
-        // A tick under each event.
-        for event in outlook.events where event.kind != .windowSpent {
+        // How long each paused stretch lasts, inside it where it fits.
+        for segment in outlook.segments where !segment.running {
+            let start = x(segment.start, width: width), end = x(segment.end, width: width)
+            let label = UsageFormat.compactDuration(segment.end.timeIntervalSince(segment.start))
+            let text = context.resolve(Text(verbatim: label).font(.system(size: 9, weight: .semibold)).foregroundColor(.orange))
+            guard text.measure(in: CGSize(width: 200, height: 20)).width + 8 <= end - start else { continue }
+            clipped.draw(text, at: CGPoint(x: (start + end) / 2, y: barTop + barHeight / 2), anchor: .center)
+        }
+        // A tick under each event, with its time where it does not crowd a
+        // neighbour's; the pause and the resume are labelled first.
+        let ticks = outlook.events.filter { $0.kind != .windowSpent }
+        let tickTop = barTop + barHeight + 2
+        for event in ticks {
             let position = x(event.at, width: width)
             var tick = Path()
-            tick.move(to: CGPoint(x: position, y: barTop + barHeight + 2))
-            tick.addLine(to: CGPoint(x: position - 3.5, y: barTop + barHeight + 8))
-            tick.addLine(to: CGPoint(x: position + 3.5, y: barTop + barHeight + 8))
+            tick.move(to: CGPoint(x: position, y: tickTop))
+            tick.addLine(to: CGPoint(x: position - 3.5, y: tickTop + 6))
+            tick.addLine(to: CGPoint(x: position + 3.5, y: tickTop + 6))
             tick.closeSubpath()
             context.fill(tick, with: .color(event.isRefill ? .brand : .orange))
+        }
+        func emphasised(_ event: CapacityOutlook.Event) -> Bool {
+            event.kind == .allPaused || event.at == outlook.resume?.at
+        }
+        var taken: [ClosedRange<CGFloat>] = []
+        for event in ticks.sorted(by: { emphasised($0) && !emphasised($1) }) {
+            let position = x(event.at, width: width)
+            let strong = emphasised(event)
+            let text = context.resolve(Text(verbatim: tickLabel(event.at, emphasised: strong))
+                .font(.system(size: 9, weight: strong ? .semibold : .regular))
+                .foregroundColor(strong ? (event.kind == .allPaused ? .orange : .brand) : .secondary))
+            let half = text.measure(in: CGSize(width: 200, height: 20)).width / 2 + 2
+            let left = min(max(position, half), width - half)
+            let range = (left - half)...(left + half)
+            guard !taken.contains(where: { $0.overlaps(range) }) else { continue }
+            taken.append(range)
+            context.draw(text, at: CGPoint(x: left, y: tickTop + 7), anchor: .top)
         }
     }
 }
