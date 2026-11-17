@@ -215,8 +215,8 @@ private struct CapacityOutlookTimeline: View {
             }
             Canvas { context, size in draw(&context, size: size) }
                 .frame(height: 50)
-            if let pause = mainPause {
-                Text(verbatim: "Paused \(UsageFormat.clock(pause.start, now: outlook.now)) → \(UsageFormat.clock(pause.end, now: outlook.now)) · \(UsageFormat.duration(pause.end.timeIntervalSince(pause.start)))")
+            if let pause = pauseSummary {
+                Text(verbatim: pause)
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.orange)
             }
@@ -228,8 +228,23 @@ private struct CapacityOutlookTimeline: View {
     private var span: TimeInterval { max(60, outlook.spanEnd.timeIntervalSince(outlook.now)) }
 
     /// The longest paused stretch: from everything pausing to the resume.
-    private var mainPause: CapacityOutlook.Segment? {
-        outlook.segments.filter { !$0.running }.max { $0.end.timeIntervalSince($0.start) < $1.end.timeIntervalSince($1.start) }
+    /// The pause from its first paused stretch to the resume: its start,
+    /// end, and the time paused in it, with the short runs between
+    /// ("Paused 8:28 pm → 10:59 pm · 2 hr paused, short runs at 9:10 pm and
+    /// 9:29 pm"); the longest paused stretch when nothing resumes in view.
+    private var pauseSummary: String? {
+        let end = outlook.resume?.at
+        let paused = outlook.segments.filter { !$0.running && (end.map { segment in segment.start < $0 } ?? true) }
+        guard let first = paused.first else { return nil }
+        let until = end ?? paused.map(\.end).max() ?? first.end
+        let total = paused.reduce(0) { $0 + min($1.end, until).timeIntervalSince($1.start) }
+        let runs = outlook.segments.filter { $0.running && $0.start > first.start && $0.start < until }
+        var text = "Paused \(UsageFormat.clock(first.start, now: outlook.now)) → \(UsageFormat.clock(until, now: outlook.now)) · \(UsageFormat.duration(total)) paused"
+        if !runs.isEmpty {
+            let times = runs.prefix(3).map { UsageFormat.clock($0.start, now: outlook.now) }
+            text += ", short runs at " + ListFormatter.localizedString(byJoining: times)
+        }
+        return text
     }
 
     /// A tick's time label: "8:54", or "8:54 am" for the pause and resume.
