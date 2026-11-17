@@ -1635,7 +1635,15 @@ the pool weights and which sessions move, each time the pool is rebuilt
   when it starts there (now for a placement, a move or a release from a
   pause; the account's reset for a planned wait or a session a wait holds
   there, `chargeHeldWaits`) plus its arrival's cache rewrite in that
-  account's cost. Lane admission and the stranded placement count the
+  account's cost. A session a pause or a wait holds is expected to use
+  what it used over the hour before it was held (`AppState.heldRate`, from
+  `heldSince` and `SessionRates.heldDemand`, in `slotRebalanceSessions`),
+  not the near nothing it sends while held: weighed so, ten sessions held
+  for two hours each look like a few thousand tokens an hour, all fit the
+  first fresh Max 5x window, go on there together and are refused at its
+  limit minutes later. At each reset, after the reading that confirms it,
+  the lane takes only the held sessions it carries for the hour, and the
+  rest stay held for their own accounts or the next lane. Lane admission and the stranded placement count the
   charges started by now beside each lane's own sessions; the held-session
   plans, the slot path's fallback (`ledgerFallback`) and the sessions a
   pause releases test the destination with `CapacityOutlook.carries`: from

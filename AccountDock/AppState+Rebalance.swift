@@ -146,18 +146,25 @@ extension AppState {
 
     /// The provider's running slot sessions as `SessionPacer.rebalance` and
     /// `SessionPacer.place` take them: each on the account its slot serves,
-    /// at `rebalanceRate`, movable unless mid-turn or pinned.
+    /// at `rebalanceRate`, movable unless mid-turn or pinned. A session a
+    /// pause or a wait holds counts at least at the rate it used before it
+    /// was held (`heldRate`, from `heldSince`), so lane admission, the
+    /// held-session plans and the stranded placement put on a freed lane
+    /// only the held sessions it carries once they run again.
     func slotRebalanceSessions(_ provider: AIProviderType, slots: SessionSlots,
                                now: Date) -> [SessionPacer.RebalanceSession] {
         let pacer = SessionPacer()
         let root = slots.sessionRoot.path + "/"
+        let held = heldSince(provider)
         return (liveSessions[provider] ?? []).compactMap { session -> SessionPacer.RebalanceSession? in
             guard let pid = session.processID, let directory = slotDirectoryByProcess[pid], directory.hasPrefix(root),
                   let account = slotDirectoryServing[directory] else { return nil }
             let id = session.sessionID
             let entry = sessionRates.entries[id]
-            let measured = Self.rebalanceRate(current: sessionRates.tokensPerHour(id, now: now),
-                                              recent: sessionRates.demand(id, until: now), lastSeen: entry?.lastSeen, now: now)
+            let measured = Self.heldRate(
+                Self.rebalanceRate(current: sessionRates.tokensPerHour(id, now: now),
+                                   recent: sessionRates.demand(id, until: now), lastSeen: entry?.lastSeen, now: now),
+                held: held[id].flatMap { sessionRates.heldDemand(id, pausedAt: $0) })
             let model = sessionModel(id, now: now)
             let pacing = SessionPacer.Session(id: id, account: account, tokensPerHour: measured,
                                               contextTokens: entry?.contextTokens ?? 0, lastSeen: entry?.lastSeen ?? now,
@@ -187,6 +194,36 @@ extension AppState {
         guard let lastSeen else { return SessionPacer.defaultSessionRate }
         if now.timeIntervalSince(lastSeen) > SessionRates.demandWindow { return current }
         return max(current, recent ?? 0)
+    }
+
+    /// The rate a held session counts at: what it uses now (`measured`), at
+    /// least its demand over the hour before it was held (`held`,
+    /// `SessionRates.heldDemand`). A held session sends nothing, so within
+    /// the hour its measured rate falls to near nothing, which is not what
+    /// it uses once it runs again: weighed so, every held session would fit
+    /// the first fresh window and all would go on there together. One quiet
+    /// by its user's choice before the hold has a held demand near nothing
+    /// too, and counts as it did.
+    nonisolated static func heldRate(_ measured: Double, held: Double?) -> Double {
+        max(measured, held ?? 0)
+    }
+
+    /// When each of the provider's sessions now kept from running was held:
+    /// the pause's start for each session it lists, or for every running one
+    /// while it holds every new turn, less those resumed in it; a wait's
+    /// start (`sessionWaits`, played ones left out) for one a wait keeps on
+    /// its account; the earlier of the two for one both hold. Read by
+    /// `slotRebalanceSessions` for `heldRate`.
+    func heldSince(_ provider: AIProviderType) -> [String: Date] {
+        var since: [String: Date] = [:]
+        for (id, wait) in sessionWaits[provider] ?? [:] where !wait.played { since[id] = wait.since }
+        guard let pause = AgentPauseGate.read(provider) else { return since }
+        let resumed = AgentPauseGate.resumedSessions(provider)
+        let listed = pause.holdsNewTurns == true ? (liveSessions[provider] ?? []).map(\.sessionID) : pause.sessions
+        for id in listed where !resumed.contains(id) {
+            since[id] = min(since[id] ?? pause.pausedAt, pause.pausedAt)
+        }
+        return since
     }
 
     /// Where `serveSessionSlots` sends each slot session whose account can

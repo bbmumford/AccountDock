@@ -528,7 +528,11 @@ No session is moved or resumed onto an account on an old belief of room: the
 account must have been read within the last five minutes, and an account that
 refused a request stays at its limit until the reset the refusal names. When
 the accounts have room again, a pause releases only as many of its sessions as
-a fresh reading shows room for together; the rest keep waiting.
+a fresh reading shows room for together; the rest keep waiting. A paused
+session is counted at what it used in the hour before it was paused, not at
+the nothing it sends while it waits, so a window that resets takes only the
+waiting sessions it can carry for the hour, rather than every one of them
+at once.
 
 When the router serves the sessions, a session also stays on its account while
 its prompt cache lasts, and one refused at the limit with the reset at most
