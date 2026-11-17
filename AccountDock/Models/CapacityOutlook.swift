@@ -128,6 +128,16 @@ struct CapacityOutlook: Equatable {
     /// long is where they resume; a shorter one is a burst on a window's last
     /// room or a small plan's window, and they pause again after it.
     static let resumeRun: TimeInterval = 30 * 60
+
+    /// Whether sessions run from `event` on: a running stretch starts within
+    /// a minute of it, or one is under way then. A refill after which every
+    /// session still waits, as a new week while the 5-hour window is still
+    /// at its limit, brings no room. Read by the Outlook's bar and list.
+    func bringsRoom(_ event: Event) -> Bool {
+        segments.contains { segment in
+            segment.running && segment.start <= event.at.addingTimeInterval(60) && segment.end > event.at.addingTimeInterval(30)
+        }
+    }
     static let defaultStep: TimeInterval = 5 * 60
     static let defaultHorizon: TimeInterval = 7 * 24 * 60 * 60
     /// A week renews this long after its last reset.

@@ -220,4 +220,17 @@ final class CapacityOutlookTests: XCTestCase {
         XCTAssertNil(outlook.biggestLine)
         XCTAssertEqual(outlook.rateLine, "~0M tokens/h across 3 sessions")
     }
+
+    func testARefillAfterWhichNothingRunsBringsNoRoom() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let refill = CapacityOutlook.Event(at: now.addingTimeInterval(30 * 60), kind: .newWeek, account: nil, name: "cybrio")
+        let window = CapacityOutlook.Event(at: now.addingTimeInterval(60 * 60), kind: .windowRefill, account: nil, name: "hexorda")
+        var outlook = CapacityOutlook(now: now, horizon: 86_400)
+        outlook.segments = [
+            .init(start: now, end: now.addingTimeInterval(60 * 60), running: false),
+            .init(start: now.addingTimeInterval(60 * 60), end: now.addingTimeInterval(2 * 3600), running: true),
+        ]
+        XCTAssertFalse(outlook.bringsRoom(refill), "the new week leaves every session waiting")
+        XCTAssertTrue(outlook.bringsRoom(window))
+    }
 }

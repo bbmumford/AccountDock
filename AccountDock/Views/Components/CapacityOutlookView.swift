@@ -141,6 +141,8 @@ private struct CapacityOutlookPanel: View {
                 text = (event.kind == .newWeek ? "new week" : "5-hour window") + "   ← sessions resume"
             } else if let runs = event.runs {
                 text += " — runs about \(UsageFormat.duration(runs))"
+            } else if !outlook.bringsRoom(event) {
+                text += " — nothing resumes yet: another of its limits is still reached"
             }
             detail = text
         case .windowSpent:
@@ -316,6 +318,9 @@ private struct CapacityOutlookTimeline: View {
         // neighbour's; the pause and the resume are labelled first.
         let ticks = outlook.events.filter { $0.kind != .windowSpent }
         let tickTop = barTop + barHeight + 2
+        // A refill that lets sessions run is a filled arrow in the brand
+        // colour; one after which nothing runs yet, as a new week while the
+        // account's 5-hour window is still full, is an outline in grey.
         for event in ticks {
             let position = x(event.at, width: width)
             var tick = Path()
@@ -323,9 +328,15 @@ private struct CapacityOutlookTimeline: View {
             tick.addLine(to: CGPoint(x: position - 3.5, y: tickTop + 6))
             tick.addLine(to: CGPoint(x: position + 3.5, y: tickTop + 6))
             tick.closeSubpath()
-            context.fill(tick, with: .color(event.isRefill ? .brand : .orange))
+            if event.isRefill, !outlook.bringsRoom(event) {
+                context.stroke(tick, with: .color(.secondary), lineWidth: 1)
+            } else {
+                context.fill(tick, with: .color(event.isRefill ? .brand : .orange))
+            }
         }
         func emphasised(_ event: CapacityOutlook.Event) -> Bool {
+            // A refill that brings no room keeps its time only where nothing
+            // else wants the space; see the tick loop above.
             event.kind == .allPaused || event.at == outlook.resume?.at
         }
         var taken: [ClosedRange<CGFloat>] = []
