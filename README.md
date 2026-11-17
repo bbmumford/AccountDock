@@ -418,8 +418,14 @@ Choose what happens for each provider:
   account with room first, and a session on an account with room never waits
   for another account's limit. A waiting session holds at its next tool call,
   including its subagents and workflow agents, and once no account has room,
-  every turn started waits before its first request, so nothing is sent to an
-  account that would refuse it. The terminal stays attached and usable, and a
+  neither one in the failover order nor one a session runs on (such as an
+  account you pinned a session to), every turn started waits before its
+  first request, so nothing is sent to an account that would refuse it. With
+  automatic failover off, the active account reaching its limit holds only
+  the sessions on the shared sign-in; sessions in slots of their own stay
+  with session balancing and wait only for their own accounts. However the
+  pause began, it never releases everything at once: each session continues
+  when its own account has room for it. The terminal stays attached and usable, and a
   message shows why. While an account still has a little room, paused
   sessions are let through one step at a time. Each continues on its own when
   its account has room again, or with **Resume all**. A pinned session is
@@ -512,7 +518,10 @@ the Sessions page says where and when it resumes ("resumes on fluxon about
 12:50 am"), and one event says how the lanes are shared ("At 12:50 am fluxon's
 fresh window takes platform-execution and continues-field (≈ 60 min of its
 window); 5 others wait for hexorda at 1:10 am, bytrix and cybrio at 1:30
-am."). Until then no other rule moves it off its account, even after you play
+am."). The plan stays the same from one check to the next while it still
+fits: a lane keeps the sessions planned onto it unless one goes away or
+another set would put at least a tenth more of its window to work, so small
+changes in the sessions' use do not swap them in and out. Until then no other rule moves it off its account, even after you play
 it; moving it yourself still does. A session on an account that can no longer
 serve it that no rule places goes to another account only where that account
 has room for it for the hour beside everything sent there that cycle; it
@@ -522,7 +531,11 @@ No session is moved or resumed onto an account on an old belief of room: the
 account must have been read within the last five minutes, and an account that
 refused a request stays at its limit until the reset the refusal names. When
 the accounts have room again, a pause releases only as many of its sessions as
-a fresh reading shows room for together; the rest keep waiting.
+a fresh reading shows room for together; the rest keep waiting. A paused
+session is counted at what it used in the hour before it was paused, not at
+the nothing it sends while it waits, so a window that resets takes only the
+waiting sessions it can carry for the hour, rather than every one of them
+at once.
 
 When the router serves the sessions, a session also stays on its account while
 its prompt cache lasts, and one refused at the limit with the reset at most
@@ -657,6 +670,14 @@ AccountDock adds a few hooks to each CLI's settings, alongside your own:
 While sessions are served from slots, AccountDock also adds one marked line
 putting the slot launcher on `PATH` to `~/.zshenv` and `~/.zshrc`, and removes
 it once they are not.
+
+A session quiet at its prompt for longer than twelve hours writes no new
+lifecycle record, so AccountDock also reads, without changing it, the list
+Claude Code keeps of the session each of its processes holds
+(`~/.claude/sessions`): such a session is still counted, paused and named by
+its ID. A process in a slot that holds no session, such as `claude --resume`
+waiting at a prompt before its session starts, or a server a session left
+running, is not counted as a run.
 
 On launch, AccountDock asks to install any hooks that are missing.
 Settings → General → Agent hooks shows each one and can reinstall them. Each

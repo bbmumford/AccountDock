@@ -1201,13 +1201,23 @@ a pause ends session by session, never because the active account has room
 account's headroom release a session pinned elsewhere.
 The pause file lists exactly the sessions that wait, and each listed session
 also waits at a new turn (`holdsListedNewTurns`); every new turn waits
-(`holdsNewTurns`) only while no account has room. Every cycle,
+(`holdsNewTurns`) only while no account has room
+(`someAccountHasRoom`): none in the failover order, and none a slot
+session runs on, such as an account outside the order the user pinned a
+session to. With automatic failover off, a threshold or limit switch
+`FailoverPlanner.plan` asks for is not made, and `evaluate` pauses at the
+active account's limit by this same scope: the sessions on the shared
+sign-in wait on it, while slot sessions stay with session balancing and
+wait only for their own accounts. Every cycle,
 `prunePausedSessions` narrows such a pause (`rescopeLimitPause`): a listed
 session whose own account has room again, by a reset, a reading or its slot
 moving to an account with room, goes on; when an account first has room
 after all were at their limit, the pause stops holding every new turn and
 lists the sessions whose own account is still at its limit; it ends when
-none is left. A pause the user took, an account hold and a pause that
+none is left. It never ends whole because the active account has room
+again (`capacityEndsPause` is false for every pause at a limit unless a
+route target serves): its sessions go on account by account, each only
+where a fresh reading shows room for it. A pause the user took, an account hold and a pause that
 narrows a route keep their own rules. The pause file and the gate's markers
 are all a pause is, so after a relaunch the same cycle picks the pause up.
 
@@ -1571,8 +1581,22 @@ the pool weights and which sessions move, each time the pool is rebuilt
   is charged the whole cache write of the session's arrival
   (`SessionPacer.arrivalCost`: its context at 2 a token for the one-hour
   cache, 1.25 for the five-minute one), not only what the move adds over
-  staying. A run whose process left no session record, as every session
-  is for the first cycle after AccountDock starts, is placed by its slot's
+  staying. A session is known by its lifecycle record, and also, for a CLI
+  that keeps its own registry of the session each process holds (Claude
+  Code's `~/.claude/sessions/<pid>.json`, `CLISessionRegistry`,
+  `ProviderCapabilities.cliSessionRegistry`), by that registry:
+  `AgentSessions.live` keeps a session whose record is older than
+  `liveLifetime` (12 hours, as for one quiet at its prompt overnight) while
+  the registry names its process with it, and lists a registered process no
+  live record covers as the session the registry names, so a pause lists
+  it and the plans name it by its ID. Only a slot read by a process that
+  may hold a session is a run (`slotRunDirectories`): one the registry
+  lists, or, for a CLI that keeps none, one of the CLI's own processes. A
+  helper that outlived the session that started it (an MCP server, a
+  script) and a CLI the registry does not list, such as `claude --resume`
+  waiting at a prompt before its session starts, send no request and are
+  never planned or charged. A run whose process left no session record is
+  placed by its slot's
   path at `defaultSessionRate`, weighed and charged in the cycle's ledger
   with the sessions; one admission leaves waiting is kept on its account
   by its slot (`admissionHeldRuns`, `slotChoice`'s `heldOn`) and never
@@ -1611,7 +1635,15 @@ the pool weights and which sessions move, each time the pool is rebuilt
   when it starts there (now for a placement, a move or a release from a
   pause; the account's reset for a planned wait or a session a wait holds
   there, `chargeHeldWaits`) plus its arrival's cache rewrite in that
-  account's cost. Lane admission and the stranded placement count the
+  account's cost. A session a pause or a wait holds is expected to use
+  what it used over the hour before it was held (`AppState.heldRate`, from
+  `heldSince` and `SessionRates.heldDemand`, in `slotRebalanceSessions`),
+  not the near nothing it sends while held: weighed so, ten sessions held
+  for two hours each look like a few thousand tokens an hour, all fit the
+  first fresh Max 5x window, go on there together and are refused at its
+  limit minutes later. At each reset, after the reading that confirms it,
+  the lane takes only the held sessions it carries for the hour, and the
+  rest stay held for their own accounts or the next lane. Lane admission and the stranded placement count the
   charges started by now beside each lane's own sessions; the held-session
   plans, the slot path's fallback (`ledgerFallback`) and the sessions a
   pause releases test the destination with `CapacityOutlook.carries`: from
@@ -1652,7 +1684,18 @@ the pool weights and which sessions move, each time the pool is rebuilt
   the hour; the next sessions go to the next lane by its reset, and a
   session no lane carries for an hour within a 5-hour window of its own
   account's reset waits for its own account, charged there from that
-  reset. With every account at its limit, admission has no
+  reset. Each lane window's set stays steady from cycle to cycle: the
+  sessions the last cycle planned to wait are planned first, window by
+  window in the order of their resets, so each keeps its lane while it
+  still fits there, then the rest by rate; the plan made heaviest first
+  replaces that only when, at the first window whose set differs, it puts
+  at least `HeldSessionPlan.replanMargin` (10%) more of that window to work
+  for the hour (an hour of each session's rate less its arrival's
+  rewrite, `prefersReplan`). A planned session that goes leaves its room
+  to the next by rate, and every tie keeps the steady plan. The summary
+  event records the plan by its resets to the nearest five minutes
+  (`summaryMinute`), so a reset reported on either side of a minute does
+  not record it again. With every account at its limit, admission has no
   lane and every stranded session is planned so. It moves now instead to a
   lane with room only when that serves more work until an hour past that
   reset (`CapacityOutlook.servedAlone`, counting the lane's ledger charges:

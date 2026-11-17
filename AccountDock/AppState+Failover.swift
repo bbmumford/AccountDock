@@ -1192,8 +1192,15 @@ extension AppState {
             guard let target = accounts.first(where: { $0.id == targetID }) else { return }
             if case .balance = reason, !policy.intelligentBalancingEnabled { return }
             // Switching at a threshold or at the limit is failover's alone.
+            // With failover off the active account stays, so the sessions on
+            // the shared sign-in wait on it; the pause is scoped per account
+            // (`limitPauseScope`), so slot sessions on accounts with room run
+            // on and session balancing keeps placing the others.
             if !reason.isBalance, !policy.enabled {
-                if exhaustionSoon { await holdWork(provider, policy: policy, current: current, because: "automatic switching is disabled") }
+                if exhaustionSoon {
+                    await holdWork(provider, policy: policy, current: current,
+                                   because: "automatic failover is off, so \(messageName(current)) stays the active account at its limit")
+                }
                 return
             }
             await performAutomaticSwitch(provider: provider, policy: policy, from: current, to: target, reason: reason)
@@ -1549,10 +1556,24 @@ extension AppState {
         return scope
     }
 
+    /// Whether a pause at a limit lets new turns go on (`pauseScope`'s
+    /// `anyRoom`): some account in the failover order (`order`), or some
+    /// account a slot session is on (`serving`: its slot's account, or the
+    /// account it is pinned to), has room (`hasRoom`: it can serve,
+    /// neither at nor near its limit). Only when none has does every new
+    /// turn wait, since each session is then on an account that would
+    /// refuse it and a new one has nowhere to go; while one has, a session
+    /// there runs on and only the sessions whose own account is at its
+    /// limit are listed. Read by `limitPauseScope`.
+    nonisolated static func someAccountHasRoom(order: [UUID], serving: Set<UUID>, hasRoom: (UUID) -> Bool) -> Bool {
+        order.contains(where: hasRoom) || serving.contains(where: hasRoom)
+    }
+
     /// `pauseScope` for the provider's running sessions now. An account is
     /// at or near its limit as `evaluate` judges the active one: refused at
     /// it, or reaching it within `suspensionLead`. An account has room when
-    /// it is in the failover order, signed in and neither. A slot session on
+    /// it is in the failover order, signed in and neither, or when a running
+    /// session is on it and it is neither (`someAccountHasRoom`). A slot session on
     /// an account at or near its limit moves where `SessionPacer.place`
     /// puts it among the accounts that also carry one more typical session
     /// for `SessionPacer.newSessionRunway` (`carriesNewSession`) and were
@@ -1640,8 +1661,20 @@ extension AppState {
         let pinned = pinnedSessionAccounts(provider)
         var pinnedLimits: [UUID: PinnedHold?] = [:]
         defer { if holding != nil { laneLedgers[provider] = releasing } }
+        // An account outside the failover order that a slot session is on
+        // (one the user moved or pinned it to) keeps that session going, so
+        // its room counts as much as the order's.
+        let serving = Set(sessions.values.compactMap { $0 }).union(pinned.values)
+        let roomyIDs = Set(roomy.map(\.id))
+        let anyRoom = Self.someAccountHasRoom(order: ladder.map(\.id), serving: serving) { id in
+            if roomyIDs.contains(id) { return true }
+            guard let account = self.accounts.first(where: { $0.id == id }), !self.needsSignIn(account) else { return false }
+            let state = self.quotaState(for: account, now: now)
+            return !state.refusedAtLimit && !self.refusedUntilReset(id, now: now)
+                && planner.servingVerdict(planner.servingView(state), now: now, lead: Self.suspensionLead) == .canServe
+        }
         return Self.pauseScope(sessions: sessions, active: current.id, atOrNearLimit: atOrNearLimit,
-                               anyRoom: !roomy.isEmpty, destination: { placements[$0] },
+                               anyRoom: anyRoom, destination: { placements[$0] },
                                pinnedHeld: { session in
             if pinned[session] == nil, let account = waiting[session] {
                 return !self.servesAgain(account, planner: planner, now: now) || !goesOn(session, account)
@@ -1825,6 +1858,8 @@ extension AppState {
         AgentPauseGate.write(narrowed, for: provider)
         if pause.holdsNewTurns == true {
             failoverEvents.record(provider, "An account has room again: sessions on accounts with room continue, and \(sessions.count) session(s) whose own account is still at its limit keep waiting.")
+        } else if scope.holdsNewTurns {
+            failoverEvents.record(provider, "No account a session runs on, nor any in the failover order, has room now: new turns wait too, and each paused session goes on once its own account has room for it.")
         } else if !released.isEmpty {
             let left = sessions.subtracting(chosen).count
             failoverEvents.record(provider, "Resumed \(released.count) paused session(s): the account each runs on has room again for them."
@@ -1844,7 +1879,11 @@ extension AppState {
             return
         }
         if var pause = AgentPauseGate.read(provider) {
-            let held = AgentPauseGate.stillHeld(pause, records: AgentSessions.records(provider))
+            // A live session the CLI's registry names stands for its process,
+            // where its own record may name an earlier one that has ended.
+            let records = AgentSessions.records(provider).merging(
+                (liveSessions[provider] ?? []).map { ($0.sessionID, $0) }) { _, live in live }
+            let held = AgentPauseGate.stillHeld(pause, records: records)
             if held != pause.sessions {
                 pause.sessions = held
                 if held.isEmpty, pause.holdsNewTurns != true {
@@ -2178,19 +2217,22 @@ extension AppState {
     }
 
     /// Whether the active account having room again ends `pause` whole
-    /// (`resumeAgentsIfCapacityReturned`). A pause at a limit that lists the
-    /// sessions it holds, without holding every new turn, does not: each
-    /// listed session goes on once its own account has room
-    /// (`rescopeLimitPause`), so a session pinned to an account still at
-    /// its limit stays held whatever the active account's room. While a
-    /// route target serves the requests (`routed`), ending the pause is
-    /// what brings them back (`releasePausedAgents`), so it ends. An account
-    /// hold ends at its own account's reset, and a pause the user took
-    /// (`AgentPauseGate.PauseFile.heldByUser`) only when the user resumes.
+    /// (`resumeAgentsIfCapacityReturned`). A pause at a limit does not,
+    /// whether it lists its sessions or holds every new turn: each session
+    /// goes on once its own account has room for it by a fresh reading
+    /// (`rescopeLimitPause`, through `limitPauseScope` and `releaseFits`),
+    /// so a slot session on an account still at its limit, or one the
+    /// freed account has no room left for, stays held whatever the active
+    /// account's room. While a route target serves the requests (`routed`),
+    /// ending the pause is what brings them back (`releasePausedAgents`), so
+    /// it ends. An account hold ends at its own account's reset, and a pause
+    /// the user took (`AgentPauseGate.PauseFile.heldByUser`) only when the
+    /// user resumes. With no pause file (a provider whose agents are
+    /// stopped instead) capacity ends it.
     nonisolated static func capacityEndsPause(_ pause: AgentPauseGate.PauseFile?, routed: Bool = false) -> Bool {
         guard let pause else { return true }
         if pause.account != nil || pause.heldByUser { return false }
-        return routed || pause.holdsNewTurns == true
+        return routed
     }
 
     /// Whether a pause at a limit leaves `existing` as it is

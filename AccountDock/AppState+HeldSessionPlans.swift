@@ -82,8 +82,10 @@ extension AppState {
                 toPlan.append(held(session))
             }
         }
+        // The last cycle's plans keep each lane's set steady
+        // (`HeldSessionPlan.planTogether`'s `previous`).
         let made = HeldSessionPlan.planTogether(toPlan, accounts: outlookAccounts, base: base, lanes: lanes,
-                                                ledger: &ledger, now: now, pacer: pacer)
+                                                ledger: &ledger, now: now, pacer: pacer, previous: previous)
         for (id, plan) in made {
             plans[id] = plan
             guard plan.choice == .move else { continue }
@@ -119,7 +121,8 @@ extension AppState {
     /// their own accounts (`HeldSessionPlan.summary`), with how long each
     /// lane's fresh window lasts the sessions planned onto it; again only
     /// when the plan itself changes, not when the sessions' rates move that
-    /// estimate.
+    /// estimate, nor when the reset's reported time moves across a minute
+    /// (`HeldSessionPlan.summaryMinute`).
     private func noteHeldPlanSummary(_ provider: AIProviderType, plans: [String: HeldSessionPlan], waiting: [String],
                                      base: [UUID: Double], ledger: LaneLedger, accounts: [CapacityOutlook.Account],
                                      pacer: SessionPacer, now: Date) {
@@ -140,7 +143,7 @@ extension AppState {
             heldPlanSummaryNoted[provider] = nil
             return
         }
-        let plan = waits.map { "\($0.name)>\($0.plan.lane.uuidString)@\(Int($0.plan.at.timeIntervalSince1970 / 60))" }
+        let plan = waits.map { "\($0.name)>\($0.plan.lane.uuidString)@\(HeldSessionPlan.summaryMinute($0.plan.at))" }
             .sorted().joined(separator: "|") + "|unplanned:\(unplanned)"
         guard heldPlanSummaryNoted[provider] != plan else { return }
         heldPlanSummaryNoted[provider] = plan
