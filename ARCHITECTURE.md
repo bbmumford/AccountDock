@@ -635,6 +635,14 @@ whose reading is older than its pool lifetime is read before it takes a new
 session (`FailoverPlanner.poolReadingIsCurrent`) and takes none while that
 reading cannot be made.
 
+A session's refusal is one event per limit it states (`AppState.refusalIsNews`,
+keyed by `refusalLimitKey`), whether the session's own transcript holds it or
+only a subagent's does: a session's subagents are refused one after another
+while replies they sent before the limit still land, so neither the count of
+refusals nor such a reply starts a new run. A served request answers the
+refusal, and clears it, only when the refused agent made it or it comes more
+than `refusalInFlightAllowance` after the refusal (`servedAnswersRefusal`).
+
 A reading a running session reports with a response (the status line, a
 Codex rollout: `PassiveUsageObservation.Source.reportsWithEachResponse`)
 arrives every few seconds while it works, whatever the budget or a cool-down

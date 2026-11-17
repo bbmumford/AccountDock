@@ -26,28 +26,84 @@ extension AppState {
         /// settle it is held back (`verifyRefusals`); `recordedLimitRefusal`
         /// does not count it until then (`refusalCounts`).
         var verified = true
+        /// The subagent whose request was refused, as its transcript names
+        /// it (`TranscriptRequest.agent`); nil for the session's own. Only a
+        /// later request of the same agent is its answer
+        /// (`servedAnswersRefusal`).
+        var agent: String? = nil
+    }
+
+    /// The limit a session's last refusal event named
+    /// (`refusalLimitKey`) and when it was refused, kept in
+    /// `refusalEventsNoted`.
+    struct NotedRefusal: Equatable {
+        var limit: String
+        var at: Date
     }
 
     /// How far apart two refusals of one session must be to be recorded as
     /// two events; a session refused at a limit usually tries again at once.
     nonisolated static let refusalEventSpacing: TimeInterval = 10 * 60
 
-    /// Whether a refusal at `at` is recorded as an event: it is recent, so
-    /// the transcripts read back at launch add none, and the session's last
-    /// refusal is `refusalEventSpacing` older or there was none.
+    /// How long after a refusal a request of another agent of the same
+    /// session can still be one sent before it: a subagent's streamed reply
+    /// lands minutes after its request left, while the limit refuses every
+    /// request sent after it.
+    nonisolated static let refusalInFlightAllowance: TimeInterval = 5 * 60
+
+    /// Whether a refusal at `at` is recorded as an event by the spacing
+    /// alone: it is recent, so the transcripts read back at launch add none,
+    /// and the session's last refusal is `refusalEventSpacing` older or there
+    /// was none. `refusalIsNews(at:limit:noted:now:)` applies it to
+    /// refusals that state no reset.
     nonisolated static func refusalIsNews(at: Date, last: Date?, now: Date) -> Bool {
         guard now.timeIntervalSince(at) < refusalEventSpacing else { return false }
         return last.map { at.timeIntervalSince($0) >= refusalEventSpacing } ?? true
     }
 
+    /// The limit a refusal names, for telling one limit from another: the
+    /// reset it states, to the minute, or its words when it states none.
+    nonisolated static func refusalLimitKey(_ words: String, at: Date, calendar: Calendar = .current) -> String {
+        guard let reset = refusalResetDate(words, at: at, calendar: calendar) else { return "words:" + words }
+        return "reset:\(Int((reset.timeIntervalSince1970 / 60).rounded()))"
+    }
+
+    /// Whether a refusal at `at` of the limit `limit` is recorded as an
+    /// event, given the session's last one (`noted`): once per session and
+    /// limit. Its subagents are refused one after another, and requests
+    /// they sent before the limit are served in between, so neither the
+    /// count of refusals nor a served request starts a new run. A refusal
+    /// stating no reset is told from the last by `refusalEventSpacing`.
+    /// Read by `noteRefusal`.
+    nonisolated static func refusalIsNews(at: Date, limit: String, noted: NotedRefusal?, now: Date) -> Bool {
+        guard now.timeIntervalSince(at) < refusalEventSpacing else { return false }
+        guard let noted else { return true }
+        if noted.limit != limit { return at > noted.at }
+        return !limit.hasPrefix("reset:") && refusalIsNews(at: at, last: noted.at, now: now)
+    }
+
+    /// Whether `request`, served, answers the session's `refusal`: it was
+    /// made after it by the same agent, whose requests go one at a time, or
+    /// more than `refusalInFlightAllowance` after it by any agent of the
+    /// session. A reply another agent receives seconds after the refusal
+    /// was sent before the limit and says nothing about the account now.
+    /// Read by `recordTranscriptRequests`.
+    nonisolated static func servedAnswersRefusal(_ refusal: SessionRefusal, request: TranscriptRequest) -> Bool {
+        guard refusal.at < request.at else { return false }
+        return refusal.agent == request.agent || request.at.timeIntervalSince(refusal.at) > refusalInFlightAllowance
+    }
+
     /// Marks a session as refused at a usage limit by `account`, and says so
-    /// in the events once for each run of refusals.
-    func noteRefusal(of session: String, by account: UUID, words: String, at: Date,
+    /// in the events once for each limit (`refusalIsNews`). `agent` is the
+    /// subagent refused, nil for the session's own request.
+    func noteRefusal(of session: String, by account: UUID, words: String, at: Date, agent: String? = nil,
                      provider: AIProviderType, now: Date) {
         let last = sessionRefusals[session]?.at
         guard last.map({ $0 < at }) ?? true else { return }
-        sessionRefusals[session] = SessionRefusal(at: at, account: account, words: words)
-        guard Self.refusalIsNews(at: at, last: last, now: now) else { return }
+        sessionRefusals[session] = SessionRefusal(at: at, account: account, words: words, agent: agent)
+        let limit = Self.refusalLimitKey(words, at: at)
+        guard Self.refusalIsNews(at: at, limit: limit, noted: refusalEventsNoted[session], now: now) else { return }
+        refusalEventsNoted[session] = NotedRefusal(limit: limit, at: at)
         let record = liveSessions[provider]?.first { $0.sessionID == session }
         let who = sessionNames[session].map { "\($0) (\(Self.eventName(of: record)))" } ?? Self.eventName(of: record)
         let name = accounts.first { $0.id == account }.map { messageName($0) } ?? "its account"
@@ -156,7 +212,7 @@ extension AppState {
             guard learns, let decision else { continue }
             if let words = request.limitRefusal {
                 noteRefusal(of: request.session, by: decision.account, words: words, at: request.at,
-                            provider: provider, now: now)
+                            agent: request.agent, provider: provider, now: now)
                 if sessionRefusals[request.session]?.at == request.at {
                     sessionRefusals[request.session]?.attributed = attributedBefore == decision.account ? nil : attributedBefore
                     sessionRefusals[request.session]?.served = served
@@ -164,7 +220,7 @@ extension AppState {
                 }
                 continue
             }
-            if let refusal = sessionRefusals[request.session], refusal.at < request.at {
+            if let refusal = sessionRefusals[request.session], Self.servedAnswersRefusal(refusal, request: request) {
                 sessionRefusals[request.session] = nil
             }
             if decision.source == .router, routerInUse { continue }

@@ -444,6 +444,10 @@ final class AppState: ObservableObject {
     /// request of theirs is served. The account cards mark them, since such
     /// a session stops until someone tells it to go on.
     @Published var sessionRefusals: [String: SessionRefusal] = [:]
+    /// The limit each session's last refusal event named, and when, so
+    /// `noteRefusal` records one event per session and limit however many
+    /// of its agents are refused and served in between.
+    var refusalEventsNoted: [String: NotedRefusal] = [:]
     var routedSessionSeen: [String: (account: UUID, at: Date)] = [:]
     /// The account each session's own status line last named by its reset
     /// times, kept by `ingestPassiveTelemetry` for `sessionAttribution`.
