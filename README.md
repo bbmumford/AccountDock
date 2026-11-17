@@ -518,7 +518,10 @@ the Sessions page says where and when it resumes ("resumes on fluxon about
 12:50 am"), and one event says how the lanes are shared ("At 12:50 am fluxon's
 fresh window takes platform-execution and continues-field (≈ 60 min of its
 window); 5 others wait for hexorda at 1:10 am, bytrix and cybrio at 1:30
-am."). Until then no other rule moves it off its account, even after you play
+am."). The plan stays the same from one check to the next while it still
+fits: a lane keeps the sessions planned onto it unless one goes away or
+another set would put at least a tenth more of its window to work, so small
+changes in the sessions' use do not swap them in and out. Until then no other rule moves it off its account, even after you play
 it; moving it yourself still does. A session on an account that can no longer
 serve it that no rule places goes to another account only where that account
 has room for it for the hour beside everything sent there that cycle; it

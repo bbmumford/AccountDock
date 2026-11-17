@@ -1684,7 +1684,18 @@ the pool weights and which sessions move, each time the pool is rebuilt
   the hour; the next sessions go to the next lane by its reset, and a
   session no lane carries for an hour within a 5-hour window of its own
   account's reset waits for its own account, charged there from that
-  reset. With every account at its limit, admission has no
+  reset. Each lane window's set stays steady from cycle to cycle: the
+  sessions the last cycle planned to wait are planned first, window by
+  window in the order of their resets, so each keeps its lane while it
+  still fits there, then the rest by rate; the plan made heaviest first
+  replaces that only when, at the first window whose set differs, it puts
+  at least `HeldSessionPlan.replanMargin` (10%) more of that window to work
+  for the hour (an hour of each session's rate less its arrival's
+  rewrite, `prefersReplan`). A planned session that goes leaves its room
+  to the next by rate, and every tie keeps the steady plan. The summary
+  event records the plan by its resets to the nearest five minutes
+  (`summaryMinute`), so a reset reported on either side of a minute does
+  not record it again. With every account at its limit, admission has no
   lane and every stranded session is planned so. It moves now instead to a
   lane with room only when that serves more work until an hour past that
   reset (`CapacityOutlook.servedAlone`, counting the lane's ledger charges:

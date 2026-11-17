@@ -163,12 +163,100 @@ struct HeldSessionPlan: Equatable {
     /// sessions it holds for the hour, the next go to the next lane by its
     /// reset, and the rest wait for their own accounts. Read by
     /// `AppState.planHeldSessions`.
+    ///
+    /// The sets stay steady from one cycle to the next: the sessions
+    /// `previous` planned to wait for a lane are planned first, lane by lane
+    /// in the order those resets come, so each keeps its lane while it
+    /// still fits there, and the rest follow, heaviest first. That plan is
+    /// replaced by the one made heaviest first only when it puts at least
+    /// `replanMargin` percent more of a lane's window to work
+    /// (`prefersReplan`): rates that drift a little between cycles would
+    /// otherwise swap sessions in and out of a lane's set every cycle. A
+    /// planned session that has gone (ended, placed, or no longer held)
+    /// leaves its room to the next sessions by rate. Ties keep the steady
+    /// plan, and every order is by rate, then ID.
     static func planTogether(_ sessions: [Session], accounts: [CapacityOutlook.Account], base: [UUID: Double],
                              lanes: Set<UUID>, ledger: inout LaneLedger, now: Date,
-                             pacer: SessionPacer = SessionPacer()) -> [String: HeldSessionPlan] {
-        let ordered = sessions.sorted {
+                             pacer: SessionPacer = SessionPacer(),
+                             previous: [String: HeldSessionPlan] = [:]) -> [String: HeldSessionPlan] {
+        let byRate = sessions.sorted {
             $0.tokensPerHour != $1.tokensPerHour ? $0.tokensPerHour > $1.tokensPerHour : $0.id < $1.id
         }
+        var freshLedger = ledger
+        let fresh = plan(byRate, accounts: accounts, base: base, lanes: lanes, ledger: &freshLedger, now: now,
+                         pacer: pacer)
+        let kept = byRate.filter { previous[$0.id]?.choice == .wait }
+        guard !kept.isEmpty else {
+            ledger = freshLedger
+            return fresh
+        }
+        let rank = Dictionary(byRate.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let steadyOrder = kept.sorted { lhs, rhs in
+            guard let left = previous[lhs.id], let right = previous[rhs.id] else { return false }
+            if left.at != right.at { return left.at < right.at }
+            if left.lane != right.lane { return left.lane.uuidString < right.lane.uuidString }
+            return (rank[lhs.id] ?? 0) < (rank[rhs.id] ?? 0)
+        } + byRate.filter { previous[$0.id]?.choice != .wait }
+        var steadyLedger = ledger
+        let steady = plan(steadyOrder, accounts: accounts, base: base, lanes: lanes, ledger: &steadyLedger, now: now,
+                          pacer: pacer)
+        if prefersReplan(fresh, over: steady, sessions: sessions, accounts: accounts, pacer: pacer) {
+            ledger = freshLedger
+            return fresh
+        }
+        ledger = steadyLedger
+        return steady
+    }
+
+    /// How much more of a lane's window, in percent of it, a plan made
+    /// afresh must put to work before it replaces the steady one
+    /// (`planTogether`).
+    static let replanMargin = 10.0
+
+    /// Whether `fresh` replaces `steady`: at the first lane window, by the
+    /// reset its sessions wait for, whose planned set differs between the
+    /// two, `fresh` puts at least `replanMargin` percent of that window
+    /// more to work for the hour: an hour of each planned session's rate,
+    /// less the cache its arrival rewrites (none on its own account), so a
+    /// set that fits more work there, or the same work for less rewriting,
+    /// counts as more. A lane's later windows are windows of their own.
+    static func prefersReplan(_ fresh: [String: HeldSessionPlan], over steady: [String: HeldSessionPlan],
+                              sessions: [Session], accounts: [CapacityOutlook.Account], pacer: SessionPacer) -> Bool {
+        struct Window: Hashable {
+            var lane: UUID
+            var minute: Int
+        }
+        func groups(_ plans: [String: HeldSessionPlan]) -> [Window: Set<String>] {
+            plans.reduce(into: [:]) { result, entry in
+                let window = Window(lane: entry.value.lane, minute: summaryMinute(entry.value.at))
+                result[window, default: []].insert(entry.key)
+            }
+        }
+        let freshLanes = groups(fresh), steadyLanes = groups(steady)
+        let order = Set(freshLanes.keys).union(steadyLanes.keys).sorted { lhs, rhs in
+            lhs.minute != rhs.minute ? lhs.minute < rhs.minute : lhs.lane.uuidString < rhs.lane.uuidString
+        }
+        let byID = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        func work(_ ids: Set<String>?, on lane: CapacityOutlook.Account) -> Double {
+            (ids ?? []).reduce(0) { total, id in
+                guard let session = byID[id] else { return total }
+                let arrival = lane.id == session.account ? 0 : arrivalTokens(session, pacer: pacer)
+                let tokens = session.tokensPerHour * SessionPacer.newSessionRunway / 3600 - arrival
+                return total + tokens * lane.pacer.percentPerMillion / 1_000_000
+            }
+        }
+        for window in order where freshLanes[window] != steadyLanes[window] {
+            guard let lane = accounts.first(where: { $0.id == window.lane }) else { return false }
+            return work(freshLanes[window], on: lane) - work(steadyLanes[window], on: lane) >= replanMargin
+        }
+        return false
+    }
+
+    /// The plans of `ordered`, each by `decide` against `ledger` in turn,
+    /// which then charges its lane for it (`planTogether`).
+    private static func plan(_ ordered: [Session], accounts: [CapacityOutlook.Account], base: [UUID: Double],
+                             lanes: Set<UUID>, ledger: inout LaneLedger, now: Date,
+                             pacer: SessionPacer) -> [String: HeldSessionPlan] {
         var plans: [String: HeldSessionPlan] = [:]
         for session in ordered {
             guard let plan = decide(session, accounts: accounts, base: base, lanes: lanes, ledger: ledger, now: now,
@@ -309,5 +397,14 @@ struct HeldSessionPlan: Equatable {
         guard let other else { return false }
         return choice == other.choice && lane == other.lane && abs(at.timeIntervalSince(other.at)) < 60
             || choice == .move && other.choice == .move && lane == other.lane
+    }
+
+    /// The time of a planned reset as the summary event's record of the plan
+    /// keeps it (`AppState.noteHeldPlanSummary`): to the nearest five
+    /// minutes, since readings report one reset seconds apart on either side
+    /// of a minute (8:39:59 and 8:40:00) and the same plan would otherwise be
+    /// recorded again each time.
+    static func summaryMinute(_ date: Date) -> Int {
+        Int((date.timeIntervalSince1970 / 300).rounded()) * 5
     }
 }
