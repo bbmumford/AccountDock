@@ -11,7 +11,7 @@ private let failoverLog = FileLog("Failover")
 extension AppState {
     /// Seconds before a projected exhaustion at which agents are paused when
     /// no other account can take the workload.
-    static let suspensionLead: TimeInterval = 150
+    nonisolated static let suspensionLead: TimeInterval = 150
 
     // MARK: - Scheduling
 
@@ -98,6 +98,7 @@ extension AppState {
         refreshSessions()
         await handleExternalRequests()
         await ingestTranscriptRequests()
+        refreshSessionsBurn(now: Date())
         // Before the slots are served, so no rule moves a session that waits
         // for its account's reset this cycle, and every rule after this
         // charges each account for the sessions waiting on it.
@@ -106,8 +107,12 @@ extension AppState {
             await holdSessionsForImminentReset(provider)
             await holdSharedSessionsOnStayingAccount(provider)
             chargeHeldWaits(provider, now: Date())
+            shedSessionsShortOfRunway(provider, now: Date())
         }
         await maintainSessionSlots(processesRead: true)
+        // The sessions the runway held or moved count on their accounts as
+        // they now run before failover judges the active account by them.
+        refreshSessionsBurn(now: Date())
         await applyModelFallbacks()
         await resumeSessionsLeftWaiting()
         await noteUnisolatedSessions()
@@ -795,6 +800,7 @@ extension AppState {
             && ((lastSwitchedAway[account.id].map { now.timeIntervalSince($0) < FailoverPlanner.sessionWindow } ?? false)
                 || slotServedAccounts.contains(account.id))
         let expired = !account.isActive && rejectedCredentialAccounts.contains(account.id)
+        let ratio = accountRatio(account.id)
         return QuotaAccountState(
             id: account.id,
             usage: plannedUsage(account, now: now, model: model, wholeAllowance: wholeAllowance),
@@ -813,7 +819,9 @@ extension AppState {
             extraUsageAvailable: extraUsageAvailable(account),
             refusedAtLimit: (routerRefusedUntil[account.id].map { $0 > now } ?? false)
                 || recordedLimitRefusal(account, model: model, now: now),
-            percentPerMillion: accountRatio(account.id)
+            percentPerMillion: ratio,
+            sessionsBurnPerHour: (sessionsBurn[account.id] ?? 0) / 1_000_000 * ratio,
+            runwayLead: Self.runwayLead
         )
     }
 
@@ -1816,7 +1824,7 @@ extension AppState {
 
     /// Sends each of `moves` to its account through the slot-move path,
     /// which records each move, and says so once.
-    private func requestPauseMoves(_ provider: AIProviderType, _ moves: [String: UUID]) {
+    func requestPauseMoves(_ provider: AIProviderType, _ moves: [String: UUID]) {
         let fresh = moves.filter { requestedSlotMoves[$0.key] != $0.value }
         guard !fresh.isEmpty else { return }
         for (session, target) in fresh {

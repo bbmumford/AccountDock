@@ -46,6 +46,17 @@ struct QuotaAccountState: Equatable {
     /// differ in size, so a rate or room moved to or compared with another
     /// account goes through it (`FailoverPlanner.converted`, `tokenRoom`).
     var percentPerMillion = TurnCostModel.defaultPercentPerMillion
+    /// Session percent per hour the sessions running on this account use
+    /// now, at their real rates over the last few minutes, their subagents'
+    /// requests included (`AppState.sessionsBurn`): a burst counts at once,
+    /// where `sessionBurnPerHour`, learned from readings, follows it only
+    /// over several. 0 when no session runs here. `FailoverPlanner.runway`
+    /// divides the room left by it.
+    var sessionsBurnPerHour: Double = 0
+    /// How short `FailoverPlanner.runway` may be before the account counts
+    /// as near its limit for its sessions, whatever lead a caller asks
+    /// (`AppState.runwayLead`): the time a reading and a request round take.
+    var runwayLead: TimeInterval = 0
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id && lhs.observedAt == rhs.observedAt }
 }
@@ -447,6 +458,10 @@ struct FailoverPlanner {
         case .exhausted: return .atLimit
         case .ineligible: return .ineligible
         case .belowTrigger, .usable:
+            // The sessions' own pace outranks a live reading with room: at
+            // a burst's rate the room it shows can be gone before the next
+            // reading arrives.
+            if lead > 0, let runway = runway(state, now: now), runway < max(lead, state.runwayLead) { return .nearLimit }
             if liveReadingShowsRoom(state, now: now) { return .canServe }
             if isForecastAtLimit(state, now: now) { return .nearLimit }
             return (secondsUntilExhaustion(state, now: now) ?? .infinity) < lead ? .nearLimit : .canServe
@@ -558,6 +573,29 @@ struct FailoverPlanner {
         }
         if let weekly = projection.weekly, state.weeklyBurnPerHour > 0 {
             times.append(max(0, (100 - weekly) / weeklyRate * 3600))
+        }
+        return times.min()
+    }
+
+    /// Seconds until the account's sessions, at their pace now
+    /// (`sessionsBurnPerHour`), spend the room its last reading shows,
+    /// counting what they spent since that reading: the 5-hour window's
+    /// room when it is spent before its reset, and the long window's, by
+    /// the plan's `sessionPerWeekly`. Nil while no session runs here or no
+    /// window is known. `servingVerdict` holds an account near its limit
+    /// while this is shorter than the lead.
+    func runway(_ state: QuotaAccountState, now: Date) -> TimeInterval? {
+        guard state.sessionsBurnPerHour > 0, let measured = measuredProjection(state, now: now) else { return nil }
+        let spent = state.sessionsBurnPerHour * measured.age / 3600
+        var times: [TimeInterval] = []
+        if let session = measured.session {
+            let seconds = max(0, 100 - session - spent) / state.sessionsBurnPerHour * 3600
+            if beforeSessionReset(seconds, reset: measured.sessionReset, now: now) { times.append(seconds) }
+        }
+        if let weekly = measured.weekly {
+            let perWeekly = state.sessionPerWeekly ?? Self.defaultSessionPerWeekly
+            let burn = state.sessionsBurnPerHour / max(perWeekly, 0.01)
+            times.append(max(0, 100 - weekly - spent / max(perWeekly, 0.01)) / burn * 3600)
         }
         return times.min()
     }

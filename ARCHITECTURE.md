@@ -1505,6 +1505,32 @@ the pool weights and which sessions move, each time the pool is rebuilt
   event-stream head goes out at once, a comment follows every 14 seconds,
   and the request goes to the same account again after the reset. Errors
   after that head are written as `event: error`.
+- An account's runway (`FailoverPlanner.runway`) is how long the room its
+  last reading shows lasts the sessions running on it at their pace now
+  (`AppState.sessionsBurn`, `QuotaAccountState.sessionsBurnPerHour`: for
+  each session the larger of its decayed rate and what it sent over the
+  last five minutes, its subagents' requests included,
+  `SessionRates.recentRate`), less what they spent since that reading.
+  While it is shorter than `AppState.runwayLead` (two readings a minute
+  apart and one request round, at least `suspensionLead`) the account is
+  near its limit (`servingVerdict`) whatever lead a rule asks, and a live
+  reading with room does not outrank it: platform-engineer's sixteen agents
+  and platform-execution's five, its 800K-token context written afresh,
+  sent 11M weighted tokens in a minute, a quarter of hexorda's window, so
+  the 10% a status line showed at 6:05:05 pm was gone before the next
+  reading, and their subagents' requests were already on their way when the
+  gate would have held them. Each cycle `shedSessionsShortOfRunway` sends
+  the heaviest slot sessions off such an account, or one at or refused at
+  its limit, until the rest last `runwayLead` there (`runwayShed`): each to
+  the first account with room that carries it for the hour beside the
+  cycle's ledger (`fallbackLane`, at its arrival rate), through the
+  slot-move path; one mid-turn, or that no account carries, is held at its
+  next tool call by a pause at a limit listing it, which `rescopeLimitPause`
+  releases where a fresh reading shows room for it (`releaseFits`). The
+  event reads "Paused platform-engineer on hexorda: at its sessions' pace
+  now (about 275% of its window an hour) its room lasts about 2 min, less
+  than the 3 min a reading and a request round take, and no account with
+  room carries it; it continues when one has room for it."
 - A session whose account is at its limit (refused at it) or within
   `suspensionLead` of it, and whose account resets at least a minute
   (`resetHoldMargin`) before the session's prompt cache expires (its last

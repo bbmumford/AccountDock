@@ -158,6 +158,21 @@ struct SessionRates: Codable, Equatable {
         entries[session] = entry
     }
 
+    /// The span `recentRate` measures a session's pace over.
+    static let burstSpan: TimeInterval = 5 * 60
+
+    /// Weighted tokens per hour the session sent over the last `burstSpan`,
+    /// its subagents' requests included: its pace now, which a burst
+    /// reaches at once, where `tokensPerHour`'s 20-minute decay counts a
+    /// burst of a few minutes at a fraction of its rate. Read by
+    /// `AppState.refreshSessionsBurn` for each account's runway.
+    func recentRate(_ session: String, now: Date) -> Double {
+        guard let entry = entries[session] else { return 0 }
+        let start = now.addingTimeInterval(-Self.burstSpan)
+        let tokens = entry.requests.filter { $0.at > start && $0.at <= now }.reduce(0) { $0 + $1.tokens }
+        return tokens / (Self.burstSpan / 3600)
+    }
+
     /// Weighted tokens per hour the session is using now.
     func tokensPerHour(_ session: String, now: Date) -> Double {
         guard let entry = entries[session] else { return 0 }
