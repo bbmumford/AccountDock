@@ -77,9 +77,9 @@ private struct CapacityOutlookPanel: View {
             }
             CapacityOutlookTimeline(outlook: outlook)
             legend
-            list(refillsTitle, rows: outlook.refillsBefore.map(row))
-            list("Running out", rows: outlook.runningOut.map(row))
-            list("Coming back", rows: outlook.comingBack.map(row))
+            list(refillsTitle, rows: soon(outlook.refillsBefore).map(row))
+            list("Running out", rows: soon(outlook.runningOut).map(row))
+            list("Coming back", rows: soon(outlook.comingBack).map(row))
             if let biggest = outlook.biggestLine {
                 Text(biggest)
                     .fixedSize(horizontal: false, vertical: true)
@@ -144,6 +144,14 @@ private struct CapacityOutlookPanel: View {
         let until = sameAccount.first { $0.kind == other && $0.at > event.at }?.at
             ?? sameAccount.last { ($0.kind == .windowSpent || $0.kind == .weekSpent) && $0.at <= event.at }?.back
         return until.map { "\(name) until \(UsageFormat.clock($0, now: outlook.now))" } ?? name
+    }
+
+    /// The events of the next `CapacityOutlookTimeline.longestView`, as the
+    /// bar shows, plus the resume wherever it falls, so a list across days
+    /// stays readable.
+    private func soon(_ events: [CapacityOutlook.Event]) -> [CapacityOutlook.Event] {
+        let end = outlook.now.addingTimeInterval(CapacityOutlookTimeline.longestView)
+        return events.filter { $0.at <= end || $0 == outlook.resume }
     }
 
     private func row(_ event: CapacityOutlook.Event) -> Row {
@@ -241,7 +249,13 @@ private struct CapacityOutlookTimeline: View {
         .accessibilityLabel(outlook.line)
     }
 
-    private var span: TimeInterval { max(60, outlook.spanEnd.timeIntervalSince(outlook.now)) }
+    /// How far ahead the bar reaches: to just past the resume, but never
+    /// more than `longestView`, so a resume days away does not shrink the
+    /// coming hours, where 5-hour windows refill, to slivers. The pause
+    /// line under the bar names the resume whatever its distance.
+    static let longestView: TimeInterval = 24 * 3600
+    private var viewEnd: Date { min(outlook.spanEnd, outlook.now.addingTimeInterval(Self.longestView)) }
+    private var span: TimeInterval { max(60, viewEnd.timeIntervalSince(outlook.now)) }
 
     /// The longest paused stretch: from everything pausing to the resume.
     /// The pause from its first paused stretch to the resume: its start,
@@ -276,13 +290,13 @@ private struct CapacityOutlookTimeline: View {
     /// past the resume: "11:29 pm", "Tue 9 pm". The resume has its own
     /// labelled arrow.
     private var endLabel: String {
-        let date = outlook.spanEnd
+        let date = viewEnd
         let minute = Calendar.current.component(.minute, from: date)
         let sameDay = Calendar.current.isDate(date, inSameDayAs: outlook.now)
         var style = Date.FormatStyle().hour()
         if minute != 0 { style = style.minute() }
         if !sameDay { style = style.weekday(.abbreviated) }
-        return date.formatted(style)
+        return date.formatted(style) + (viewEnd < outlook.spanEnd ? " →" : "")
     }
 
     private func x(_ date: Date, width: CGFloat) -> CGFloat {
@@ -299,7 +313,7 @@ private struct CapacityOutlookTimeline: View {
         while Double(calendar.component(.hour, from: mark)).truncatingRemainder(dividingBy: hours) != 0 {
             mark = mark.addingTimeInterval(3600)
         }
-        while mark < outlook.spanEnd {
+        while mark < viewEnd {
             let position = x(mark, width: width)
             if position > 12 && position < width - 12 {
                 let label = hours >= 24 ? mark.formatted(.dateTime.weekday(.abbreviated)) : mark.formatted(.dateTime.hour())
@@ -330,7 +344,7 @@ private struct CapacityOutlookTimeline: View {
         }
         // A tick under each event, with its time where it does not crowd a
         // neighbour's; the pause and the resume are labelled first.
-        let ticks = outlook.events.filter { $0.kind != .windowSpent }
+        let ticks = outlook.events.filter { $0.kind != .windowSpent && $0.at <= viewEnd }
         let tickTop = barTop + barHeight + 2
         // A refill that lets sessions run is a filled arrow in the brand
         // colour; one after which nothing runs yet, as a new week while the
