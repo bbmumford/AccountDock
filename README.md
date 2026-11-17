@@ -418,8 +418,14 @@ Choose what happens for each provider:
   account with room first, and a session on an account with room never waits
   for another account's limit. A waiting session holds at its next tool call,
   including its subagents and workflow agents, and once no account has room,
-  every turn started waits before its first request, so nothing is sent to an
-  account that would refuse it. The terminal stays attached and usable, and a
+  neither one in the failover order nor one a session runs on (such as an
+  account you pinned a session to), every turn started waits before its
+  first request, so nothing is sent to an account that would refuse it. With
+  automatic failover off, the active account reaching its limit holds only
+  the sessions on the shared sign-in; sessions in slots of their own stay
+  with session balancing and wait only for their own accounts. However the
+  pause began, it never releases everything at once: each session continues
+  when its own account has room for it. The terminal stays attached and usable, and a
   message shows why. While an account still has a little room, paused
   sessions are let through one step at a time. Each continues on its own when
   its account has room again, or with **Resume all**. A pinned session is

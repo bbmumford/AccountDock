@@ -185,7 +185,9 @@ final class PauseScopeTests: XCTestCase {
         let limit = AgentPauseGate.PauseFile(sessions: ["a", "b"], reason: "limit", pausedAt: now, resumeAt: nil,
                                              holdsNewTurns: true, chosen: ["b"])
         XCTAssertFalse(limit.heldByUser)
-        XCTAssertTrue(AppState.capacityEndsPause(limit), "an automatic pause ends when capacity returns")
+        XCTAssertFalse(AppState.capacityEndsPause(limit),
+                       "an automatic pause ends session by session as each one's own account has room")
+        XCTAssertTrue(AppState.capacityEndsPause(limit, routed: true), "ending it brings routed requests back")
         XCTAssertFalse(AppState.limitPauseYields(to: limit))
         XCTAssertEqual(AppState.automaticallyReleasable(["a", "b"], pause: limit), ["a"],
                        "paced resume may let a go, never b")

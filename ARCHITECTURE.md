@@ -1201,13 +1201,23 @@ a pause ends session by session, never because the active account has room
 account's headroom release a session pinned elsewhere.
 The pause file lists exactly the sessions that wait, and each listed session
 also waits at a new turn (`holdsListedNewTurns`); every new turn waits
-(`holdsNewTurns`) only while no account has room. Every cycle,
+(`holdsNewTurns`) only while no account has room
+(`someAccountHasRoom`): none in the failover order, and none a slot
+session runs on, such as an account outside the order the user pinned a
+session to. With automatic failover off, a threshold or limit switch
+`FailoverPlanner.plan` asks for is not made, and `evaluate` pauses at the
+active account's limit by this same scope: the sessions on the shared
+sign-in wait on it, while slot sessions stay with session balancing and
+wait only for their own accounts. Every cycle,
 `prunePausedSessions` narrows such a pause (`rescopeLimitPause`): a listed
 session whose own account has room again, by a reset, a reading or its slot
 moving to an account with room, goes on; when an account first has room
 after all were at their limit, the pause stops holding every new turn and
 lists the sessions whose own account is still at its limit; it ends when
-none is left. A pause the user took, an account hold and a pause that
+none is left. It never ends whole because the active account has room
+again (`capacityEndsPause` is false for every pause at a limit unless a
+route target serves): its sessions go on account by account, each only
+where a fresh reading shows room for it. A pause the user took, an account hold and a pause that
 narrows a route keep their own rules. The pause file and the gate's markers
 are all a pause is, so after a relaunch the same cycle picks the pause up.
 
