@@ -1657,7 +1657,19 @@ the pool weights and which sessions move, each time the pool is rebuilt
   first fresh Max 5x window, go on there together and are refused at its
   limit minutes later. At each reset, after the reading that confirms it,
   the lane takes only the held sessions it carries for the hour, and the
-  rest stay held for their own accounts or the next lane. Lane admission and the stranded placement count the
+  rest stay held for their own accounts or the next lane. That demand is
+  at least what the session used while it worked
+  (`SessionRates.workingDemand`: the hour's tokens over the time it
+  worked, each gap of more than `runGap` between its requests left out, at
+  least `runGap`), so a session held two minutes into a burst after an hour
+  of waiting on its user counts at the burst's rate, not at the burst
+  spread over the hour. A session the stranded placement, the slot path's
+  fallback or a pause at a limit sends to another account counts there at
+  least at its working rate before its last request
+  (`SessionRates.arrivalRate`): quiet for hours it uses nothing where it
+  is, but where it is sent it works at that rate once its user speaks
+  again, so two such sessions are not both sent to one window their work
+  empties within the hour. Lane admission and the stranded placement count the
   charges started by now beside each lane's own sessions; the held-session
   plans, the slot path's fallback (`ledgerFallback`) and the sessions a
   pause releases test the destination with `CapacityOutlook.carries`: from

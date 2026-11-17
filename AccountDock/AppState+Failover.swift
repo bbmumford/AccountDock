@@ -1624,6 +1624,7 @@ extension AppState {
         if !destinations.isEmpty, let slots = SessionSlots(provider) {
             let running = slotRebalanceSessions(provider, slots: slots, now: now)
             let leaving = running.filter { $0.movable && atOrNearLimit($0.account) && waiting[$0.id] == nil }
+                .map(arriving)
             let ids = Set(leaving.map(\.id))
             let pacerAccounts = ladder.map { account in
                 pacerAccount(account.id, state: quotaState(for: account, now: now, wholeAllowance: true), weight: 1,

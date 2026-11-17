@@ -535,7 +535,9 @@ a fresh reading shows room for together; the rest keep waiting. A paused
 session is counted at what it used in the hour before it was paused, not at
 the nothing it sends while it waits, so a window that resets takes only the
 waiting sessions it can carry for the hour, rather than every one of them
-at once.
+at once. A session that worked in a burst after an idle hour counts at the
+burst's rate, and one quiet for hours counts, wherever it is sent, at the
+rate it worked at before it went quiet.
 
 When the router serves the sessions, a session also stays on its account while
 its prompt cache lasts, and one refused at the limit with the reset at most
