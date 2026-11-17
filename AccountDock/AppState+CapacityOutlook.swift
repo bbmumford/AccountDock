@@ -40,9 +40,10 @@ extension AppState {
     /// Each running session counts at the rate pacing expects of it
     /// (`SessionPacer.lightRate`: its last hour's use, at least its current
     /// rate, so one idle for its last hour counts near nothing); one a pause
-    /// at a limit holds at its use over the hour before it was held
-    /// (`SessionRates.heldDemand`), as resuming as capacity allows forecasts
-    /// it; one the user paused at nothing, since only the user lets it go.
+    /// at a limit or a wait holds at its use over the hour before it was
+    /// held (`SessionRates.heldDemand`), as resuming as capacity allows
+    /// forecasts it; one the user paused at nothing, since only the user
+    /// lets it go.
     func projectCapacityOutlook(_ provider: AIProviderType, now: Date) -> CapacityOutlook? {
         let live = liveSessions[provider] ?? []
         guard live.contains(where: { sessionRates.entries[$0.sessionID] != nil }) else { return nil }
@@ -50,11 +51,19 @@ extension AppState {
         let pause = AgentPauseGate.read(provider)
         let userHeld = pause?.userHeld(running: Set(live.map(\.sessionID))) ?? []
         let pacing = pacerSessions(provider, now: now).reduce(into: [String: SessionPacer.Session]()) { $0[$1.id] = $1 }
+        // Sessions a pause or a wait holds now: they send nothing, so their
+        // last hour reads near nothing, but they run at their working rate
+        // once released.
+        let held = Set(pause?.sessions ?? []).subtracting(AgentPauseGate.resumedSessions(provider))
+            .union(waitingSessions(provider).keys)
         let sessions = live.map { session -> CapacityOutlook.Session in
             let id = session.sessionID
             let rate: Double
             if userHeld.contains(id) {
                 rate = 0
+            } else if held.contains(id) {
+                let since = sessionWaits[provider]?[id]?.since ?? pause?.pausedAt ?? now
+                rate = sessionRates.heldDemand(id, pausedAt: since) ?? pacing[id].map(SessionPacer.lightRate) ?? 0
             } else if let running = pacing[id] {
                 rate = SessionPacer.lightRate(running)
             } else if let pausedAt = pause?.pausedAt {

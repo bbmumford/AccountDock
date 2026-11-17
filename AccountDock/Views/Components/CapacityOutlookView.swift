@@ -78,7 +78,7 @@ private struct CapacityOutlookPanel: View {
             CapacityOutlookTimeline(outlook: outlook)
             legend
             list(refillsTitle, rows: soon(outlook.refillsBefore).map(row))
-            list("Running out", rows: soon(outlook.runningOut).map(row))
+            list("Running out", rows: outlook.runningOut.map(row))
             list("Coming back", rows: soon(outlook.comingBack).map(row))
             if let biggest = outlook.biggestLine {
                 Text(biggest)
@@ -147,8 +147,9 @@ private struct CapacityOutlookPanel: View {
     }
 
     /// The events of the next `CapacityOutlookTimeline.longestView`, as the
-    /// bar shows, plus the resume wherever it falls, so a list across days
-    /// stays readable.
+    /// bar shows, plus the resume wherever it falls, so the refill lists
+    /// across days stay readable; accounts running out are listed whenever
+    /// they do, being few and what the outlook turns on.
     private func soon(_ events: [CapacityOutlook.Event]) -> [CapacityOutlook.Event] {
         let end = outlook.now.addingTimeInterval(CapacityOutlookTimeline.longestView)
         return events.filter { $0.at <= end || $0 == outlook.resume }
