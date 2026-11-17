@@ -272,7 +272,13 @@ every later piece of such evidence; Settings → General → Audit, or the reque
 session whose process runs now (a live lifecycle record whose process the
 process table lists) is recorded and flagged: a status-line file or a
 transcript outlives its session, and a session that ended has no token to
-read again, so its flag is dropped.
+read again, so its flag is dropped. A status line repeats the resets of its
+session's last reply and is redrawn without a request, as when a held or
+quiet session's user answers it, so a slot session's status line is no
+evidence until the session has sent a request after its slot last moved and
+settled (`AppState.statusLinePredatesSlotMove`, by the requests its
+transcript or the router recorded, `lastRequestSeen`); until then it is no
+reading of the slot's account either.
 
 
 Query it with the request `{"action":"audit","since":"<ISO time>","account":"<id, label or email>"}`;

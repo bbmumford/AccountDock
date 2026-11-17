@@ -356,6 +356,11 @@ extension AppState {
                                       observed: evidence.account, source: "statusLineResets",
                                       observedAt: observation.observedAt)
             }
+            // A slot session's status line from before its slot last moved
+            // shows the account it left; applied to the slot's account it
+            // would stand there as a live reading of another account's use.
+            if slot != nil, let session = observation.processKey,
+               statusLinePredatesSlotMove(session: session, process: processes[session]) { continue }
             guard let accountID = slot ?? attributed?.account else { continue }
             if let updatedAt = accountUsageUpdatedAt[accountID], observation.observedAt <= updatedAt { continue }
             if Self.describesSupersededWindow(observation.usage, stored: accountUsage[accountID]) { continue }
