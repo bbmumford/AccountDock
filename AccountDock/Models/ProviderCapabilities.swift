@@ -88,6 +88,12 @@ struct ProviderCapabilities: Sendable {
     /// `kimi` runs as a process named `kimi-code`, which the lifecycle hook
     /// must recognise to record the session's own process.
     var cliProcessAliases: [String] = []
+    /// The folder under `configDirectory` where the CLI keeps one file per
+    /// running process naming the session it holds (`CLISessionRegistry`),
+    /// read by `AgentSessions.live` for sessions with no fresh lifecycle
+    /// record and by `AppState.slotRunDirectories`; nil for a CLI that
+    /// keeps none.
+    var cliSessionRegistry: String?
     /// Every name the CLI's process may run under.
     var cliProcessNames: [String] { (cliExecutableName.map { [$0] } ?? []) + cliProcessAliases }
     /// Window percent a request is assumed to cost while the provider has no
@@ -422,6 +428,7 @@ extension AIProviderType {
                     SessionModelChoice(id: "claude-sonnet-5-5", label: "Sonnet 5.5"),
                 ],
                 cliExecutableName: "claude",
+                cliSessionRegistry: "sessions",
                 storageKey: "claude",
                 shortBadge: "C",
                 activityMetrics: [.turns, .activeTime, .linesChanged, .cost],

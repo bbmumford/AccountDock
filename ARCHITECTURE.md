@@ -1581,8 +1581,22 @@ the pool weights and which sessions move, each time the pool is rebuilt
   is charged the whole cache write of the session's arrival
   (`SessionPacer.arrivalCost`: its context at 2 a token for the one-hour
   cache, 1.25 for the five-minute one), not only what the move adds over
-  staying. A run whose process left no session record, as every session
-  is for the first cycle after AccountDock starts, is placed by its slot's
+  staying. A session is known by its lifecycle record, and also, for a CLI
+  that keeps its own registry of the session each process holds (Claude
+  Code's `~/.claude/sessions/<pid>.json`, `CLISessionRegistry`,
+  `ProviderCapabilities.cliSessionRegistry`), by that registry:
+  `AgentSessions.live` keeps a session whose record is older than
+  `liveLifetime` (12 hours, as for one quiet at its prompt overnight) while
+  the registry names its process with it, and lists a registered process no
+  live record covers as the session the registry names, so a pause lists
+  it and the plans name it by its ID. Only a slot read by a process that
+  may hold a session is a run (`slotRunDirectories`): one the registry
+  lists, or, for a CLI that keeps none, one of the CLI's own processes. A
+  helper that outlived the session that started it (an MCP server, a
+  script) and a CLI the registry does not list, such as `claude --resume`
+  waiting at a prompt before its session starts, send no request and are
+  never planned or charged. A run whose process left no session record is
+  placed by its slot's
   path at `defaultSessionRate`, weighed and charged in the cycle's ledger
   with the sessions; one admission leaves waiting is kept on its account
   by its slot (`admissionHeldRuns`, `slotChoice`'s `heldOn`) and never

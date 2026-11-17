@@ -664,6 +664,14 @@ While sessions are served from slots, AccountDock also adds one marked line
 putting the slot launcher on `PATH` to `~/.zshenv` and `~/.zshrc`, and removes
 it once they are not.
 
+A session quiet at its prompt for longer than twelve hours writes no new
+lifecycle record, so AccountDock also reads, without changing it, the list
+Claude Code keeps of the session each of its processes holds
+(`~/.claude/sessions`): such a session is still counted, paused and named by
+its ID. A process in a slot that holds no session, such as `claude --resume`
+waiting at a prompt before its session starts, or a server a session left
+running, is not counted as a run.
+
 On launch, AccountDock asks to install any hooks that are missing.
 Settings → General → Agent hooks shows each one and can reinstall them. Each
 settings file is backed up once before the first change, for example

@@ -20,6 +20,10 @@ extension AppState {
         /// read with `directoryByProcess` (`slotFolders`); names a run with
         /// no session record in the events (`unrecordedRunName`).
         var folderByDirectory: [String: String] = [:]
+        /// The slots a process that may hold a session reads
+        /// (`slotRunDirectories`): only these become runs when no live
+        /// session record names their process.
+        var runDirectories: Set<String> = []
         /// The account serving each slot that has running sessions.
         var directoryServing: [String: UUID] = [:]
         /// Accounts whose slot a running session reads; they are read and
@@ -239,22 +243,26 @@ extension AppState {
         }
         guard !isolated.isEmpty else { return }
         let read = await Task.detached(priority: .utility) {
-            () -> [([Int32: String], BackgroundSessionProcesses, [String: String])] in
+            () -> [([Int32: String], BackgroundSessionProcesses, [String: String], Set<String>)] in
             let table = ProcessTable.read() ?? ProcessTable(entries: [])
-            return isolated.map { _, slots in
+            return isolated.map { provider, slots in
                 let background = slots.background.map {
                     BackgroundSessionProcesses(table: table, executable: slots.executable, support: $0)
                 } ?? BackgroundSessionProcesses()
                 let directories = slots.directoriesByProcess(in: table)
-                return (directories, background, Self.slotFolders(directories, table: table))
+                let runs = Self.slotRunDirectories(directories, table: table,
+                                                   names: Set(provider.capabilities.cliProcessNames + [slots.executable]),
+                                                   registry: CLISessionRegistry.read(provider))
+                return (directories, background, Self.slotFolders(directories, table: table), runs)
             }
 
         }.value
-        for ((provider, slots), (directories, background, folders)) in zip(isolated, read) {
+        for ((provider, slots), (directories, background, folders, runs)) in zip(isolated, read) {
             sessionSlotStates[provider, default: SessionSlotState()].background = background
             let byProcess = Self.sessionSlotDirectories(directories, background: background)
             sessionSlotStates[provider, default: SessionSlotState()].directoryByProcess = byProcess
             sessionSlotStates[provider, default: SessionSlotState()].folderByDirectory = folders
+            sessionSlotStates[provider, default: SessionSlotState()].runDirectories = runs
             // A slot in use that `serveSessionSlots` has not served yet, as
             // on the first cycle after launch, serves the account the slot
             // itself records; `refreshSessions` would otherwise count its
@@ -294,6 +302,27 @@ extension AppState {
             folders[directory] = folder
         }
         return folders
+    }
+
+    /// The slots read (`directories`, by process ID, from `table`) by a
+    /// process that may hold a session: one the CLI's `registry` lists, or,
+    /// for a CLI that keeps none (nil), any process of the CLI's own (its
+    /// executable is among `names`). Every other process
+    /// with the slot in its environment is no session: a helper a session
+    /// started that outlived it, such as an MCP server or a script, and a
+    /// CLI the registry does not list, which has not started its session
+    /// (it waits at a prompt before it) and sends no request. Read by
+    /// `serveSessionSlots`, which places and charges a run without a
+    /// session record only in these slots.
+    nonisolated static func slotRunDirectories(_ directories: [Int32: String], table: ProcessTable, names: Set<String>,
+                                               registry: [Int32: CLISessionRegistry.Entry]?) -> Set<String> {
+        Set(directories.compactMap { pid, directory -> String? in
+            if let registry { return registry[pid] == nil ? nil : directory }
+            guard let entry = table.entries.first(where: { $0.pid == pid }), names.contains(entry.executableName) else {
+                return nil
+            }
+            return directory
+        })
     }
 
     /// How the events and plans name a run with no session record in the
@@ -543,9 +572,11 @@ extension AppState {
         let slotList = await Task.detached(priority: .utility, operation: { slots.sessionSlots() }).value
         // Runs in claimed slots whose process left no session record, by
         // slot, so they are placed with the sessions rather than all sent to
-        // `fallback`.
+        // `fallback`; a slot only helpers or a CLI not yet holding a session
+        // read is none (`slotRunDirectories`).
+        let runs = sessionSlotStates[provider]?.runDirectories ?? []
         let unrecorded = slotList.compactMap { slot -> (path: String, account: UUID)? in
-            guard slot.claimedAt != nil, inUse.contains(slot.directory.path),
+            guard slot.claimedAt != nil, inUse.contains(slot.directory.path), runs.contains(slot.directory.path),
                   sessionsByDirectory[slot.directory.path] == nil, let account = slot.account else { return nil }
             return (slot.directory.path, account)
         }

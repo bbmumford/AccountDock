@@ -176,20 +176,52 @@ enum AgentSessions {
     nonisolated(unsafe) private static var archiveTimer: DispatchSourceTimer?
 
     /// Sessions running now: the process is alive, the session has not
-    /// ended, and it was heard from within `liveLifetime`.
+    /// ended, and it was heard from within `liveLifetime`, or the CLI's own
+    /// `registry` (`CLISessionRegistry`) names its process with that
+    /// session, as for a session quiet at its prompt for longer. A process
+    /// the registry names with a session no live record covers is that
+    /// session too, as one resumed in a process whose hooks have not
+    /// written yet: it is listed from the registry (its folder, and a turn
+    /// under way when the CLI says it is busy) unless the process started
+    /// more than `registryStartTolerance` away from the entry, when its ID
+    /// belongs to another program. So a pause lists every session that
+    /// runs, and the plans name each by its ID.
     static func live(
         _ provider: AIProviderType,
         directory: URL = directory,
         now: Date = Date(),
         isAlive: (Int32) -> Bool = { Darwin.kill($0, 0) == 0 },
-        startTime: (Int32) -> Date? = ProcessAncestry.startTime(of:)
+        startTime: (Int32) -> Date? = ProcessAncestry.startTime(of:),
+        registry: [Int32: CLISessionRegistry.Entry] = [:]
     ) -> [AgentSession] {
-        records(provider, directory: directory).values.filter { record in
+        let all = records(provider, directory: directory)
+        var live = all.values.filter { record in
             guard record.event != "SessionEnd", let observedAt = record.observedAt,
-                  now.timeIntervalSince(observedAt) < liveLifetime else { return false }
-            return isRunning(record, isAlive: isAlive, startTime: startTime)
-        }.sorted { $0.sessionID < $1.sessionID }
+                  isRunning(record, isAlive: isAlive, startTime: startTime) else { return false }
+            if now.timeIntervalSince(observedAt) < liveLifetime { return true }
+            return record.processID.flatMap { registry[$0] }?.sessionID == record.sessionID
+        }
+        let named = Set(live.map(\.sessionID))
+        let processes = Set(live.compactMap(\.processID))
+        for entry in registry.values.sorted(by: { $0.pid < $1.pid })
+        where !named.contains(entry.sessionID) && !processes.contains(entry.pid) && isAlive(entry.pid) {
+            if let listed = entry.startedAt, let started = startTime(entry.pid),
+               abs(started.timeIntervalSince(listed)) > registryStartTolerance { continue }
+            let record = all[entry.sessionID]
+            if record?.event == "SessionEnd", record?.processID == entry.pid { continue }
+            live.append(AgentSession(sessionID: entry.sessionID, provider: provider.capabilities.pauseGate?.key,
+                                     event: entry.busy == true ? "UserPromptSubmit" : "Stop",
+                                     workingDirectory: entry.workingDirectory ?? record?.workingDirectory,
+                                     processID: entry.pid, host: record?.host ?? "cli",
+                                     observedAt: entry.startedAt ?? now))
+        }
+        return live.sorted { $0.sessionID < $1.sessionID }
     }
+
+    /// How far a process's start may be from when the CLI's registry says it
+    /// started its session for the entry to be that process's: the CLI
+    /// writes it as its session starts, within seconds of the process.
+    static let registryStartTolerance: TimeInterval = 120
 
     /// Whether the session's own process runs now. A process ID is reused
     /// once its process ends, after a restart within minutes: a process that

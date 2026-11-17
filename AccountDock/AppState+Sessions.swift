@@ -6,12 +6,16 @@ extension AppState {
     /// Reads every provider's live sessions and assigns each to the account
     /// serving it (`SessionAttribution`). Sessions the router served within
     /// `SessionAttribution.routerWindow` are counted even without a
-    /// lifecycle record.
+    /// lifecycle record. A CLI that keeps its own registry of the sessions
+    /// its processes hold (`CLISessionRegistry`) has it read too, so a
+    /// session quiet for longer than `AgentSessions.liveLifetime`, or one
+    /// whose hooks have not written for its process, is still live.
     func refreshSessions(now: Date = Date()) {
         var live: [AIProviderType: [AgentSession]] = [:]
         var byAccount: [UUID: Set<String>] = [:]
         for provider in AIProviderType.implementedProviders {
-            let sessions = Self.excludingNonSessions(AgentSessions.live(provider, now: now),
+            let registry = CLISessionRegistry.read(provider) ?? [:]
+            let sessions = Self.excludingNonSessions(AgentSessions.live(provider, now: now, registry: registry),
                                                      background: backgroundProcesses(provider))
             live[provider] = sessions
             let attribution = sessionAttribution(provider, now: now)

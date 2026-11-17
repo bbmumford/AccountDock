@@ -1879,7 +1879,11 @@ extension AppState {
             return
         }
         if var pause = AgentPauseGate.read(provider) {
-            let held = AgentPauseGate.stillHeld(pause, records: AgentSessions.records(provider))
+            // A live session the CLI's registry names stands for its process,
+            // where its own record may name an earlier one that has ended.
+            let records = AgentSessions.records(provider).merging(
+                (liveSessions[provider] ?? []).map { ($0.sessionID, $0) }) { _, live in live }
+            let held = AgentPauseGate.stillHeld(pause, records: records)
             if held != pause.sessions {
                 pause.sessions = held
                 if held.isEmpty, pause.holdsNewTurns != true {
