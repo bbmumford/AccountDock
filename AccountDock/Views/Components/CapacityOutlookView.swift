@@ -241,9 +241,11 @@ private struct CapacityOutlookTimeline: View {
             .replacingOccurrences(of: "\u{202F}am", with: "").replacingOccurrences(of: "\u{202F}pm", with: "")
     }
 
-    /// The resume, or the end of the horizon, as an hour: "Tue 9 pm".
+    /// The time at the bar's right edge, the end of its span, which runs on
+    /// past the resume: "11:29 pm", "Tue 9 pm". The resume has its own
+    /// labelled arrow.
     private var endLabel: String {
-        let date = outlook.resume?.at ?? outlook.spanEnd
+        let date = outlook.spanEnd
         let minute = Calendar.current.component(.minute, from: date)
         let sameDay = Calendar.current.isDate(date, inSameDayAs: outlook.now)
         var style = Date.FormatStyle().hour()
