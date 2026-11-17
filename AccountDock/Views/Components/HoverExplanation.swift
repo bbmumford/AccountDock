@@ -4,7 +4,8 @@ import SwiftUI
 /// popover: its name in bold, then what it does. A `.help` tooltip appears
 /// only after a long delay, and not at all while the menu's panel is not the
 /// key window, so an icon such as the footer's Failover switch would be left
-/// unexplained.
+/// unexplained; it is not added beside this one, which would show the same
+/// words twice.
 private struct HoverExplanation: ViewModifier {
     let title: String
     let detail: String
@@ -43,7 +44,6 @@ private struct HoverExplanation: ViewModifier {
                 .padding(8)
                 .frame(width: 280, alignment: .leading)
             }
-            .help(detail.isEmpty ? title : "\(title): \(detail)")
             .accessibilityHint(detail)
     }
 }
