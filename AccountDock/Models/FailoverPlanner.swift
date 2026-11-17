@@ -583,7 +583,8 @@ struct FailoverPlanner {
     /// room when it is spent before its reset, and the long window's, by
     /// the plan's `sessionPerWeekly`. Nil while no session runs here or no
     /// window is known. `servingVerdict` holds an account near its limit
-    /// while this is shorter than the lead.
+    /// while this is shorter than the lead, and `AppState` reads an
+    /// account often while it is short (`runwayWatch`).
     func runway(_ state: QuotaAccountState, now: Date) -> TimeInterval? {
         guard state.sessionsBurnPerHour > 0, let measured = measuredProjection(state, now: now) else { return nil }
         let spent = state.sessionsBurnPerHour * measured.age / 3600

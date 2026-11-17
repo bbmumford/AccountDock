@@ -4,15 +4,16 @@ import Foundation
 /// runway, `FailoverPlanner.runway`), and what follows from it each quota
 /// cycle: an account whose runway is shorter than a reading and a request
 /// round sends its heaviest sessions to accounts with room, or holds them,
-/// before the provider refuses them (`shedSessionsShortOfRunway`).
+/// before the provider refuses them (`shedSessionsShortOfRunway`), and an
+/// account whose runway is short is read every minute (`runwayReadingIsDue`).
 /// A heavy session's burst, many subagents at once or a whole context
 /// written afresh, can spend the last tenth of a window in minutes, less
 /// than the time between two readings, and its subagents' requests are
 /// already on their way when the pause gate would hold it at its next tool
 /// call.
 extension AppState {
-    /// The interval between two readings of an account whose sessions
-    /// report one with each response, as Claude Code's status line does.
+    /// How often an account whose runway is short is read
+    /// (`runwayReadingIsDue`).
     nonisolated static let runwayReadInterval: TimeInterval = 60
     /// How long a request sent before a hold takes effect may still run:
     /// the pause gate holds a session at its next tool call, and the
@@ -23,6 +24,15 @@ extension AppState {
     /// apart, so the reading that shows it comes in time, and one request
     /// round, at least `suspensionLead`.
     nonisolated static let runwayLead: TimeInterval = max(suspensionLead, 2 * runwayReadInterval + requestRound)
+    /// While an account's runway is shorter than this, it is read every
+    /// `runwayReadInterval` and the quota cycle runs every
+    /// `runwayCycleInterval`.
+    nonisolated static let runwayWatch: TimeInterval = 10 * 60
+    nonisolated static let runwayCycleInterval: TimeInterval = 30
+    /// Window percent an hour above which a session arriving on an account
+    /// is heavy: the account is read once its first requests there have
+    /// been answered (`noteRunwayArrival`).
+    nonisolated static let heavyArrivalShare = 25.0
 
     // MARK: - Burn
 
@@ -48,6 +58,62 @@ extension AppState {
             }
         }
         sessionsBurn = burns
+    }
+
+    /// Whether some account's runway is shorter than `runwayWatch`. Read by
+    /// `nextQuotaCycleInterval`.
+    func runwayIsShort(now: Date) -> Bool {
+        sessionsBurn.keys.contains { id in
+            guard let account = accounts.first(where: { $0.id == id }) else { return false }
+            let planner = FailoverPlanner(settings: plannerSettings(account.provider))
+            return (planner.runway(quotaState(for: account, now: now), now: now) ?? .infinity) < Self.runwayWatch
+        }
+    }
+
+    // MARK: - Readings
+
+    /// Whether `account` is read this cycle for its runway, at verification
+    /// rank: its runway is shorter than `runwayWatch` and its newest
+    /// reading, a session's live one included, is `runwayReadInterval` old
+    /// (`runwayReadIsDue`); or a heavy session arrived on it
+    /// (`runwayArrivals`) a request round ago and no reading has followed.
+    /// Once its sessions are held their pace stops counting, and once its
+    /// room is ample its runway is long, so either ends the frequent reads.
+    /// Read by `runQuotaCycle` for every account serving sessions.
+    func runwayReadingIsDue(_ account: Account, now: Date) -> Bool {
+        let readAt = accountUsageUpdatedAt[account.id]
+        if let arrival = runwayArrivals[account.id] {
+            let after = arrival.addingTimeInterval(Self.requestRound)
+            if readAt.map({ $0 >= after }) == true || now.timeIntervalSince(arrival) > Self.runwayWatch {
+                runwayArrivals[account.id] = nil
+            } else if now >= after {
+                return true
+            }
+        }
+        let planner = FailoverPlanner(settings: plannerSettings(account.provider))
+        return Self.runwayReadIsDue(runway: planner.runway(quotaState(for: account, now: now), now: now),
+                                    readAt: readAt, now: now)
+    }
+
+    /// `runwayReadingIsDue`'s rule for an account whose runway is `runway`
+    /// and whose newest reading is from `readAt`.
+    nonisolated static func runwayReadIsDue(runway: TimeInterval?, readAt: Date?, now: Date) -> Bool {
+        guard let runway, runway < runwayWatch else { return false }
+        return readAt.map { now.timeIntervalSince($0) >= runwayReadInterval } ?? true
+    }
+
+    /// Notes that `session` arrived on `account` by a slot move, when it is
+    /// heavy there (`arrivalIsHeavy`, at its arrival rate or its pace now),
+    /// so the account is read once its first requests there are answered.
+    /// Called by `serveSessionSlots` for each slot it moves.
+    func noteRunwayArrival(_ session: String, on account: UUID, now: Date) {
+        let rate = sessionRates.arrivalRate(session, measured: burstRate(session, now: now))
+        guard Self.arrivalIsHeavy(tokensPerHour: rate, percentPerMillion: accountRatio(account)) else { return }
+        runwayArrivals[account] = now
+    }
+
+    nonisolated static func arrivalIsHeavy(tokensPerHour: Double, percentPerMillion: Double) -> Bool {
+        tokensPerHour / 1_000_000 * percentPerMillion >= heavyArrivalShare
     }
 
     // MARK: - Shedding

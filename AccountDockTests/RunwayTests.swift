@@ -84,7 +84,7 @@ final class RunwayTests: XCTestCase {
         XCTAssertEqual(p.servingVerdict(bursting, now: now, lead: 0), .canServe, "it can still serve at all")
 
         let light = hexorda(burn: 10 * 2.545)
-        XCTAssertGreaterThan(try XCTUnwrap(p.runway(light, now: now)), 10 * 60,
+        XCTAssertGreaterThan(try XCTUnwrap(p.runway(light, now: now)), AppState.runwayWatch,
                              "one light session leaves the 10% for over 20 minutes")
         XCTAssertEqual(p.servingVerdict(light, now: now, lead: AppState.suspensionLead), .canServe)
     }
@@ -127,5 +127,17 @@ final class RunwayTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(AppState.runwayLead, AppState.suspensionLead)
         XCTAssertTrue(AppState.runwayHoldEvent(session: "platform-engineer", account: "hexorda", lasts: 127,
                                                percentPerHour: 275).contains("lasts about 2 min, less than the 3 min"))
+    }
+
+    func testAShortRunwayIsReadEveryMinuteAndAHeavyArrivalIsHeavy() {
+        XCTAssertTrue(AppState.runwayReadIsDue(runway: 8 * 60, readAt: seconds(-70), now: now))
+        XCTAssertFalse(AppState.runwayReadIsDue(runway: 8 * 60, readAt: seconds(-20), now: now),
+                       "a session's live reading twenty seconds ago is recent enough")
+        XCTAssertFalse(AppState.runwayReadIsDue(runway: 20 * 60, readAt: seconds(-300), now: now), "room is ample")
+        XCTAssertFalse(AppState.runwayReadIsDue(runway: nil, readAt: seconds(-300), now: now),
+                       "no session spends it, as once they are held")
+        XCTAssertTrue(AppState.arrivalIsHeavy(tokensPerHour: 55_000_000, percentPerMillion: 1.176),
+                      "platform-engineer's working rate on voltrix: two thirds of its window an hour")
+        XCTAssertFalse(AppState.arrivalIsHeavy(tokensPerHour: 3_000_000, percentPerMillion: 2.545))
     }
 }

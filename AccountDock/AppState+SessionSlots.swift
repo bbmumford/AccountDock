@@ -755,6 +755,7 @@ extension AppState {
                          process: session?.processID)
             // The session's first request there writes its whole context.
             quotaTrends[target]?.settle(at: now)
+            if let session { noteRunwayArrival(session.sessionID, on: target, now: now) }
             let from = slot.account.flatMap { id in accounts.first { $0.id == id } }.map { messageName($0) } ?? "its account"
             let to = accounts.first { $0.id == target }.map { messageName($0) } ?? "another account"
             let subject = session.map { Self.eventName(of: $0) } ?? unrecordedRunName(provider, slot: path)

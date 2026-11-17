@@ -568,7 +568,15 @@ Accounts are read active first, then the accounts sessions run on, then the
 idle ones, each oldest reading first (`AppState.readUrgencyOrder`), so the
 account at the end of the list is not the one left unread whenever the
 budget runs short, and idle accounts at their limits do not spend the budget
-before an account sessions are using.
+before an account sessions are using. An account whose runway (the room left
+over its sessions' pace now, `FailoverPlanner.runway`) is shorter than
+`AppState.runwayWatch`, ten minutes, is read at verification rank whenever
+its newest reading, a session's live one included, is a minute old
+(`runwayReadingIsDue`), and the quota cycle runs every 30 seconds
+meanwhile; an account a heavy session (`heavyArrivalShare`, a quarter of its
+window an hour) was just moved onto is read once a request round after the
+move. Held sessions send nothing and leave the runway, so the frequent
+readings end once they are held or the room is ample.
 Throttling backs off for every account of that provider, from one minute up to
 fifteen. While a provider throttles, `QuotaTrend` projects the active account's
 usage forward from its learned burn rate so failover still acts on time.

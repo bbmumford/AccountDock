@@ -51,6 +51,10 @@ extension AppState {
         if let due = passedResetWorkDue(now: now) {
             interval = min(interval, max(20, due.timeIntervalSince(now) + 1))
         }
+        // An account whose sessions spend its room within `runwayWatch` is
+        // read at least every `runwayReadInterval`, which a cycle must
+        // come round for.
+        if runwayIsShort(now: now) { interval = min(interval, Self.runwayCycleInterval) }
         return interval
     }
 
@@ -81,7 +85,11 @@ extension AppState {
             for account in accountsServingSessions(provider) {
                 let due = (account.isActive && activeReadingIsDue(account, now: now))
                     || Self.wholeReadingIsDue(accountUsage[account.id], whole: accountWholeReadings[account.id], now: now)
-                if due { await fetchUsageNow(account, priority: account.isActive ? .critical : .candidate) }
+                if due {
+                    await fetchUsageNow(account, priority: account.isActive ? .critical : .candidate)
+                } else if runwayReadingIsDue(account, now: now) {
+                    await fetchUsageNow(account, priority: .verification)
+                }
             }
         }
         await readIdleDestinationIfDue(now: now)

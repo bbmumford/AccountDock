@@ -452,6 +452,9 @@ final class AppState: ObservableObject {
     /// now (`refreshSessionsBurn`), which `quotaState` turns into the
     /// account's runway (`QuotaAccountState.sessionsBurnPerHour`).
     var sessionsBurn: [UUID: Double] = [:]
+    /// When a heavy session last arrived on each account by a slot move,
+    /// until a reading of the account follows it (`runwayReadingIsDue`).
+    var runwayArrivals: [UUID: Date] = [:]
     var routedSessionSeen: [String: (account: UUID, at: Date)] = [:]
     /// The account each session's own status line last named by its reset
     /// times, kept by `ingestPassiveTelemetry` for `sessionAttribution`.
