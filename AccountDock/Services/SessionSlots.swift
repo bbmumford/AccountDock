@@ -236,6 +236,37 @@ struct SessionSlots: Sendable {
         return directory
     }
 
+    /// Whether `path` names a one-session slot: a directory named by a UUID
+    /// right under `sessionRoot`.
+    func isSessionSlot(_ path: String) -> Bool {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        return url.deletingLastPathComponent().path == sessionRoot.standardizedFileURL.path
+            && UUID(uuidString: url.lastPathComponent) != nil
+    }
+
+    /// Recreates a one-session slot whose directory is gone while a running
+    /// process still names it (`AppState.restoreMissingSlots`): the
+    /// directory at that same path, claimed before anything else, so no
+    /// launcher takes it for a new session, then `credential` and
+    /// `account`, recorded as a `slotWrite` and a `slotAssign` by `reason`.
+    /// Refuses a path that is not a one-session slot or that exists.
+    /// Returns whether the slot holds the credential afterwards.
+    func restoreClaimedSlot(_ directory: URL, account: UUID, credential: SlotCredential, reason: String,
+                            session: String? = nil, process: Int32? = nil) -> Bool {
+        let fm = FileManager.default
+        guard isSessionSlot(directory.path), !fm.fileExists(atPath: directory.path) else { return false }
+        do {
+            try isolation.prepareSlot(directory)
+            try fm.createDirectory(at: directory.appendingPathComponent(Self.claimedMarker), withIntermediateDirectories: false)
+        } catch {
+            log.error("[restoreClaimedSlot] Slot not created: \(error.localizedDescription)")
+            return false
+        }
+        guard serve(directory, credential: credential, account: account, reason: reason, session: session, process: process)
+        else { return false }
+        return assign(directory, to: account, reason: reason, session: session, process: process)
+    }
+
     /// Claims a slot for one session started on request, so the launcher
     /// never hands it to another session; the session names the slot itself
     /// through the CLI's slot variable.

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 private let slotsLog = FileLog("SessionSlots")
@@ -48,6 +49,36 @@ extension AppState {
         /// Watches the one-session slot directory for a launcher's request
         /// for a spare; installed by `watchSpareRequests`.
         var spareRequestWatcher: DispatchSourceFileSystemObject?
+        /// Whether the last `refreshSlotProcesses` read the whole process
+        /// list (`processScanSucceeded`). Until it has, the maps above keep
+        /// what the last whole reading found, and `serveSessionSlots` and
+        /// `serveRunning` remove no slot a process may still read: a list
+        /// that failed or came back short names no process, which would
+        /// read as every session having ended.
+        var scanSucceeded = false
+        /// The processes each slot was last seen read by in a whole
+        /// reading, with their start times (`slotReaders`).
+        /// `serveSessionSlots` removes a claimed slot as gone only once
+        /// every one of them has ended (`sessionGoneBlocker`), so a process
+        /// whose environment one reading missed keeps its slot.
+        var readers: [String: [SlotReader]] = [:]
+        /// The CLI's own registry of the session each process holds, as
+        /// the last whole reading found it (`CLISessionRegistry`); names the
+        /// session of a slot `restoreMissingSlots` recreates when no live
+        /// record does yet, as on the first pass after launch.
+        var registry: [Int32: CLISessionRegistry.Entry] = [:]
+        /// The account the credential audit last recorded for each slot
+        /// `restoreMissingSlots` looked up (`CredentialAudit.lastSlotAccounts`),
+        /// and every slot looked up, found or not, so the trail is read once
+        /// per slot.
+        var auditAccounts: [String: UUID] = [:]
+        var auditLooked: Set<String> = []
+        /// Why each claimed slot past its grace was kept rather than removed
+        /// as gone, so the log records each reason once per slot.
+        var removalHeld: [String: String] = [:]
+        /// Missing slots `restoreMissingSlots` could not write again, so the
+        /// log records each once until it succeeds.
+        var restoreFailures: Set<String> = []
 
         /// Drops a removed account.
         mutating func forget(_ id: UUID) {
@@ -57,6 +88,13 @@ extension AppState {
             sessionMoves = sessionMoves.filter { $0.value != id }
             remainderMoves = remainderMoves.filter { $0.value.account != id }
         }
+    }
+
+    /// One process seen reading a slot: its ID and when it started, so a
+    /// later process given the same ID is not taken for it.
+    struct SlotReader: Equatable, Sendable {
+        var pid: Int32
+        var startedAt: Date?
     }
 
     /// The slot directory each running process reads, over every provider.
@@ -236,33 +274,55 @@ extension AppState {
     /// and `maintainSessionSlots`, and each isolated CLI's background-session
     /// processes, from one fresh `ProcessTable`; run first on every quota
     /// cycle, and the readers after it within seconds reuse that table
-    /// (`ProcessTable.current(maxAge:)`).
+    /// (`ProcessTable.current(maxAge:)`). A reading that is not whole
+    /// (`processScanSucceeded`), as when `ps` does not finish on a loaded
+    /// machine, changes none of the maps and marks the scan failed, so no
+    /// slot is removed on it.
     func refreshSlotProcesses() async {
         let isolated = AIProviderType.isolatedProviders.compactMap { provider in
             SessionSlots(provider).map { (provider, $0) }
         }
         guard !isolated.isEmpty else { return }
-        let read = await Task.detached(priority: .utility) {
-            () -> [([Int32: String], BackgroundSessionProcesses, [String: String], Set<String>)] in
-            let table = ProcessTable.read() ?? ProcessTable(entries: [])
+        let ownPID = getpid()
+        typealias Reading = (directories: [Int32: String], background: BackgroundSessionProcesses,
+                             folders: [String: String], runs: Set<String>, registry: [Int32: CLISessionRegistry.Entry]?,
+                             startedAt: [Int32: Date])
+        let read = await Task.detached(priority: .utility) { () -> [Reading]? in
+            guard let table = ProcessTable.read(), Self.processScanSucceeded(table, ownPID: ownPID) else { return nil }
             return isolated.map { provider, slots in
                 let background = slots.background.map {
                     BackgroundSessionProcesses(table: table, executable: slots.executable, support: $0)
                 } ?? BackgroundSessionProcesses()
                 let directories = slots.directoriesByProcess(in: table)
+                let registry = CLISessionRegistry.read(provider)
                 let runs = Self.slotRunDirectories(directories, table: table,
                                                    names: Set(provider.capabilities.cliProcessNames + [slots.executable]),
-                                                   registry: CLISessionRegistry.read(provider))
-                return (directories, background, Self.slotFolders(directories, table: table), runs)
+                                                   registry: registry)
+                let startedAt = directories.keys.reduce(into: [Int32: Date]()) { $0[$1] = ProcessAncestry.startTime(of: $1) }
+                return (directories, background, Self.slotFolders(directories, table: table), runs, registry, startedAt)
             }
-
         }.value
-        for ((provider, slots), (directories, background, folders, runs)) in zip(isolated, read) {
+        guard let read else {
+            for (provider, _) in isolated {
+                sessionSlotStates[provider, default: SessionSlotState()].scanSucceeded = false
+            }
+            slotsLog.warning("[refreshSlotProcesses] The process list could not be read whole; the slots keep what the last whole reading found, and none is removed until one succeeds")
+            return
+        }
+        for ((provider, slots), reading) in zip(isolated, read) {
+            let (directories, background, folders, runs) = (reading.directories, reading.background, reading.folders,
+                                                            reading.runs)
             sessionSlotStates[provider, default: SessionSlotState()].background = background
             let byProcess = Self.sessionSlotDirectories(directories, background: background)
             sessionSlotStates[provider, default: SessionSlotState()].directoryByProcess = byProcess
             sessionSlotStates[provider, default: SessionSlotState()].folderByDirectory = folders
             sessionSlotStates[provider, default: SessionSlotState()].runDirectories = runs
+            sessionSlotStates[provider, default: SessionSlotState()].registry = reading.registry ?? [:]
+            sessionSlotStates[provider, default: SessionSlotState()].readers = Self.slotReaders(
+                previous: sessionSlotStates[provider]?.readers ?? [:], byProcess: byProcess, startedAt: reading.startedAt,
+                stillRuns: { Self.readerRuns($0) }
+            )
+            sessionSlotStates[provider, default: SessionSlotState()].scanSucceeded = true
             // A slot in use that `serveSessionSlots` has not served yet, as
             // on the first cycle after launch, serves the account the slot
             // itself records; `refreshSessions` would otherwise count its
@@ -288,6 +348,84 @@ extension AppState {
     nonisolated static func sessionSlotDirectories(_ directories: [Int32: String],
                                                    background: BackgroundSessionProcesses) -> [Int32: String] {
         directories.filter { !background.nonSessions.contains($0.key) }
+    }
+
+    /// Whether `table` lists every process: it lists any at all, and it
+    /// lists AccountDock's own (`ownPID`), which a whole `ps -ax` always
+    /// does. A list cut short would name no process for slots whose
+    /// sessions still run, and `serveSessionSlots` would take them for
+    /// ended.
+    nonisolated static func processScanSucceeded(_ table: ProcessTable, ownPID: Int32) -> Bool {
+        !table.entries.isEmpty && table.entry(ownPID) != nil
+    }
+
+    /// The readers of each slot after a whole reading: the processes that
+    /// read it now (`byProcess`, with `startedAt`), and, for a slot none
+    /// reads now, those of its `previous` readers that `stillRuns`, so a
+    /// process whose environment the reading missed still holds its slot.
+    /// A slot with no reader left is dropped.
+    nonisolated static func slotReaders(previous: [String: [SlotReader]], byProcess: [Int32: String],
+                                        startedAt: [Int32: Date], stillRuns: (SlotReader) -> Bool) -> [String: [SlotReader]] {
+        var readers: [String: [SlotReader]] = [:]
+        for (pid, directory) in byProcess.sorted(by: { $0.key < $1.key }) {
+            readers[directory, default: []].append(SlotReader(pid: pid, startedAt: startedAt[pid]))
+        }
+        for (directory, old) in previous where readers[directory] == nil {
+            let running = old.filter(stillRuns)
+            if !running.isEmpty { readers[directory] = running }
+        }
+        return readers
+    }
+
+    /// Whether `reader` still runs: its process ID is alive (`isAlive`, by
+    /// default `kill(pid, 0)`, which another user's process answers with
+    /// `EPERM`) and, when both are known, started when the reader did, so
+    /// a later process given the same ID is not taken for it.
+    nonisolated static func readerRuns(_ reader: SlotReader,
+                                       isAlive: (Int32) -> Bool = { Darwin.kill($0, 0) == 0 || errno == EPERM },
+                                       startTime: (Int32) -> Date? = ProcessAncestry.startTime(of:)) -> Bool {
+        guard isAlive(reader.pid) else { return false }
+        guard let recorded = reader.startedAt, let started = startTime(reader.pid) else { return true }
+        return abs(started.timeIntervalSince(recorded)) < 1
+    }
+
+    /// Why a claimed slot no process read in this cycle's scan, past its
+    /// grace, must still be kept; nil when `serveSessionSlots` may remove it
+    /// as gone. It needs evidence that its session ended: this cycle's
+    /// scan read the whole process list (`scanSucceeded`), and every
+    /// process seen reading the slot (`readers`) has ended (`stillRuns`).
+    /// Removing the slot of a session that still runs deletes its
+    /// credential under it, and the CLI then falls back to the shared
+    /// sign-in, off the account it was on or pinned to.
+    nonisolated static func sessionGoneBlocker(scanSucceeded: Bool, readers: [SlotReader],
+                                               stillRuns: (SlotReader) -> Bool) -> String? {
+        guard scanSucceeded else { return "the process list could not be read whole this cycle" }
+        if let running = readers.first(where: stillRuns) {
+            return "process \(running.pid), seen reading it, still runs"
+        }
+        return nil
+    }
+
+    /// The one-session slots a running process reads (`byProcess`) that are
+    /// no longer on disk (`present`, the slot paths `SessionSlots.sessionSlots`
+    /// found), in path order; `isSessionSlot` says which paths are
+    /// one-session slots. `restoreMissingSlots` recreates them.
+    nonisolated static func missingSlots(byProcess: [Int32: String], present: Set<String>,
+                                         isSessionSlot: (String) -> Bool) -> [String] {
+        Set(byProcess.values).filter { !present.contains($0) && isSessionSlot($0) }.sorted()
+    }
+
+    /// The accounts a recreated slot may serve, in order: the one it was
+    /// last assigned (`history`), the one serving it (`serving`), the one
+    /// the credential audit last recorded for it (`audit`), its session's
+    /// pin (`pinned`), then the one the pool would place it on
+    /// (`fallback`); each named once. `restoreMissingSlots` takes the first
+    /// whose credential can be written.
+    nonisolated static func restoredSlotAccounts(history: UUID?, serving: UUID?, audit: UUID?, pinned: UUID?,
+                                                 fallback: UUID?) -> [UUID] {
+        [history, serving, audit, pinned, fallback].compactMap { $0 }.reduce(into: [UUID]()) { result, id in
+            if !result.contains(id) { result.append(id) }
+        }
     }
 
     /// The folder each slot's process runs in, by slot path: the `PWD` in
@@ -541,6 +679,88 @@ extension AppState {
     /// lifetime (`moveHold`).
     static let balanceMoveInterval: TimeInterval = 30 * 60
 
+    /// Recreates, at the same path, each one-session slot a running process
+    /// still reads (`SessionSlotState.directoryByProcess`) whose directory
+    /// is gone from disk (`present`, the slots `serveSessionSlots` found).
+    /// The CLI names its slot once, in its environment, and with the
+    /// directory and its credential gone reads the shared sign-in instead,
+    /// off the account it was on or pinned to; written again, the slot is
+    /// read at its next request. Each serves the first account of
+    /// `restoredSlotAccounts` that can be written, claimed so no launcher
+    /// hands it to another session, recorded in the credential audit
+    /// (`serveSessionSlots.restore`) and as an event. Only after a whole
+    /// process reading, and only for an isolation whose slot can be
+    /// recreated in place (`ProviderSessionIsolation.restoresRemovedSlot`).
+    /// Returns whether any slot was recreated.
+    private func restoreMissingSlots(_ slots: SessionSlots, provider: AIProviderType, present: [SessionSlots.SessionSlot],
+                                     sessionsByDirectory: [String: AgentSession], fallback: UUID?, now: Date) async -> Bool {
+        guard slots.isolation.restoresRemovedSlot, let state = sessionSlotStates[provider], state.scanSucceeded else {
+            return false
+        }
+        let missing = Self.missingSlots(byProcess: state.directoryByProcess, present: Set(present.map(\.directory.path)),
+                                        isSessionSlot: { slots.isSessionSlot($0) })
+        guard !missing.isEmpty else { return false }
+        // The audit trail is read only for slots nothing in memory names an
+        // account for, as after AccountDock restarts, and once per slot.
+        let unread = missing.filter {
+            slotAccountHistory[$0]?.last == nil && state.directoryServing[$0] == nil && !state.auditLooked.contains($0)
+        }
+        if !unread.isEmpty {
+            let audit = slots.audit
+            let found = await Task.detached(priority: .utility) { audit.lastSlotAccounts(Set(unread)) }.value
+            sessionSlotStates[provider, default: SessionSlotState()].auditAccounts.merge(found) { _, new in new }
+            sessionSlotStates[provider, default: SessionSlotState()].auditLooked.formUnion(unread)
+        }
+        var restored = false
+        for path in missing {
+            let processes = state.directoryByProcess.filter { $0.value == path }.keys.sorted()
+            let session = sessionsByDirectory[path]
+            let sessionID = session?.sessionID ?? processes.lazy.compactMap { state.registry[$0]?.sessionID }.first
+                ?? slotSessionsByDirectory[path]
+            let pinned = sessionPins.account(of: sessionID) ?? sessionPins.slots[path]?.account
+            let wasOn = [slotAccountHistory[path]?.last?.account, state.directoryServing[path],
+                         sessionSlotStates[provider]?.auditAccounts[path]]
+            let candidates = Self.restoredSlotAccounts(history: wasOn[0], serving: wasOn[1], audit: wasOn[2],
+                                                       pinned: pinned, fallback: fallback)
+            var served: Account?
+            for id in candidates {
+                guard let account = accounts.first(where: { $0.id == id && $0.provider == provider }), !needsSignIn(account),
+                      let credential = await slots.isolation.currentSlotCredential(
+                          for: account, minimumLifetime: readsLiveCredential(account) ? 60 : 2 * 60 * 60, from: self
+                      ) else { continue }
+                let directory = URL(fileURLWithPath: path, isDirectory: true)
+                let process = processes.first
+                let made = await Task.detached(priority: .utility) {
+                    slots.restoreClaimedSlot(directory, account: id, credential: credential,
+                                             reason: "serveSessionSlots.restore", session: sessionID, process: process)
+                }.value
+                guard made else { break }
+                slotCredentialWritten[path] = (Self.credentialDigest(credential.contents), now)
+                sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = id
+                noteSlotAssignment(path, from: nil, to: id, at: now)
+                served = account
+                break
+            }
+            let name = session.map { Self.eventName(of: $0) } ?? sessionID.map { "session \($0.prefix(8))" }
+                ?? unrecordedRunName(provider, slot: path)
+            guard let served else {
+                if sessionSlotStates[provider, default: SessionSlotState()].restoreFailures.insert(path).inserted {
+                    slotsLog.warning("[restoreMissingSlots] The slot of \(name) is gone while it runs and could not be written again; it is tried again on every pass")
+                }
+                continue
+            }
+            sessionSlotStates[provider]?.restoreFailures.remove(path)
+            restored = true
+            let account = messageName(served)
+            let reads = pinned == served.id ? "\(account) again, where it is pinned"
+                : wasOn.contains(served.id) ? "\(account) again, the account it was on"
+                : "\(account), where the pool places it"
+            slotsLog.info("[restoreMissingSlots] Restored slot \(URL(fileURLWithPath: path).lastPathComponent) for \(account)")
+            failoverEvents.record(provider, "Restored the slot of \(name), which was removed while it ran; it reads \(reads).")
+        }
+        return restored
+    }
+
     /// Keeps the one-session slots: each claimed slot serves its account, or
     /// the pool's highest-weight account once its own leaves the pool, and
     /// moves to the account `SessionPacer` chose for its session between
@@ -569,7 +789,13 @@ extension AppState {
         let sessionsByDirectory: [String: AgentSession] = (liveSessions[provider] ?? []).reduce(into: [:]) { result, session in
             if let pid = session.processID, let directory = byProcess[pid] { result[directory] = session }
         }
-        let slotList = await Task.detached(priority: .utility, operation: { slots.sessionSlots() }).value
+        var slotList = await Task.detached(priority: .utility, operation: { slots.sessionSlots() }).value
+        // A slot a running process still reads but that is gone from disk
+        // is recreated first, so the pass below serves it like any other.
+        if await restoreMissingSlots(slots, provider: provider, present: slotList, sessionsByDirectory: sessionsByDirectory,
+                                     fallback: fallback, now: now) {
+            slotList = await Task.detached(priority: .utility, operation: { slots.sessionSlots() }).value
+        }
         // Runs in claimed slots whose process left no session record, by
         // slot, so they are placed with the sessions rather than all sent to
         // `fallback`; a slot only helpers or a CLI not yet holding a session
@@ -635,10 +861,23 @@ extension AppState {
             }
             guard inUse.contains(path) else {
                 let grace = slot.requested ? Self.requestedClaimGrace : Self.slotClaimGrace
-                if now.timeIntervalSince(claimedAt) > grace { remove.append(slot.directory) }
-                else if let id = slot.account { sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = id }
+                if now.timeIntervalSince(claimedAt) > grace {
+                    guard let blocker = Self.sessionGoneBlocker(
+                        scanSucceeded: sessionSlotStates[provider]?.scanSucceeded ?? false,
+                        readers: sessionSlotStates[provider]?.readers[path] ?? [], stillRuns: { Self.readerRuns($0) }
+                    ) else {
+                        remove.append(slot.directory)
+                        continue
+                    }
+                    if sessionSlotStates[provider]?.removalHeld[path] != blocker {
+                        sessionSlotStates[provider, default: SessionSlotState()].removalHeld[path] = blocker
+                        slotsLog.info("[serveSessionSlots] Kept the claimed slot \(slot.directory.lastPathComponent), which no process read in this scan: \(blocker)")
+                    }
+                }
+                if let id = slot.account { sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = id }
                 continue
             }
+            sessionSlotStates[provider]?.removalHeld[path] = nil
             // Each session is judged for the model it uses: one whose model's
             // own limit is spent moves to an account with room for that
             // model, and the account's other sessions stay. With no such
@@ -837,6 +1076,8 @@ extension AppState {
         if !remove.isEmpty || !removeSpares.isEmpty {
             for directory in remove {
                 sessionSlotStates[provider]?.directoryServing[directory.path] = nil
+                sessionSlotStates[provider]?.readers[directory.path] = nil
+                sessionSlotStates[provider]?.removalHeld[directory.path] = nil
                 slotDirectoryMovedAt[directory.path] = nil
                 slotAccountHistory[directory.path] = nil
                 slotSessionsByDirectory[directory.path] = nil
@@ -1069,7 +1310,9 @@ extension AppState {
         let stale = slots.slotDirectories().filter { directory in
             UUID(uuidString: directory.lastPathComponent).map { !keep.contains($0) } ?? false
         }
-        if !stale.isEmpty {
+        // `running` comes from the process scan; after one that did not
+        // read the whole list it may lack slots sessions still read.
+        if !stale.isEmpty, sessionSlotStates[provider]?.scanSucceeded == true {
             for directory in stale { slotCredentialWritten[directory.path] = nil }
             await Task.detached(priority: .utility) { stale.forEach { slots.remove($0, reason: "serveRunning.stale") } }.value
         }

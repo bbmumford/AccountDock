@@ -673,6 +673,35 @@ final class CredentialAudit: @unchecked Sendable {
         return found
     }
 
+    /// The account the newest `slotAssign`, `slotWrite` or `slotRemove`
+    /// entry names for each of `slots` (slot paths), from the newest line
+    /// back; a slot with no such entry is left out.
+    /// `AppState.restoreMissingSlots` serves a recreated slot the account
+    /// it was on when nothing in memory says, as after AccountDock
+    /// restarts. Only lines holding a slot's last path component are
+    /// decoded.
+    func lastSlotAccounts(_ slots: Set<String>) -> [String: UUID] {
+        guard !slots.isEmpty else { return [:] }
+        let files: [URL] = lock.withLock { [fileURL] + (1...max(keepRotated, 1)).map(rotatedURL) }
+        let actions: Set<CredentialAuditAction> = [.slotAssign, .slotWrite, .slotRemove]
+        let names = slots.map { Data(URL(fileURLWithPath: $0).lastPathComponent.utf8) }
+        let decoder = JSONDecoder()
+        var remaining = slots
+        var found: [String: UUID] = [:]
+        for file in files where !remaining.isEmpty {
+            guard let data = FileManager.default.contents(atPath: file.path) else { continue }
+            for line in data.split(separator: UInt8(ascii: "\n")).reversed() where !remaining.isEmpty {
+                guard names.contains(where: { line.range(of: $0) != nil }),
+                      let entry = try? decoder.decode(CredentialAuditEntry.self, from: Data(line)),
+                      actions.contains(entry.action), let slot = entry.slot, remaining.contains(slot),
+                      let account = entry.accountID.flatMap(UUID.init(uuidString:)) else { continue }
+                found[slot] = account
+                remaining.remove(slot)
+            }
+        }
+        return found
+    }
+
     /// Parses an ISO 8601 time with or without fractional seconds.
     static func date(_ text: String) -> Date? {
         let fractional = ISO8601DateFormatter()

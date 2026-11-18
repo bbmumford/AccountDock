@@ -42,6 +42,10 @@ struct KimiSessionIsolation: ProviderSessionIsolation {
     /// make Kimi Code read the slot's credential.
     static let baseURLVariable = "KIMI_CODE_BASE_URL"
     static let oauthHostVariable = "KIMI_CODE_OAUTH_HOST"
+    /// The credential a running session reads is named by the spelling
+    /// its launch exported, which only the removed directory recorded;
+    /// `prepareSlot` would give a new directory another spelling.
+    let restoresRemovedSlot = false
     /// `KIMI_CODE_HOME` names another home; `KIMI_MODEL_NAME` defines a
     /// model with its own API key; the base URL and OAuth host overrides
     /// already choose a credential, as they do in a slot's own session, so

@@ -119,6 +119,11 @@ protocol ProviderSessionIsolation: Sendable {
     /// for a CLI that does not read it again before each request on its
     /// own. Called by `SessionSlots.serve` after each write.
     func signalReread(_ directory: URL)
+    /// Whether a slot whose directory is gone can be made again at the
+    /// same path for the running CLI that names it, because where the CLI
+    /// reads the credential follows from that path alone; read by
+    /// `AppState.restoreMissingSlots`. True by default.
+    var restoresRemovedSlot: Bool { get }
 }
 
 extension ProviderSessionIsolation {
@@ -138,6 +143,8 @@ extension ProviderSessionIsolation {
     func launchArguments(forSlot directory: URL) -> [String] { [] }
 
     var movesNeedRestart: Bool { false }
+
+    var restoresRemovedSlot: Bool { true }
 
     var exitCommand: String { "/exit" }
 
