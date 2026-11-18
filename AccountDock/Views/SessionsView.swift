@@ -177,6 +177,9 @@ struct SessionsView: View {
                 }
                 .font(.caption2)
                 .foregroundStyle(.textSecondary)
+                if let drift = row.pinDrift {
+                    pinDriftLine(row, drift: drift)
+                }
             }
             Spacer(minLength: 4)
             SessionControlButtons(provider: row.provider, session: row.id, state: row.state, pinned: row.pinned,
@@ -185,6 +188,28 @@ struct SessionsView: View {
             }
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /// A pinned session running on another account than its pin
+    /// (`SessionRow.pinDrift`): what it runs on, and the one click that puts
+    /// it back (`AppState.restorePin`), whose outcome shows under the
+    /// provider's heading like a move's.
+    private func pinDriftLine(_ row: SessionRow, drift: AppState.PinDrift) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "exclamationmark.triangle")
+            Text(verbatim: drift.text + " —")
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("restore") {
+                Task { moveOutcomes[row.provider] = await appState.restorePin(row.id) }
+            }
+            .buttonStyle(.link)
+            .disabled(drift.blocker != nil)
+            .help(drift.blocker ?? "Put it back on the account it is pinned to; it stays pinned there.")
+            .accessibilityLabel("Restore it to its pinned account")
+        }
+        .font(.caption2)
+        .foregroundStyle(.orange)
     }
 
     /// When a held session goes on: where and when its wait for a lane

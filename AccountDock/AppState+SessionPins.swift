@@ -147,4 +147,112 @@ extension AppState {
         case .notPinned: (false, "The session is not pinned.")
         }
     }
+
+    // MARK: - A pinned session off its pin
+
+    /// A pinned session found running on another account than its pin, as
+    /// the Sessions page flags it (`SessionRow.pinDrift`).
+    struct PinDrift: Equatable {
+        /// "Pinned to ICARE but running on cybrio".
+        var text: String
+        /// Why `restorePin` cannot put it back now; nil when it can.
+        var blocker: String?
+    }
+
+    /// The account a session pinned to `pinned` runs on when that is not
+    /// its pin, and whether that is through the shared sign-in: the account
+    /// its one-session slot serves (`slotServing`) when it reads one
+    /// (`inSlot`), else the active account (`active`), which a session
+    /// reads when it has no slot or its slot's directory is gone and serves
+    /// nothing. Nil when it runs on its pin.
+    nonisolated static func pinDriftAccount(pinned: UUID, inSlot: Bool, slotServing: UUID?,
+                                            active: UUID?) -> (account: UUID?, shared: Bool)? {
+        if inSlot, let slotServing { return slotServing == pinned ? nil : (slotServing, false) }
+        return active == pinned ? nil : (active, true)
+    }
+
+    /// The one-session slot a running session's process names, whether or
+    /// not its directory is still on disk; nil for one on the shared
+    /// sign-in.
+    func sessionSlotPath(_ session: AgentSession, slots: SessionSlots) -> String? {
+        session.processID.flatMap { slotDirectoryByProcess[$0] }.flatMap { slots.isSessionSlot($0) ? $0 : nil }
+    }
+
+    /// Whether `session`, pinned, runs off its pin, and what keeps
+    /// `restorePin` from putting it back now; nil when it runs on its pin
+    /// or is not pinned. Read by `sessionRows`.
+    func pinDrift(_ provider: AIProviderType, session: AgentSession) -> PinDrift? {
+        guard let pinned = sessionPins.account(of: session.sessionID), let slots = SessionSlots(provider) else { return nil }
+        let slot = sessionSlotPath(session, slots: slots)
+        guard let drift = Self.pinDriftAccount(pinned: pinned, inSlot: slot != nil,
+                                               slotServing: slot.flatMap { slotDirectoryServing[$0] },
+                                               active: activeAccount(for: provider)?.id) else { return nil }
+        func name(_ id: UUID?) -> String {
+            id.flatMap { id in accounts.first { $0.id == id } }.map { messageName($0) } ?? "another account"
+        }
+        let running = drift.shared ? "\(name(drift.account)) through the shared sign-in" : name(drift.account)
+        return PinDrift(text: "Pinned to \(name(pinned)) but running on \(running)",
+                        blocker: pinRestoreBlocker(session, inSlot: slot != nil, restarts: slots.isolation.movesNeedRestart))
+    }
+
+    /// Why a pinned session off its pin cannot be put back now; nil when
+    /// it can. One reading a slot its CLI reads again (`restarts` false) is
+    /// put back by writing the slot, at any moment; any other is put back
+    /// by restarting it between turns, from its terminal (`restartBlocker`).
+    func pinRestoreBlocker(_ session: AgentSession, inSlot: Bool, restarts: Bool) -> String? {
+        if inSlot, !restarts { return nil }
+        if inSlot {
+            if session.isWorking { return "Its turn is under way; it can restart once the turn ends." }
+            if !session.isIdle { return "It has not finished a turn yet; it can restart once one ends." }
+            return nil
+        }
+        let id = session.sessionID
+        return Self.restartBlocker(session, terminal: unisolatedTerminals[id], background: backgroundSessionStates[id],
+                                   refused: sessionRefusals[id] != nil)
+    }
+
+    /// Puts a pinned session running off its pin (`pinDrift`) back on its
+    /// pinned account, at the user's request from the Sessions page; the
+    /// pin itself stays. A session reading a slot its CLI reads again is
+    /// served by a slot pass run now: one whose slot's directory is gone
+    /// gets it back (`restoreMissingSlots`), and every pinned session's
+    /// slot is written for its pin (`slotChoice`). Any other, on the shared
+    /// sign-in or of a CLI that moves only by restarting, is ended between
+    /// turns and resumed in a slot of the pinned account
+    /// (`prepareResumeSlot`, `restartInOwnSlot`). The outcome is recorded.
+    @discardableResult
+    func restorePin(_ sessionID: String, now: Date = Date()) async -> SessionMoveOutcome {
+        guard let (provider, session) = liveSession(sessionID), let pinned = sessionPins.account(of: sessionID),
+              let account = accounts.first(where: { $0.id == pinned && $0.provider == provider }),
+              let slots = SessionSlots(provider) else {
+            return SessionMoveOutcome(ok: false, detail: "The session is no longer running, or no longer pinned to a saved account.")
+        }
+        defer { refreshSessions() }
+        let name = messageName(account)
+        let subject = Self.eventName(of: session)
+        let slot = sessionSlotPath(session, slots: slots)
+        if let slot, !slots.isolation.movesNeedRestart {
+            await maintainSessionSlots(now: now)
+            let restored = slotDirectoryServing[slot] == pinned
+            failoverEvents.record(provider, restored
+                ? "Restored the pinned \(subject) to \(name) at the user's request; it reads \(name) from its next request."
+                : "\(subject) was not restored to \(name), where it is pinned: its slot could not be written for \(name).")
+            return SessionMoveOutcome(ok: restored, detail: restored ? "It reads \(name) again from its next request."
+                                      : "Its slot could not be written for \(name).", account: account)
+        }
+        if let blocker = pinRestoreBlocker(session, inSlot: slot != nil, restarts: slots.isolation.movesNeedRestart) {
+            return SessionMoveOutcome(ok: false, detail: "It goes back to \(name) by restarting in a slot there: \(blocker)",
+                                      account: account)
+        }
+        guard await prepareResumeSlot(sessionID, slots: slots, on: account, reason: "restorePin") else {
+            return SessionMoveOutcome(ok: false, detail: "No slot of \(name) could be made ready for it.", account: account)
+        }
+        slotRestartResumes[sessionID] = SlotRestartResume(provider: provider, account: pinned, at: now)
+        guard await restartInOwnSlot(sessionID) else {
+            slotRestartResumes[sessionID] = nil
+            return SessionMoveOutcome(ok: false, detail: "It goes back to \(name) only by restarting, which did not happen; the events say why.",
+                                      account: account)
+        }
+        return SessionMoveOutcome(ok: true, detail: "Restarted in a slot on \(name), where it is pinned.", account: account)
+    }
 }

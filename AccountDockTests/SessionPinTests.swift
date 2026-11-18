@@ -148,4 +148,18 @@ final class SessionPinTests: XCTestCase {
         XCTAssertEqual(loaded.prune(.claudeCode, recorded: [], now: now.addingTimeInterval(3600)), ["s1"])
         XCTAssertFalse(loaded.isPinned("s1"))
     }
+
+    // MARK: - A pinned session off its pin
+
+    func testAPinnedSessionIsOffItsPinOnAnotherSlotAccountOrSharedSignIn() {
+        let ours = UUID(), other = UUID()
+        XCTAssertNil(AppState.pinDriftAccount(pinned: ours, inSlot: true, slotServing: ours, active: other))
+        let bySlot = AppState.pinDriftAccount(pinned: ours, inSlot: true, slotServing: other, active: ours)
+        XCTAssertEqual(bySlot?.account, other)
+        XCTAssertEqual(bySlot?.shared, false)
+        let removedSlot = AppState.pinDriftAccount(pinned: ours, inSlot: true, slotServing: nil, active: other)
+        XCTAssertEqual(removedSlot?.account, other, "a slot whose directory is gone leaves it on the shared sign-in")
+        XCTAssertEqual(removedSlot?.shared, true)
+        XCTAssertNil(AppState.pinDriftAccount(pinned: ours, inSlot: false, slotServing: nil, active: ours))
+    }
 }
