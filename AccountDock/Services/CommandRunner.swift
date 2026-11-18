@@ -48,7 +48,9 @@ enum CommandRunner {
     struct Command: Sendable {
         var executable: URL
         var arguments: [String] = []
-        /// The whole environment; nil inherits the app's.
+        /// The whole environment; nil inherits the app's. Either way the
+        /// credential variables the app inherited are left out
+        /// (`childEnvironment`).
         var environment: [String: String]?
         var currentDirectory: URL?
         /// Written whole to standard input and closed once the program
@@ -136,6 +138,33 @@ enum CommandRunner {
         }
     }
 
+    /// Variables that point a CLI at a credential slot or another home,
+    /// which the app inherits when it is started from a shell inside a slot
+    /// session. A `claude`, `codex` or `kimi` the app runs with one of them
+    /// reads that session's slot rather than the shared sign-in, so a check
+    /// of the live credential answers for the slot: with the slot gone it
+    /// reports the live sign-in signed out. The launcher's own exports are
+    /// `ProviderSessionIsolation.launcherExportLines`.
+    static let inheritedCredentialVariables = [
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME", "ACCOUNTDOCK_CODEX_SLOT", "ACCOUNTDOCK_CODEX_ACCOUNT_ID",
+        "KIMI_CODE_HOME", "ACCOUNTDOCK_KIMI_SLOT", "KIMI_CODE_BASE_URL", "KIMI_CODE_OAUTH_HOST",
+    ]
+
+    /// The environment a child is started with: `requested`, or the app's
+    /// own (`inherited`) when nil, less each `inheritedCredentialVariables`
+    /// entry still holding the value the app inherited. A caller that sets
+    /// one of them to another value, as `ClaudeIsolatedLogin` and the Codex
+    /// managed homes do, keeps it.
+    static func childEnvironment(_ requested: [String: String]?,
+                                 inherited: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        var environment = requested ?? inherited
+        for name in inheritedCredentialVariables {
+            if let value = inherited[name], environment[name] == value { environment[name] = nil }
+        }
+        return environment
+    }
+
     /// `run(_:timeout:control:)` for the call sites that name the parts.
     static func run(
         executable: URL,
@@ -153,7 +182,7 @@ enum CommandRunner {
         let process = Process()
         process.executableURL = command.executable
         process.arguments = command.arguments
-        if let environment = command.environment { process.environment = environment }
+        process.environment = childEnvironment(command.environment)
         if let directory = command.currentDirectory { process.currentDirectoryURL = directory }
         let inputPipe = command.input.map { _ in Pipe() }
         process.standardInput = inputPipe ?? FileHandle.nullDevice
@@ -229,7 +258,7 @@ enum CommandRunner {
         let process = Process()
         process.executableURL = command.executable
         process.arguments = command.arguments
-        if let environment = command.environment { process.environment = environment }
+        process.environment = childEnvironment(command.environment)
         if let directory = command.currentDirectory { process.currentDirectoryURL = directory }
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
