@@ -79,6 +79,21 @@ extension AppState {
         /// Missing slots `restoreMissingSlots` could not write again, so the
         /// log records each once until it succeeds.
         var restoreFailures: Set<String> = []
+        /// The sessions seen reading each claimed slot, by its live record
+        /// or the CLI's registry (`noteSlotSessions`); a pin or a registry
+        /// entry naming one of them keeps the slot (`SlotGoneEvidence`).
+        var slotSessions: [String: Set<String>] = [:]
+        /// When each claimed slot was last read in a whole scan; its grace
+        /// runs from then (`SlotGoneEvidence.idleSince`).
+        var lastSeenInUse: [String: Date] = [:]
+        /// Processes the CLI's registry lists whose environment the last
+        /// whole reading could not read (absent from it, or listed with
+        /// none): the slot such a process reads is unknown, so its
+        /// registry entry still speaks for the slot of its session.
+        var unreadProcesses: Set<Int32> = []
+        /// Since when more claimed slots than `maximumGoneRemovals` have
+        /// stood to be removed as gone in one pass (`goneRemovals`).
+        var massRemovalSince: Date?
 
         /// Drops a removed account.
         mutating func forget(_ id: UUID) {
@@ -286,20 +301,21 @@ extension AppState {
         let ownPID = getpid()
         typealias Reading = (directories: [Int32: String], background: BackgroundSessionProcesses,
                              folders: [String: String], runs: Set<String>, registry: [Int32: CLISessionRegistry.Entry]?,
-                             startedAt: [Int32: Date])
+                             startedAt: [Int32: Date], unread: Set<Int32>)
         let read = await Task.detached(priority: .utility) { () -> [Reading]? in
             guard let table = ProcessTable.read(), Self.processScanSucceeded(table, ownPID: ownPID) else { return nil }
             return isolated.map { provider, slots in
                 let background = slots.background.map {
                     BackgroundSessionProcesses(table: table, executable: slots.executable, support: $0)
                 } ?? BackgroundSessionProcesses()
-                let directories = slots.directoriesByProcess(in: table)
+                let directories = Self.processSlotDirectories(slots.directoriesByProcess(in: table), ownPID: ownPID)
                 let registry = CLISessionRegistry.read(provider)
                 let runs = Self.slotRunDirectories(directories, table: table,
                                                    names: Set(provider.capabilities.cliProcessNames + [slots.executable]),
                                                    registry: registry)
                 let startedAt = directories.keys.reduce(into: [Int32: Date]()) { $0[$1] = ProcessAncestry.startTime(of: $1) }
-                return (directories, background, Self.slotFolders(directories, table: table), runs, registry, startedAt)
+                return (directories, background, Self.slotFolders(directories, table: table), runs, registry, startedAt,
+                        Self.unreadProcesses(Set((registry ?? [:]).keys), table: table))
             }
         }.value
         guard let read else {
@@ -318,6 +334,7 @@ extension AppState {
             sessionSlotStates[provider, default: SessionSlotState()].folderByDirectory = folders
             sessionSlotStates[provider, default: SessionSlotState()].runDirectories = runs
             sessionSlotStates[provider, default: SessionSlotState()].registry = reading.registry ?? [:]
+            sessionSlotStates[provider, default: SessionSlotState()].unreadProcesses = reading.unread
             sessionSlotStates[provider, default: SessionSlotState()].readers = Self.slotReaders(
                 previous: sessionSlotStates[provider]?.readers ?? [:], byProcess: byProcess, startedAt: reading.startedAt,
                 stillRuns: { Self.readerRuns($0) }
@@ -389,21 +406,119 @@ extension AppState {
         return abs(started.timeIntervalSince(recorded)) < 1
     }
 
-    /// Why a claimed slot no process read in this cycle's scan, past its
-    /// grace, must still be kept; nil when `serveSessionSlots` may remove it
-    /// as gone. It needs evidence that its session ended: this cycle's
-    /// scan read the whole process list (`scanSucceeded`), and every
-    /// process seen reading the slot (`readers`) has ended (`stillRuns`).
-    /// Removing the slot of a session that still runs deletes its
-    /// credential under it, and the CLI then falls back to the shared
-    /// sign-in, off the account it was on or pinned to.
-    nonisolated static func sessionGoneBlocker(scanSucceeded: Bool, readers: [SlotReader],
-                                               stillRuns: (SlotReader) -> Bool) -> String? {
-        guard scanSucceeded else { return "the process list could not be read whole this cycle" }
-        if let running = readers.first(where: stillRuns) {
-            return "process \(running.pid), seen reading it, still runs"
+    /// The slots processes read (`directories`, by process ID), less
+    /// AccountDock's own process (`ownPID`): started from a shell inside a
+    /// slot session, it inherits that session's slot variable without
+    /// reading the slot, and as a reader it would hold the slot for as long
+    /// as the app runs.
+    nonisolated static func processSlotDirectories(_ directories: [Int32: String], ownPID: Int32) -> [Int32: String] {
+        directories.filter { $0.key != ownPID }
+    }
+
+    /// Of the processes the CLI's registry lists (`registered`), those
+    /// whose environment `table` does not show: absent from it, or listed
+    /// with none. Read into `SessionSlotState.unreadProcesses`.
+    nonisolated static func unreadProcesses(_ registered: Set<Int32>, table: ProcessTable) -> Set<Int32> {
+        registered.filter { table.entry($0)?.environment.isEmpty ?? true }
+    }
+
+    /// Whether the process a registry `entry` names still runs it: alive
+    /// (`isAlive`) and, when both are known, started within
+    /// `AgentSessions.registryStartTolerance` of when the entry says, so a
+    /// later process given the same ID is not taken for it.
+    nonisolated static func registryEntryRuns(_ entry: CLISessionRegistry.Entry,
+                                              isAlive: (Int32) -> Bool = { Darwin.kill($0, 0) == 0 || errno == EPERM },
+                                              startTime: (Int32) -> Date? = ProcessAncestry.startTime(of:)) -> Bool {
+        guard isAlive(entry.pid) else { return false }
+        guard let listed = entry.startedAt, let started = startTime(entry.pid) else { return true }
+        return abs(started.timeIntervalSince(listed)) <= AgentSessions.registryStartTolerance
+    }
+
+    /// What `serveSessionSlots` knows of a claimed slot no process read in
+    /// this cycle's scan, for `sessionGoneBlocker`.
+    struct SlotGoneEvidence {
+        /// This cycle's scan read the whole process list.
+        var scanSucceeded: Bool
+        /// The processes seen reading the slot (`SessionSlotState.readers`).
+        var readers: [SlotReader] = []
+        /// Registry entries holding a session seen reading the slot, whose
+        /// process the scan could not read (`unreadProcesses`).
+        var registered: [CLISessionRegistry.Entry] = []
+        /// A pin names a session seen reading the slot, or the slot itself.
+        var pinned = false
+        /// Since when no whole scan has seen it read: the later of its claim
+        /// and `SessionSlotState.lastSeenInUse`.
+        var idleSince: Date
+        /// `slotClaimGrace`, or `requestedClaimGrace` for a slot claimed by
+        /// `sessionLaunch`; a pinned slot waits `pinnedClaimGrace` if longer.
+        var grace: TimeInterval
+    }
+
+    /// Why a claimed slot must still be kept; nil when `serveSessionSlots`
+    /// may remove it as gone. The slot stays within its grace from
+    /// `idleSince`, and past it needs evidence that its session ended: this
+    /// cycle's scan read the whole process list, every process seen
+    /// reading it has ended (`stillRuns`), the CLI's registry lists no
+    /// unread live process with its session (`registryRuns`), and, for a
+    /// pinned session, `pinnedClaimGrace` has passed too. Removing the slot
+    /// of a session that still runs deletes its credential under it, and
+    /// the CLI then falls back to the shared sign-in, off the account it
+    /// was on or pinned to.
+    nonisolated static func sessionGoneBlocker(_ evidence: SlotGoneEvidence, now: Date,
+                                               stillRuns: (SlotReader) -> Bool,
+                                               registryRuns: (CLISessionRegistry.Entry) -> Bool) -> SlotKeep? {
+        let idle = now.timeIntervalSince(evidence.idleSince)
+        if idle <= evidence.grace { return .withinGrace }
+        guard evidence.scanSucceeded else { return .held("the process list could not be read whole this cycle") }
+        if let running = evidence.readers.first(where: stillRuns) {
+            return .held("process \(running.pid), seen reading it, still runs")
+        }
+        if let entry = evidence.registered.first(where: registryRuns) {
+            return .held("the CLI's registry lists process \(entry.pid) with its session \(entry.sessionID.prefix(8))")
+        }
+        if evidence.pinned, idle <= max(evidence.grace, pinnedClaimGrace) {
+            return .held("its session is pinned, and a pinned session's slot is kept \(Int(pinnedClaimGrace / 60)) minutes after it was last read")
         }
         return nil
+    }
+
+    /// Why `sessionGoneBlocker` keeps a slot: still within its grace, which
+    /// is the usual case and not logged, or held for the reason given,
+    /// which `serveSessionSlots` logs once per slot.
+    enum SlotKeep: Equatable {
+        case withinGrace
+        case held(String)
+    }
+
+    /// A claimed slot whose session is pinned is kept this long after a
+    /// whole scan last saw it read: its credential is the pin, and a slot
+    /// removed under a session still running sends it to the shared
+    /// sign-in, off the pinned account.
+    nonisolated static let pinnedClaimGrace: TimeInterval = 60 * 60
+
+    /// The most claimed slots one pass removes as gone. More at once is
+    /// what a process list read short looks like rather than sessions
+    /// ending, and deleting the slots of sessions still running sends each
+    /// to the shared sign-in, so such a pass removes none of them.
+    nonisolated static let maximumGoneRemovals = 3
+    /// How long more than `maximumGoneRemovals` slots must stand to be
+    /// removed, pass after pass, before they go, `maximumGoneRemovals` a
+    /// pass: as many sessions can end together, as when a terminal closes.
+    nonisolated static let massRemovalHold: TimeInterval = 30 * 60
+
+    /// Which of `candidates` (slot paths `serveSessionSlots` would remove
+    /// as gone) one pass removes, and since when more than
+    /// `maximumGoneRemovals` have stood (`heldSince`, kept in
+    /// `SessionSlotState.massRemovalSince`): all of them up to that many;
+    /// beyond it none, until they have stood for `massRemovalHold`, then
+    /// the first `maximumGoneRemovals` by path. `started` says a hold began
+    /// with this pass, which `serveSessionSlots` logs and records.
+    nonisolated static func goneRemovals(_ candidates: [String], heldSince: Date?, now: Date)
+        -> (remove: [String], heldSince: Date?, started: Bool) {
+        guard candidates.count > maximumGoneRemovals else { return (candidates, nil, false) }
+        guard let heldSince else { return ([], now, true) }
+        guard now.timeIntervalSince(heldSince) >= massRemovalHold else { return ([], heldSince, false) }
+        return (Array(candidates.sorted().prefix(maximumGoneRemovals)), heldSince, false)
     }
 
     /// The one-session slots a running process reads (`byProcess`) that are
@@ -669,15 +784,51 @@ extension AppState {
     }
     /// A claimed one-session slot that no process reads this long after its
     /// claim has lost its session.
-    static let slotClaimGrace: TimeInterval = 2 * 60
+    nonisolated static let slotClaimGrace: TimeInterval = 2 * 60
     /// The same for a slot claimed by `sessionLaunch`, whose command may be
     /// copied and run some minutes later.
-    static let requestedClaimGrace: TimeInterval = 30 * 60
+    nonisolated static let requestedClaimGrace: TimeInterval = 30 * 60
     /// How long an account a session moved to for a remainder or a window
     /// rests (`RemainderSpending.resting`), and the least time between two
     /// automatic rebalances. A moved session itself is held for its cache's
     /// lifetime (`moveHold`).
     static let balanceMoveInterval: TimeInterval = 30 * 60
+
+    /// Records, after a whole scan, when each slot in use (`inUse`) was last
+    /// read (`SessionSlotState.lastSeenInUse`) and the sessions reading it
+    /// (`SessionSlotState.slotSessions`): each one's live record
+    /// (`sessionsByDirectory`), and the session the CLI's registry names for
+    /// each process reading it. `slotGoneEvidence` reads both once no
+    /// process is seen reading the slot.
+    func noteSlotSessions(_ provider: AIProviderType, inUse: Set<String>, sessionsByDirectory: [String: AgentSession],
+                          now: Date) {
+        guard var state = sessionSlotStates[provider], state.scanSucceeded else { return }
+        for path in inUse { state.lastSeenInUse[path] = now }
+        for (path, session) in sessionsByDirectory { state.slotSessions[path, default: []].insert(session.sessionID) }
+        for (pid, path) in state.directoryByProcess {
+            if let entry = state.registry[pid] { state.slotSessions[path, default: []].insert(entry.sessionID) }
+        }
+        sessionSlotStates[provider] = state
+    }
+
+    /// What is known of the claimed `slot`, claimed at `claimedAt`, that no
+    /// process read in this cycle's scan (`SlotGoneEvidence`): the sessions
+    /// seen reading it, by their records, the registry and its status line
+    /// (`slotSessionsByDirectory`), and their pins.
+    func slotGoneEvidence(_ provider: AIProviderType, slot: SessionSlots.SessionSlot, claimedAt: Date) -> SlotGoneEvidence {
+        let state = sessionSlotStates[provider] ?? SessionSlotState()
+        let path = slot.directory.path
+        let sessions = (state.slotSessions[path] ?? []).union([slotSessionsByDirectory[path]].compactMap { $0 })
+        return SlotGoneEvidence(
+            scanSucceeded: state.scanSucceeded, readers: state.readers[path] ?? [],
+            registered: state.registry.values
+                .filter { sessions.contains($0.sessionID) && state.unreadProcesses.contains($0.pid) }
+                .sorted { $0.pid < $1.pid },
+            pinned: sessionPins.slots[path] != nil || sessions.contains { sessionPins.isPinned($0) },
+            idleSince: state.lastSeenInUse[path].map { max($0, claimedAt) } ?? claimedAt,
+            grace: slot.requested ? Self.requestedClaimGrace : Self.slotClaimGrace
+        )
+    }
 
     /// Recreates, at the same path, each one-session slot a running process
     /// still reads (`SessionSlotState.directoryByProcess`) whose directory
@@ -789,6 +940,7 @@ extension AppState {
         let sessionsByDirectory: [String: AgentSession] = (liveSessions[provider] ?? []).reduce(into: [:]) { result, session in
             if let pid = session.processID, let directory = byProcess[pid] { result[directory] = session }
         }
+        noteSlotSessions(provider, inUse: inUse, sessionsByDirectory: sessionsByDirectory, now: now)
         var slotList = await Task.detached(priority: .utility, operation: { slots.sessionSlots() }).value
         // A slot a running process still reads but that is gone from disk
         // is recreated first, so the pass below serves it like any other.
@@ -860,19 +1012,19 @@ extension AppState {
                 slotDirectoryMovedAt[path] = assigned
             }
             guard inUse.contains(path) else {
-                let grace = slot.requested ? Self.requestedClaimGrace : Self.slotClaimGrace
-                if now.timeIntervalSince(claimedAt) > grace {
-                    guard let blocker = Self.sessionGoneBlocker(
-                        scanSucceeded: sessionSlotStates[provider]?.scanSucceeded ?? false,
-                        readers: sessionSlotStates[provider]?.readers[path] ?? [], stillRuns: { Self.readerRuns($0) }
-                    ) else {
-                        remove.append(slot.directory)
-                        continue
+                switch Self.sessionGoneBlocker(slotGoneEvidence(provider, slot: slot, claimedAt: claimedAt), now: now,
+                                               stillRuns: { Self.readerRuns($0) },
+                                               registryRuns: { Self.registryEntryRuns($0) }) {
+                case nil:
+                    remove.append(slot.directory)
+                    continue
+                case .held(let reason):
+                    if sessionSlotStates[provider]?.removalHeld[path] != reason {
+                        sessionSlotStates[provider, default: SessionSlotState()].removalHeld[path] = reason
+                        slotsLog.info("[serveSessionSlots] Kept the claimed slot \(slot.directory.lastPathComponent), which no process read in this scan: \(reason)")
                     }
-                    if sessionSlotStates[provider]?.removalHeld[path] != blocker {
-                        sessionSlotStates[provider, default: SessionSlotState()].removalHeld[path] = blocker
-                        slotsLog.info("[serveSessionSlots] Kept the claimed slot \(slot.directory.lastPathComponent), which no process read in this scan: \(blocker)")
-                    }
+                case .withinGrace:
+                    break
                 }
                 if let id = slot.account { sessionSlotStates[provider, default: SessionSlotState()].directoryServing[path] = id }
                 continue
@@ -1073,11 +1225,20 @@ extension AppState {
         // they belong to.
         requestedWindowUses = requestedWindowUses.filter { requestedSlotMoves[$0.key] != nil }
         automaticSlotMoves = automaticSlotMoves.filter { requestedSlotMoves[$0] != nil }
+        let gone = Self.goneRemovals(remove.map(\.path), heldSince: sessionSlotStates[provider]?.massRemovalSince, now: now)
+        sessionSlotStates[provider, default: SessionSlotState()].massRemovalSince = gone.heldSince
+        if gone.started {
+            slotsLog.error("[serveSessionSlots] STOPPED: this pass would remove \(remove.count) claimed slots at once as gone, more than \(Self.maximumGoneRemovals); none is removed. Slots: \(remove.map(\.lastPathComponent).sorted().joined(separator: ", "))")
+            failoverEvents.record(provider, "Kept \(remove.count) session slots one pass would have removed at once: so many sessions seeming to end together is more likely a failed reading of the running processes, and removing a running session's slot sends it to the shared sign-in. If no session reads them for \(Int(Self.massRemovalHold / 60)) minutes they are removed \(Self.maximumGoneRemovals) at a time.")
+        }
+        remove = remove.filter { gone.remove.contains($0.path) }
         if !remove.isEmpty || !removeSpares.isEmpty {
             for directory in remove {
                 sessionSlotStates[provider]?.directoryServing[directory.path] = nil
                 sessionSlotStates[provider]?.readers[directory.path] = nil
                 sessionSlotStates[provider]?.removalHeld[directory.path] = nil
+                sessionSlotStates[provider]?.slotSessions[directory.path] = nil
+                sessionSlotStates[provider]?.lastSeenInUse[directory.path] = nil
                 slotDirectoryMovedAt[directory.path] = nil
                 slotAccountHistory[directory.path] = nil
                 slotSessionsByDirectory[directory.path] = nil
