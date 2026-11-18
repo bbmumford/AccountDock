@@ -1872,6 +1872,59 @@ running"), which is answered with Escape (stay), never Enter, whose first
 choice stops the work. A background session's restart reads its attach
 client's screen the same way before stopping it.
 
+**A slot stays while its session runs.** Which slot each process reads is
+known only from the process list (`refreshSlotProcesses`, one
+`ProcessTable` reading a cycle), and removing a slot deletes its credential:
+the CLI names its slot once, in its environment, and with the slot gone
+reads the shared sign-in, off the account it was on or pinned to. So
+`serveSessionSlots` removes a claimed slot as gone only on evidence that
+its session ended (`sessionGoneBlocker`):
+
+- This cycle's reading is whole (`processScanSucceeded`: it lists processes,
+  AccountDock's own among them). One that is not, as when `ps` does not
+  finish within its ten seconds on a loaded machine, changes none of the
+  slot maps, and the pass removes no claimed slot and no account slot
+  (`serveRunning`).
+- Every process a whole reading saw reading the slot
+  (`SessionSlotState.readers`, with its start time) has ended: `kill(pid, 0)`
+  fails, or the ID now belongs to a process that started later.
+- The CLI's registry lists no live process holding a session seen in the
+  slot whose environment the reading could not show (`unreadProcesses`).
+- Its grace has passed since a whole reading last saw it read
+  (`lastSeenInUse`): `slotClaimGrace`, `requestedClaimGrace` for a slot
+  `sessionLaunch` claimed, and `pinnedClaimGrace` (an hour) when a pin names
+  the slot or a session seen in it.
+
+A slot kept past its grace says why in the app log, once per reason. One
+pass removes at most `maximumGoneRemovals` (3) claimed slots: more at once
+looks like a reading cut short rather than sessions ending, so that pass
+removes none of them, logs it as an error and records an event; slots that
+stay unread for `massRemovalHold` (30 minutes) then go three a pass
+(`goneRemovals`). AccountDock's own process is never a slot's reader
+(`processSlotDirectories`): started from a shell inside a slot session it
+inherits that session's slot variable. For the same reason every program
+it runs is started without the slot and home variables it inherited
+(`CommandRunner.childEnvironment`: `CLAUDE_SECURESTORAGE_CONFIG_DIR`,
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `KIMI_CODE_HOME` and the Codex and Kimi
+slot variables), so its `claude auth status` reads the shared sign-in, not a
+session's slot; a caller that sets one of them to a value of its own, as
+`ClaudeIsolatedLogin` does, keeps it.
+
+A one-session slot a running process still names but whose directory is
+gone is made again at the same path on every pass after a whole reading
+(`restoreMissingSlots`, `SessionSlots.restoreClaimedSlot`): claimed first,
+so no launcher hands it to a new session, then written for the account it
+was last assigned (in memory, else the credential audit's newest slot entry
+for that path, `CredentialAudit.lastSlotAccounts`), else its session's pin,
+else the pool's fallback; the rest of the pass then serves it like any
+other, so a pinned session's slot ends on its pin. The audit records it as
+`serveSessionSlots.restore`, and an event says so ("Restored the slot of
+session 341e5695 in ~/ORBTR, which was removed while it ran; it reads ICARE
+again, where it is pinned."). The CLI reads it at its next request. Kimi
+Code's slots are not remade (`restoresRemovedSlot`): the credential a
+running Kimi session reads is named by the spelling its launch exported,
+which only the removed directory held.
+
 A CLI with a background-session service (`backgroundSessions`; Claude
 Code's `claude --bg`, `claude attach <id>`, `claude stop <id>`) runs each
 background session in worker processes its supervisor starts with its own
@@ -1995,7 +2048,16 @@ sessions · 1 pinned") lists its sessions with the Sessions tab's controls
 shows "pinned · refused at limit" with **Switch model**, and its move menu
 unpins and moves it. The Sessions tab shows every session's pin, and the
 requests interface takes `{"action":"pin"|"unpin","session":…}`;
-`moveSession` refuses a pinned session.
+`moveSession` refuses a pinned session. A pinned session found running on
+another account (its slot serving another, as for a CLI that moves only by
+restarting, or the shared sign-in, as when its slot's directory is gone) is
+flagged in its Sessions row: "Pinned to ICARE but running on cybrio through
+the shared sign-in — restore" (`AppState.pinDrift`). **restore**
+(`restorePin`) runs a slot pass at once, which makes a missing slot again
+and writes it for the pin; a session on the shared sign-in, or of a CLI that
+moves only by restarting, is ended between turns and resumed in a slot of
+the pinned account instead, and the link is disabled, saying why, while
+that cannot be done. The session stays pinned.
 
 While sessions are served from several accounts, pausing waits for the whole
 pool: sessions pause only when no other included account is below its limit

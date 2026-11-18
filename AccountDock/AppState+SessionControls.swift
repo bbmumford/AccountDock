@@ -34,6 +34,9 @@ struct SessionRow: Identifiable, Equatable {
     /// While lane admission keeps it waiting, where and when it resumes
     /// (`AppState.heldSessionNote`): "resumes on fluxon about 12:50 am".
     var waitPlan: String? = nil
+    /// Pinned but running on another account (`AppState.pinDrift`): the
+    /// row says so and offers `AppState.restorePin`.
+    var pinDrift: AppState.PinDrift? = nil
 }
 
 /// One provider's part of the Sessions page: its running sessions, each
@@ -118,7 +121,8 @@ extension AppState {
                 gated: provider.capabilities.pauseGate != nil && !ungated.contains(id),
                 pausedByYou: chosen.contains(id),
                 resumeAt: chosen.contains(id) ? nil : held[id]?.resumeAt,
-                waitPlan: chosen.contains(id) ? nil : heldSessionNote(provider, session: id, now: now)
+                waitPlan: chosen.contains(id) ? nil : heldSessionNote(provider, session: id, now: now),
+                pinDrift: slotsInUse ? pinDrift(provider, session: session) : nil
             )
         }
         .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }

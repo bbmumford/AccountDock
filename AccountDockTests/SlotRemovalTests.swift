@@ -81,49 +81,97 @@ final class SlotRemovalTests: XCTestCase {
 
     // MARK: - Removal needs evidence
 
+    private let now = Date(timeIntervalSince1970: 2_000_000)
+
+    /// A claimed slot no process read for `idle` seconds.
+    private func evidence(scanSucceeded: Bool = true, readers: [AppState.SlotReader] = [],
+                          registered: [CLISessionRegistry.Entry] = [], pinned: Bool = false,
+                          idle: TimeInterval = 10 * 60) -> AppState.SlotGoneEvidence {
+        AppState.SlotGoneEvidence(scanSucceeded: scanSucceeded, readers: readers, registered: registered, pinned: pinned,
+                                  idleSince: now.addingTimeInterval(-idle), grace: AppState.slotClaimGrace)
+    }
+
+    private func keep(_ evidence: AppState.SlotGoneEvidence, stillRuns: @escaping (AppState.SlotReader) -> Bool = { _ in false },
+                      registryRuns: @escaping (CLISessionRegistry.Entry) -> Bool = { _ in false }) -> AppState.SlotKeep? {
+        AppState.sessionGoneBlocker(evidence, now: now, stillRuns: stillRuns, registryRuns: registryRuns)
+    }
+
+    func testASlotStaysWithinItsGraceSinceItWasLastRead() {
+        XCTAssertEqual(keep(evidence(idle: 60)), .withinGrace)
+        XCTAssertNil(keep(evidence(idle: AppState.slotClaimGrace + 1)))
+    }
+
     func testAFailedScanKeepsEveryClaimedSlot() {
-        let blocker = AppState.sessionGoneBlocker(scanSucceeded: false, readers: [], stillRuns: { _ in false })
-        XCTAssertNotNil(blocker)
-        XCTAssertTrue(blocker?.contains("could not be read") == true)
+        guard case .held(let reason) = keep(evidence(scanSucceeded: false)) else { return XCTFail("kept") }
+        XCTAssertTrue(reason.contains("could not be read"))
     }
 
     func testASlotWhoseReaderStillRunsIsKeptAlthoughTheScanMissedIt() {
-        let readers = [AppState.SlotReader(pid: 3425, startedAt: nil), AppState.SlotReader(pid: 46941, startedAt: nil)]
-        let blocker = AppState.sessionGoneBlocker(scanSucceeded: true, readers: readers, stillRuns: { $0.pid == 46941 })
-        XCTAssertEqual(blocker, "process 46941, seen reading it, still runs")
+        let readers = [AppState.SlotReader(pid: 3425, startedAt: nil), AppState.SlotReader(pid: 85569, startedAt: nil)]
+        XCTAssertEqual(keep(evidence(readers: readers), stillRuns: { $0.pid == 85569 }),
+                       .held("process 85569, seen reading it, still runs"))
     }
 
     func testASlotIsRemovedOnceTheScanIsWholeAndEveryReaderEnded() {
-        let readers = [AppState.SlotReader(pid: 3425, startedAt: nil)]
-        XCTAssertNil(AppState.sessionGoneBlocker(scanSucceeded: true, readers: readers, stillRuns: { _ in false }))
-        XCTAssertNil(AppState.sessionGoneBlocker(scanSucceeded: true, readers: [], stillRuns: { _ in true }),
-                     "a slot no process was ever seen reading goes after a whole scan, as before")
+        XCTAssertNil(keep(evidence(readers: [AppState.SlotReader(pid: 3425, startedAt: nil)])))
+        XCTAssertNil(keep(evidence(), stillRuns: { _ in true }),
+                     "a slot no process was ever seen reading goes after a whole scan")
     }
 
-    func testAReaderRunsWhileItsProcessIDIsAliveWithTheSameStart() {
-        let started = Date(timeIntervalSince1970: 1_000)
-        let reader = AppState.SlotReader(pid: 77, startedAt: started)
-        XCTAssertFalse(AppState.readerRuns(reader, isAlive: { _ in false }, startTime: { _ in started }))
-        XCTAssertTrue(AppState.readerRuns(reader, isAlive: { _ in true }, startTime: { _ in started }))
-        XCTAssertFalse(AppState.readerRuns(reader, isAlive: { _ in true }, startTime: { _ in started.addingTimeInterval(600) }),
-                       "a later process given the same ID is not the reader")
-        XCTAssertTrue(AppState.readerRuns(AppState.SlotReader(pid: 77, startedAt: nil), isAlive: { _ in true },
-                                          startTime: { _ in nil }))
+    func testTheRegistryListingALiveProcessWithTheSlotsSessionKeepsIt() {
+        let entry = CLISessionRegistry.Entry(pid: 3425, sessionID: "341e5695-0000", workingDirectory: nil, startedAt: nil,
+                                             busy: nil)
+        XCTAssertEqual(keep(evidence(registered: [entry]), registryRuns: { $0.pid == 3425 }),
+                       .held("the CLI's registry lists process 3425 with its session 341e5695"))
+        XCTAssertNil(keep(evidence(registered: [entry])), "an entry whose process ended is no evidence")
     }
 
-    func testReadersFollowTheScanAndKeepThoseStillRunningForASlotTheScanMissed() {
-        let previous: [String: [AppState.SlotReader]] = [
-            "/s/A": [.init(pid: 1, startedAt: nil)],
-            "/s/B": [.init(pid: 2, startedAt: nil), .init(pid: 3, startedAt: nil)],
-            "/s/C": [.init(pid: 4, startedAt: nil)],
-        ]
-        let started = Date(timeIntervalSince1970: 5)
-        let readers = AppState.slotReaders(previous: previous, byProcess: [9: "/s/A", 8: "/s/D"], startedAt: [9: started],
-                                           stillRuns: { $0.pid == 3 })
-        XCTAssertEqual(readers["/s/A"], [.init(pid: 9, startedAt: started)], "a slot read now has the readers seen now")
-        XCTAssertEqual(readers["/s/B"], [.init(pid: 3, startedAt: nil)], "a missed slot keeps the readers still running")
-        XCTAssertNil(readers["/s/C"], "a slot whose readers all ended has none")
-        XCTAssertEqual(readers["/s/D"], [.init(pid: 8, startedAt: nil)])
+    func testAPinnedSessionsSlotWaitsTheLongerGrace() {
+        guard case .held(let reason) = keep(evidence(pinned: true, idle: 30 * 60)) else { return XCTFail("kept") }
+        XCTAssertTrue(reason.contains("pinned"))
+        XCTAssertNil(keep(evidence(pinned: true, idle: AppState.pinnedClaimGrace + 1)))
+        XCTAssertGreaterThan(AppState.pinnedClaimGrace, AppState.requestedClaimGrace)
+    }
+
+    func testRegistryEntriesRunWhileTheirProcessStartedWhenTheEntrySays() {
+        let listed = Date(timeIntervalSince1970: 1_000)
+        let entry = CLISessionRegistry.Entry(pid: 9, sessionID: "s", workingDirectory: nil, startedAt: listed, busy: nil)
+        XCTAssertFalse(AppState.registryEntryRuns(entry, isAlive: { _ in false }, startTime: { _ in listed }))
+        XCTAssertTrue(AppState.registryEntryRuns(entry, isAlive: { _ in true }, startTime: { _ in listed.addingTimeInterval(3) }))
+        XCTAssertFalse(AppState.registryEntryRuns(entry, isAlive: { _ in true },
+                                                  startTime: { _ in listed.addingTimeInterval(3_600) }),
+                       "a later process given the same ID is not the entry's")
+    }
+
+    func testOnlyRegisteredProcessesWhoseEnvironmentWasNotReadSpeakForASlot() {
+        let table = ProcessTable(entries: [
+            .init(pid: 1, command: "claude", environment: "HOME=/Users/u"),
+            .init(pid: 2, command: "claude"),
+        ])
+        XCTAssertEqual(AppState.unreadProcesses([1, 2, 3], table: table), [2, 3])
+    }
+
+    // MARK: - One pass removes only a few
+
+    func testOnePassRemovesUpToTheLimitAndHoldsBackMore() {
+        let few = ["/s/a", "/s/b", "/s/c"]
+        XCTAssertEqual(AppState.goneRemovals(few, heldSince: nil, now: now).remove, few)
+        let many = (0..<10).map { "/s/\($0)" }
+        let first = AppState.goneRemovals(many, heldSince: nil, now: now)
+        XCTAssertEqual(first.remove, [], "ten slots seeming gone at once are removed by no pass")
+        XCTAssertEqual(first.heldSince, now)
+        XCTAssertTrue(first.started)
+        let later = AppState.goneRemovals(many, heldSince: now, now: now.addingTimeInterval(60))
+        XCTAssertEqual(later.remove, [])
+        XCTAssertFalse(later.started)
+        let after = AppState.goneRemovals(many, heldSince: now, now: now.addingTimeInterval(AppState.massRemovalHold))
+        XCTAssertEqual(after.remove.count, AppState.maximumGoneRemovals, "once they stay unread, a few go each pass")
+        XCTAssertNil(AppState.goneRemovals(few, heldSince: now, now: now).heldSince, "the hold ends once few stand")
+    }
+
+    func testAccountDocksOwnProcessReadsNoSlot() {
+        XCTAssertEqual(AppState.processSlotDirectories([3425: "/s/A", 46941: "/s/A", 7: "/s/B"], ownPID: 46941),
+                       [3425: "/s/A", 7: "/s/B"])
     }
 
     // MARK: - Restoring a slot a running process names
