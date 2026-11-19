@@ -155,9 +155,11 @@ extension AppState {
     /// mid-turn, or that no account carries, is held at its next tool call
     /// by a pause at a limit listing it (`pinnedHoldPause`), which
     /// `rescopeLimitPause` releases where a fresh reading shows room for it
-    /// (`releaseFits`) or moves where one has. Pinned sessions, sessions a
-    /// pause or a wait already holds, and a provider whose requests a route
-    /// target serves are left out; with pausing off, or while the user's
+    /// (`releaseFits`) or moves where one has. A session the user played is
+    /// held like the others unless its play still covers its account's limit
+    /// (`holdAtLimit`). Pinned sessions, sessions a pause or a wait already
+    /// holds, and a provider whose requests a route target serves are left
+    /// out; with pausing off, or while the user's
     /// "Resume all" holds pauses off, sessions only move. Run by
     /// `runQuotaCycle` after the waits are charged and before the slots are
     /// served, so a refusal read this cycle moves or holds its account's
@@ -222,15 +224,10 @@ extension AppState {
         }
         laneLedgers[provider] = ledger
         requestPauseMoves(provider, moves)
-        let existing = AgentPauseGate.read(provider)
-        let resumed = AgentPauseGate.resumedSessions(provider)
-        let due = holds.filter { !(existing?.sessions.contains($0) ?? false) && !resumed.contains($0) }.sorted()
-        guard let pause = Self.pinnedHoldPause(existing: existing, adding: due, at: now,
-                                               reason: "an account's room lasts its sessions less than a reading and a request round")
-        else { return }
-        AgentPauseGate.write(pause, for: provider)
-        refreshPauseStatus(provider)
-        for id in due {
+        let listing = holdAtLimit(provider, holds,
+                                  reason: "an account's room lasts its sessions less than a reading and a request round", now: now)
+        recordPlaysHeldAgain(provider, listing.replayed, now: now)
+        for id in listing.listed {
             guard let entry = short[id] else { continue }
             let name = liveSession(id).map { Self.eventName(of: $0.1) } ?? "session \(id.prefix(8))"
             let on = accounts.first { $0.id == entry.account }.map { messageName($0) } ?? "its account"

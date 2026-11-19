@@ -240,13 +240,15 @@ extension AppState {
         }
     }
 
-    /// Lets one session go on while every other session stays held. Resumed
-    /// onto an account with room, it is held again once that account nears
-    /// its limit (`reholdUserResumedSessions`); resumed onto one already at
-    /// its limit, it runs for the rest of the pause and may reach it. A
-    /// later pause holds it again either way. When it was the last session
-    /// the pause held, the pause ends (`AgentPauseGate.playOne`), as
-    /// "Resume all" would end it.
+    /// Lets one session go on while every other session stays held. The
+    /// play is one release (`UserResume`), recorded against the account
+    /// serving the session whether or not that account is at its limit:
+    /// once the account the session runs on, that one or the one a slot
+    /// move takes it to, is at or near its limit, the session is held again
+    /// (`reholdUserResumedSessions`, `holdAtLimit`), except for the limit of
+    /// the account it was played on while it stays there. A later pause
+    /// holds it again too. When it was the last session the pause held, the
+    /// pause ends (`AgentPauseGate.playOne`), as "Resume all" would end it.
     func resumeSession(_ session: WaitingSession) {
         let provider = session.provider
         let chosenOnly = AgentPauseGate.read(provider)?.holdsOnlyChosenSessions == true
@@ -271,9 +273,10 @@ extension AppState {
             objectWillChange.send()
             return
         }
-        if let account = servingAccount(provider, session: session.sessionID),
-           !isNearLimit(account, planner: FailoverPlanner(settings: plannerSettings(provider))) {
-            userResumes[provider, default: [:]][session.sessionID] = account.id
+        if let account = servingAccount(provider, session: session.sessionID)
+            ?? session.account.flatMap({ id in accounts.first { $0.id == id } }) {
+            let spent = isNearLimit(account, planner: FailoverPlanner(settings: plannerSettings(provider)))
+            userResumes[provider, default: [:]][session.sessionID] = UserResume(playedOn: account.id, spent: spent)
         }
         refreshPauseStatus(provider)
         failoverEvents.record(provider, "Resumed the \(session.label) at the user's request; other sessions stay paused.")

@@ -1312,11 +1312,19 @@ and the session shows a status message and terminal title while it waits.
   pause ends; a new pause holds it again. A pause started for a new limit
   removes the markers of the sessions it lists
   (`AgentPauseGate.clearResumed`), since a pause file left from before,
-  as after an app restart, would otherwise keep them. A session resumed onto
-  an account with room (`AppState.userResumes`) is held again at its next
-  tool call once the account serving it is at its limit or within
-  `suspensionLead` of it; one resumed onto an account already at its limit
-  runs for the rest of the pause. The pause banner lists the waiting
+  as after an app restart, would otherwise keep them. A play is one release,
+  not a lasting exemption (`AppState.userResumes`, `UserResume`): it is
+  recorded against the account serving the session, whether or not that
+  account is at its limit, and follows the session's slot when it moves, as
+  the stranded placement moves a played session off an account that cannot
+  serve it. Once the account the session runs on is at its limit or within
+  `suspensionLead` of it, the session is held again at its next tool call
+  (`reholdUserResumedSessions`), or, by the rule holding that account's
+  sessions (the runway, a wait, a pinned hold: `holdAtLimit`), moved to an
+  account with room or held with them, before the provider refuses it.
+  The one limit a play lets the session run into is the limit of the
+  account it was played on, while it stays there and that account has had
+  no room since; a second play releases it the same way. The pause banner lists the waiting
   sessions, and the system-wide shortcut ⌃⌥⌘R (`SessionResumeShortcut`, a
   Carbon hot key, so no Accessibility permission) resumes the one in the
   front window. The gate writes its process ID into its `.waiting` marker;

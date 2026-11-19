@@ -1392,7 +1392,9 @@ extension AppState {
         // A resume lasts for the pause it was given in; a pause file left
         // from before this limit, as after a restart, keeps its markers.
         AgentPauseGate.clearResumed(provider, sessions: sessions)
-        userResumes[provider] = nil
+        // A play of a session left unlisted still stands, to be held again
+        // when its account nears its limit (`reholdUserResumedSessions`).
+        userResumes[provider] = userResumes[provider]?.filter { !sessions.contains($0.key) }
         // While no account has room, every turn that starts waits too, so no
         // request is sent to an account known to refuse it; otherwise only
         // the listed sessions' new turns do.
@@ -1781,17 +1783,17 @@ extension AppState {
             if pinnedHoldsPlayed[session] == account { continue }
             reached[session] = (account, hold)
         }
-        let existing = AgentPauseGate.read(provider)
-        let resumed = AgentPauseGate.resumedSessions(provider)
-        let due = reached.keys.filter { !(existing?.sessions.contains($0) ?? false) && !resumed.contains($0) }.sorted()
-        guard let pause = Self.pinnedHoldPause(existing: existing, adding: due, at: now) else { return }
-        AgentPauseGate.write(pause, for: provider)
-        refreshPauseStatus(provider)
-        for session in due {
+        // A session the user played here with room is held again like the
+        // others; one played through this hold is not in `reached`.
+        let held = holdAtLimit(provider, reached.keys.sorted(), reason: "a pinned session's account reached its limit",
+                               now: now)
+        let again = Set(held.replayed.map(\.session))
+        for session in (held.listed + again).sorted() {
             guard let entry = reached[session] else { continue }
             let name = liveSession(session).map { Self.eventName(of: $0.1) } ?? "session \(session.prefix(8))"
             let on = accounts.first { $0.id == entry.account }.map { messageName($0) } ?? "its account"
-            failoverEvents.record(provider, Self.pinnedHoldEvent(session: name, account: on, hold: entry.hold))
+            failoverEvents.record(provider, Self.pinnedHoldEvent(session: name, account: on, hold: entry.hold,
+                                                                 again: again.contains(session)))
         }
     }
 
@@ -1825,9 +1827,11 @@ extension AppState {
         return pause
     }
 
-    /// The event recording that a pinned session waits for its account.
-    nonisolated static func pinnedHoldEvent(session: String, account: String, hold: PinnedHold) -> String {
-        "Paused \(session), pinned to \(account), which reached its \(hold == .limit ? "limit" : "threshold"); it continues when \(account) has room."
+    /// The event recording that a pinned session waits for its account;
+    /// `again` when the user had played it there.
+    nonisolated static func pinnedHoldEvent(session: String, account: String, hold: PinnedHold,
+                                            again: Bool = false) -> String {
+        "Paused \(session)\(again ? " again" : ""), pinned to \(account), which reached its \(hold == .limit ? "limit" : "threshold"); it continues when \(account) has room."
     }
 
     /// Sends each of `moves` to its account through the slot-move path,
@@ -2168,30 +2172,6 @@ extension AppState {
     /// The account serving a session now (`SessionAttribution`).
     func servingAccount(_ provider: AIProviderType, session: String) -> Account? {
         servingDecision(provider, session: session).flatMap { decision in accounts.first { $0.id == decision.account } }
-    }
-
-    /// Holds again, at its next tool call, every session the user resumed
-    /// while its account had room, once the account serving it nears its
-    /// limit (`userResumes`). A session resumed onto an account already at
-    /// its limit was resumed knowingly and is left to run.
-    private func reholdUserResumedSessions(_ provider: AIProviderType, planner: FailoverPlanner) {
-        guard var resumes = userResumes[provider], !resumes.isEmpty else { return }
-        guard AgentPauseGate.read(provider) != nil else { userResumes[provider] = nil; return }
-        let resumed = AgentPauseGate.resumedSessions(provider)
-        var reheld = 0
-        for (session, accountID) in resumes {
-            guard resumed.contains(session) else { resumes[session] = nil; continue }
-            guard let account = servingAccount(provider, session: session) ?? accounts.first(where: { $0.id == accountID }),
-                  isNearLimit(account, planner: planner) else { continue }
-            AgentPauseGate.hold(provider, session: session)
-            resumes[session] = nil
-            reheld += 1
-        }
-        userResumes[provider] = resumes
-        if reheld > 0 {
-            refreshPauseStatus(provider)
-            failoverEvents.record(provider, "Paused \(reheld) session(s) you resumed again: the account serving them is close to its limit. They continue when capacity allows, or when you resume them again.")
-        }
     }
 
     /// Paused agents continue only on a fresh reading showing the active
