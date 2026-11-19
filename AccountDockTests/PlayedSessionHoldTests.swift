@@ -155,6 +155,79 @@ final class PlayedSessionHoldTests: XCTestCase {
         XCTAssertTrue(AgentPauseGate.heldSessions(.claudeCode, running: [designer], directory: directory).contains(designer))
     }
 
+    // MARK: - cybrio's weekly allowance
+
+    private func iso(_ date: Date) -> String { ISO8601DateFormatter().string(from: date) }
+
+    private func planner() -> FailoverPlanner {
+        FailoverPlanner(settings: .init(policy: .defaults(for: .claudeCode), provider: .claudeCode, canVerify: true))
+    }
+
+    /// cybrio read five seconds before 10:57:05 pm, its 5-hour window
+    /// resetting at 11:50 pm and its week at 9 pm on 24 November, with
+    /// cf-designer on it at its pace after the play: 45M weighted tokens an
+    /// hour, at cybrio's 2.124% of a window per million.
+    private func cybrioState(session: Double = 46, weekly: Double) -> QuotaAccountState {
+        let now = at("22:57:05")
+        var state = QuotaAccountState(
+            id: cybrio,
+            usage: UsageAPIResponse(
+                fiveHour: UsageWindow(utilization: session, resetsAt: iso(at("23:50:00"))),
+                sevenDay: UsageWindow(utilization: weekly, resetsAt: "2026-11-24T10:00:00Z"),
+                sevenDayOauthApps: nil, sevenDayOpus: nil, sevenDaySonnet: nil,
+                sevenDayCowork: nil, iguanaNecktie: nil, extraUsage: nil
+            ),
+            observedAt: now.addingTimeInterval(-5),
+            sessionBurnPerHour: 0,
+            weeklyBurnPerHour: 0
+        )
+        state.sessionPerWeekly = 4
+        state.percentPerMillion = 2.124
+        state.sessionsBurnPerHour = 45 * 2.124
+        state.runwayLead = AppState.runwayLead
+        return state
+    }
+
+    func testAWeekRunningOutAtTheSessionsPaceIsNearItsLimitWhileTheWindowHasRoom() throws {
+        let p = planner()
+        let now = at("22:57:05")
+        // 1.1% of the week left is 4.4% of a window: under three minutes at 95.6% an hour.
+        let spending = cybrioState(weekly: 98.9)
+        let windows = try XCTUnwrap(p.runwayByWindow(spending, now: now))
+        XCTAssertGreaterThan(try XCTUnwrap(windows.session), 30 * 60, "the 5-hour window's 54% lasts over half an hour")
+        XCTAssertLessThan(try XCTUnwrap(windows.weekly), AppState.runwayLead)
+        XCTAssertEqual(p.runway(spending, now: now), windows.weekly)
+        XCTAssertEqual(p.limitingWindow(spending, now: now), .weekly)
+        // Re-holding judges the account by `servingVerdict` at `suspensionLead`.
+        XCTAssertEqual(p.servingVerdict(spending, now: now, lead: AppState.suspensionLead), .nearLimit)
+        XCTAssertEqual(p.servingVerdict(spending, now: now, lead: 0), .canServe, "it can still serve at all")
+        // The runway sends cf-designer off, or holds it.
+        let runway = try XCTUnwrap(p.runway(spending, now: now))
+        XCTAssertEqual(AppState.runwayShed([(id: designer, tokensPerHour: 45_000_000)], others: 0,
+                                           roomPercent: runway * spending.sessionsBurnPerHour / 3600,
+                                           percentPerMillion: spending.percentPerMillion, lead: AppState.runwayLead),
+                       [designer])
+
+        // With half its week left, the window binds and has room.
+        let roomy = cybrioState(weekly: 50)
+        XCTAssertEqual(p.limitingWindow(roomy, now: now), .session)
+        XCTAssertEqual(p.servingVerdict(roomy, now: now, lead: AppState.suspensionLead), .canServe)
+        XCTAssertTrue(AppState.runwayShed([(id: designer, tokensPerHour: 45_000_000)], others: 0,
+                                          roomPercent: try XCTUnwrap(p.runway(roomy, now: now)) * roomy.sessionsBurnPerHour / 3600,
+                                          percentPerMillion: roomy.percentPerMillion, lead: AppState.runwayLead).isEmpty)
+    }
+
+    func testTheLimitingWindowWithNoSessionRunningIsTheOneWithLessRoom() {
+        let p = planner()
+        let now = at("22:57:05")
+        var spent = cybrioState(weekly: 100)
+        spent.sessionsBurnPerHour = 0
+        XCTAssertEqual(p.limitingWindow(spent, now: now), .weekly, "the week cybrio refused it for")
+        var window = cybrioState(session: 100, weekly: 60)
+        window.sessionsBurnPerHour = 0
+        XCTAssertEqual(p.limitingWindow(window, now: now), .session)
+    }
+
     // MARK: - Events
 
     func testTheHoldAgainIsRecordedWithTheAccountItRanOn() {

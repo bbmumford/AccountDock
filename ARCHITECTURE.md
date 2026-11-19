@@ -1527,7 +1527,12 @@ the pool weights and which sessions move, each time the pool is rebuilt
   each session the larger of its decayed rate and what it sent over the
   last five minutes, its subagents' requests included,
   `SessionRates.recentRate`), less what they spent since that reading.
-  While it is shorter than `AppState.runwayLead` (two readings a minute
+  Each window counts (`runwayByWindow`): the 5-hour window's room when its
+  sessions spend it before its reset, and the weekly allowance's, in
+  session percent by the plan's `sessionPerWeekly`, so an account whose
+  week runs out at that pace within the lead is near its limit though its
+  5-hour window has room; `limitingWindow` names the one that runs out
+  first. While it is shorter than `AppState.runwayLead` (two readings a minute
   apart and one request round, at least `suspensionLead`) the account is
   near its limit (`servingVerdict`) whatever lead a rule asks, and a live
   reading with room does not outrank it: platform-engineer's sixteen agents
