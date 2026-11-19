@@ -400,15 +400,11 @@ extension AppState {
 
     /// Lists `sessions` in the provider's pause: the pause in effect, or a
     /// pause at a limit holding them alone at their next tool call and new
-    /// turn (`pinnedHoldPause`). A session the user resumed in this pause is
-    /// left to run.
+    /// turn (`pinnedHoldPause`). A session resumed in this pause runs on
+    /// while its release stands; one the user played whose play no longer
+    /// covers its account's limit is held again (`holdAtLimit`).
     func writeWaits(_ provider: AIProviderType, _ sessions: [String], reason: String, now: Date) {
-        let existing = AgentPauseGate.read(provider)
-        let resumed = AgentPauseGate.resumedSessions(provider)
-        let due = sessions.filter { !(existing?.sessions.contains($0) ?? false) && !resumed.contains($0) }.sorted()
-        guard let pause = Self.pinnedHoldPause(existing: existing, adding: due, at: now, reason: reason) else { return }
-        AgentPauseGate.write(pause, for: provider)
-        refreshPauseStatus(provider)
+        recordPlaysHeldAgain(provider, holdAtLimit(provider, sessions, reason: reason, now: now).replayed, now: now)
     }
 
     /// The event for a session held on its account for a reset that comes

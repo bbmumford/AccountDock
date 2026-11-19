@@ -500,10 +500,11 @@ final class AppState: ObservableObject {
     /// Paused sessions AccountDock let continue during the current pause,
     /// by provider and session.
     var sessionAdmissions: [AIProviderType: [String: SessionAdmission]] = [:]
-    /// Sessions the user resumed during the current pause while the account
-    /// serving them had room: the account each was on, by provider and
-    /// session. Each is held again when that account nears its limit.
-    var userResumes: [AIProviderType: [String: UUID]] = [:]
+    /// Sessions the user played during the current pause, by provider and
+    /// session: the account each runs on and whether the play covers that
+    /// account's limit (`UserResume`). Each is held again once the account
+    /// it runs on is at or near its limit and the play does not cover it.
+    var userResumes: [AIProviderType: [String: UserResume]] = [:]
     /// Pinned sessions the user played while a pause held them for their
     /// account's threshold or limit, with that account. `limitPauseScope`
     /// and `holdPinnedSessionsAtLimit` leave each running until the account
@@ -1307,7 +1308,7 @@ final class AppState: ObservableObject {
         lockedSwitchNoted = lockedSwitchNoted.filter { $0.value != id }
         pendingResetRecovery = pendingResetRecovery.filter { $0.value.accountID != id }
         suspensionContexts = suspensionContexts.filter { $0.value.accountID != id }
-        userResumes = userResumes.mapValues { $0.filter { $0.value != id } }
+        userResumes = userResumes.mapValues { $0.filter { $0.value.account != id } }
         sessionAdmissions = sessionAdmissions.mapValues { $0.filter { $0.value.account != id } }
         requestedSlotMoves = requestedSlotMoves.filter { $0.value != id }
         remainderMovedAt[id] = nil

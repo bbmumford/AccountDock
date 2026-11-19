@@ -586,19 +586,59 @@ struct FailoverPlanner {
     /// while this is shorter than the lead, and `AppState` reads an
     /// account often while it is short (`runwayWatch`).
     func runway(_ state: QuotaAccountState, now: Date) -> TimeInterval? {
+        guard let windows = runwayByWindow(state, now: now) else { return nil }
+        return [windows.session, windows.weekly].compactMap { $0 }.min()
+    }
+
+    /// `runway` for each window: the 5-hour window's, nil when it resets
+    /// before its sessions spend it, and the weekly allowance's. Nil while
+    /// no session runs here or no reading is known. Read by `runway` and
+    /// `limitingWindow`.
+    func runwayByWindow(_ state: QuotaAccountState, now: Date) -> (session: TimeInterval?, weekly: TimeInterval?)? {
         guard state.sessionsBurnPerHour > 0, let measured = measuredProjection(state, now: now) else { return nil }
         let spent = state.sessionsBurnPerHour * measured.age / 3600
-        var times: [TimeInterval] = []
-        if let session = measured.session {
-            let seconds = max(0, 100 - session - spent) / state.sessionsBurnPerHour * 3600
-            if beforeSessionReset(seconds, reset: measured.sessionReset, now: now) { times.append(seconds) }
+        var session: TimeInterval?
+        if let used = measured.session {
+            let seconds = max(0, 100 - used - spent) / state.sessionsBurnPerHour * 3600
+            if beforeSessionReset(seconds, reset: measured.sessionReset, now: now) { session = seconds }
         }
-        if let weekly = measured.weekly {
-            let perWeekly = state.sessionPerWeekly ?? Self.defaultSessionPerWeekly
-            let burn = state.sessionsBurnPerHour / max(perWeekly, 0.01)
-            times.append(max(0, 100 - weekly - spent / max(perWeekly, 0.01)) / burn * 3600)
+        let weekly = measured.weekly.map { used in
+            let perWeekly = max(state.sessionPerWeekly ?? Self.defaultSessionPerWeekly, 0.01)
+            return max(0, 100 - used - spent / perWeekly) / (state.sessionsBurnPerHour / perWeekly) * 3600
         }
-        return times.min()
+        return (session, weekly)
+    }
+
+    /// A window an account runs out of (`limitingWindow`).
+    enum LimitWindow: Equatable {
+        /// The 5-hour window.
+        case session
+        /// The weekly allowance.
+        case weekly
+    }
+
+    /// The window the account runs out of first: the one its sessions, at
+    /// their pace now, spend first (`runwayByWindow`), else, with no session
+    /// running here, the one with less room by its last reading, the weekly
+    /// allowance's room counted in session percent by the plan's
+    /// `sessionPerWeekly`; at a tie the weekly allowance, which resets
+    /// later. Nil with no reading. Names the limit in the events that hold
+    /// a session for it.
+    func limitingWindow(_ state: QuotaAccountState, now: Date) -> LimitWindow? {
+        func first(_ session: Double?, _ weekly: Double?) -> LimitWindow? {
+            switch (session, weekly) {
+            case let (session?, weekly?): weekly <= session ? .weekly : .session
+            case (.some, nil): .session
+            case (nil, .some): .weekly
+            case (nil, nil): nil
+            }
+        }
+        if let windows = runwayByWindow(state, now: now), let window = first(windows.session, windows.weekly) {
+            return window
+        }
+        guard let measured = measuredProjection(state, now: now) else { return nil }
+        let perWeekly = max(state.sessionPerWeekly ?? Self.defaultSessionPerWeekly, 0.01)
+        return first(measured.session.map { max(0, 100 - $0) }, measured.weekly.map { max(0, 100 - $0) * perWeekly })
     }
 
     /// When an exhausted account can serve again: every window at its limit
