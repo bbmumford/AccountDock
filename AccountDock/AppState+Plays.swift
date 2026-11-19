@@ -176,26 +176,36 @@ extension AppState {
     }
 
     /// Records each of `ended` (`playHeldAgainEvent`), named as the session
-    /// names itself, else by its folder and ID.
+    /// names itself, else by its folder and ID, with the window its account
+    /// runs out of first (`FailoverPlanner.limitingWindow`).
     func recordPlaysHeldAgain(_ provider: AIProviderType, _ ended: [EndedPlay], now: Date) {
+        guard !ended.isEmpty else { return }
+        let planner = FailoverPlanner(settings: plannerSettings(provider))
         for play in ended {
             let name = sessionNames[play.session]
                 ?? liveSession(play.session).map { Self.eventName(of: $0.1) } ?? "session \(play.session.prefix(8))"
             let account = play.account.flatMap { id in accounts.first { $0.id == id } }
-            let refused = account.map { quotaState(for: $0, now: now).refusedAtLimit } ?? false
+            let state = account.map { quotaState(for: $0, now: now) }
             failoverEvents.record(provider, Self.playHeldAgainEvent(
                 session: name, account: account.map { messageName($0) } ?? "its account", moved: play.moved,
-                refused: refused))
+                refused: state?.refusedAtLimit ?? false, window: state.flatMap { planner.limitingWindow($0, now: now) }))
         }
     }
 
     /// The event recording that a session the user played is held again
     /// for the account it ran on: where it ran (the one it was played on,
-    /// or the one it moved to after the play) and that the account reached
-    /// its limit (`refused`) or is about to.
-    nonisolated static func playHeldAgainEvent(session: String, account: String, moved: Bool, refused: Bool) -> String {
+    /// or the one it moved to after the play), and that the account reached
+    /// its limit (`refused`) or is about to, naming the 5-hour window or the
+    /// weekly allowance (`window`) when known.
+    nonisolated static func playHeldAgainEvent(session: String, account: String, moved: Bool, refused: Bool,
+                                               window: FailoverPlanner.LimitWindow?) -> String {
         let place = moved ? "where it ran after you resumed it" : "where you resumed it"
-        let reach = refused ? "reached its limit" : "is about to reach its limit"
+        let limit = switch window {
+        case .weekly: "its weekly limit"
+        case .session: "its 5-hour limit"
+        case nil: "its limit"
+        }
+        let reach = refused ? "reached \(limit)" : "is about to reach \(limit)"
         return "Paused \(session) again: \(account), \(place), \(reach); it continues when an account has room."
     }
 }

@@ -230,11 +230,17 @@ final class PlayedSessionHoldTests: XCTestCase {
 
     // MARK: - Events
 
-    func testTheHoldAgainIsRecordedWithTheAccountItRanOn() {
-        XCTAssertEqual(AppState.playHeldAgainEvent(session: "cf-designer", account: "cybrio", moved: true, refused: false),
-                       "Paused cf-designer again: cybrio, where it ran after you resumed it, is about to reach its limit; it continues when an account has room.")
-        XCTAssertEqual(AppState.playHeldAgainEvent(session: "cf-designer", account: "ORBTR", moved: false, refused: true),
-                       "Paused cf-designer again: ORBTR, where you resumed it, reached its limit; it continues when an account has room.")
+    func testTheHoldAgainIsRecordedWithTheAccountItRanOnAndTheWindowRunningOut() {
+        let now = at("22:57:05")
+        XCTAssertEqual(AppState.playHeldAgainEvent(session: "cf-designer", account: "cybrio", moved: true, refused: false,
+                                                   window: planner().limitingWindow(cybrioState(weekly: 98.9), now: now)),
+                       "Paused cf-designer again: cybrio, where it ran after you resumed it, is about to reach its weekly limit; it continues when an account has room.")
+        XCTAssertEqual(AppState.playHeldAgainEvent(session: "cf-designer", account: "ORBTR", moved: false, refused: true,
+                                                   window: .session),
+                       "Paused cf-designer again: ORBTR, where you resumed it, reached its 5-hour limit; it continues when an account has room.")
+        XCTAssertEqual(AppState.playHeldAgainEvent(session: "session a78ddf66 in ~/ORBTR", account: "its account", moved: false,
+                                                   refused: false, window: nil),
+                       "Paused session a78ddf66 in ~/ORBTR again: its account, where you resumed it, is about to reach its limit; it continues when an account has room.")
         XCTAssertEqual(AppState.pinnedHoldEvent(session: "api (4f2a)", account: "Work", hold: .threshold, again: true),
                        "Paused api (4f2a) again, pinned to Work, which reached its threshold; it continues when Work has room.")
     }

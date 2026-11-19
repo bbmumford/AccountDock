@@ -1324,7 +1324,12 @@ and the session shows a status message and terminal title while it waits.
   account with room or held with them, before the provider refuses it.
   The one limit a play lets the session run into is the limit of the
   account it was played on, while it stays there and that account has had
-  no room since; a second play releases it the same way. The pause banner lists the waiting
+  no room since; a second play releases it the same way. The event names
+  the account, whether the session moved there after the play, and the
+  window that account runs out of first (`FailoverPlanner.limitingWindow`):
+  "Paused cf-designer again: cybrio, where it ran after you resumed it, is
+  about to reach its weekly limit; it continues when an account has room."
+  The pause banner lists the waiting
   sessions, and the system-wide shortcut ⌃⌥⌘R (`SessionResumeShortcut`, a
   Carbon hot key, so no Accessibility permission) resumes the one in the
   front window. The gate writes its process ID into its `.waiting` marker;
