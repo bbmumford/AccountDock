@@ -94,6 +94,7 @@ private struct CapacityOutlookPanel: View {
     }
 
     private var legend: some View {
+        VStack(alignment: .leading, spacing: 3) {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             HStack(spacing: 4) {
                 swatch(.brand)
@@ -104,6 +105,13 @@ private struct CapacityOutlookPanel: View {
                 Text("paused (short bursts possible where weekly room remains)")
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+        // What each mark under the bar means, in its colour.
+        (Text(verbatim: "▲ ").foregroundColor(.brand) + Text("refill   ")
+            + Text(verbatim: "△ ").foregroundColor(.secondary) + Text("refill, nothing resumes yet   ")
+            + Text(verbatim: "● ").foregroundColor(.secondary) + Text("an account runs out   ")
+            + Text(verbatim: "▲ ").foregroundColor(.orange) + Text("everything pauses"))
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -349,9 +357,17 @@ private struct CapacityOutlookTimeline: View {
         let tickTop = barTop + barHeight + 2
         // A refill that lets sessions run is a filled arrow in the brand
         // colour; one after which nothing runs yet, as a new week while the
-        // account's 5-hour window is still full, is an outline in grey.
+        // account's 5-hour window is still full, is an outline in grey. An
+        // account running out while others carry the sessions is a small
+        // grey dot, since nothing pauses there; only the moment every
+        // session pauses is an orange arrow.
         for event in ticks {
             let position = x(event.at, width: width)
+            if event.kind == .weekSpent {
+                let dot = Path(ellipseIn: CGRect(x: position - 2, y: tickTop + 2, width: 4, height: 4))
+                context.fill(dot, with: .color(.secondary))
+                continue
+            }
             var tick = Path()
             tick.move(to: CGPoint(x: position, y: tickTop))
             tick.addLine(to: CGPoint(x: position - 3.5, y: tickTop + 6))
