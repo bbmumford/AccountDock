@@ -1,12 +1,12 @@
 import XCTest
 @testable import AccountDock
 
-/// Pacing to the resets (`SustainablePace`) on a fixture of the morning of
-/// 21 November, when fourteen sessions would have spent Personal's and
-/// hexorda's fresh weeks in about four hours and then waited until Monday.
+/// Pacing to the resets (`SustainablePace`) on a fixture where fourteen
+/// sessions flat out would spend Personal's and hexorda's fresh weeks in
+/// about four hours and then wait until Monday.
 final class SustainablePaceTests: XCTestCase {
-    /// Saturday 21 November 2026, 8:22 am in Melbourne: the fixture's
-    /// resets are counted from here in hours.
+    /// A Saturday at 8:22 am in Melbourne: the fixture's resets are
+    /// counted from here in hours.
     let now = Date(timeIntervalSince1970: 1_795_209_720)
     let personal = UUID(), hexorda = UUID(), bytrix = UUID(), cybrio = UUID(), fluxon = UUID(), voltrix = UUID()
     let backup = UUID(), hstles = UUID()
@@ -14,7 +14,7 @@ final class SustainablePaceTests: XCTestCase {
     /// Window percent per million weighted tokens: a Max 5x percent holds a
     /// quarter of the work of a Max 20x one. The fixture's universe is
     /// scaled so the flat-out rate spends Personal's and hexorda's weeks in
-    /// about four hours, as the Outlook read that morning.
+    /// about four hours, as the Outlook reads it.
     let max20x = 0.09, max5x = 0.36
 
     func hours(_ value: Double) -> Date { now.addingTimeInterval(value * 3600) }
@@ -38,11 +38,11 @@ final class SustainablePaceTests: XCTestCase {
             name: name, sessionPerWeekly: 1, availability: availability)
     }
 
-    /// 21 November, 8:22 am: Personal (Max 20x) 13% into a week renewing
+    /// Saturday, 8:22 am: Personal (Max 20x) 13% into a week renewing
     /// Saturday midnight, hexorda (Max 5x) 4% into one renewing Saturday
     /// 5 am with its 5-hour window not started, and six accounts at 99-100%
     /// of weeks renewing from Monday 8 am (bytrix) to Tuesday 11 pm.
-    func november21(hexordaRatio: Double? = nil) -> [CapacityOutlook.Account] {
+    func saturdayMorning(hexordaRatio: Double? = nil) -> [CapacityOutlook.Account] {
         [account(personal, "Personal", ratio: max20x, windowUsed: 20, windowResetIn: 2, weeklyUsed: 13,
                  weeklyResetIn: 159 + 38.0 / 60),
          account(hexorda, "hexorda", ratio: hexordaRatio ?? max5x, weeklyUsed: 4, weeklyResetIn: 164 + 38.0 / 60),
@@ -71,12 +71,12 @@ final class SustainablePaceTests: XCTestCase {
     var flatOut: Double { rates.reduce(0) { $0 + $1.1 } * 1_000_000 }
 
     func target(_ accounts: [CapacityOutlook.Account]? = nil) throws -> SustainablePace.Target {
-        try XCTUnwrap(SustainablePace.target(accounts: accounts ?? november21(), flatOut: flatOut, now: now))
+        try XCTUnwrap(SustainablePace.target(accounts: accounts ?? saturdayMorning(), flatOut: flatOut, now: now))
     }
 
     // MARK: - The target
 
-    func testTheTargetOnTheTwentyFirstOfNovemberIsWhatPersonalAndHexordaCarryUntilBytrixsNewWeek() throws {
+    func testTheTargetIsWhatPersonalAndHexordaCarryUntilBytrixsNewWeek() throws {
         XCTAssertEqual(flatOut, 302_000_000)
         let target = try target()
         // Flat out, Personal's and hexorda's weeks (86 and 95 window
@@ -89,17 +89,17 @@ final class SustainablePaceTests: XCTestCase {
 
         // At that rate nothing pauses before Monday; a tenth more pauses
         // everything before it.
-        let carried = CapacityOutlook.run(november21(), demand: .init(tokensPerHour: target.tokensPerHour), now: now,
+        let carried = CapacityOutlook.run(saturdayMorning(), demand: .init(tokensPerHour: target.tokensPerHour), now: now,
                                           step: SustainablePace.searchStep, horizon: monday8am * 3600, reach: .firstPause)
         XCTAssertNil(carried.allPausedAt.flatMap { $0 < hours(monday8am - 0.25) ? $0 : nil })
-        let faster = CapacityOutlook.run(november21(), demand: .init(tokensPerHour: target.tokensPerHour * 1.1), now: now,
+        let faster = CapacityOutlook.run(saturdayMorning(), demand: .init(tokensPerHour: target.tokensPerHour * 1.1), now: now,
                                          step: SustainablePace.searchStep, horizon: monday8am * 3600, reach: .firstPause)
         XCTAssertLessThan(try XCTUnwrap(faster.allPausedAt), hours(monday8am - 1))
 
         // The flat-out Outlook agrees: paused from about 12:24 pm until
         // Monday 8 am.
         let outlook = CapacityOutlook.project(
-            accounts: november21(),
+            accounts: saturdayMorning(),
             sessions: rates.map { CapacityOutlook.Session(id: $0.0, label: $0.0, tokensPerHour: $0.1 * 1_000_000) }, now: now)
         XCTAssertEqual(try XCTUnwrap(outlook.allPausedAt).timeIntervalSince(target.flatOutPausedAt), 0, accuracy: 10 * 60)
         XCTAssertEqual(outlook.resume?.at, hours(monday8am))
@@ -107,7 +107,7 @@ final class SustainablePaceTests: XCTestCase {
 
     func testNothingIsPacedWhenTheAccountsCarryEverySessionOrNoneHasRoom() {
         // Every week has room for the sessions flat out.
-        let roomy = november21().map { account -> CapacityOutlook.Account in
+        let roomy = saturdayMorning().map { account -> CapacityOutlook.Account in
             var roomy = account
             roomy.pacer.weeklyRemaining = 99 * 60
             roomy.pacer.percentPerMillion = 0.001
@@ -116,20 +116,20 @@ final class SustainablePaceTests: XCTestCase {
         }
         XCTAssertNil(SustainablePace.target(accounts: roomy, flatOut: flatOut, now: now))
         // No account has room now: the limit pauses hold the sessions.
-        let spent = november21().map { account -> CapacityOutlook.Account in
+        let spent = saturdayMorning().map { account -> CapacityOutlook.Account in
             var spent = account
             spent.availability = .atLimit
             return spent
         }
         XCTAssertNil(SustainablePace.target(accounts: spent, flatOut: flatOut, now: now))
-        XCTAssertNil(SustainablePace.target(accounts: november21(), flatOut: 0, now: now))
+        XCTAssertNil(SustainablePace.target(accounts: saturdayMorning(), flatOut: 0, now: now))
     }
 
     func testAnOutlyingTokenCostLowersTheTarget() throws {
         // hexorda read at five times what its plan size makes of the other
         // Max 5x accounts would hold a fifth of the work it does.
-        let raw = try target(november21(hexordaRatio: max5x * 5.04))
-        let held = try target(november21(hexordaRatio: max5x * sqrt(5.04)))
+        let raw = try target(saturdayMorning(hexordaRatio: max5x * 5.04))
+        let held = try target(saturdayMorning(hexordaRatio: max5x * sqrt(5.04)))
         let expected = try target()
         XCTAssertLessThan(raw.tokensPerHour, held.tokensPerHour)
         XCTAssertLessThan(held.tokensPerHour, expected.tokensPerHour)
@@ -282,7 +282,7 @@ final class SustainablePaceTests: XCTestCase {
         // session from then, pauses nothing before Monday; flat out,
         // everything pauses about 12:24 pm.
         let paced = CapacityOutlook.run(
-            november21(), demand: .init(tokensPerHour: summary.runningTokensPerHour,
+            saturdayMorning(), demand: .init(tokensPerHour: summary.runningTokensPerHour,
                                         changes: [.init(from: hours(monday8am), tokensPerHour: flatOut)]),
             now: now, horizon: 7 * 86_400, reach: .firstPause)
         XCTAssertGreaterThanOrEqual(try XCTUnwrap(paced.allPausedAt), hours(monday8am))
@@ -305,4 +305,34 @@ final class SustainablePaceTests: XCTestCase {
                        "Pacing to the resets: the 8 session(s) it held run again: pacing to the resets is off.")
         XCTAssertEqual(SustainablePace.names(["a", "b"]), ListFormatter.localizedString(byJoining: ["a", "b"]))
     }
+
+    // MARK: - Pacing off
+
+    func testPacingIsOffByDefaultAndAPolicySavedWithoutItDecodesOff() throws {
+        XCTAssertFalse(ProviderFailoverPolicy().paceToResets)
+        let saved = try JSONEncoder().encode(ProviderFailoverPolicy())
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [String: Any])
+        XCTAssertEqual(object["paceToResets"] as? Bool, false)
+        object["paceToResets"] = nil
+        object["waitForResetWithinCache"] = false
+        let older = try JSONDecoder().decode(ProviderFailoverPolicy.self,
+                                             from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertFalse(older.paceToResets)
+        XCTAssertFalse(older.waitForResetWithinCache, "the stored values stay as they were")
+        var on = ProviderFailoverPolicy()
+        on.paceToResets = true
+        XCTAssertTrue(try JSONDecoder().decode(ProviderFailoverPolicy.self, from: JSONEncoder().encode(on)).paceToResets)
+    }
+
+    func testWithoutPacingTheOutlookAndRowStatesAreAsBefore() {
+        let sessions = rates.map { CapacityOutlook.Session(id: $0.0, label: $0.0, tokensPerHour: $0.1 * 1_000_000) }
+        let outlook = CapacityOutlook.project(accounts: saturdayMorning(), sessions: sessions, now: now)
+        XCTAssertNil(outlook.paced)
+        XCTAssertTrue(outlook.line.hasPrefix("Runs until about "))
+        XCTAssertEqual(SessionRowState.paced.label,
+                       "paused (paced: waiting for room so the others can run until the resets)")
+        XCTAssertTrue(SessionRowState.paced.isPaused)
+    }
+
+
 }

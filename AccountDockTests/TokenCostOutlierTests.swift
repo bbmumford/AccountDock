@@ -10,7 +10,7 @@ final class TokenCostOutlierTests: XCTestCase {
     let personal = UUID(), backup = UUID(), hstles = UUID()
     let hexorda = UUID(), voltrix = UUID(), bytrix = UUID(), cybrio = UUID(), fluxon = UUID()
 
-    /// The Max 5x accounts' learned costs on the morning of 21 November:
+    /// Learned costs of five Max 5x accounts, four of them agreeing:
     /// hexorda 8.87% of its window per million weighted tokens, voltrix
     /// 1.19, bytrix 1.72, cybrio 2.12 and fluxon 1.55; Personal and Backup
     /// (Max 20x) and HSTLES (Max 5x) have none.
