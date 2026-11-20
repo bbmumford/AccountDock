@@ -5,6 +5,7 @@ import ServiceManagement
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var updateChecker: UpdateChecker
+    @EnvironmentObject private var menuBarConfig: MenuBarConfig
 
     private var isUpdateFailed: Bool {
         if case .failed = updateChecker.installState { return true }
@@ -85,6 +86,18 @@ struct SettingsView: View {
         )
     }
 
+    /// Why the provider's enabled menu-bar modules are missing from the menu
+    /// bar while the user keeps it shown (`MenuBarPresence.notice`).
+    private func menuBarNotice(_ provider: AIProviderType) -> String? {
+        MenuBarPresence.notice(
+            for: provider,
+            modules: menuBarConfig.modules,
+            hidden: ProviderVisibility.hidden(in: hiddenProviders),
+            accounts: appState.accounts,
+            needsSignIn: { appState.needsSignIn($0) }
+        )
+    }
+
     // MARK: - Audit
 
     /// Where the credential audit trail is (`CredentialAudit`), and the
@@ -146,6 +159,11 @@ struct SettingsView: View {
                 ForEach(AIProviderType.implementedProviders) { provider in
                     Toggle("Show \(provider.capabilities.displayName)", isOn: visibilityBinding(provider))
                         .disabled(ProviderVisibility.visibleProviders(in: hiddenProviders) == [provider])
+                    if let notice = menuBarNotice(provider) {
+                        Text(notice)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Text("Visible providers appear together in AccountDock. At least one provider must remain enabled.")
                     .font(.caption)
