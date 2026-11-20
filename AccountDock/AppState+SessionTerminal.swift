@@ -351,6 +351,7 @@ extension AppState {
         var live = Set<String>()
         for provider in AIProviderType.isolatedProviders where sessionSlotsInUse(provider) {
             live.formUnion((liveSessions[provider] ?? []).map(\.sessionID))
+            guard failoverConfig.policy(for: provider).restartSessionsOutsideSlots else { continue }
             var last = unisolatedRestartAt
             last.merge(stayingRestartAt) { max($0, $1) }
             last.merge(stuckBackgroundRestartedAt) { max($0, $1) }

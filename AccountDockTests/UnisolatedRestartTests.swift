@@ -50,4 +50,10 @@ final class UnisolatedRestartTests: XCTestCase {
         XCTAssertTrue(AppState.automaticRestartEvent(session: "s", takesBack: false, account: "HSTLES", pinned: false)
             .hasSuffix("it continues on HSTLES."))
     }
+
+    func testRestartingSessionsOutsideSlotsIsOffUntilTurnedOn() throws {
+        XCTAssertFalse(ProviderFailoverPolicy().restartSessionsOutsideSlots)
+        let decoded = try JSONDecoder().decode(ProviderFailoverPolicy.self, from: Data("{}".utf8))
+        XCTAssertFalse(decoded.restartSessionsOutsideSlots, "a policy stored before the option has it off")
+    }
 }
