@@ -1902,10 +1902,10 @@ assigns that slot to an account by writing the account's credential for it
 (`SessionSlots`). A slot is never handed from one session to another, and
 nothing is made ahead of a launch: a session moves between accounts only by
 its slot being rewritten for another (or, for a CLI that reads its account
-once, by a restart into a slot of the new one). The account-level
-directories (`<cli>-slots/<account-id>`) are no longer given to new
-sessions; `serveRunning` keeps the ones sessions started earlier still
-read until they exit.
+once, by a restart into a slot of the new one). No launch is given an
+account-level directory (`<cli>-slots/<account-id>`); `serveRunning`
+serves one only while a running session reads it, and removes it once none
+does.
 
 The launcher, which `SessionSlots.installLauncher` puts first on `PATH`
 from `~/.zshenv`, read by every zsh, and again last in `~/.zshrc`, since the
@@ -1963,8 +1963,8 @@ a launch that sets its own credential run the CLI unchanged):
    filled in time starts the CLI unchanged, and the empty slot goes with
    the slots no process reads.
 
-A slot no launch claimed, as an earlier AccountDock made ahead of
-launches, is removed (`serveSessionSlots.neverClaimed`).
+A slot no launch claimed belongs to no session, since every launch's slot
+appears claimed, and is removed (`serveSessionSlots.neverClaimed`).
 
 **A slot is offered back to its session.** Each pass records in a slot
 the session reading it and its folder (`session`). A claimed slot no

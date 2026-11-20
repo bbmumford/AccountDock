@@ -180,7 +180,7 @@ struct SessionSlots: Sendable {
         var account: UUID?
         /// When the launcher made it for a session, or last took it back for
         /// one (`claimerFile`'s time); nil for a slot no launch has claimed,
-        /// which only an earlier AccountDock made ahead of a launch.
+        /// which belongs to no session.
         var claimedAt: Date?
         /// When its account was last written, by filling or moving it.
         var assignedAt: Date? = nil
@@ -510,10 +510,10 @@ struct SessionSlots: Sendable {
         return true
     }
 
-    /// Deletes a slot no launch has claimed, as an earlier AccountDock made
-    /// ahead of launches, claiming it first with the `mkdir` an earlier
-    /// launcher claimed one with, so one taken in the meantime is left to
-    /// its session. Returns whether the slot was removed.
+    /// Deletes a slot no launch has claimed, claiming it first with the
+    /// `mkdir` of its `claimedMarker`, which fails once anything else has
+    /// claimed it, so one claimed in the meantime is left to its session.
+    /// Returns whether the slot was removed.
     @discardableResult
     func removeUnclaimed(_ directory: URL, reason: String) -> Bool {
         do {

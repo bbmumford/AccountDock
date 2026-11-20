@@ -1104,8 +1104,8 @@ extension AppState {
     /// two of the session's turns; a move rewrites the slot, which the CLI
     /// reads again before its next request. The isolation's
     /// `currentSlotCredential` keeps the active account's token renewed
-    /// while slots hold it. A slot no launch claimed, which only an earlier
-    /// AccountDock made ahead of launches, is removed. A claimed slot whose
+    /// while slots hold it. A slot no launch claimed belongs to no session
+    /// and is removed. A claimed slot whose
     /// session has ended is offered back to it for `reclaimGrace`
     /// (`reclaimChoice`), its credential kept current, so the session
     /// resumed after AccountDock or the machine restarts takes the slot and
@@ -1251,8 +1251,8 @@ extension AppState {
         var removeUnclaimed: [URL] = []
         for slot in slotList {
             let path = slot.directory.path
-            // Every launch makes its slot claimed, so one never claimed was
-            // made ahead of a launch by an earlier AccountDock.
+            // Every launch makes its slot claimed before the slot appears,
+            // so one never claimed belongs to no session.
             guard let claimedAt = slot.claimedAt else {
                 removeUnclaimed.append(slot.directory)
                 continue
@@ -1748,7 +1748,8 @@ extension AppState {
     }
 
     /// Keeps the account-level slots (`SessionSlots.directory(for:)`) that
-    /// running sessions read, which no launch hands to a session any more:
+    /// running sessions read, which no launch hands to a session (each gets
+    /// a session slot of its own):
     /// writes a current credential to each and deletes the rest. A running
     /// session's slot keeps its own account while that account is in the
     /// pool, and otherwise serves the pool's highest-weight account, so the
