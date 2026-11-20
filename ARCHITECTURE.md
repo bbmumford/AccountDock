@@ -1989,11 +1989,19 @@ an event, and so is a pass offering more than one slot at once.
 A run started by full path, from an IDE or the desktop app, or while
 AccountDock was not running reads no slot (no `slotDirectoryByProcess`
 entry): `AppState.noteUnisolatedSessions` lists such sessions on the usage
-tab ("N sessions not isolated") and records each once. One idle in agterm
-(its last event `Stop`) can be restarted in its own slot:
-`/exit`, Enter, then the isolation's resume command (`claude --resume <id>`),
-Enter, typed into its agterm session, so the resumed run goes through the
-launcher, which takes back the slot it had when the resume file names one.
+tab ("N sessions not isolated") and records each once. Each is restarted
+in a slot of its own without being asked once it is idle in agterm (its
+last event `Stop`), at most once every ten minutes whichever rule restarted
+it last (`restartUnisolatedSessions`, `automaticRestarts`), and the usage
+tab offers the same restart at once: `/exit`, Enter, then the isolation's
+resume command (`claude --resume <id>`), Enter, typed into its agterm
+session, so the resumed run goes through the launcher. A pinned session
+comes back on its pin; any other takes back the slot it had when the
+resume file names one, and otherwise asks for the account whose sign-in it
+shared (`automaticRestartAccount`, through `slotRestartResumes`). Each
+restart made is an event. A session of the CLI's background service is
+left to the user and to `handleStuckBackgroundSessions`, since its restart
+turns it into a terminal session.
 A session mid-turn or outside agterm is never typed into; the list
 says why. Its screen is read first (`SessionTerminalInput.screenText`,
 `agtermctl session text`): a footer that reports work still running, such as

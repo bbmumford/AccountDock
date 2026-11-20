@@ -556,6 +556,10 @@ final class AppState: ObservableObject {
     /// (`holdSharedSessionsOnStayingAccount`), so a restart that did not
     /// take is tried again only after `stuckRestartSpacing`.
     var stayingRestartAt: [String: Date] = [:]
+    /// When each session outside a slot of its own was last restarted in
+    /// one without being asked (`restartUnisolatedSessions`), so a restart
+    /// that did not take is tried again only after `stuckRestartSpacing`.
+    var unisolatedRestartAt: [String: Date] = [:]
     /// The last lane admission recorded for each provider
     /// (`noteLaneAdmission`), so the same one is recorded once.
     var laneAdmissionNoted: [AIProviderType: String] = [:]

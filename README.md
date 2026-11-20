@@ -252,9 +252,12 @@ renews each account and rewrites its slots.
 
 Sessions started by full path, from an IDE or the desktop app, or while
 AccountDock was not running read the shared sign-in and move only with the active
-account. The usage tab counts them ("2 sessions not isolated"), and one idle
-in agterm can be restarted in its own slot: AccountDock types `/exit`, then the
-CLI's resume command, so it continues through the launcher. A session mid-turn
+account. The usage tab counts them ("2 sessions not isolated"), and AccountDock
+restarts each in a slot of its own once it is idle between turns in agterm, at
+most once every ten minutes (the usage tab can do it at once): it types
+`/exit`, then the CLI's resume command, so it continues through the launcher,
+on its pin when it is pinned, else in the slot it had or on the account it ran
+on. A session mid-turn
 or outside agterm is never typed into.
 
 Claude Code's background service (`claude --bg`) runs sessions in worker

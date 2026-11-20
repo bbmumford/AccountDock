@@ -125,6 +125,7 @@ extension AppState {
         await resumeSessionsLeftWaiting()
         await noteUnisolatedSessions()
         await handleStuckBackgroundSessions()
+        await restartUnisolatedSessions()
         await rebalanceAutomaticallyIfDue()
 
         await evaluateFailover()
