@@ -435,8 +435,8 @@ and rewrites the slots. Because the account header is fixed for the
 process, Codex sessions move by restart (`movesNeedRestart`):
 `serveSessionSlots` keeps the slot's account and queues the move, and
 `applySlotRestarts`, only for an idle, unpinned session in agterm whose
-footer reports no running work, fills a spare of the new account, names it
-in the resume file for the session, then types `/exit` and
+footer reports no running work, names the new account in the resume file
+for the session, then types `/exit` and
 `codex resume <id>`. The pacer and rebalance cost such a move three times a
 cache rewrite (`sessionMoveCostFactor`).
 
@@ -728,10 +728,14 @@ once the active account is at or near its limit
 `holdSharedSessionsOnStayingAccount` restarts the shared sessions that can
 restart in a slot of their own and holds the rest
 (`SessionWait.Reason.activeAccountStays`) until it serves again, the user
-moves them or the switch is on again. The menu footer's switches
-(`FooterSwitches`, `AppState+MenuToggles`) set it, and `distributeSessions`
-for session balancing, for every provider at once; `ProviderFailoverSwitch`
-sets it for one.
+moves them or the switch is on again. The menu footer's Failover switch
+(`FooterSwitches`, `AppState+MenuToggles`) sets it and the provider's
+`enabled` ("Failover: switch at a threshold or the limit") together
+(`AppState.withFailover`), and shows on only while both are
+(`failoverIsOn`), so failover on always means the active account moves to an
+account with room; its Balancing switch sets `distributeSessions` for
+session balancing, each for every provider at once; `ProviderFailoverSwitch`
+sets both of failover's for one.
 
 ## Failover planning
 
@@ -744,7 +748,14 @@ one would plan from a half-switched state.
 A plan that every account is at its limit (wait for a reset, or no capacity)
 is not acted on during the first ten minutes after launch while an account
 that can be read has neither a reading from this launch nor a stored one
-still fresh (`AppState.awaitsFirstReadings`). The status the plan's standing
+still fresh (`AppState.awaitsFirstReadings`). In the same window an
+automatic switch of the active account waits until both the active
+account and the destination have such a reading, or the active account
+has been refused at its limit since (`AppState.switchAwaitsReadings`): a
+reading stored before launch can show room, or a limit, that is no longer
+there, and a switch made on it is undone once the readings arrive. The
+sign-in AccountDock finds in use when it starts still decides the active
+account (`adoptRenewedCredentials`), since that is no reading. The status the plan's standing
 state shows ("Using … up to its limit", "All accounts exhausted …") is
 restated every cycle; it is recorded as an event only once it has differed
 from the provider's last recorded status for two minutes, the longest quota
@@ -1884,18 +1895,118 @@ cannot change model within a session), `AppState.applyModelFallbacks` types
 each call limited to 15 seconds. The switch, or why it could not be made, is
 recorded as an event.
 
-Sessions served from one-session slots start through the launcher, which
-`SessionSlots.installLauncher` puts first on `PATH` from `~/.zshenv`, read by
-every zsh, and again last in `~/.zshrc`, since the login files' `path_helper`
-and Homebrew's `shellenv` put the CLI's own directory ahead of it in a
-terminal's shell. A run started by full path, from an IDE or the desktop app,
-or before the pool was ready reads no slot (no `slotDirectoryByProcess`
+**Session slots and accounts are two layers.** Every session the launcher
+starts runs in a session slot of its own, a directory under
+`~/.accountdock/<cli>-slots/session/` named by a UUID, and AccountDock
+assigns that slot to an account by writing the account's credential for it
+(`SessionSlots`). A slot is never handed from one session to another, and
+nothing is made ahead of a launch: a session moves between accounts only by
+its slot being rewritten for another (or, for a CLI that reads its account
+once, by a restart into a slot of the new one). No launch is given an
+account-level directory (`<cli>-slots/<account-id>`); `serveRunning`
+serves one only while a running session reads it, and removes it once none
+does.
+
+The launcher, which `SessionSlots.installLauncher` puts first on `PATH`
+from `~/.zshenv`, read by every zsh, and again last in `~/.zshrc`, since the
+login files' `path_helper` and Homebrew's `shellenv` put the CLI's own
+directory ahead of it in a terminal's shell, does this for each launch that
+is a session (sign-in and background-service commands, a `--bg` launch and
+a launch that sets its own credential run the CLI unchanged):
+
+1. **Is AccountDock running?** `started` in the slot root holds AccountDock's
+   process ID and executable name (`markStarted`, written as it starts,
+   before its first pass). When that process is not running under that name
+   (`ps -o comm=`), the CLI starts unchanged on the shared sign-in: nothing
+   would fill a slot. Copying the active sign-in into a slot instead was
+   considered and rejected: the launcher would have to write a Keychain
+   item through `security`, whose value would show in the process list, and
+   a copy with its refresh token would rotate that token under the shared
+   sign-in and AccountDock's saved copy, while one without it stops working
+   when its access token expires. AccountDock restarts such a session in a
+   slot of its own once it runs.
+2. **Is it still starting?** Until `ready` holds the same process ID
+   (`markReady`, written when its first pass has written the pool and resume
+   files; `markStarted` removes the one an earlier run left, since a process
+   ID comes round again after a restart), the launch waits, up to
+   `startWaitSeconds` (60, `ACCOUNTDOCK_START_WAIT`), and starts the CLI
+   unchanged if AccountDock ends meanwhile.
+3. **Its own slot back.** A session resumed by ID (`--resume`, or the
+   isolation's spelling), or continued in a folder (`--continue`, Claude
+   Code) that the resume file names, takes back the slot the resume file
+   names for it while AccountDock offers it (`reclaimable`, below) and the
+   process that claimed it (`claimed/pid`, the launcher's own ID, which the
+   CLI keeps on `exec`) no longer runs: no process has that ID, or the one
+   that has it started more than a few seconds after the claim was written,
+   so was given the ID since, as after a restart. One rename of the marker
+   takes it, which a second launcher, or AccountDock retiring the slot,
+   cannot also make. The slot keeps its account.
+4. **Otherwise a new slot**, made under a name AccountDock does not read
+   (`.making.<pid>`), claimed, given its `wanted` file (the account asked
+   for and the resumed session), then renamed into place whole. The account
+   asked for is the one the resume file names for the session (the slot it
+   could not take back, or the account its history ran on), else the pool's
+   pick by weight, else the active one (`-`). AccountDock fills it
+   (`AppState.fillRequestedSlots`, `filledSlotAccounts`): a pinned session's
+   slot for its pin alone, even when the pin is at its limit, excluded or
+   needs signing in again (with no credential to write, the account file
+   alone names it, an event says why, and the session waits there under the
+   pinned rules, never on another account); any other for the account asked
+   for, else the active account, the first whose credential can be written.
+   The account file is written last, and the launcher, which
+   waits for it up to `fillWaitSeconds` (30, `ACCOUNTDOCK_SLOT_WAIT`), then
+   starts the CLI in the slot. The launcher's request (`.wanted.<pid>`)
+   wakes AccountDock's watch on the directory, so a slot is filled within
+   about a second (one Keychain write and the account file; the audit shows
+   0.09 s a slot typically and 0.7 s at most, with fifteen at once after a
+   restart taking about four seconds), not at the next cycle; a slot not
+   filled in time starts the CLI unchanged, and the empty slot goes with
+   the slots no process reads.
+
+A slot no launch claimed belongs to no session, since every launch's slot
+appears claimed, and is removed (`serveSessionSlots.neverClaimed`).
+
+**A slot is offered back to its session.** Each pass records in a slot
+the session reading it and its folder (`session`). A claimed slot no
+process reads whose session has ended by the same evidence as its
+removal (below; a pin's longer grace aside), whose session runs in no
+other slot and does not move to another account by a restart, is offered
+back (`reclaimable`, `AppState.reclaimChoice`) for `reclaimGrace` (an
+hour): it serves its session's pin, and a pinned session's slot on another
+account is offered only once the pin's credential is written to it, so a
+pinned session never resumes on another account's token (until then the
+resume file names the pin, `reclaimAccount`); an unpinned session's keeps
+the account it served. Its credential is kept current, and the resume
+file names it for the session, so the session resumed after AccountDock
+or the machine restarts takes the slot back on its pin or the account it
+had. The session is known from the slot itself, else from what
+this run saw reading it, else from the credential audit's newest
+`slotAssign` or `slotWrite` naming it (`CredentialAudit.lastSlotSessions`),
+read once per slot. Of several slots one session left, the one claimed last
+is offered. A `--continue` folder is named only where one offered slot's
+session ran there, no running session has a record there, and no newer
+record there names another session. An offer that ends unclaimed is taken
+back and the slot removed (`serveSessionSlots.reclaimEnded`); one a process
+reads again ends without removal. Each session that took its slot back is
+an event, and so is a pass offering more than one slot at once.
+
+A run started by full path, from an IDE or the desktop app, or while
+AccountDock was not running reads no slot (no `slotDirectoryByProcess`
 entry): `AppState.noteUnisolatedSessions` lists such sessions on the usage
-tab ("N sessions not isolated") and records each once. At the user's request
-only, one idle in agterm (its last event `Stop`) is restarted in its own slot:
-`/exit`, Enter, then the isolation's resume command (`claude --resume <id>`),
-Enter, typed into its agterm session, so the resumed run goes through the
-launcher. A session mid-turn or outside agterm is never typed into; the list
+tab ("N sessions not isolated") and records each once. Each is restarted
+in a slot of its own without being asked once it is idle in agterm (its
+last event `Stop`), at most once every ten minutes whichever rule restarted
+it last (`restartUnisolatedSessions`, `automaticRestarts`), and the usage
+tab offers the same restart at once: `/exit`, Enter, then the isolation's
+resume command (`claude --resume <id>`), Enter, typed into its agterm
+session, so the resumed run goes through the launcher. A pinned session
+comes back on its pin; any other takes back the slot it had when the
+resume file names one, and otherwise asks for the account whose sign-in it
+shared (`automaticRestartAccount`, through `slotRestartResumes`). Each
+restart made is an event. A session of the CLI's background service is
+left to the user and to `handleStuckBackgroundSessions`, since its restart
+turns it into a terminal session.
+A session mid-turn or outside agterm is never typed into; the list
 says why. Its screen is read first (`SessionTerminalInput.screenText`,
 `agtermctl session text`): a footer that reports work still running, such as
 Claude Code's `· 1 shell` for a command it started directly, leaves it alone,

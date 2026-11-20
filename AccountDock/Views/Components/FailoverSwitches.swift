@@ -31,16 +31,17 @@ struct SwitchGlyph: View {
 
 /// The menu footer's Failover and Balancing switches, left of Refresh,
 /// Settings and Quit: each sets its setting for every provider it covers
-/// at once (`AppState.setActiveAccountMovement`,
-/// `AppState.setSessionBalancing`), shows on, off or mixed, and lists each
-/// provider's state in its tooltip.
+/// at once (`AppState.setActiveAccountMovement`, which sets "Move the active
+/// account automatically" and "Failover: switch at a threshold or the
+/// limit" together, and `AppState.setSessionBalancing`), shows on, off or
+/// mixed, and lists each provider's state in its tooltip.
 struct FooterSwitches: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var store = FailoverConfigStore.shared
 
     var body: some View {
         let failoverProviders = appState.failoverToggleProviders
-        let failover = AppState.toggleState(failoverProviders.map { store.policy(for: $0).movesActiveAccountAutomatically })
+        let failover = AppState.toggleState(failoverProviders.map { AppState.failoverIsOn(store.policy(for: $0)) })
         let balancingProviders = appState.balancingToggleProviders
         let balancing = AppState.toggleState(balancingProviders.map { store.policy(for: $0).distributeSessions })
 
@@ -54,9 +55,10 @@ struct FooterSwitches: View {
         .focusable(false)
         .hoverExplanation(
             "Failover — \(text(failover).lowercased())",
-            "Moves the active account automatically: at a threshold or its limit, and for weekly balancing. "
-                + "\(summary(failoverProviders) { store.policy(for: $0).movesActiveAccountAutomatically }). "
-                + (failover == .on ? "Click to keep each provider's active account where it is." : "Click to turn it on for every provider.")
+            "On, the active account moves to an account with room at a threshold or its limit, and for weekly balancing: "
+                + "Move the active account automatically and Failover: switch at a threshold or the limit, together. "
+                + "\(summary(failoverProviders) { AppState.failoverIsOn(store.policy(for: $0)) }). "
+                + (failover == .on ? "Click to keep each provider's active account where it is." : "Click to turn both on for every provider.")
         )
         .accessibilityLabel("Failover")
         .accessibilityValue(text(failover))
@@ -99,8 +101,9 @@ struct FooterSwitches: View {
 
 /// One provider's Failover switch, beside its Rebalance icon on the
 /// Sessions page and the usage tab: its "Move the active account
-/// automatically" (`AppState.setActiveAccountMovement`), which the footer's
-/// switch also sets.
+/// automatically" and "Failover: switch at a threshold or the limit"
+/// together (`AppState.setActiveAccountMovement`), which the footer's switch
+/// also sets.
 struct ProviderFailoverSwitch: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var store = FailoverConfigStore.shared
@@ -109,7 +112,7 @@ struct ProviderFailoverSwitch: View {
     let place: String
 
     var body: some View {
-        let on = store.policy(for: provider).movesActiveAccountAutomatically
+        let on = AppState.failoverIsOn(store.policy(for: provider))
         let name = provider.capabilities.displayName
         Button {
             appState.setActiveAccountMovement(!on, for: [provider], from: place)
@@ -118,8 +121,8 @@ struct ProviderFailoverSwitch: View {
         }
         .hoverExplanation(
             "Failover for \(name) — \(on ? "on" : "off")",
-            on ? "The active account moves at a threshold or its limit, and for weekly balancing. Click to keep it where it is."
-               : "The active account stays where it is; session balancing still moves sessions. Click to let failover and weekly balancing move it."
+            on ? "The active account moves to an account with room at a threshold or its limit, and for weekly balancing (Move the active account automatically and Failover: switch at a threshold or the limit, both on). Click to keep it where it is."
+               : "The active account stays where it is; session balancing still moves sessions. Click to turn on Move the active account automatically and Failover: switch at a threshold or the limit, so it moves to an account with room."
         )
         .accessibilityLabel("Failover for \(name)")
         .accessibilityValue(on ? "On" : "Off")

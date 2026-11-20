@@ -32,6 +32,11 @@ struct ClaudeSessionIsolation: ProviderSessionIsolation {
         SessionSlots.resumeArgumentScript(options: ["--resume", "-r"], inlineOptions: ["--resume"])
     }
 
+    /// `--continue` resumes the folder's newest conversation.
+    var continueArgumentScript: String {
+        SessionSlots.continueArgumentScript(options: ["--continue", "-c"])
+    }
+
     func resumeCommand(sessionID: String) -> String {
         "\(executable) --resume \(SessionSlots.shellQuoted(sessionID))"
     }

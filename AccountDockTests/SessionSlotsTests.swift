@@ -149,7 +149,9 @@ final class SessionSlotsTests: XCTestCase {
             if claimed { try fm.createDirectory(at: directory.appendingPathComponent(SessionSlots.claimedMarker), withIntermediateDirectories: true) }
             return directory.path
         }
-        let spare = try sessionSlot(account, claimed: false)
+        let offered = try sessionSlot(account, claimed: true)
+        XCTAssertTrue(slots.markReclaimable(URL(fileURLWithPath: offered)))
+        _ = try sessionSlot(account, claimed: false)
         let claimedHere = try sessionSlot(account, claimed: true)
         let claimedElsewhere = try sessionSlot(account, claimed: true)
         _ = try sessionSlot(other, claimed: false)
@@ -159,186 +161,9 @@ final class SessionSlotsTests: XCTestCase {
         // A claimed slot holds the account it serves now, which may not be
         // the one its account file names before the cycle that moves it.
         let serving = [claimedHere: account, claimedElsewhere: other, otherOwn: account]
-        XCTAssertEqual(slots.directories(holding: account, serving: serving), [own, spare, claimedHere, otherOwn])
+        XCTAssertEqual(slots.directories(holding: account, serving: serving), [own, offered, claimedHere, otherOwn])
         // An account's own slot serving another account holds that one's token.
-        XCTAssertEqual(slots.directories(holding: account, serving: [own: other]), [spare])
-    }
-
-    func testLauncherStartsTheRealCLIOnThePickedSlot() throws {
-        let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: temp) }
-        let home = temp.appendingPathComponent("home with space", isDirectory: true)
-        let realBin = temp.appendingPathComponent("real", isDirectory: true)
-        try FileManager.default.createDirectory(at: realBin, withIntermediateDirectories: true)
-        let real = realBin.appendingPathComponent("claude")
-        try #"""
-        #!/bin/sh
-        printf '%s|%s' "${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}" "$*"
-
-        """#.write(to: real, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: real.path)
-
-        let slots = try XCTUnwrap(SessionSlots(.claudeCode, home: home))
-        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        try slots.installLauncher()
-        XCTAssertTrue(slots.launcherInstalled)
-        let slot = slots.directory(for: UUID())
-        try FileManager.default.createDirectory(at: slot, withIntermediateDirectories: true)
-
-        func launch(_ arguments: [String], environment: [String: String] = [:]) throws -> String {
-            let process = Process()
-            let pipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/bin/sh")
-            process.arguments = ["-c", "exec claude \"$@\"", "sh"] + arguments
-            process.environment = ["PATH": slots.binDirectory.path + ":" + realBin.path + ":/usr/bin:/bin",
-                                   SessionSlots.spareWaitVariable: "0"]
-                .merging(environment) { $1 }
-            process.standardOutput = pipe
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return String(decoding: data, as: UTF8.self)
-        }
-
-        XCTAssertEqual(try launch(["-p", "hi"]), "|-p hi", "no pool file starts the CLI unchanged")
-        slots.writePool([(slot.path, 1)])
-        XCTAssertEqual(try launch(["-p", "hi"]), slot.path + "|-p hi")
-        XCTAssertEqual(try launch(["auth", "status"]), "|auth status")
-        XCTAssertEqual(try launch(["attach", "4822c359"]), "|attach 4822c359", "an attach client claims no slot")
-        XCTAssertEqual(try launch(["daemon", "run"]), "|daemon run")
-        XCTAssertEqual(try launch(["--bg", "-p", "hi"]), "|--bg -p hi", "a background session runs in a worker")
-        XCTAssertEqual(try launch(["-p"], environment: ["CLAUDE_CONFIG_DIR": "/x"]), "|-p")
-        slots.writePool([(SessionSlots.activeEntry, 1)])
-        XCTAssertEqual(try launch([]), "|")
-        slots.writePool([(slot.path + "-missing", 1)])
-        XCTAssertEqual(try launch([]), "|")
-
-        // A spare one-session slot for the picked account is claimed once;
-        // with none left the account's own slot serves.
-        let account = try XCTUnwrap(UUID(uuidString: slot.lastPathComponent))
-        let spare = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: spare, withIntermediateDirectories: true)
-        let other = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
-        XCTAssertTrue(slots.assign(spare, to: account, reason: "test"))
-        XCTAssertTrue(slots.assign(other, to: UUID(), reason: "test"))
-        slots.writePool([(slot.path, 1)])
-        XCTAssertEqual(try launch(["-p"]), spare.path + "|-p")
-        XCTAssertEqual(slots.sessionSlots().first { $0.directory.lastPathComponent == spare.lastPathComponent }?.account, account)
-        XCTAssertNotNil(slots.sessionSlots().first { $0.directory.lastPathComponent == spare.lastPathComponent }?.claimedAt)
-        XCTAssertNil(slots.sessionSlots().first { $0.directory.lastPathComponent == other.lastPathComponent }?.claimedAt)
-        XCTAssertEqual(try launch(["-p"]), slot.path + "|-p", "a claimed spare is never handed out twice")
-
-        // With no spare left the launcher asks for one and takes the one
-        // filled while it waits, so the session still gets a slot of its own.
-        let late = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let asked = expectation(description: "the launcher asked for a spare")
-        DispatchQueue.global().async {
-            for _ in 0..<100 {
-                if slots.takeSpareRequests() {
-                    try? FileManager.default.createDirectory(at: late, withIntermediateDirectories: true)
-                    _ = slots.assign(late, to: account, reason: "test")
-                    asked.fulfill()
-                    return
-                }
-                Thread.sleep(forTimeInterval: 0.05)
-            }
-        }
-        XCTAssertEqual(try launch(["-p"], environment: [SessionSlots.spareWaitVariable: "5"]), late.path + "|-p")
-        wait(for: [asked], timeout: 6)
-        XCTAssertFalse(slots.takeSpareRequests(), "the launcher removes its request once served")
-
-        // A spare is removed only while unclaimed.
-        let unclaimed = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: unclaimed, withIntermediateDirectories: true)
-        XCTAssertTrue(slots.assign(unclaimed, to: account, reason: "test"))
-        XCTAssertFalse(slots.removeSpare(late, reason: "test"), "a spare a session has claimed is left to it")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: late.path))
-        XCTAssertTrue(slots.removeSpare(unclaimed, reason: "test"))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: unclaimed.path))
-
-        // A session resumed by ID goes back to the account its history ran
-        // on, whatever the weights say; an unknown ID is placed by weight.
-        let home2 = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: home2, withIntermediateDirectories: true)
-        let otherAccount = UUID()
-        XCTAssertTrue(slots.assign(home2, to: otherAccount, reason: "test"))
-        slots.writeResumes([(session: "abc-123", path: slots.directory(for: otherAccount).path),
-                            (session: "on-active", path: SessionSlots.activeEntry)])
-        XCTAssertEqual(try launch(["--resume", "abc-123"]), home2.path + "|--resume abc-123")
-        XCTAssertEqual(try launch(["-r", "on-active"]), "|-r on-active")
-        XCTAssertEqual(try launch(["--resume=unknown"]), slot.path + "|--resume=unknown")
-
-        slots.removeLauncher()
-        XCTAssertFalse(slots.launcherInstalled)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: slots.launcher.path))
-        XCTAssertEqual(try String(contentsOf: slots.profileURL, encoding: .utf8), "")
-    }
-
-    func testALauncherFindingAStalePoolAsksForAFreshOneBeforeStartingTheCLIUnchanged() throws {
-        let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: temp) }
-        let home = temp.appendingPathComponent("home", isDirectory: true)
-        let realBin = temp.appendingPathComponent("real", isDirectory: true)
-        try FileManager.default.createDirectory(at: realBin, withIntermediateDirectories: true)
-        let real = realBin.appendingPathComponent("claude")
-        try "#!/bin/sh\nprintf '%s|%s' \"${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}\" \"$*\"\n"
-            .write(to: real, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: real.path)
-        let slots = try XCTUnwrap(SessionSlots(.claudeCode, home: home))
-        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        try slots.installLauncher()
-        let slot = slots.directory(for: UUID())
-        try FileManager.default.createDirectory(at: slot, withIntermediateDirectories: true)
-
-        func launch(wait: Int) throws -> String {
-            let process = Process()
-            let pipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/bin/sh")
-            process.arguments = ["-c", "exec claude \"$@\"", "sh", "-p"]
-            process.environment = ["PATH": slots.binDirectory.path + ":" + realBin.path + ":/usr/bin:/bin",
-                                   SessionSlots.spareWaitVariable: String(wait)]
-            process.standardOutput = pipe
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return String(decoding: data, as: UTF8.self)
-        }
-        func makeStale() throws {
-            slots.writePool([(slot.path, 1)])
-            try FileManager.default.setAttributes(
-                [.modificationDate: Date().addingTimeInterval(-Double(SessionSlots.poolLifetimeMinutes + 60) * 60)],
-                ofItemAtPath: slots.poolFile.path)
-        }
-
-        // Before AccountDock has made its slot directory, nothing can answer.
-        try makeStale()
-        XCTAssertEqual(try launch(wait: 5), "|-p")
-
-        // AccountDock running: it sees the request and writes the pool again.
-        try FileManager.default.createDirectory(at: slots.sessionRoot, withIntermediateDirectories: true)
-        try makeStale()
-        let asked = expectation(description: "the launcher asked for a fresh pool")
-        DispatchQueue.global().async {
-            for _ in 0..<100 {
-                if slots.takeSpareRequests() {
-                    slots.writePool([(slot.path, 1)])
-                    asked.fulfill()
-                    return
-                }
-                Thread.sleep(forTimeInterval: 0.05)
-            }
-        }
-        XCTAssertEqual(try launch(wait: 5), slot.path + "|-p")
-        wait(for: [asked], timeout: 6)
-        XCTAssertFalse(slots.takeSpareRequests(), "the launcher removes its request")
-
-        // AccountDock not running: no new pool within the wait.
-        try makeStale()
-        let started = Date()
-        XCTAssertEqual(try launch(wait: 1), "|-p")
-        XCTAssertLessThan(Date().timeIntervalSince(started), 4)
-        XCTAssertFalse(slots.takeSpareRequests())
+        XCTAssertEqual(slots.directories(holding: account, serving: [own: other]), [offered])
     }
 
     func testShellQuotingSurvivesSingleQuotes() {
@@ -407,34 +232,15 @@ final class SessionSlotsTests: XCTestCase {
         let slots = try XCTUnwrap(SessionSlots(.claudeCode, home: temp))
         let directory = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        // Claimed while still empty: no account file yet, so neither the
-        // launcher nor spare upkeep treats it as a spare.
+        // Claimed while still empty: no account file yet, so no pass takes
+        // it for a slot no launch claimed.
         XCTAssertTrue(slots.claimRequested(directory))
         let slot = try XCTUnwrap(slots.sessionSlots().first)
         XCTAssertNil(slot.account)
         XCTAssertNotNil(slot.claimedAt)
         XCTAssertTrue(slot.requested)
-        XCTAssertFalse(slots.removeSpare(directory, reason: "test"), "a claimed slot is not removed as a spare")
+        XCTAssertFalse(slots.removeUnclaimed(directory, reason: "test"), "a claimed slot is not removed as one no launch claimed")
         XCTAssertTrue(slots.assign(directory, to: UUID(), reason: "test"))
-    }
-
-    func testSparesCoverEverySessionSeenRunningAtOnce() {
-        XCTAssertEqual(AppState.spareTarget(peakSessions: 0), AppState.minimumSpares)
-        XCTAssertEqual(AppState.spareTarget(peakSessions: 12), 14, "a restart restoring twelve sessions finds a slot for each")
-        XCTAssertEqual(AppState.spareTarget(peakSessions: 200), AppState.maximumSpares)
-    }
-
-    func testTheSessionPeakOutlivesARestartAndExpiresAfterADay() {
-        let now = Date()
-        let hour: TimeInterval = 60 * 60
-        XCTAssertEqual(AppState.sessionPeak(stored: nil, running: 4, now: now).count, 4)
-        // Right after a restart nothing runs yet; the peak stands.
-        let before = (count: 12, at: now.addingTimeInterval(-2 * hour))
-        XCTAssertEqual(AppState.sessionPeak(stored: before, running: 0, now: now).count, 12)
-        XCTAssertEqual(AppState.sessionPeak(stored: before, running: 0, now: now).at, before.at, "an unchanged peak is not written again")
-        XCTAssertEqual(AppState.sessionPeak(stored: before, running: 15, now: now).count, 15)
-        XCTAssertEqual(AppState.sessionPeak(stored: before, running: 12, now: now).at, now, "a peak still matched is kept current")
-        XCTAssertEqual(AppState.sessionPeak(stored: (12, now.addingTimeInterval(-25 * hour)), running: 2, now: now).count, 2)
     }
 
     func testEventsNameEachSessionApart() {

@@ -236,9 +236,13 @@ renews each account and rewrites its slots.
   **Serve sessions from several accounts at once** is on and no route target is
   chosen. AccountDock puts a small launcher first on `PATH`, from `~/.zshenv`
   and again last in `~/.zshrc` so a terminal's shell finds it ahead of the CLI,
-  and the launcher starts each session in a slot of an account picked for it.
-  If AccountDock stops, the launcher starts the CLI unchanged within half an
-  hour, so no session is left on a slot nothing renews.
+  and the launcher starts each session in a session slot of its own, which
+  AccountDock fills, within about a second, for the account the session last
+  ran on, else one picked for it, else the active one. A session resumed by ID
+  takes back the slot it had, with its account, for an hour after it ended, so
+  sessions a terminal restores after a restart continue where they were.
+  While AccountDock is starting, a launch waits for it; while it is not
+  running, the CLI starts unchanged on the shared sign-in.
 - **Codex** and **Kimi Code** slots keep session history in the CLI's usual
   home. A session opened from an account card always runs in one, and every
   terminal session does once **Serve sessions from several accounts at once**
@@ -246,11 +250,14 @@ renews each account and rewrites its slots.
   Codex session moves by restarting: once it is idle in agterm and unpinned,
   AccountDock ends it and resumes it with `codex resume` on the new account.
 
-Sessions started by full path, from an IDE or the desktop app, or before the
-slots were ready read the shared sign-in and move only with the active
-account. The usage tab counts them ("2 sessions not isolated"), and one idle
-in agterm can be restarted in its own slot: AccountDock types `/exit`, then the
-CLI's resume command, so it continues through the launcher. A session mid-turn
+Sessions started by full path, from an IDE or the desktop app, or while
+AccountDock was not running read the shared sign-in and move only with the active
+account. The usage tab counts them ("2 sessions not isolated"), and AccountDock
+restarts each in a slot of its own once it is idle between turns in agterm, at
+most once every ten minutes (the usage tab can do it at once): it types
+`/exit`, then the CLI's resume command, so it continues through the launcher,
+on its pin when it is pinned, else in the slot it had or on the account it ran
+on. A session mid-turn
 or outside agterm is never typed into.
 
 Claude Code's background service (`claude --bg`) runs sessions in worker
@@ -288,7 +295,10 @@ Three separate things move work, and every event names which one acted.
 
 **Move the active account automatically** (Settings → Failover, the footer's
 Failover switch, or the provider headings' switch) decides whether failover
-and weekly balancing may move the active account at all. Off, it stays where
+and weekly balancing may move the active account at all. The footer's and the
+headings' Failover switches set it and **Failover: switch at a threshold or
+the limit** together, so Failover on always means the active account moves to
+an account with room; Settings keeps the two apart. Off, it stays where
 you put it: when it reaches its limit, the sessions on the shared sign-in are
 not moved together; those that can restart in a slot of their own do, so
 session balancing can place them, and the rest are paused until it resets or
@@ -388,8 +398,9 @@ provider's failover order when it should take work.
   reset or for you to move them. Sessions in slots of their own keep moving.
   The lock beside the active account on the Accounts tab is the same switch.
 - **Switches in the menu.** Left of Refresh, Settings and Quit at the bottom
-  of the menu, **Failover** turns Move the active account automatically on or
-  off for every provider at once, and **Balancing** turns session balancing
+  of the menu, **Failover** turns Move the active account automatically and
+  Failover: switch at a threshold or the limit on or off together for every
+  provider at once (it shows on only while both are), and **Balancing** turns session balancing
   (Serve sessions from several accounts at once) on or off for every provider
   whose sessions can use it. Each shows on, off, or mixed when providers
   differ (a mixed one turns them all on), its tooltip lists each provider

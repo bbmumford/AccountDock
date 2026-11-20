@@ -150,27 +150,36 @@ final class KimiSessionIsolationTests: XCTestCase {
         let account = UUID(), other = UUID()
         let credential = try XCTUnwrap(isolation.slotCredential(from: stored("a1")))
         let otherCredential = try XCTUnwrap(isolation.slotCredential(from: stored("b2")))
-        let spare = try XCTUnwrap(slots.makeSlot(for: account, credential: credential, reason: "test"))
-        let otherSpare = try XCTUnwrap(slots.makeSlot(for: other, credential: otherCredential, reason: "test"))
+        let credentials = [account: credential, other: otherCredential]
+        try FileManager.default.createDirectory(at: slots.sessionRoot, withIntermediateDirectories: true)
         slots.writePool([(slots.directory(for: account).path, 1)])
+        let harness = LauncherHarness(slots: slots, realBin: realBin)
+        defer { harness.stopResponding(); harness.stopDock() }
+        try harness.startDock()
+        // With `unreadable` set, a slot is named for its account without
+        // the pair the launcher reads from it.
+        let unreadable = Locked(false)
+        harness.respond(active: account) { request, id in
+            guard let value = credentials[id] else { return }
+            if unreadable.value {
+                _ = slots.assign(request.directory, to: id, reason: "test")
+            } else {
+                _ = slots.fill(request.directory, account: id, credential: value, reason: "test", session: request.session)
+            }
+        }
 
         func launch(_ arguments: [String], environment: [String: String] = [:]) throws -> String {
-            let process = Process()
-            let pipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/bin/sh")
-            process.arguments = ["-c", "exec kimi \"$@\"", "sh"] + arguments
-            process.environment = ["PATH": slots.binDirectory.path + ":" + realBin.path + ":/usr/bin:/bin",
-                                   SessionSlots.spareWaitVariable: "0"]
-                .merging(environment) { $1 }
-            process.standardOutput = pipe
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return String(decoding: data, as: UTF8.self)
+            try harness.launch(arguments, environment: environment)
         }
-        func expected(_ slot: URL, _ arguments: String) throws -> String {
+        /// The session slot `output` names, after checking the launcher
+        /// exported its pair and passed `arguments`.
+        func slot(of output: String, _ arguments: String, account id: UUID) throws -> URL {
+            let slot = URL(fileURLWithPath: String(output.split(separator: "|").first ?? ""), isDirectory: true)
+            XCTAssertEqual(slot.deletingLastPathComponent().path, slots.sessionRoot.path, output)
             let selector = try XCTUnwrap(isolation.selector(in: slot))
-            return "\(slot.path)|\(selector.baseURL)|\(selector.oauthHost)|\(arguments)"
+            XCTAssertEqual(output, "\(slot.path)|\(selector.baseURL)|\(selector.oauthHost)|\(arguments)")
+            XCTAssertEqual(slots.sessionSlots().first { $0.directory.path == slot.path }?.account, id)
+            return slot
         }
 
         // Sign-in, account and configuration commands run the real CLI
@@ -184,29 +193,28 @@ final class KimiSessionIsolationTests: XCTestCase {
                        "|https://API.kimi.ai/coding/v1||-p hi", "a launch inside a slot's session stays on that slot")
 
         // A session resumed by ID goes back to the account its history ran
-        // on, by either spelling of the option.
+        // on, by either spelling of the option, each in a slot of its own.
         slots.writeResumes([(session: "s-1", path: slots.directory(for: other).path)])
-        XCTAssertEqual(try launch(["-S", "s-1"]), try expected(otherSpare, "-S s-1"))
-        let again = try XCTUnwrap(slots.makeSlot(for: other, credential: otherCredential, reason: "test"))
-        XCTAssertEqual(try launch(["--session=s-1"]), try expected(again, "--session=s-1"))
+        let resumed = try slot(of: try launch(["-S", "s-1"]), "-S s-1", account: other)
+        let again = try slot(of: try launch(["--session=s-1"]), "--session=s-1", account: other)
+        XCTAssertNotEqual(resumed, again)
 
-        // A new session claims a spare of the pool's account.
-        XCTAssertEqual(try launch(["-y"]), try expected(spare, "-y"))
+        // A new session gets a slot of its own on the pool's account.
+        let new = try slot(of: try launch(["-y"]), "-y", account: account)
 
-        // A spare whose pair cannot be read runs the CLI unchanged.
-        let broken = try XCTUnwrap(slots.makeSlot(for: account, credential: credential, reason: "test"))
-        try FileManager.default.removeItem(at: broken.appendingPathComponent(KimiSessionIsolation.baseURLFile))
+        // A slot whose pair cannot be read runs the CLI unchanged.
+        unreadable.mutate { $0 = true }
         XCTAssertEqual(try launch(["-y"]), "|||-y")
 
         // Each kimi process is mapped to the slot its environment names; a
         // process on Kimi Code's own credential reads no slot.
         let list = """
-          321     1 /Users/me/.kimi-code/bin/kimi -S s-1 ACCOUNTDOCK_KIMI_SLOT=\(otherSpare.path) KIMI_CODE_BASE_URL=https://API.kimi.ai/coding/v1 HOME=/x
+          321     1 /Users/me/.kimi-code/bin/kimi -S s-1 ACCOUNTDOCK_KIMI_SLOT=\(resumed.path) KIMI_CODE_BASE_URL=https://API.kimi.ai/coding/v1 HOME=/x
           322     1 /Users/me/.kimi-code/bin/kimi -y HOME=/x
           323     1 /Users/me/.kimi-code/bin/kimi KIMI_CODE_BASE_URL=https://api.kimi.ai/coding/v1 HOME=/x
-          324     1 /Users/me/.kimi-code/bin/kimi -y ACCOUNTDOCK_KIMI_SLOT=\(spare.path)
+          324     1 /Users/me/.kimi-code/bin/kimi -y ACCOUNTDOCK_KIMI_SLOT=\(new.path)
         """
-        XCTAssertEqual(slots.directoriesByProcess(in: ProcessTable(listing: list, columns: .pidPPID)), [321: otherSpare.path, 324: spare.path])
+        XCTAssertEqual(slots.directoriesByProcess(in: ProcessTable(listing: list, columns: .pidPPID)), [321: resumed.path, 324: new.path])
     }
 
     func testASessionStartedOnASlotSetsItsPair() throws {
@@ -367,7 +375,7 @@ final class KimiSessionIsolationTests: XCTestCase {
         let slots = SessionSlots(isolation: isolation, home: root.appendingPathComponent("home", isDirectory: true))
         let first = try XCTUnwrap(isolation.slotCredential(from: stored("a1")))
         let second = try XCTUnwrap(isolation.slotCredential(from: stored("b2", expiresAt: 1_900_000_500)))
-        let slot = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: first, reason: "test"))
+        let slot = try XCTUnwrap(slots.filledSlot(for: UUID(), credential: first, reason: "test"))
         XCTAssertEqual(isolation.readCredential(in: slot), first)
 
         XCTAssertTrue(slots.serve(slot, credential: second, account: nil, reason: "test"))
@@ -383,8 +391,8 @@ final class KimiSessionIsolationTests: XCTestCase {
         let isolation = isolation()
         let slots = SessionSlots(isolation: isolation, home: root.appendingPathComponent("home", isDirectory: true))
         let credential = try XCTUnwrap(isolation.slotCredential(from: stored("a1")))
-        let removed = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: credential, reason: "test"))
-        let kept = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: credential, reason: "test"))
+        let removed = try XCTUnwrap(slots.filledSlot(for: UUID(), credential: credential, reason: "test"))
+        let kept = try XCTUnwrap(slots.filledSlot(for: UUID(), credential: credential, reason: "test"))
         let removedFile = try XCTUnwrap(isolation.credentialFile(in: removed))
         let before = try snapshot()
 
@@ -397,14 +405,14 @@ final class KimiSessionIsolationTests: XCTestCase {
         XCTAssertEqual(isolation.readCredential(in: kept), credential)
 
         // A removed slot leaves its spelling free for the next one.
-        let next = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: credential, reason: "test"))
+        let next = try XCTUnwrap(slots.filledSlot(for: UUID(), credential: credential, reason: "test"))
         XCTAssertEqual(isolation.credentialFile(in: next), removedFile)
     }
 
     func testRemovingASlotKeepsACredentialConfigTomlStillNames() throws {
         let isolation = isolation()
         let slots = SessionSlots(isolation: isolation, home: root.appendingPathComponent("home", isDirectory: true))
-        let slot = try XCTUnwrap(slots.makeSlot(for: UUID(), credential: try XCTUnwrap(isolation.slotCredential(from: stored("a1"))), reason: "test"))
+        let slot = try XCTUnwrap(slots.filledSlot(for: UUID(), credential: try XCTUnwrap(isolation.slotCredential(from: stored("a1"))), reason: "test"))
         let file = try XCTUnwrap(isolation.credentialFile(in: slot))
         let selector = try XCTUnwrap(isolation.selector(in: slot))
         // config.toml names the slot's spelling, and the file under that
@@ -549,10 +557,13 @@ final class KimiSessionIsolationTests: XCTestCase {
 
     static let golden = #"""
     #!/bin/sh
-    # Installed by AccountDock: starts kimi on one of the accounts in
-    # '/Users/golden/.accountdock/kimi-slots/pool.tsv', picked at random by weight.
+    # Installed by AccountDock: starts kimi in a session slot of its own,
+    # which AccountDock fills for the account the session last ran on, or
+    # the one '/Users/golden/.accountdock/kimi-slots/pool.tsv' picks at random by weight, or the active one.
     launcher='/Users/golden/.accountdock/bin/kimi'
+    root='/Users/golden/.accountdock/kimi-slots'
     pool='/Users/golden/.accountdock/kimi-slots/pool.tsv'
+    sessions='/Users/golden/.accountdock/kimi-slots/session'
     real=
     saved_ifs=$IFS
     IFS=:
@@ -565,7 +576,6 @@ final class KimiSessionIsolationTests: XCTestCase {
       break
     done
     IFS=$saved_ifs
-    sessions='/Users/golden/.accountdock/kimi-slots/session'
     if [ -z "$real" ]; then
       echo "kimi: command not found" >&2
       exit 127
@@ -579,24 +589,33 @@ final class KimiSessionIsolationTests: XCTestCase {
       login|logout|provider|doctor|migrate|upgrade|update|install-desktop|app|session|import-sessions|export|fork|vis) exec "$real" "$@" ;;
     esac
 
-    # A stale pool, as after a restart before AccountDock has written a
-    # new one, is asked for again the way a spare is, and given
-    # 4 seconds; without AccountDock running the CLI starts unchanged.
-    fresh_pool() { [ -n "$(find "$pool" -mmin -30 2>/dev/null)" ]; }
-    if ! fresh_pool; then
-      [ -d "$sessions" ] || exec "$real" "$@"
-      request="$sessions/.wanted.pool.$$"
-      wait=${ACCOUNTDOCK_SPARE_WAIT:-4}
-      case "$wait" in ''|*[!0-9]*) wait=4 ;; esac
-      tries=0
-      while ! fresh_pool && [ "$tries" -lt $((wait * 5)) ]; do
-        : > "$request" 2>/dev/null || break
-        tries=$((tries + 1))
-        sleep 0.2
-      done
-      rm -f "$request"
-      fresh_pool || exec "$real" "$@"
-    fi
+    # AccountDock fills every session slot, and runs while the process its
+    # started file names, by ID and name, runs. Without it the CLI starts
+    # unchanged, and AccountDock restarts the session in a slot of its own
+    # once it runs.
+    dock=
+    dock_name=
+    [ -f "$root/started" ] && read -r dock dock_name < "$root/started"
+    case "$dock" in *[!0-9]*) dock= ;; esac
+    [ -n "$dock" ] && [ -n "$dock_name" ] || exec "$real" "$@"
+    case "$(ps -o comm= -p "$dock" 2>/dev/null)" in
+      "$dock_name"|*/"$dock_name") ;;
+      *) exec "$real" "$@" ;;
+    esac
+    # While AccountDock is starting, its first pass over the slots, which
+    # writes the pool and resume files, is waited for: its ID in the ready file.
+    wait=${ACCOUNTDOCK_START_WAIT:-60}
+    case "$wait" in ''|*[!0-9]*) wait=60 ;; esac
+    tries=0
+    ready=
+    [ -f "$root/ready" ] && read -r ready < "$root/ready"
+    while [ "$ready" != "$dock" ] && [ "$tries" -lt $((wait * 5)) ]; do
+      kill -0 "$dock" 2>/dev/null || exec "$real" "$@"
+      sleep 0.2
+      tries=$((tries + 1))
+      ready=
+      [ -f "$root/ready" ] && read -r ready < "$root/ready"
+    done
     resumes='/Users/golden/.accountdock/kimi-slots/resume.tsv'
     resumed=
     previous=
@@ -605,55 +624,97 @@ final class KimiSessionIsolationTests: XCTestCase {
       case "$argument" in --session=*) resumed=${argument#--session=} ;; esac
       previous=$argument
     done
+    continued=
+
     slot=
-    if [ -n "$resumed" ] && [ -n "$(find "$resumes" -mmin -30 2>/dev/null)" ]; then
-      slot=$(awk -F '\t' -v id="$resumed" '$1 == id { print $2; exit }' "$resumes" 2>/dev/null)
+    if { [ -n "$resumed" ] || [ -n "$continued" ]; } && [ -n "$(find "$resumes" -mmin -30 2>/dev/null)" ]; then
+      if [ -n "$resumed" ]; then
+        slot=$(awk -F '\t' -v id="$resumed" '$1 == id { print $2; exit }' "$resumes" 2>/dev/null)
+      else
+        here=$(pwd -P 2>/dev/null)
+        slot=$(awk -F '\t' -v a="$PWD" -v b="$here" '$1 == a || $1 == b { print $2; exit }' "$resumes" 2>/dev/null)
+      fi
     fi
-    [ -n "$slot" ] || slot=$(awk -F '\t' -v pid="$$" '
-      BEGIN { srand(); seed = srand(); srand(seed + pid * 7919) }
-      $1 > 0 { n++; weight[n] = $1; path[n] = $2; total += $1 }
-      END {
-        if (n == 0) exit
-        r = rand() * total
-        for (i = 1; i <= n; i++) { r -= weight[i]; if (r < 0) { print path[i]; exit } }
-        print path[n]
-      }' "$pool" 2>/dev/null)
-    # Each session gets a slot of its own, so AccountDock can move it
-    # alone. With no spare left, AccountDock is asked for one and given
-    # 4 seconds to fill it.
-    if [ -n "$slot" ] && [ "$slot" != "-" ]; then
-      account=${slot##*/}
-      request="$sessions/.wanted.$$"
-      wait=${ACCOUNTDOCK_SPARE_WAIT:-4}
-      case "$wait" in ''|*[!0-9]*) wait=4 ;; esac
-      tries=0
-      while :; do
-        for spare in "$sessions"/*; do
-          [ -f "$spare/account" ] || continue
-          [ "$(cat "$spare/account" 2>/dev/null)" = "$account" ] || continue
-          if mkdir "$spare/claimed" 2>/dev/null; then
-            [ "$tries" -eq 0 ] || rm -f "$request"
-            ACCOUNTDOCK_KIMI_SLOT=$spare
-            KIMI_CODE_BASE_URL=$(cat "$spare/base-url" 2>/dev/null) || exec "$real" "$@"
-            KIMI_CODE_OAUTH_HOST=$(cat "$spare/oauth-host" 2>/dev/null) || exec "$real" "$@"
-            [ -n "$KIMI_CODE_BASE_URL" ] && [ -n "$KIMI_CODE_OAUTH_HOST" ] || exec "$real" "$@"
-            export ACCOUNTDOCK_KIMI_SLOT KIMI_CODE_BASE_URL KIMI_CODE_OAUTH_HOST
-            exec "$real" "$@"
-          fi
-        done
-        [ "$tries" -lt $((wait * 5)) ] || break
-        : > "$request" 2>/dev/null || break
-        tries=$((tries + 1))
-        sleep 0.2
-      done
-      [ "$tries" -eq 0 ] || rm -f "$request"
+    # A session resumed into the session slot it last ran in takes it back:
+    # AccountDock offers that slot once its session has ended, and the
+    # rename of its reclaimable marker, which one launcher alone can make,
+    # takes it, unless the process that claimed it still runs: a process
+    # with its ID that started no later than the claim was written (one
+    # that started later was given the ID since, as after a restart).
+    # Otherwise the session asks for the account that slot serves.
+    account=
+    case "$slot" in
+      "$sessions"/*)
+        claimer=
+        [ -f "$slot/claimed/pid" ] && read -r claimer < "$slot/claimed/pid"
+        case "$claimer" in *[!0-9]*) claimer= ;; esac
+        running=
+        if [ -n "$claimer" ] && kill -0 "$claimer" 2>/dev/null; then
+          running=1
+          written=$(stat -f %m "$slot/claimed/pid" 2>/dev/null)
+          started=$(LC_ALL=C ps -o lstart= -p "$claimer" 2>/dev/null)
+          started=$(LC_ALL=C date -j -f '%a %b %e %T %Y' "$started" +%s 2>/dev/null)
+          case "$written" in *[!0-9]*) written= ;; esac
+          case "$started" in *[!0-9]*) started= ;; esac
+          [ -n "$written" ] && [ -n "$started" ] && [ "$started" -gt $((written + 5)) ] && running=
+        fi
+        if [ -z "$running" ] && mv "$slot/reclaimable" "$slot/claimed/reclaimed.$$" 2>/dev/null; then
+          rm -f "$slot/claimed/reclaimed.$$"
+          { echo "$$" > "$slot/claimed/pid"; } 2>/dev/null
+          ACCOUNTDOCK_KIMI_SLOT=$slot
+          KIMI_CODE_BASE_URL=$(cat "$slot/base-url" 2>/dev/null) || exec "$real" "$@"
+          KIMI_CODE_OAUTH_HOST=$(cat "$slot/oauth-host" 2>/dev/null) || exec "$real" "$@"
+          [ -n "$KIMI_CODE_BASE_URL" ] && [ -n "$KIMI_CODE_OAUTH_HOST" ] || exec "$real" "$@"
+          export ACCOUNTDOCK_KIMI_SLOT KIMI_CODE_BASE_URL KIMI_CODE_OAUTH_HOST
+          exec "$real" "$@"
+        fi
+        [ -f "$slot/account" ] && read -r account < "$slot/account"
+        ;;
+      */*) account=${slot##*/} ;;
+      ?*) account=$slot ;;
+    esac
+    if [ -z "$account" ] && [ -n "$(find "$pool" -mmin -30 2>/dev/null)" ]; then
+      account=$(awk -F '\t' -v pid="$$" '
+        BEGIN { srand(); seed = srand(); srand(seed + pid * 7919) }
+        $1 > 0 { n++; weight[n] = $1; path[n] = $2; total += $1 }
+        END {
+          if (n == 0) exit
+          r = rand() * total
+          for (i = 1; i <= n; i++) { r -= weight[i]; if (r < 0) { print path[i]; exit } }
+          print path[n]
+        }' "$pool" 2>/dev/null)
+      account=${account##*/}
     fi
-    if [ -z "$slot" ] || [ "$slot" = "-" ] || [ ! -d "$slot" ]; then
+    [ -n "$account" ] || account=-
+    # The session's own slot: made under a name AccountDock does not read,
+    # claimed, told the account it asks for, then renamed into place whole.
+    # AccountDock fills it for that account, its account file last, and is
+    # given 30 seconds to; the CLI starts unchanged if it does not.
+    name=$(uuidgen 2>/dev/null)
+    making="$sessions/.making.$$"
+    mine="$sessions/$name"
+    [ -n "$name" ] && mkdir -m 700 "$making" 2>/dev/null && mkdir "$making/claimed" 2>/dev/null \
+      && { echo "$$" > "$making/claimed/pid"; } 2>/dev/null \
+      && { printf '%s\n%s\n' "$account" "$resumed" > "$making/wanted"; } 2>/dev/null \
+      && mv "$making" "$mine" 2>/dev/null || exec "$real" "$@"
+    request="$sessions/.wanted.$$"
+    wait=${ACCOUNTDOCK_SLOT_WAIT:-30}
+    case "$wait" in ''|*[!0-9]*) wait=30 ;; esac
+    tries=0
+    while [ ! -f "$mine/account" ] && [ "$tries" -lt $((wait * 5)) ]; do
+      [ $((tries % 25)) -eq 0 ] && : > "$request" 2>/dev/null
+      kill -0 "$dock" 2>/dev/null || break
+      sleep 0.2
+      tries=$((tries + 1))
+    done
+    rm -f "$request"
+    if [ ! -f "$mine/account" ]; then
+      rm -f "$mine/wanted"
       exec "$real" "$@"
     fi
-    ACCOUNTDOCK_KIMI_SLOT=$slot
-    KIMI_CODE_BASE_URL=$(cat "$slot/base-url" 2>/dev/null) || exec "$real" "$@"
-    KIMI_CODE_OAUTH_HOST=$(cat "$slot/oauth-host" 2>/dev/null) || exec "$real" "$@"
+    ACCOUNTDOCK_KIMI_SLOT=$mine
+    KIMI_CODE_BASE_URL=$(cat "$mine/base-url" 2>/dev/null) || exec "$real" "$@"
+    KIMI_CODE_OAUTH_HOST=$(cat "$mine/oauth-host" 2>/dev/null) || exec "$real" "$@"
     [ -n "$KIMI_CODE_BASE_URL" ] && [ -n "$KIMI_CODE_OAUTH_HOST" ] || exec "$real" "$@"
     export ACCOUNTDOCK_KIMI_SLOT KIMI_CODE_BASE_URL KIMI_CODE_OAUTH_HOST
     exec "$real" "$@"

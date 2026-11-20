@@ -55,6 +55,23 @@ final class MenuToggleTests: XCTestCase {
                        "Failover turned off from the Sessions page for Claude Code.")
     }
 
+    func testTheFailoverSwitchSetsMovingTheActiveAccountAndSwitchingAtTheLimitTogether() {
+        var policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
+        policy.enabled = false
+        policy.movesActiveAccountAutomatically = true
+        XCTAssertFalse(AppState.failoverIsOn(policy), "moving the active account without switching at the limit is not failover on")
+        let on = AppState.withFailover(policy, on: true)
+        XCTAssertTrue(on.enabled)
+        XCTAssertTrue(on.movesActiveAccountAutomatically)
+        XCTAssertTrue(AppState.failoverIsOn(on))
+        let off = AppState.withFailover(on, on: false)
+        XCTAssertFalse(off.enabled)
+        XCTAssertFalse(off.movesActiveAccountAutomatically)
+        XCTAssertEqual(AppState.withFailover(off, on: true), on, "every other setting is as it was")
+        XCTAssertEqual(AppState.toggleState([AppState.failoverIsOn(on), AppState.failoverIsOn(policy)]), .mixed,
+                       "a provider with only one of the two on shows the footer mixed, and a click turns both on")
+    }
+
     func testFailoverIsTheMoveTheActiveAccountSwitch() {
         var policy = ProviderFailoverPolicy.defaults(for: .claudeCode)
         policy.enabled = true

@@ -128,8 +128,9 @@ final class CredentialAuditTests: XCTestCase {
 
         // Session slots, through a fake isolation.
         let slots = SessionSlots(isolation: AuditFakeIsolation(), home: root.appendingPathComponent("home"), audit: audit)
-        let slot = try XCTUnwrap(slots.makeSlot(for: kimiAccount, credential: SlotCredential(contents: kimiJSON()),
-                                                reason: "test.makeSlot"))
+        let slot = slots.sessionRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        XCTAssertTrue(slots.fill(slot, account: kimiAccount, credential: SlotCredential(contents: kimiJSON()),
+                                 reason: "test.makeSlot"))
         XCTAssertTrue(slots.serve(slot, credential: SlotCredential(contents: second), account: alpha, reason: "test.move",
                                   session: "session-1", process: 4242))
         slots.remove(slot, reason: "test.remove")

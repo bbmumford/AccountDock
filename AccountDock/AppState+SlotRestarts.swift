@@ -26,16 +26,16 @@ struct SlotRestartResume: Equatable {
 /// Moves sessions of a CLI that cannot change account while it runs
 /// (`ProviderSessionIsolation.movesNeedRestart`): each is ended between
 /// turns and resumed by ID through the launcher, which starts the resumed
-/// run in a spare slot written for the new account. Everything here is the
-/// same for every such provider.
+/// run in a session slot of its own filled for the new account. Everything
+/// here is the same for every such provider.
 extension AppState {
     /// How long a restarted session's resume keeps naming its new account
     /// in the resume file, for a resumed run slow to start.
     nonisolated static let slotRestartResumeLifetime: TimeInterval = 10 * 60
 
     /// Applies `pendingSlotRestarts`: for each session still idle and not
-    /// pinned, fills a spare slot of the destination, names it in the
-    /// resume file for the session, and types the CLI's exit and its resume
+    /// pinned, names the destination in the resume file for the session,
+    /// and types the CLI's exit and its resume
     /// command into the session's terminal (`SessionTerminalActions`). The
     /// slot the session leaves keeps its account until it is released.
     /// Called after every `maintainSessionSlots`.
@@ -80,26 +80,24 @@ extension AppState {
         }
     }
 
-    /// Fills a spare slot of `destination` and names it in the resume file
-    /// for `sessionID`, so the launcher starts the session's resumed run
-    /// there. Used before a restart that moves a session: by
-    /// `applySlotRestart`, and by `restartInSlot` for a session on the
-    /// shared sign-in. Returns whether the slot is ready.
+    /// Names `destination` in the resume file for `sessionID`, so the
+    /// launcher starting the session's resumed run asks for a session slot
+    /// on it, which `fillRequestedSlots` fills; only while `destination`
+    /// has a credential to write. Used before a restart that moves a
+    /// session: by `applySlotRestart`, and by `restartInSlot` for a session
+    /// on the shared sign-in. Returns whether the destination can be
+    /// served.
     func prepareResumeSlot(_ sessionID: String, slots: SessionSlots, on destination: Account, reason: String) async -> Bool {
         let lifetime: TimeInterval = readsLiveCredential(destination) ? 60 : 2 * 60 * 60
-        guard let credential = await slots.isolation.currentSlotCredential(for: destination, minimumLifetime: lifetime,
-                                                                            from: self) else {
-            restartLog.warning("No credential of \(messageName(destination)) for a restarted session")
+        guard await slots.isolation.currentSlotCredential(for: destination, minimumLifetime: lifetime, from: self) != nil else {
+            restartLog.warning("No credential of \(messageName(destination)) for a restarted session (\(reason))")
             return false
         }
         let to = destination.id
-        let ready = await Task.detached(priority: .userInitiated) { () -> Bool in
-            guard slots.makeSpare(for: to, credential: credential, reason: reason) else { return false }
+        await Task.detached(priority: .userInitiated) {
             slots.addResume(session: sessionID, path: slots.directory(for: to).path)
-            return true
         }.value
-        if !ready { restartLog.error("No spare slot of \(messageName(destination)) for a restarted session") }
-        return ready
+        return true
     }
 
     /// The event for a restart that was not made, once per session; nil for

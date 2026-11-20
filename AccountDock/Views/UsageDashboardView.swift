@@ -880,7 +880,7 @@ private struct UnisolatedSessionsLine: View {
 
     private var list: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Started outside a slot of its own: by full path, from an IDE or the desktop app, before the pool was ready, or in the background service, whose workers read the shared sign-in. These share the sign-in and cannot be moved one at a time.")
+            Text("Started outside a slot of its own: by full path, from an IDE or the desktop app, while AccountDock was not running, or in the background service, whose workers read the shared sign-in. These share the sign-in and cannot be moved one at a time.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

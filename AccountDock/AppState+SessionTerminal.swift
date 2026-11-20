@@ -1,5 +1,7 @@
 import Foundation
 
+private let terminalLog = FileLog("SessionTerminal")
+
 /// Acts on running sessions through the terminals they run in
 /// (`SessionTerminalActions`, `sessionTerminal`).
 extension AppState {
@@ -127,7 +129,7 @@ extension AppState {
 
     /// The sessions among `sessions` whose process reads no slot of its own
     /// (`slotDirectoryByProcess`): started by full path, from an IDE or the
-    /// desktop app, or before the pool was fresh. They share the CLI's own
+    /// desktop app, or while AccountDock was not running. They share the CLI's own
     /// sign-in and cannot be moved one at a time.
     nonisolated static func unisolated(_ sessions: [AgentSession], slotDirectoryByProcess: [Int32: String]) -> [AgentSession] {
         sessions.filter { session in session.processID.map { slotDirectoryByProcess[$0] == nil } ?? false }
@@ -164,7 +166,7 @@ extension AppState {
             for session in found where unisolatedNoted.insert(session.sessionID).inserted {
                 failoverEvents.record(provider, background[session.sessionID] != nil
                     ? "\(Self.eventName(of: session)) runs in \(provider.capabilities.displayName)'s background service, whose workers read the shared sign-in, not a slot of its own: it cannot be moved on its own. Restart it in its own slot from the usage tab once it is idle."
-                    : "\(Self.eventName(of: session)) runs outside a slot of its own (started by full path, from an IDE or the desktop app, or before the pool was ready): it shares the sign-in and cannot be moved on its own. Restart it in its own slot from the usage tab, or quit it and resume it from a terminal.")
+                    : "\(Self.eventName(of: session)) runs outside a slot of its own (started by full path, from an IDE or the desktop app, or while AccountDock was not running): it shares the sign-in and cannot be moved on its own. AccountDock restarts it in a slot of its own once it is idle between turns in agterm; outside agterm, quit it and resume it from a terminal.")
             }
             running.formUnion((liveSessions[provider] ?? []).map(\.sessionID))
         }
@@ -247,12 +249,15 @@ extension AppState {
     /// command and resumed in its attach client's terminal, judged again
     /// from a fresh read of the processes; one refused at a usage limit
     /// since its last served request (`sessionRefusals`) counts as idle
-    /// (`restartBlocker`). At the user's request, from the usage tab, and
-    /// for a background session stuck on an account that can no longer
-    /// serve it (`handleStuckBackgroundSessions`). Returns whether it was
-    /// typed.
+    /// (`restartBlocker`). At the user's request, from the usage tab, for a
+    /// background session stuck on an account that can no longer serve it
+    /// (`handleStuckBackgroundSessions`), and for every session outside a
+    /// slot once it is idle (`restartUnisolatedSessions`), which passes
+    /// `automaticEvent`: the event for a restart typed, given the session's
+    /// name, with any other outcome logged rather than recorded, since the
+    /// restart is tried again. Returns whether it was typed.
     @discardableResult
-    func restartInOwnSlot(_ sessionID: String) async -> Bool {
+    func restartInOwnSlot(_ sessionID: String, automaticEvent: ((String) -> String)? = nil) async -> Bool {
         guard let (provider, session) = liveSession(sessionID), let slots = SessionSlots(provider) else { return false }
         let outcome: SessionTerminalActions.Outcome
         if let support = slots.background, backgroundProcesses(provider).isWorker(session.processID) {
@@ -267,7 +272,16 @@ extension AppState {
             outcome = await SessionTerminalActions.restartInOwnSlot(session, isolation: slots.isolation,
                                                                     terminal: sessionTerminal)
         }
-        failoverEvents.record(provider, Self.restartEvent(outcome, session: Self.eventName(of: session)))
+        let name = Self.eventName(of: session)
+        if let automaticEvent {
+            if outcome == .typed {
+                failoverEvents.record(provider, automaticEvent(name))
+            } else {
+                terminalLog.info("[restartInOwnSlot] \(Self.restartEvent(outcome, session: name))")
+            }
+        } else {
+            failoverEvents.record(provider, Self.restartEvent(outcome, session: name))
+        }
         return outcome == .typed
     }
 
@@ -284,6 +298,85 @@ extension AppState {
             if await restartInOwnSlot(session.sessionID) { restarted += 1 }
         }
         return restarted
+    }
+
+    /// The sessions among `sessions` (those outside a slot of their own)
+    /// that `restartUnisolatedSessions` restarts now: not in the CLI's
+    /// background service (`background`), whose restart turns the session
+    /// into a terminal one and stays the user's choice or
+    /// `handleStuckBackgroundSessions`'s; idle between turns in agterm
+    /// (`restartBlocker` with their `terminals`); and not restarted by any
+    /// rule within `stuckRestartSpacing` (`lastRestart`).
+    nonisolated static func automaticRestarts(_ sessions: [AgentSession], background: Set<String>,
+                                              terminals: [String: String], lastRestart: [String: Date],
+                                              now: Date) -> [String] {
+        sessions.filter { session in
+            let id = session.sessionID
+            return !background.contains(id)
+                && (lastRestart[id].map { now.timeIntervalSince($0) >= stuckRestartSpacing } ?? true)
+                && restartBlocker(session, terminal: terminals[id], now: now) == nil
+        }.map(\.sessionID)
+    }
+
+    /// The account a session `restartUnisolatedSessions` restarts is named
+    /// for in the resume file: its pin when it has one, else, unless it
+    /// takes back a slot offered to it (`takesBack`, which serves its
+    /// pin or the account it had), the account whose sign-in it shares
+    /// (`shared`), so it continues where it ran.
+    nonisolated static func automaticRestartAccount(pinned: UUID?, takesBack: Bool, shared: UUID?) -> UUID? {
+        if let pinned { return takesBack ? nil : pinned }
+        return takesBack ? nil : shared
+    }
+
+    /// The event for a session `restartUnisolatedSessions` restarted.
+    nonisolated static func automaticRestartEvent(session: String, takesBack: Bool, account: String?, pinned: Bool) -> String {
+        let continues = takesBack ? "it continues in the slot it had before"
+            : account.map { pinned ? "it continues on \($0), where it is pinned" : "it continues on \($0)" }
+            ?? "it continues on the account its slot is given"
+        return "Restarted \(session) in a slot of its own without being asked: it ran on the shared sign-in, so it could not be moved on its own; \(continues)."
+    }
+
+    /// Restarts each session outside a slot of its own that
+    /// `automaticRestarts` picks in a slot of its own, typed into its
+    /// agterm session as `restartInOwnSlot` types it, so each rebuilds its
+    /// prompt cache at most once there and can then be moved alone. A
+    /// session whose slot AccountDock offers back to it
+    /// (`SessionSlotState.reclaimOffered`) takes that slot back through the
+    /// resume file; any other is named in it (`slotRestartResumes`) for
+    /// `automaticRestartAccount`: a pinned session always for its pin. Each
+    /// restart is an event. Called on every quota cycle after
+    /// `noteUnisolatedSessions`, which lists the sessions and their
+    /// terminals.
+    func restartUnisolatedSessions(now: Date = Date()) async {
+        var live = Set<String>()
+        for provider in AIProviderType.isolatedProviders where sessionSlotsInUse(provider) {
+            live.formUnion((liveSessions[provider] ?? []).map(\.sessionID))
+            var last = unisolatedRestartAt
+            last.merge(stayingRestartAt) { max($0, $1) }
+            last.merge(stuckBackgroundRestartedAt) { max($0, $1) }
+            let due = Self.automaticRestarts(unisolatedSessions[provider] ?? [], background: Set(backgroundSessionStates.keys),
+                                             terminals: unisolatedTerminals, lastRestart: last, now: now)
+            guard !due.isEmpty else { continue }
+            let offered = Set((sessionSlotStates[provider]?.reclaimOffered ?? [:]).values)
+            let shared = liveCredentialOwners[provider]?.account ?? activeAccount(for: provider)?.id
+            for id in due {
+                unisolatedRestartAt[id] = now
+                let pinned = sessionPins.account(of: id)
+                let takesBack = offered.contains(id)
+                let target = Self.automaticRestartAccount(pinned: pinned, takesBack: takesBack, shared: shared)
+                var named = false
+                if let target, slotRestartResumes[id] == nil {
+                    slotRestartResumes[id] = SlotRestartResume(provider: provider, account: target, at: now)
+                    named = true
+                }
+                let account = target.flatMap { target in accounts.first { $0.id == target } }.map { messageName($0) }
+                let typed = await restartInOwnSlot(id, automaticEvent: { name in
+                    Self.automaticRestartEvent(session: name, takesBack: takesBack, account: account, pinned: pinned != nil)
+                })
+                if !typed, named { slotRestartResumes[id] = nil }
+            }
+        }
+        unisolatedRestartAt = unisolatedRestartAt.filter { live.contains($0.key) }
     }
 
     /// The running session with `id` and its provider.
