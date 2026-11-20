@@ -46,9 +46,17 @@ extension AppState {
         /// workers are sessions on the shared sign-in, its attach clients
         /// and other commands no sessions.
         var background = BackgroundSessionProcesses()
-        /// Watches the one-session slot directory for a launcher's request
-        /// for a spare; installed by `watchSpareRequests`.
-        var spareRequestWatcher: DispatchSourceFileSystemObject?
+        /// Watches the session slot directory for a launcher's request to
+        /// fill its slot; installed by `watchSlotRequests`.
+        var slotRequestWatcher: DispatchSourceFileSystemObject?
+        /// The slots `fillRequestedSlots` is filling, so a second request
+        /// meanwhile does not fill one twice.
+        var filling: Set<String> = []
+        /// Whether this run of AccountDock has written the provider's
+        /// `SessionSlots.startedFile` and, after its first pass, its
+        /// `readyFile`.
+        var startedMarked = false
+        var readyMarked = false
         /// Whether the last `refreshSlotProcesses` read the whole process
         /// list (`processScanSucceeded`). Until it has, the maps above keep
         /// what the last whole reading found, and `serveSessionSlots` and
@@ -94,6 +102,16 @@ extension AppState {
         /// Since when more claimed slots than `maximumGoneRemovals` have
         /// stood to be removed as gone in one pass (`goneRemovals`).
         var massRemovalSince: Date?
+        /// The session the credential audit last named for each claimed slot
+        /// that records none itself (`CredentialAudit.lastSlotSessions`), and
+        /// every slot looked up, found or not, so the trail is read once per
+        /// slot.
+        var auditSessions: [String: String] = [:]
+        var auditSessionsLooked: Set<String> = []
+        /// The slots the last pass offered back to their sessions, by path,
+        /// with the session; the pass that finds one read again records that
+        /// its session took it back.
+        var reclaimOffered: [String: String] = [:]
 
         /// Drops a removed account.
         mutating func forget(_ id: UUID) {
@@ -167,13 +185,12 @@ extension AppState {
     }
 
     /// Runs on every quota cycle: keeps each isolated provider's launcher,
-    /// each account's slot and the pool file current while its sessions
-    /// are distributed, and afterwards removes them, keeping the slots
-    /// running sessions still read. `processesRead` says
+    /// its session slots and the pool and resume files current while its
+    /// sessions are distributed, and afterwards removes them, keeping the
+    /// slots running sessions still read. `processesRead` says
     /// `refreshSlotProcesses` has just run, as the quota cycle runs it
     /// before counting sessions. One call runs at a time; a call made
-    /// meanwhile, as when a launcher asks for a spare, runs once more after
-    /// it.
+    /// meanwhile runs once more after it.
     func maintainSessionSlots(now: Date = Date(), processesRead: Bool = false) async {
         if slotMaintenanceRunning {
             slotMaintenanceRequested = true
@@ -189,13 +206,37 @@ extension AppState {
         await applySlotRestarts(now: now)
     }
 
-    /// Fills spares at once when a launcher has asked for one
-    /// (`SessionSlots.takeSpareRequests`), instead of at the next quota
-    /// cycle: the launcher waits only a few seconds before it starts its
-    /// session on a shared credential. The watch is on the provider's
-    /// one-session slot directory, where the launcher leaves its request.
-    func watchSpareRequests(_ slots: SessionSlots, provider: AIProviderType) {
-        guard sessionSlotStates[provider]?.spareRequestWatcher == nil else { return }
+    /// Records, for every provider whose sessions are served from slots,
+    /// that AccountDock runs (`SessionSlots.markStarted`), before its first
+    /// pass over the slots: a launch then waits for that pass instead of
+    /// starting the CLI unchanged. Called as AccountDock starts, and by
+    /// each pass for a provider whose slots are turned on later.
+    func markSlotsStarting() {
+        for provider in AIProviderType.isolatedProviders where sessionSlotsWanted(provider) {
+            guard let slots = SessionSlots(provider) else { continue }
+            markStarted(slots, provider: provider)
+        }
+    }
+
+    private func markStarted(_ slots: SessionSlots, provider: AIProviderType) {
+        guard sessionSlotStates[provider]?.startedMarked != true else { return }
+        slots.markStarted(pid: getpid(), name: Self.ownProcessName)
+        sessionSlotStates[provider, default: SessionSlotState()].startedMarked = true
+    }
+
+    /// The name `ps -o comm=` ends with for AccountDock's own process: its
+    /// executable's file name.
+    nonisolated static var ownProcessName: String {
+        Bundle.main.executableURL?.lastPathComponent ?? ProcessInfo.processInfo.processName
+    }
+
+    /// Fills a session slot as soon as its launcher asks
+    /// (`SessionSlots.takeSlotRequests`), instead of at the next quota
+    /// cycle: the launcher waits for it before it starts the CLI. The watch
+    /// is on the provider's session slot directory, where the launcher
+    /// leaves its request.
+    func watchSlotRequests(_ slots: SessionSlots, provider: AIProviderType) {
+        guard sessionSlotStates[provider]?.slotRequestWatcher == nil else { return }
         try? FileManager.default.createDirectory(at: slots.sessionRoot, withIntermediateDirectories: true,
                                                  attributes: [.posixPermissions: 0o700])
         let descriptor = open(slots.sessionRoot.path, O_EVTONLY)
@@ -203,15 +244,91 @@ extension AppState {
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: .write, queue: .main)
         source.setEventHandler { [weak self] in
             Task { @MainActor in
-                guard let self, await Task.detached(priority: .userInitiated, operation: { slots.takeSpareRequests() }).value else { return }
-                await self.maintainSessionSlots()
+                guard let self, await Task.detached(priority: .userInitiated, operation: { slots.takeSlotRequests() }).value else { return }
+                await self.fillRequestedSlots(provider, slots: slots)
             }
         }
         source.setCancelHandler { close(descriptor) }
         source.resume()
-        sessionSlotStates[provider, default: SessionSlotState()].spareRequestWatcher = source
+        sessionSlotStates[provider, default: SessionSlotState()].slotRequestWatcher = source
     }
 
+    /// The accounts a session slot a launcher asked for may be filled for,
+    /// in order: a pinned session's pin alone, since a pinned session
+    /// always comes back on its pin and waits there when the pin cannot
+    /// serve it; else the account the launcher asked for (`requested`: the
+    /// one its session last ran on, or the pool's pick), then the active
+    /// account; each named once.
+    nonisolated static func filledSlotAccounts(pinned: UUID?, requested: UUID?, active: UUID?) -> [UUID] {
+        if let pinned { return [pinned] }
+        return [requested, active].compactMap { $0 }.reduce(into: [UUID]()) { result, id in
+            if !result.contains(id) { result.append(id) }
+        }
+    }
+
+    /// The account a slot offered back to its session serves: its
+    /// session's pin when it has one, else the account it served. A pinned
+    /// session's slot on another account is offered only once it holds the
+    /// pin's credential (`pinServed`); otherwise nil, and the slot is not
+    /// offered, so the session never resumes on that other account's token
+    /// and the resume file names its pin instead.
+    nonisolated static func reclaimAccount(own: UUID, pinned: UUID?, pinServed: Bool) -> UUID? {
+        guard let pinned, pinned != own else { return own }
+        return pinServed ? pinned : nil
+    }
+
+    /// Fills every session slot a launcher of `provider` waits on
+    /// (`SessionSlots.wantedSlots`) for the first account of
+    /// `filledSlotAccounts` whose credential can be written, so the session
+    /// starts in its own slot on that account. A pinned session's slot is
+    /// named for its pin even when no credential of the pin can be written
+    /// now (it needs signing in again): the session starts there and waits,
+    /// held by the pinned rules, never on another account. A slot whose
+    /// launcher has ended is left for the pass that removes slots no process
+    /// reads. Called when a launcher asks and at the start of every pass.
+    func fillRequestedSlots(_ provider: AIProviderType, slots: SessionSlots, now: Date = Date()) async {
+        guard sessionSlotsWanted(provider) else { return }
+        let wanted = await Task.detached(priority: .userInitiated) { slots.wantedSlots() }.value
+        let active = accounts.first { $0.provider == provider && $0.isActive }?.id
+        for request in wanted {
+            let path = request.directory.path
+            guard sessionSlotStates[provider]?.filling.contains(path) != true else { continue }
+            if let pid = request.claimer, !(Darwin.kill(pid, 0) == 0 || errno == EPERM) { continue }
+            sessionSlotStates[provider, default: SessionSlotState()].filling.insert(path)
+            defer { sessionSlotStates[provider]?.filling.remove(path) }
+            let pinned = sessionPins.account(of: request.session)
+            let candidates = Self.filledSlotAccounts(pinned: pinned, requested: request.account, active: active)
+            let directory = request.directory
+            let session = request.session
+            let process = request.claimer
+            var filled: (account: Account, credential: Bool)?
+            for id in candidates {
+                guard let account = accounts.first(where: { $0.id == id && $0.provider == provider }),
+                      pinned == id || !needsSignIn(account) else { continue }
+                let credential = await slots.isolation.currentSlotCredential(
+                    for: account, minimumLifetime: readsLiveCredential(account) ? 60 : 2 * 60 * 60, from: self
+                )
+                guard credential != nil || pinned == id else { continue }
+                let made = await Task.detached(priority: .userInitiated) {
+                    slots.fill(directory, account: id, credential: credential, reason: "fillRequestedSlots",
+                               session: session, process: process)
+                }.value
+                guard made else { break }
+                if let credential { slotCredentialWritten[path] = (Self.credentialDigest(credential.contents), Date()) }
+                noteSlotAssignment(path, from: nil, to: id, at: Date())
+                filled = (account, credential != nil)
+                break
+            }
+            guard let filled else {
+                slotsLog.warning("[fillRequestedSlots] Session slot \(request.directory.lastPathComponent) not filled: no account it may serve has a credential to write")
+                continue
+            }
+            slotsLog.info("[fillRequestedSlots] Filled session slot \(request.directory.lastPathComponent) for \(messageName(filled.account))\(session.map { " (resumes \($0.prefix(8)))" } ?? "")")
+            if !filled.credential, let session {
+                failoverEvents.record(provider, "Session \(session.prefix(8)) is pinned to \(messageName(filled.account)), whose sign-in cannot be written to its slot now: it starts in its own slot on \(messageName(filled.account)) and waits there until that account is signed in again, or until you unpin it.")
+            }
+        }
+    }
     private func maintainSessionSlotsOnce(now: Date, processesRead: Bool) async {
         let isolated = AIProviderType.isolatedProviders.compactMap { provider in
             SessionSlots(provider).map { (provider, $0) }
@@ -238,7 +355,7 @@ extension AppState {
             if mirrorsRouterPool, !routerInUse { routerPoolMembers = [] }
             sessionSlotStates[provider, default: SessionSlotState()].sessionMoves = [:]
             await serveRunning(slots, provider: provider, members: [], inUse: inUse)
-            await serveSessionSlots(slots, provider: provider, members: [], inUse: inUse, now: now)
+            await serveSessionSlots(slots, provider: provider, members: [], inUse: inUse, offersBack: false, now: now)
             let served = Set((sessionSlotStates[provider]?.directoryServing ?? [:]).values)
             sessionSlotStates[provider, default: SessionSlotState()].servedAccounts = served
             sessionSlotStates[provider, default: SessionSlotState()].credentialAccounts = served
@@ -253,38 +370,44 @@ extension AppState {
                 return
             }
         }
-        watchSpareRequests(slots, provider: provider)
+        markStarted(slots, provider: provider)
+        watchSlotRequests(slots, provider: provider)
+        await fillRequestedSlots(provider, slots: slots, now: now)
         let members = await buildPool(provider, now: now, forRouter: false)
         if mirrorsRouterPool { routerPoolMembers = members }
-        let open = Set(members.filter { $0.weight > 0 }.compactMap { UUID(uuidString: $0.accountID) })
-        let served = await serveRunning(slots, provider: provider, members: members, inUse: inUse, newSessions: open)
+        await serveRunning(slots, provider: provider, members: members, inUse: inUse)
         var resumes = resumeTargets(provider, now: now)
         for (session, restart) in slotRestartResumes where restart.provider == provider {
             resumes[session] = restart.account
         }
-        let spares = await serveSessionSlots(slots, provider: provider, members: members, inUse: inUse,
-                                             resumeAccounts: Set(resumes.values), now: now)
-        let activeForResume = accounts.first { $0.provider == provider && $0.isActive }?.id
-        let resumeEntries = resumes.compactMap { session, account -> (session: String, path: String)? in
-            if spares.contains(account) { return (session, slots.directory(for: account).path) }
-            return account == activeForResume ? (session, SessionSlots.activeEntry) : nil
-        }.sorted { $0.session < $1.session }
+        let pass = await serveSessionSlots(slots, provider: provider, members: members, inUse: inUse, now: now)
+        // A session resumed on an account asks for it by the path naming it;
+        // the launcher makes the slot.
+        let accountEntries = resumes.map { session, account in (session: session, path: slots.directory(for: account).path) }
+            .sorted { $0.session < $1.session }
+        let continues = pass.reclaims.isEmpty || slots.isolation.continueArgumentScript.isEmpty ? []
+            : Self.continueEntries(pass.reclaims, records: Array(AgentSessions.records(provider).values),
+                                   running: Set((liveSessions[provider] ?? []).map(\.sessionID)))
+        let resumeEntries = Self.resumeTable(reclaims: pass.reclaims, continues: continues, accounts: accountEntries)
         await Task.detached(priority: .utility) { slots.writeResumes(resumeEntries) }.value
         let slotServed = Set((sessionSlotStates[provider]?.directoryServing ?? [:]).values)
         sessionSlotStates[provider, default: SessionSlotState()].servedAccounts = slotServed
-        sessionSlotStates[provider, default: SessionSlotState()].credentialAccounts = slotServed.union(served).union(spares)
-        let active = accounts.first { $0.provider == provider && $0.isActive }?.id
-        // The launcher names an account by its slot's path. The active
-        // account's slot holds no credential, so when no spare of it is left
-        // the launcher starts the CLI on the default credential.
+        sessionSlotStates[provider, default: SessionSlotState()].credentialAccounts = slotServed
+            .union(pass.reclaims.map(\.account))
+        // The launcher names an account by the path `directory(for:)` gives
+        // it and asks AccountDock to fill its session slot for that account.
         let entries: [(path: String, weight: Double)] = members.compactMap { member in
             guard let id = UUID(uuidString: member.accountID), member.weight > 0 else { return nil }
-            if id == active { return (spares.contains(id) ? slots.directory(for: id).path : SessionSlots.activeEntry, member.weight) }
-            return served.contains(id) || spares.contains(id) ? (slots.directory(for: id).path, member.weight) : nil
+            return (slots.directory(for: id).path, member.weight)
         }
         await Task.detached(priority: .utility) { slots.writePool(entries) }.value
+        // Launches waiting since AccountDock started go on now.
+        if sessionSlotStates[provider]?.readyMarked != true {
+            let pid = getpid()
+            await Task.detached(priority: .utility) { slots.markReady(pid: pid) }.value
+            sessionSlotStates[provider, default: SessionSlotState()].readyMarked = true
+        }
     }
-
     /// Reads which slot each running process reads, for `refreshSessions`
     /// and `maintainSessionSlots`, and each isolated CLI's background-session
     /// processes, from one fresh `ProcessTable`; run first on every quota
@@ -543,6 +666,111 @@ extension AppState {
         }
     }
 
+    // MARK: - Slots offered back to their sessions
+
+    /// A one-session slot whose session has ended, offered back to it: the
+    /// resume file maps `session` to `path`, and the launcher resuming it
+    /// takes the slot, which serves `account`. `folder` is where the
+    /// session ran, for a `--continue` there (`continueEntries`).
+    struct SlotReclaim: Equatable {
+        var session: String
+        var path: String
+        var account: UUID
+        var folder: String?
+    }
+
+    /// What `serveSessionSlots` leaves for the resume file: the slots
+    /// offered back to their sessions.
+    struct SlotPass {
+        var reclaims: [SlotReclaim] = []
+    }
+
+    /// How long a slot stays offered to its session with no launcher taking
+    /// it, from when it was first offered; then it is removed. A terminal
+    /// restores its sessions within minutes of a restart, and a session
+    /// resumed by hand within the hour still finds its slot.
+    nonisolated static let reclaimGrace: TimeInterval = 60 * 60
+
+    /// What becomes of a claimed slot no process reads.
+    enum ReclaimChoice: Equatable {
+        /// Offered to its session: marked `SessionSlots.reclaimableMarker`,
+        /// kept with its credential served, and named in the resume file.
+        case offer
+        /// The offer is taken back and the slot removed.
+        case retire
+        /// No offer: the rules for a claimed slot apply.
+        case none
+    }
+
+    /// Whether `serveSessionSlots` offers a claimed slot no process reads
+    /// back to its session. Only a slot that `knowsSession`, whose session
+    /// `ended` by `sessionGoneBlocker`'s evidence (a pin aside), that serves
+    /// an account, and that is the slot `reclaimSlots` chose for its session
+    /// (`chosen`) is offered; not while that session runs in another slot
+    /// (`runsInSlot`) or moves by a restart to another account
+    /// (`restarting`), which the resume file names for it instead. An
+    /// offer stands for `reclaimGrace` from `reclaimableSince`; one that no
+    /// longer applies is retired.
+    nonisolated static func reclaimChoice(knowsSession: Bool, chosen: Bool, ended: Bool, hasAccount: Bool,
+                                          runsInSlot: Bool, restarting: Bool, reclaimableSince: Date?,
+                                          now: Date) -> ReclaimChoice {
+        let offered = reclaimableSince != nil
+        guard knowsSession, chosen, hasAccount, !runsInSlot, !restarting, offered || ended else {
+            return offered ? .retire : .none
+        }
+        if let since = reclaimableSince, now.timeIntervalSince(since) > reclaimGrace { return .retire }
+        return .offer
+    }
+
+    /// The slot offered to each session among `candidates` (claimed slots no
+    /// process reads, with the session each was last read by and its claim
+    /// time): the one claimed last, the slot its newest run had, by path on
+    /// a tie.
+    nonisolated static func reclaimSlots(_ candidates: [(path: String, session: String, claimedAt: Date)]) -> [String: String] {
+        var chosen: [String: (path: String, claimedAt: Date)] = [:]
+        for candidate in candidates {
+            if let held = chosen[candidate.session],
+               held.claimedAt > candidate.claimedAt || (held.claimedAt == candidate.claimedAt && held.path < candidate.path) {
+                continue
+            }
+            chosen[candidate.session] = (candidate.path, candidate.claimedAt)
+        }
+        return chosen.mapValues(\.path)
+    }
+
+    /// Resume-file lines for a `--continue` in a folder: the folder and the
+    /// slot offered to the one session of `reclaims` that ran there, only
+    /// where that is unambiguous: one offered slot in the folder, no
+    /// `running` session's record there, and no newer record there than its
+    /// session's (`records`, by `observedAt`), since the CLI continues the
+    /// folder's newest conversation.
+    nonisolated static func continueEntries(_ reclaims: [SlotReclaim], records: [AgentSession],
+                                            running: Set<String>) -> [(session: String, path: String)] {
+        var byFolder: [String: [SlotReclaim]] = [:]
+        for reclaim in reclaims {
+            guard let folder = reclaim.folder, folder.hasPrefix("/") else { continue }
+            byFolder[folder, default: []].append(reclaim)
+        }
+        return byFolder.compactMap { folder, found -> (session: String, path: String)? in
+            guard found.count == 1, let only = found.first else { return nil }
+            let here = records.filter { $0.workingDirectory == folder }
+            guard !here.contains(where: { running.contains($0.sessionID) }) else { return nil }
+            if let newest = here.max(by: { ($0.observedAt ?? .distantPast) < ($1.observedAt ?? .distantPast) }),
+               newest.sessionID != only.session { return nil }
+            return (folder, only.path)
+        }.sorted { $0.session < $1.session }
+    }
+
+    /// The resume file's lines: each offered slot for its session first,
+    /// then the `--continue` folders, then `accounts`, the account-level
+    /// entries, for the sessions no offered slot is named for.
+    nonisolated static func resumeTable(reclaims: [SlotReclaim], continues: [(session: String, path: String)],
+                                        accounts: [(session: String, path: String)]) -> [(session: String, path: String)] {
+        let offered = reclaims.sorted { $0.session < $1.session }.map { (session: $0.session, path: $0.path) }
+        let named = Set(offered.map(\.session))
+        return offered + continues + accounts.filter { !named.contains($0.session) }
+    }
+
     /// The folder each slot's process runs in, by slot path: the `PWD` in
     /// the environment of the process reading it (`directories`, by process
     /// ID, from `table`), the lowest process ID first when several read
@@ -715,53 +943,11 @@ extension AppState {
         return "session \(id) in " + (directory as NSString).abbreviatingWithTildeInPath
     }
 
-    /// Spare one-session slots kept filled for each account taking new
-    /// sessions: `minimumSpares`, or two more than the most sessions seen
-    /// running at once in the last day when that is more, up to
-    /// `maximumSpares`. A terminal that restores every session at once
-    /// after a restart then finds a slot for each, at a moment AccountDock
-    /// is itself still starting and cannot fill more.
-    nonisolated static func spareTarget(peakSessions: Int) -> Int {
-        min(max(minimumSpares, peakSessions + 2), maximumSpares)
-    }
-    nonisolated static let minimumSpares = 3
-    nonisolated static let maximumSpares = 16
-    /// How long a count of running sessions stays the peak `spareTarget`
-    /// is taken from.
-    nonisolated static let sessionPeakLifetime: TimeInterval = 24 * 60 * 60
-
-    /// The peak after `running` sessions are seen at `now`: a higher count
-    /// replaces it, an expired one is replaced by the current count, and a
-    /// peak still being matched has its date moved on hourly, not on every
-    /// cycle, so it is rarely written.
-    nonisolated static func sessionPeak(stored: (count: Int, at: Date)?, running: Int, now: Date) -> (count: Int, at: Date) {
-        guard let stored, now.timeIntervalSince(stored.at) < sessionPeakLifetime else { return (running, now) }
-        if running > stored.count { return (running, now) }
-        if running == stored.count, now.timeIntervalSince(stored.at) > 60 * 60 { return (running, now) }
-        return stored
-    }
-
-    /// The most sessions of the provider seen running at once in the last
-    /// day, kept across launches: after a restart no session runs yet, at
-    /// the very moment the spare count has to cover all of them.
-    func recentSessionPeak(_ provider: AIProviderType, now: Date) -> Int {
-        let key = "slotSessionPeak." + provider.capabilities.storageKey
-        let saved = UserDefaults.standard.dictionary(forKey: key)
-        var stored: (count: Int, at: Date)?
-        if let count = saved?["count"] as? Int, let at = saved?["at"] as? Double {
-            stored = (count, Date(timeIntervalSince1970: at))
-        }
-        let peak = Self.sessionPeak(stored: stored, running: liveSessions[provider]?.count ?? 0, now: now)
-        if stored?.count != peak.count || stored?.at != peak.at {
-            UserDefaults.standard.set(["count": peak.count, "at": peak.at.timeIntervalSince1970], forKey: key)
-        }
-        return peak.count
-    }
-
     /// How long a slot `serveSlot` wrote is trusted to still hold what was
-    /// written: a spare, which nothing else touches, and a slot a session
-    /// reads, whose CLI can replace its item.
-    nonisolated static let spareRecheckInterval: TimeInterval = 10 * 60
+    /// written: one no CLI reads, as a slot offered back to its session,
+    /// which nothing else touches, and a slot a session reads, whose CLI can
+    /// replace its item.
+    nonisolated static let idleRecheckInterval: TimeInterval = 10 * 60
     nonisolated static let claimedRecheckInterval: TimeInterval = 60
 
     /// Writes `credential` to a slot through `SessionSlots.serve`, unless
@@ -912,24 +1098,25 @@ extension AppState {
         return restored
     }
 
-    /// Keeps the one-session slots: each claimed slot serves its account, or
+    /// Keeps the session slots: each claimed slot serves its account, or
     /// the pool's highest-weight account once its own leaves the pool, and
     /// moves to the account `SessionPacer` chose for its session between
     /// two of the session's turns; a move rewrites the slot, which the CLI
-    /// reads again before its next request. Spare slots are kept for each
-    /// account in `members` with a positive weight, the active one
-    /// included, and the rest removed; the isolation's
+    /// reads again before its next request. The isolation's
     /// `currentSlotCredential` keeps the active account's token renewed
-    /// while slots hold it. `resumeAccounts` keep
-    /// spares too, for sessions resumed on them. Returns the accounts that
-    /// have a spare slot.
+    /// while slots hold it. A slot no launch claimed, which only an earlier
+    /// AccountDock made ahead of launches, is removed. A claimed slot whose
+    /// session has ended is offered back to it for `reclaimGrace`
+    /// (`reclaimChoice`), its credential kept current, so the session
+    /// resumed after AccountDock or the machine restarts takes the slot and
+    /// the account it had; with `offersBack` off, as once the provider's
+    /// sessions are no longer served from slots, none is. Returns the slots
+    /// offered.
     @discardableResult
     private func serveSessionSlots(_ slots: SessionSlots, provider: AIProviderType, members: [RouterPoolMember],
-                                   inUse: Set<String>, resumeAccounts: Set<UUID> = [], now: Date) async -> Set<UUID> {
+                                   inUse: Set<String>, offersBack: Bool = true, now: Date) async -> SlotPass {
         let activeID = accounts.first { $0.provider == provider && $0.isActive }?.id
         let pooled = Set(members.compactMap { UUID(uuidString: $0.accountID) })
-        let open = Set(members.filter { $0.weight > 0 }.compactMap { UUID(uuidString: $0.accountID) })
-            .union(resumeAccounts)
         let planner = FailoverPlanner(settings: plannerSettings(provider))
         let fallback = members.max { lhs, rhs in
             lhs.weight != rhs.weight ? lhs.weight < rhs.weight : rhs.accountID == activeID?.uuidString
@@ -980,30 +1167,94 @@ extension AppState {
             credentials[id] = current
             return current
         }
-        func serve(_ directory: URL, _ id: UUID, spare: Bool = false, reason: String,
-                   session: AgentSession? = nil) async -> Bool {
+        func serve(_ directory: URL, _ id: UUID, idle: Bool = false, reason: String,
+                   session: AgentSession? = nil, sessionID: String? = nil) async -> Bool {
             guard let value = await credential(id) else { return false }
             return await serveSlot(slots, directory, credential: value,
-                                   recheck: spare ? Self.spareRecheckInterval : Self.claimedRecheckInterval,
-                                   account: id, reason: reason, session: session?.sessionID,
+                                   recheck: idle ? Self.idleRecheckInterval : Self.claimedRecheckInterval,
+                                   account: id, reason: reason, session: session?.sessionID ?? sessionID,
                                    process: session?.processID, now: now)
         }
-        let spareTarget = Self.spareTarget(peakSessions: recentSessionPeak(provider, now: now))
+        // Claimed slots no process reads, and the session each was last read
+        // by; the credential audit's trail is read only for a slot nothing
+        // else names a session for, once per slot.
+        let idle = slotList.filter { $0.claimedAt != nil && !inUse.contains($0.directory.path) }
+        func knownSession(_ slot: SessionSlots.SessionSlot) -> String? {
+            let state = sessionSlotStates[provider] ?? SessionSlotState()
+            let path = slot.directory.path
+            return Self.knownSlotSession(recorded: slot.session, statusLine: slotSessionsByDirectory[path],
+                                         seen: state.slotSessions[path] ?? [], audit: state.auditSessions[path])
+        }
+        // A slot still unfilled, or claimed within its grace, as a launch's
+        // own before its CLI starts, is offered to no one and not looked up.
+        let unnamed = idle.filter {
+            $0.account != nil && now.timeIntervalSince($0.claimedAt ?? now) > Self.slotClaimGrace && knownSession($0) == nil
+                && !(sessionSlotStates[provider]?.auditSessionsLooked.contains($0.directory.path) ?? false)
+        }.map(\.directory.path)
+        if !unnamed.isEmpty {
+            let audit = slots.audit
+            let found = await Task.detached(priority: .utility) { audit.lastSlotSessions(Set(unnamed)) }.value
+            sessionSlotStates[provider, default: SessionSlotState()].auditSessions.merge(found) { _, new in new }
+            sessionSlotStates[provider, default: SessionSlotState()].auditSessionsLooked.formUnion(unnamed)
+        }
+        let idleSessions: [String: String] = idle.reduce(into: [:]) { result, slot in
+            if let id = knownSession(slot) { result[slot.directory.path] = id }
+        }
+        let chosenSlots = Self.reclaimSlots(idle.compactMap { slot in
+            idleSessions[slot.directory.path].map { (path: slot.directory.path, session: $0, claimedAt: slot.claimedAt ?? .distantPast) }
+        })
+        // A session running in a slot needs no other, and one restarting on
+        // another account is named in the resume file for that account.
+        let inSlots = Set(sessionsByDirectory.values.map(\.sessionID))
+        let restarting = Set(slotRestartResumes.filter { $0.value.provider == provider }.keys)
+            .union(pendingSlotRestarts.filter { $0.value.provider == provider }.keys)
+        let stateBefore = sessionSlotStates[provider] ?? SessionSlotState()
+        let registrySessions: [String: String] = stateBefore.directoryByProcess.sorted { $0.key < $1.key }
+            .reduce(into: [:]) { result, entry in
+                if result[entry.value] == nil, let id = stateBefore.registry[entry.key]?.sessionID { result[entry.value] = id }
+            }
+        var reclaims: [SlotReclaim] = []
+        var newlyOffered: [SlotReclaim] = []
+        var retire: [URL] = []
+        var retract: [URL] = []
+        var sessionRecords: [(directory: URL, session: String, folder: String?)] = []
+        // Offers `slot` back to `id`: served for its pin or else the account
+        // it serves (`reclaimAccount`), marked, and listed for the resume
+        // file. A pinned session's slot on another account whose pin cannot
+        // be written now is not offered. An unpinned slot whose credential
+        // cannot be written now keeps the token it holds, and the next pass
+        // writes it.
+        func offer(_ slot: SessionSlots.SessionSlot, session id: String) async -> Bool {
+            guard let own = slot.account else { return false }
+            let directory = slot.directory
+            let pinned = sessionPins.account(of: id)
+            let served = await serve(directory, pinned ?? own, idle: true, reason: "serveSessionSlots.reclaimable", sessionID: id)
+            guard let account = Self.reclaimAccount(own: own, pinned: pinned, pinServed: served) else { return false }
+            if slot.reclaimableSince == nil,
+               !(await Task.detached(priority: .utility, operation: { slots.markReclaimable(directory) }).value) {
+                return false
+            }
+            if account != own {
+                slots.assign(directory, to: account, reason: "serveSessionSlots.reclaimable", session: id)
+                noteSlotAssignment(directory.path, from: own, to: account, at: now)
+            }
+            let reclaim = SlotReclaim(session: id, path: directory.path, account: account, folder: slot.folder)
+            reclaims.append(reclaim)
+            if slot.reclaimableSince == nil { newlyOffered.append(reclaim) }
+            return true
+        }
+        var taken: [(path: String, session: String, account: UUID?)] = []
         // Read once, when a slot first needs the fallback.
         var fallbackRunning: [SessionPacer.RebalanceSession]?
         var fallbackAccounts: [CapacityOutlook.Account]?
-        var sparesOf: [UUID: Int] = [:]
         var remove: [URL] = []
-        var removeSpares: [URL] = []
+        var removeUnclaimed: [URL] = []
         for slot in slotList {
             let path = slot.directory.path
+            // Every launch makes its slot claimed, so one never claimed was
+            // made ahead of a launch by an earlier AccountDock.
             guard let claimedAt = slot.claimedAt else {
-                guard let id = slot.account, open.contains(id), sparesOf[id, default: 0] < spareTarget,
-                      await serve(slot.directory, id, spare: true, reason: "serveSessionSlots.spare") else {
-                    removeSpares.append(slot.directory)
-                    continue
-                }
-                sparesOf[id, default: 0] += 1
+                removeUnclaimed.append(slot.directory)
                 continue
             }
             // A move made before AccountDock last started is dated by the
@@ -1011,10 +1262,41 @@ extension AppState {
             if slotDirectoryMovedAt[path] == nil, let assigned = slot.assignedAt, assigned > claimedAt {
                 slotDirectoryMovedAt[path] = assigned
             }
+            // A slot offered back that a process reads again is claimed:
+            // the offer is over.
+            if slot.reclaimableSince != nil, inUse.contains(path) { retract.append(slot.directory) }
             guard inUse.contains(path) else {
-                switch Self.sessionGoneBlocker(slotGoneEvidence(provider, slot: slot, claimedAt: claimedAt), now: now,
-                                               stillRuns: { Self.readerRuns($0) },
-                                               registryRuns: { Self.registryEntryRuns($0) }) {
+                let evidence = slotGoneEvidence(provider, slot: slot, claimedAt: claimedAt)
+                let blocker = Self.sessionGoneBlocker(evidence, now: now, stillRuns: { Self.readerRuns($0) },
+                                                      registryRuns: { Self.registryEntryRuns($0) })
+                // A pin keeps a slot longer before it is removed, but its
+                // session has ended by the same evidence without it.
+                var unpinned = evidence
+                unpinned.pinned = false
+                let ended = blocker == nil || (blocker != .withinGrace && Self.sessionGoneBlocker(
+                    unpinned, now: now, stillRuns: { Self.readerRuns($0) }, registryRuns: { Self.registryEntryRuns($0) }
+                ) == nil)
+                let id = idleSessions[path]
+                switch Self.reclaimChoice(knowsSession: offersBack && id != nil, chosen: id.map { chosenSlots[$0] == path } ?? false,
+                                          ended: ended, hasAccount: slot.account != nil,
+                                          runsInSlot: id.map(inSlots.contains) ?? false,
+                                          restarting: id.map(restarting.contains) ?? false,
+                                          reclaimableSince: slot.reclaimableSince, now: now) {
+                case .offer:
+                    if let id, await offer(slot, session: id) { continue }
+                    // An offer that no longer stands is taken back before
+                    // the slot goes, as a launcher may be taking it.
+                    if slot.reclaimableSince != nil {
+                        retire.append(slot.directory)
+                        continue
+                    }
+                case .retire:
+                    retire.append(slot.directory)
+                    continue
+                case .none:
+                    break
+                }
+                switch blocker {
                 case nil:
                     remove.append(slot.directory)
                     continue
@@ -1030,6 +1312,17 @@ extension AppState {
                 continue
             }
             sessionSlotStates[provider]?.removalHeld[path] = nil
+            // The slot records the session reading it, for the resume file
+            // once that session ends; a slot offered back is now its
+            // session's again.
+            let reading = sessionsByDirectory[path]
+            if let id = reading?.sessionID ?? registrySessions[path] ?? slotSessionsByDirectory[path] {
+                let folder = reading?.workingDirectory ?? stateBefore.folderByDirectory[path] ?? slot.folder
+                if id != slot.session || folder != slot.folder {
+                    sessionRecords.append((slot.directory, id, folder))
+                }
+            }
+            if let offered = stateBefore.reclaimOffered[path] { taken.append((path, offered, slot.account)) }
             // Each session is judged for the model it uses: one whose model's
             // own limit is spent moves to an account with room for that
             // model, and the account's other sessions stay. With no such
@@ -1213,14 +1506,6 @@ extension AppState {
                     + "; it rebuilds its prompt cache there at its next request."
                 : "\(actor) \(subject) from \(from) to \(to): \(why).")
         }
-        for id in open where sparesOf[id, default: 0] < spareTarget {
-            guard let value = await credential(id) else { continue }
-            let missing = spareTarget - sparesOf[id, default: 0]
-            let made = await Task.detached(priority: .utility) {
-                (0..<missing).filter { _ in slots.makeSpare(for: id, credential: value, reason: "serveSessionSlots.newSpare") }.count
-            }.value
-            sparesOf[id, default: 0] += made
-        }
         // A rebalance's window, and its being automatic, outlive no request
         // they belong to.
         requestedWindowUses = requestedWindowUses.filter { requestedSlotMoves[$0.key] != nil }
@@ -1232,24 +1517,76 @@ extension AppState {
             failoverEvents.record(provider, "Kept \(remove.count) session slots one pass would have removed at once: so many sessions seeming to end together is more likely a failed reading of the running processes, and removing a running session's slot sends it to the shared sign-in. If no session reads them for \(Int(Self.massRemovalHold / 60)) minutes they are removed \(Self.maximumGoneRemovals) at a time.")
         }
         remove = remove.filter { gone.remove.contains($0.path) }
-        if !remove.isEmpty || !removeSpares.isEmpty {
-            for directory in remove {
+        // Offers taken back, offers that ended unclaimed, and the sessions
+        // slots record; a retired slot a launcher took meanwhile stays.
+        let records = sessionRecords
+        let (retracted, retired) = (retract, retire)
+        let removedOffers: [URL] = retract.isEmpty && retire.isEmpty && records.isEmpty ? [] : await Task.detached(priority: .utility) {
+            retracted.forEach { slots.retractReclaimable($0) }
+            records.forEach { slots.recordSession($0.session, folder: $0.folder, in: $0.directory) }
+            return retired.filter { slots.removeReclaimable($0, reason: "serveSessionSlots.reclaimEnded") }
+        }.value
+        if !remove.isEmpty || !removeUnclaimed.isEmpty || !removedOffers.isEmpty {
+            for directory in remove + removedOffers {
                 sessionSlotStates[provider]?.directoryServing[directory.path] = nil
                 sessionSlotStates[provider]?.readers[directory.path] = nil
                 sessionSlotStates[provider]?.removalHeld[directory.path] = nil
                 sessionSlotStates[provider]?.slotSessions[directory.path] = nil
                 sessionSlotStates[provider]?.lastSeenInUse[directory.path] = nil
+                sessionSlotStates[provider]?.auditSessions[directory.path] = nil
                 slotDirectoryMovedAt[directory.path] = nil
                 slotAccountHistory[directory.path] = nil
                 slotSessionsByDirectory[directory.path] = nil
             }
-            for directory in remove + removeSpares { slotCredentialWritten[directory.path] = nil }
+            for directory in remove + removeUnclaimed + removedOffers { slotCredentialWritten[directory.path] = nil }
+            let unclaimed = removeUnclaimed
             await Task.detached(priority: .utility) {
                 remove.forEach { slots.remove($0, reason: "serveSessionSlots.sessionGone") }
-                removeSpares.forEach { slots.removeSpare($0, reason: "serveSessionSlots.spareNotWanted") }
+                unclaimed.forEach { slots.removeUnclaimed($0, reason: "serveSessionSlots.neverClaimed") }
             }.value
         }
-        return Set(sparesOf.filter { $0.value > 0 }.keys)
+        noteReclaims(provider, offered: newlyOffered, taken: taken, removed: removedOffers.count)
+        sessionSlotStates[provider, default: SessionSlotState()].reclaimOffered =
+            Dictionary(reclaims.map { ($0.path, $0.session) }) { first, _ in first }
+        return SlotPass(reclaims: reclaims)
+    }
+
+    /// Records the slots this pass offered back to their sessions, and each
+    /// session that took its slot back, as events, and the offers removed
+    /// unclaimed in the app log. One slot offered alone, as when one
+    /// session ends, is logged only.
+    private func noteReclaims(_ provider: AIProviderType, offered: [SlotReclaim],
+                              taken: [(path: String, session: String, account: UUID?)], removed: Int) {
+        func accountName(_ id: UUID?) -> String {
+            id.flatMap { id in accounts.first { $0.id == id } }.map { messageName($0) } ?? "its account"
+        }
+        func sessionName(_ id: String) -> String {
+            (liveSessions[provider] ?? []).first { $0.sessionID == id }.map { Self.eventName(of: $0) } ?? "session \(id.prefix(8))"
+        }
+        if !offered.isEmpty {
+            let listed = offered.prefix(6).map { "\($0.session.prefix(8)) (\(accountName($0.account)))" }.joined(separator: ", ")
+                + (offered.count > 6 ? " and \(offered.count - 6) more" : "")
+            slotsLog.info("[serveSessionSlots] Offered \(offered.count) slot(s) back to their ended sessions: \(listed)")
+            if offered.count > 1 {
+                failoverEvents.record(provider, "Kept the slots of \(offered.count) sessions that no longer run in them, each for its own session for \(Int(Self.reclaimGrace / 60)) minutes: resumed by ID, it takes its slot back and continues on the account it was on (\(listed)).")
+            }
+        }
+        for item in taken {
+            failoverEvents.record(provider, "\(sessionName(item.session)) took back the slot it had and continues on \(accountName(item.account)).")
+        }
+        if removed > 0 {
+            slotsLog.info("[serveSessionSlots] Removed \(removed) slot(s) offered back to sessions that did not resume within \(Int(Self.reclaimGrace / 60)) minutes or now run elsewhere")
+        }
+    }
+
+    /// The session a claimed slot was last read by: the one it records
+    /// itself (`SessionSlots.sessionFile`), its status line's, the only one
+    /// this run saw reading it (`seen`), or the credential audit's; nil
+    /// when none names one or this run saw several and the slot records
+    /// none.
+    nonisolated static func knownSlotSession(recorded: String?, statusLine: String?, seen: Set<String>,
+                                             audit: String?) -> String? {
+        recorded ?? statusLine ?? (seen.count == 1 ? seen.first : nil) ?? audit
     }
 
     /// How a claimed slot's session reaches the account `slotChoice` chose.
@@ -1410,16 +1747,14 @@ extension AppState {
         slotsLog.info("Renewed credential of \(messageName(account)) written to \(written) slot(s)")
     }
 
-    /// Writes a current credential to the slot of every account in
-    /// `newSessions` and every slot a running session reads, and deletes the
-    /// other slots. A running session's slot keeps its own account while
-    /// that account is in the pool, and otherwise serves the pool's
-    /// highest-weight account, so the session continues on an account with
-    /// room. Returns the accounts in `newSessions` whose slot holds a
-    /// credential.
-    @discardableResult
+    /// Keeps the account-level slots (`SessionSlots.directory(for:)`) that
+    /// running sessions read, which no launch hands to a session any more:
+    /// writes a current credential to each and deletes the rest. A running
+    /// session's slot keeps its own account while that account is in the
+    /// pool, and otherwise serves the pool's highest-weight account, so the
+    /// session continues on an account with room.
     private func serveRunning(_ slots: SessionSlots, provider: AIProviderType, members: [RouterPoolMember],
-                              inUse: Set<String>, newSessions: Set<UUID> = []) async -> Set<UUID> {
+                              inUse: Set<String>) async {
         let active = accounts.first { $0.provider == provider && $0.isActive }
         let activeID = active?.id
         let running = Set(inUse.compactMap { slots.account(forDirectory: $0) })
@@ -1433,12 +1768,11 @@ extension AppState {
         let fallback = members.max { lhs, rhs in
             lhs.weight != rhs.weight ? lhs.weight < rhs.weight : rhs.accountID == activeID?.uuidString
         }.flatMap { UUID(uuidString: $0.accountID) } ?? activeID
-        var ready = Set<UUID>()
         var credentials: [UUID: SlotCredential] = [:]
         // A session of a CLI that reads only the account it started on
         // stays on its own: its slot is never rewritten for another.
         let keepsOwn = slots.isolation.movesNeedRestart
-        for slot in newSessions.subtracting([activeID].compactMap { $0 }).union(running) {
+        for slot in running {
             let servingID = pooled.contains(slot) || keepsOwn ? slot : fallback
             guard let servingID, let account = accounts.first(where: { $0.id == servingID }) else { continue }
             if credentials[servingID] == nil {
@@ -1452,11 +1786,8 @@ extension AppState {
             }
             guard let credential = credentials[servingID] else { continue }
             let directory = slots.directory(for: slot)
-            let recheck = running.contains(slot) ? Self.claimedRecheckInterval : Self.spareRecheckInterval
-            if await serveSlot(slots, directory, credential: credential, recheck: recheck, account: servingID,
-                               reason: running.contains(slot) ? "serveRunning.running" : "serveRunning.newSession") {
-                ready.insert(slot)
-            } else {
+            if !(await serveSlot(slots, directory, credential: credential, recheck: Self.claimedRecheckInterval,
+                                 account: servingID, reason: "serveRunning.running")) {
                 slotsLog.error("Slot for \(slot.uuidString) not written")
             }
         }
@@ -1467,9 +1798,8 @@ extension AppState {
         where slots.account(forDirectory: path) != nil && !inUse.contains(path) {
             sessionSlotStates[provider]?.directoryServing[path] = nil
         }
-        let keep = ready.union(running)
         let stale = slots.slotDirectories().filter { directory in
-            UUID(uuidString: directory.lastPathComponent).map { !keep.contains($0) } ?? false
+            UUID(uuidString: directory.lastPathComponent).map { !running.contains($0) } ?? false
         }
         // `running` comes from the process scan; after one that did not
         // read the whole list it may lack slots sessions still read.
@@ -1477,6 +1807,5 @@ extension AppState {
             for directory in stale { slotCredentialWritten[directory.path] = nil }
             await Task.detached(priority: .utility) { stale.forEach { slots.remove($0, reason: "serveRunning.stale") } }.value
         }
-        return ready.intersection(newSessions)
     }
 }

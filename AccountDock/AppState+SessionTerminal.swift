@@ -127,7 +127,7 @@ extension AppState {
 
     /// The sessions among `sessions` whose process reads no slot of its own
     /// (`slotDirectoryByProcess`): started by full path, from an IDE or the
-    /// desktop app, or before the pool was fresh. They share the CLI's own
+    /// desktop app, or while AccountDock was not running. They share the CLI's own
     /// sign-in and cannot be moved one at a time.
     nonisolated static func unisolated(_ sessions: [AgentSession], slotDirectoryByProcess: [Int32: String]) -> [AgentSession] {
         sessions.filter { session in session.processID.map { slotDirectoryByProcess[$0] == nil } ?? false }
@@ -164,7 +164,7 @@ extension AppState {
             for session in found where unisolatedNoted.insert(session.sessionID).inserted {
                 failoverEvents.record(provider, background[session.sessionID] != nil
                     ? "\(Self.eventName(of: session)) runs in \(provider.capabilities.displayName)'s background service, whose workers read the shared sign-in, not a slot of its own: it cannot be moved on its own. Restart it in its own slot from the usage tab once it is idle."
-                    : "\(Self.eventName(of: session)) runs outside a slot of its own (started by full path, from an IDE or the desktop app, or before the pool was ready): it shares the sign-in and cannot be moved on its own. Restart it in its own slot from the usage tab, or quit it and resume it from a terminal.")
+                    : "\(Self.eventName(of: session)) runs outside a slot of its own (started by full path, from an IDE or the desktop app, or while AccountDock was not running): it shares the sign-in and cannot be moved on its own. Restart it in its own slot from the usage tab, or quit it and resume it from a terminal.")
             }
             running.formUnion((liveSessions[provider] ?? []).map(\.sessionID))
         }

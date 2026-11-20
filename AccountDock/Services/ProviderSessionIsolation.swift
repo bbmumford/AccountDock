@@ -13,7 +13,7 @@ struct SlotCredential: Equatable, Sendable {
 /// a slot, whose credential AccountDock writes and can change one session at
 /// a time. Everything else is the same for every provider and lives in
 /// `SessionSlots` and `AppState+SessionSlots`: the launcher on the user's
-/// `PATH`, the pool and resume files, spare and claimed one-session slots,
+/// `PATH`, the pool and resume files, the session slots it makes,
 /// which process reads which slot, and moving a session by rewriting its
 /// slot. A provider offers one through `ProviderCapabilities.sessionIsolation`;
 /// without one its sessions keep the CLI's own credential.
@@ -77,6 +77,11 @@ protocol ProviderSessionIsolation: Sendable {
     /// `SessionSlots.resumeArgumentScript` writes them for options that
     /// take the ID as their value.
     var resumeArgumentScript: String { get }
+    /// Launcher lines that set `continued` when a launch continues the
+    /// newest session of the folder it starts in, read from `"$@"`; the
+    /// launcher then looks the folder up in the resume file. Empty, the
+    /// default, for a CLI without such an option.
+    var continueArgumentScript: String { get }
     /// The command line that resumes the session `sessionID` through the
     /// launcher, typed by `SessionTerminalActions`.
     func resumeCommand(sessionID: String) -> String
@@ -131,6 +136,8 @@ extension ProviderSessionIsolation {
     /// into for one.
     func screenWaitsAtLimit(_ screen: String) -> Bool { false }
     var cancelWaitKey: String { "\u{1B}" }
+
+    var continueArgumentScript: String { "" }
 
     func launcherExportLines(slot: String) -> [String] {
         ["\(directoryVariable)=\(slot)", "export \(directoryVariable)"]

@@ -236,9 +236,13 @@ renews each account and rewrites its slots.
   **Serve sessions from several accounts at once** is on and no route target is
   chosen. AccountDock puts a small launcher first on `PATH`, from `~/.zshenv`
   and again last in `~/.zshrc` so a terminal's shell finds it ahead of the CLI,
-  and the launcher starts each session in a slot of an account picked for it.
-  If AccountDock stops, the launcher starts the CLI unchanged within half an
-  hour, so no session is left on a slot nothing renews.
+  and the launcher starts each session in a session slot of its own, which
+  AccountDock fills, within about a second, for the account the session last
+  ran on, else one picked for it, else the active one. A session resumed by ID
+  takes back the slot it had, with its account, for an hour after it ended, so
+  sessions a terminal restores after a restart continue where they were.
+  While AccountDock is starting, a launch waits for it; while it is not
+  running, the CLI starts unchanged on the shared sign-in.
 - **Codex** and **Kimi Code** slots keep session history in the CLI's usual
   home. A session opened from an account card always runs in one, and every
   terminal session does once **Serve sessions from several accounts at once**
@@ -246,8 +250,8 @@ renews each account and rewrites its slots.
   Codex session moves by restarting: once it is idle in agterm and unpinned,
   AccountDock ends it and resumes it with `codex resume` on the new account.
 
-Sessions started by full path, from an IDE or the desktop app, or before the
-slots were ready read the shared sign-in and move only with the active
+Sessions started by full path, from an IDE or the desktop app, or while
+AccountDock was not running read the shared sign-in and move only with the active
 account. The usage tab counts them ("2 sessions not isolated"), and one idle
 in agterm can be restarted in its own slot: AccountDock types `/exit`, then the
 CLI's resume command, so it continues through the launcher. A session mid-turn

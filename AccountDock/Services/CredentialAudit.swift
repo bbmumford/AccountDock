@@ -702,6 +702,34 @@ final class CredentialAudit: @unchecked Sendable {
         return found
     }
 
+    /// The session the newest `slotAssign` or `slotWrite` entry naming one
+    /// names for each of `slots` (slot paths), from the newest line back; a
+    /// slot with none is left out. `AppState.serveSessionSlots` offers a
+    /// slot back to that session when the slot records none itself
+    /// (`SessionSlots.sessionFile`), as for one claimed before it did.
+    /// Only lines holding a slot's last path component are decoded.
+    func lastSlotSessions(_ slots: Set<String>) -> [String: String] {
+        guard !slots.isEmpty else { return [:] }
+        let files: [URL] = lock.withLock { [fileURL] + (1...max(keepRotated, 1)).map(rotatedURL) }
+        let actions: Set<CredentialAuditAction> = [.slotAssign, .slotWrite]
+        let names = slots.map { Data(URL(fileURLWithPath: $0).lastPathComponent.utf8) }
+        let decoder = JSONDecoder()
+        var remaining = slots
+        var found: [String: String] = [:]
+        for file in files where !remaining.isEmpty {
+            guard let data = FileManager.default.contents(atPath: file.path) else { continue }
+            for line in data.split(separator: UInt8(ascii: "\n")).reversed() where !remaining.isEmpty {
+                guard names.contains(where: { line.range(of: $0) != nil }),
+                      let entry = try? decoder.decode(CredentialAuditEntry.self, from: Data(line)),
+                      actions.contains(entry.action), let slot = entry.slot, remaining.contains(slot),
+                      let session = entry.session, !session.isEmpty else { continue }
+                found[slot] = session
+                remaining.remove(slot)
+            }
+        }
+        return found
+    }
+
     /// Parses an ISO 8601 time with or without fractional seconds.
     static func date(_ text: String) -> Date? {
         let fractional = ISO8601DateFormatter()

@@ -60,8 +60,10 @@ struct AccountDockApp: App {
                     // Kick off background usage tracking immediately upon app start
                     Task {
                         // Sessions a terminal restores at login start as soon as
-                        // it opens; the pool and spares their launchers wait for
-                        // come before anything slower.
+                        // it opens: their launchers wait, once AccountDock is
+                        // known to run, for the first pass over the slots,
+                        // which comes before anything slower.
+                        appState.markSlotsStarting()
                         if appState.sessionSlotsWanted { await appState.maintainSessionSlots() }
                         // The account cards' session counts, before the first
                         // refresh, which reads every account and can take a

@@ -76,20 +76,24 @@ final class CodexSessionIsolationTests: XCTestCase {
         let slots = SessionSlots(isolation: isolation, home: home)
         let account = UUID()
         let credential = try XCTUnwrap(isolation.slotCredential(from: Self.auth(account: "acct-1", expires: Date().addingTimeInterval(3600))))
-        XCTAssertTrue(slots.serve(slots.directory(for: account), credential: credential, account: account, reason: "test"))
         slots.writePool([(slots.directory(for: account).path, 1)])
 
-        let lines = try runLauncher(home: home, arguments: ["exec", "say ok"]).split(separator: "\n").map(String.init)
+        let lines = try runLauncher(home: home, arguments: ["exec", "say ok"], credentials: [account: credential], active: account)
+            .split(separator: "\n").map(String.init)
         XCTAssertEqual(Array(lines.dropFirst()),
                        (CodexSessionIsolation.arguments(baseURL: CodexSessionIsolation.routedBaseURL) + ["exec", "say ok"]).map { "arg=" + $0 })
         XCTAssertTrue(lines.contains("arg=" + #"model_providers.accountdock.base_url=""# + CodexSessionIsolation.routedBaseURL + #"""#))
     }
 
     /// Runs the installed launcher in front of a stand-in `codex` that
-    /// prints its arguments and slot environment.
-    private func runLauncher(home: URL, arguments: [String]) throws -> String {
+    /// prints its arguments and slot environment. With `credentials`, a
+    /// stand-in AccountDock runs and fills each session slot a launch asks
+    /// for with the credential of the account it asks for, or `active`'s.
+    private func runLauncher(home: URL, arguments: [String], credentials: [UUID: SlotCredential] = [:],
+                             active: UUID = UUID()) throws -> String {
         let slots = SessionSlots(isolation: isolation, home: home)
         try slots.installLauncher()
+        try FileManager.default.createDirectory(at: slots.sessionRoot, withIntermediateDirectories: true)
         let bin = home.appendingPathComponent("realbin", isDirectory: true)
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         let fake = bin.appendingPathComponent("codex")
@@ -99,16 +103,16 @@ final class CodexSessionIsolationTests: XCTestCase {
         for a in "$@"; do echo "arg=$a"; done
         """.write(to: fake, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
-        let process = Process()
-        process.executableURL = slots.launcher
-        process.arguments = arguments
-        process.environment = ["PATH": "\(slots.binDirectory.path):\(bin.path):/usr/bin:/bin", "HOME": home.path,
-                               SessionSlots.spareWaitVariable: "0"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        try process.run()
-        process.waitUntilExit()
-        return String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let harness = LauncherHarness(slots: slots, realBin: bin)
+        defer { harness.stopResponding(); harness.stopDock() }
+        if !credentials.isEmpty {
+            try harness.startDock()
+            harness.respond(active: active) { request, id in
+                guard let value = credentials[id] else { return }
+                _ = slots.fill(request.directory, account: id, credential: value, reason: "test", session: request.session)
+            }
+        }
+        return try harness.launch(arguments)
     }
 
     func testTheLauncherStartsCodexOnTheSlotWithItsArgumentsFirst() throws {
@@ -116,12 +120,12 @@ final class CodexSessionIsolationTests: XCTestCase {
         let slots = SessionSlots(isolation: isolation, home: home)
         let account = UUID()
         let credential = try XCTUnwrap(isolation.slotCredential(from: Self.auth(account: "acct-1", expires: Date().addingTimeInterval(3600))))
-        XCTAssertTrue(slots.serve(slots.directory(for: account), credential: credential, account: account, reason: "test"))
         slots.writePool([(slots.directory(for: account).path, 1)])
 
-        let output = try runLauncher(home: home, arguments: ["exec", "say ok"])
+        let output = try runLauncher(home: home, arguments: ["exec", "say ok"], credentials: [account: credential], active: account)
         let lines = output.split(separator: "\n").map(String.init)
-        XCTAssertEqual(lines.first, "slot=\(slots.directory(for: account).path) account=acct-1")
+        XCTAssertTrue(lines.first?.hasPrefix("slot=\(slots.sessionRoot.path)/") == true, output)
+        XCTAssertTrue(lines.first?.hasSuffix(" account=acct-1") == true, output)
         XCTAssertEqual(Array(lines.dropFirst()), (CodexSessionIsolation.slotArguments + ["exec", "say ok"]).map { "arg=" + $0 })
     }
 
@@ -130,36 +134,35 @@ final class CodexSessionIsolationTests: XCTestCase {
         let slots = SessionSlots(isolation: isolation, home: home)
         let account = UUID()
         let credential = try XCTUnwrap(isolation.slotCredential(from: Self.auth(account: "acct-1", expires: Date().addingTimeInterval(3600))))
-        XCTAssertTrue(slots.serve(slots.directory(for: account), credential: credential, account: account, reason: "test"))
         slots.writePool([(slots.directory(for: account).path, 1)])
         for command in ["login", "logout", "mcp", "app"] {
-            let output = try runLauncher(home: home, arguments: [command, "--help"])
+            let output = try runLauncher(home: home, arguments: [command, "--help"], credentials: [account: credential],
+                                         active: account)
             XCTAssertEqual(output, "slot=none account=none\narg=\(command)\narg=--help\n", command)
         }
     }
 
-    func testAResumeIsRoutedToTheSlotItsSessionRanOn() throws {
+    func testAResumeIsRoutedToTheAccountItsSessionRanOn() throws {
         let home = try temporaryDirectory()
         let slots = SessionSlots(isolation: isolation, home: home)
         let (pooled, resumedOn) = (UUID(), UUID())
         let credential = try XCTUnwrap(isolation.slotCredential(from: Self.auth(account: "acct-1", expires: Date().addingTimeInterval(3600))))
         let other = try XCTUnwrap(isolation.slotCredential(from: Self.auth(account: "acct-2", expires: Date().addingTimeInterval(3600))))
-        XCTAssertTrue(slots.serve(slots.directory(for: pooled), credential: credential, account: pooled, reason: "test"))
-        XCTAssertTrue(slots.serve(slots.directory(for: resumedOn), credential: other, account: resumedOn, reason: "test"))
+        let credentials = [pooled: credential, resumedOn: other]
         slots.writePool([(slots.directory(for: pooled).path, 1)])
         slots.writeResumes([("019a-session", slots.directory(for: resumedOn).path)])
 
-        let output = try runLauncher(home: home, arguments: ["resume", "019a-session"])
-        XCTAssertTrue(output.hasPrefix("slot=\(slots.directory(for: resumedOn).path) account=acct-2\n"), output)
+        let output = try runLauncher(home: home, arguments: ["resume", "019a-session"], credentials: credentials, active: pooled)
+        XCTAssertTrue(output.hasPrefix("slot=\(slots.sessionRoot.path)/"), output)
+        XCTAssertTrue(output.split(separator: "\n").first?.hasSuffix(" account=acct-2") == true, output)
         XCTAssertTrue(output.hasSuffix("arg=resume\narg=019a-session\n"))
         XCTAssertEqual(isolation.resumeCommand(sessionID: "019a-session"), "codex resume '019a-session'")
 
         slots.addResume(session: "019a-session", path: slots.directory(for: pooled).path)
-        let moved = try runLauncher(home: home, arguments: ["resume", "019a-session"])
-        XCTAssertTrue(moved.hasPrefix("slot=\(slots.directory(for: pooled).path) account=acct-1\n"),
-                      "a restart names its new slot at once: \(moved)")
+        let moved = try runLauncher(home: home, arguments: ["resume", "019a-session"], credentials: credentials, active: pooled)
+        XCTAssertTrue(moved.split(separator: "\n").first?.hasSuffix(" account=acct-1") == true,
+                      "a restart names its new account at once: \(moved)")
     }
-
     func testTheResumeArgumentIsTheFirstNonOptionAfterResume() throws {
         func resumed(_ arguments: [String]) throws -> String {
             let process = Process()

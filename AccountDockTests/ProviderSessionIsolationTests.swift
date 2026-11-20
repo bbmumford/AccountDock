@@ -116,58 +116,59 @@ final class ProviderSessionIsolationTests: XCTestCase {
         let account = UUID()
         let credential = try XCTUnwrap(isolation.slotCredential(from: #"{"access":"a1","refresh":"secret"}"#))
         XCTAssertFalse(credential.contents.contains("secret"))
-        let spare = try XCTUnwrap(slots.makeSlot(for: account, credential: credential, reason: "test"))
-        XCTAssertEqual(isolation.readCredential(in: spare), credential)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: spare.appendingPathComponent("config.toml").path))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: spare.appendingPathComponent("reread").path))
-        XCTAssertEqual(slots.sessionSlots().first?.account, account)
-        XCTAssertEqual(slots.directories(holding: account, serving: [:]), [spare.path])
+        let other = UUID()
+        let otherCredential = try XCTUnwrap(isolation.slotCredential(from: #"{"access":"b2"}"#))
+        let credentials = [account: credential, other: otherCredential]
 
-        func launch(_ arguments: [String], environment: [String: String] = [:]) throws -> String {
-            let process = Process()
-            let pipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/bin/sh")
-            process.arguments = ["-c", "exec fakecli \"$@\"", "sh"] + arguments
-            process.environment = ["PATH": slots.binDirectory.path + ":" + realBin.path + ":/usr/bin:/bin",
-                                   SessionSlots.spareWaitVariable: "0"]
-                .merging(environment) { $1 }
-            process.standardOutput = pipe
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return String(decoding: data, as: UTF8.self)
+        let harness = LauncherHarness(slots: slots, realBin: realBin)
+        defer { harness.stopResponding(); harness.stopDock() }
+        XCTAssertEqual(try harness.launch(["chat"]), "||chat", "without AccountDock running the CLI starts unchanged")
+
+        // AccountDock fills each launch's own slot for the account it asks for.
+        try FileManager.default.createDirectory(at: slots.sessionRoot, withIntermediateDirectories: true)
+        try harness.startDock()
+        harness.respond(active: account) { request, id in
+            guard let value = credentials[id] else { return }
+            _ = slots.fill(request.directory, account: id, credential: value, reason: "test", session: request.session)
         }
-
-        XCTAssertEqual(try launch(["chat"]), "||chat", "no pool file starts the CLI unchanged")
         slots.writePool([(slots.directory(for: account).path, 1)])
-        XCTAssertEqual(try launch(["login"]), "||login")
-        XCTAssertEqual(try launch(["chat"], environment: ["FAKECLI_TOKEN": "t"]), "||chat")
-        XCTAssertEqual(try launch(["chat"]), spare.path + "|" + credential.contents + "|chat",
-                       "the launcher claims the account's spare and exports the isolation's variable")
-        XCTAssertNotNil(slots.sessionSlots().first { $0.directory.lastPathComponent == spare.lastPathComponent }?.claimedAt)
+        XCTAssertEqual(try harness.launch(["login"]), "||login")
+        XCTAssertEqual(try harness.launch(["chat"], environment: ["FAKECLI_TOKEN": "t"]), "||chat")
+        let chat = try harness.launch(["chat"]).split(separator: "|").map(String.init)
+        XCTAssertEqual(chat.count, 3)
+        let own = URL(fileURLWithPath: chat[0], isDirectory: true)
+        XCTAssertEqual(own.deletingLastPathComponent().path, slots.sessionRoot.path,
+                       "the launcher made the session its own slot and exports the isolation's variable")
+        XCTAssertEqual(Array(chat.dropFirst()), [credential.contents, "chat"])
+        XCTAssertEqual(isolation.readCredential(in: own), credential)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: own.appendingPathComponent("config.toml").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: own.appendingPathComponent("reread").path))
+        XCTAssertEqual(slots.sessionSlots().first { $0.directory.path == own.path }?.account, account)
+        XCTAssertNotNil(slots.sessionSlots().first { $0.directory.path == own.path }?.claimedAt)
 
         // A session resumed by ID goes back to its account, parsed by the
         // isolation's own resume lines.
-        let other = UUID()
-        let otherCredential = try XCTUnwrap(isolation.slotCredential(from: #"{"access":"b2"}"#))
-        let otherSpare = try XCTUnwrap(slots.makeSlot(for: other, credential: otherCredential, reason: "test"))
         slots.writeResumes([(session: "s-1", path: slots.directory(for: other).path)])
-        XCTAssertEqual(try launch(["resume", "s-1"]), otherSpare.path + "|" + otherCredential.contents + "|resume s-1")
+        let resumed = try harness.launch(["resume", "s-1"]).split(separator: "|").map(String.init)
+        XCTAssertEqual(Array(resumed.dropFirst()), [otherCredential.contents, "resume s-1"])
+        let resumedSlot = URL(fileURLWithPath: resumed[0], isDirectory: true)
+        XCTAssertNotEqual(resumedSlot.path, own.path)
 
         // Moving a session rewrites its slot through the isolation.
-        XCTAssertTrue(slots.serve(spare, credential: otherCredential, account: nil, reason: "test"))
-        XCTAssertEqual(isolation.readCredential(in: spare), otherCredential)
+        XCTAssertTrue(slots.serve(own, credential: otherCredential, account: nil, reason: "test"))
+        XCTAssertEqual(isolation.readCredential(in: own), otherCredential)
 
         // Each process is mapped to the slot its environment names.
         let list = """
-          123   1 fakecli chat FAKECLI_HOME=\(spare.path) HOME=/x
+          123   1 fakecli chat FAKECLI_HOME=\(own.path) HOME=/x
           124   1 fakecli chat HOME=/x
-          125   1 fakecli resume s-1 FAKECLI_HOME=\(otherSpare.path)
+          125   1 fakecli resume s-1 FAKECLI_HOME=\(resumedSlot.path)
         """
-        XCTAssertEqual(slots.directoriesByProcess(in: ProcessTable(listing: list, columns: .pidPPID)), [123: spare.path, 125: otherSpare.path])
+        XCTAssertEqual(slots.directoriesByProcess(in: ProcessTable(listing: list, columns: .pidPPID)),
+                       [123: own.path, 125: resumedSlot.path])
 
-        slots.remove(spare, reason: "test")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: spare.path))
+        slots.remove(own, reason: "test")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: own.path))
         slots.removeLauncher()
         XCTAssertFalse(slots.launcherInstalled)
     }
