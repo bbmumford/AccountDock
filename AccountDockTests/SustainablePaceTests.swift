@@ -288,4 +288,21 @@ final class SustainablePaceTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(try XCTUnwrap(paced.allPausedAt), hours(monday8am))
         XCTAssertLessThan(target.flatOutPausedAt, hours(5))
     }
+
+    // MARK: - The events
+
+    func testTheEventSaysWhichSessionsRunAndWhichWait() throws {
+        let target = try target()
+        let decision = SustainablePace.decide(previous: nil, candidates: candidates(), target: target, now: now)
+        let summary = SustainablePace.summary(candidates(), held: decision.held, target: target, flatOutResume: nil)
+        XCTAssertEqual(SustainablePace.event(summary, now: now),
+                       "Pacing to the resets: 6 of 14 sessions run (≈ \(CapacityOutlook.millions(target.tokensPerHour)) "
+                       + "tokens/h, what the accounts carry until \(UsageFormat.clock(hours(monday8am), now: now)) "
+                       + "(bytrix's new week)); cf-builder, platform-engineer, cf-designer and 5 more wait for room.")
+        let everyone = SustainablePace.summary(candidates(), held: [], target: target, flatOutResume: nil)
+        XCTAssertTrue(SustainablePace.event(everyone, now: now).hasPrefix("Pacing to the resets: all 14 sessions run (≈ "))
+        XCTAssertEqual(SustainablePace.releaseEvent(count: 8, reason: "pacing to the resets is off"),
+                       "Pacing to the resets: the 8 session(s) it held run again: pacing to the resets is off.")
+        XCTAssertEqual(SustainablePace.names(["a", "b"]), ListFormatter.localizedString(byJoining: ["a", "b"]))
+    }
 }

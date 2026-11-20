@@ -271,6 +271,25 @@ enum SustainablePace {
         return labels.prefix(shown).joined(separator: ", ") + " and \(labels.count - shown) more"
     }
 
+    /// The event recorded when the held set changes: "Pacing to the resets:
+    /// 9 of 14 sessions run (≈ 120M tokens/h, what the accounts carry until
+    /// Mon 8:00 am (bytrix's new week)); cf-builder, … wait for room."
+    static func event(_ summary: Summary, now: Date) -> String {
+        let carry = "≈ \(CapacityOutlook.millions(summary.target.tokensPerHour)) tokens/h, what the accounts carry until "
+            + until(summary.target, now: now)
+        guard !summary.held.isEmpty else {
+            return "Pacing to the resets: all \(summary.sessionCount) sessions run (\(carry))."
+        }
+        return "Pacing to the resets: \(summary.running.count) of \(summary.sessionCount) sessions run (\(carry)); "
+            + names(summary.held) + " wait for room."
+    }
+
+    /// The event recorded when pacing lets every session it held go on,
+    /// with why (`AppState.endPacing`).
+    static func releaseEvent(count: Int, reason: String) -> String {
+        "Pacing to the resets: the \(count) session(s) it held run again: \(reason)."
+    }
+
     /// The pause gate's reason for a pause pacing starts.
     static let holdReason = "paced: waiting for room so the others can run until the resets"
 }

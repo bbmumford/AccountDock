@@ -530,6 +530,9 @@ final class AppState: ObservableObject {
     /// `SustainablePace.playLasts`, and the play counts as the user's
     /// latest prompt to it.
     var pacedPlays: [String: Date] = [:]
+    /// The pacing event last recorded per provider, so one is recorded
+    /// only when what pacing holds changes.
+    var pacedEventNoted: [AIProviderType: String] = [:]
     /// When pacing last looked for a target and found nothing to pace, so
     /// it looks again only after `pacingRecheck`.
     var pacingCheckedAt: [AIProviderType: Date] = [:]

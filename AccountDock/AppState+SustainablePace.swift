@@ -74,6 +74,13 @@ extension AppState {
         let decision = SustainablePace.decide(previous: previous, candidates: candidates, target: target, now: now)
         pacedDecisions[provider] = decision
         applyPacing(provider, held: decision.held, until: target.until, now: now)
+        guard decision.held != (previous?.held ?? []) else { return }
+        let summary = SustainablePace.summary(candidates, held: decision.held, target: target, flatOutResume: nil)
+        let event = SustainablePace.event(summary, now: now)
+        paceLog.info("\(provider.rawValue): \(event)")
+        guard pacedEventNoted[provider] != event else { return }
+        pacedEventNoted[provider] = event
+        failoverEvents.record(provider, event)
     }
 
     /// The provider's live sessions as pacing weighs them: each at the
@@ -157,8 +164,8 @@ extension AppState {
         }
     }
 
-    /// Lets every session pacing holds go on, logs why, and forgets the
-    /// decision.
+    /// Lets every session pacing holds go on, records why once, and forgets
+    /// the decision.
     func endPacing(_ provider: AIProviderType, reason: String) {
         let held = pacedSessions(provider)
         pacedDecisions[provider] = nil
@@ -166,7 +173,10 @@ extension AppState {
         sessionWaits[provider] = sessionWaits[provider]?.filter { $0.value.reason != .paced }
         if sessionWaits[provider]?.isEmpty == true { sessionWaits[provider] = nil }
         releasePacedHolds(provider, held)
-        paceLog.info("\(provider.rawValue): released the \(held.count) paced session(s): \(reason)")
+        let event = SustainablePace.releaseEvent(count: held.count, reason: reason)
+        pacedEventNoted[provider] = event
+        failoverEvents.record(provider, event)
+        paceLog.info("\(provider.rawValue): \(event)")
     }
 
     /// A paced session the user played (`SessionWait.played`, set by
