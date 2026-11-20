@@ -204,11 +204,12 @@ extension AppState {
         objectWillChange.send()
     }
 
-    /// Lets one held session go on (`resumeSession`), ending the pause when
-    /// it held no other session.
+    /// The play button of one held session: it goes on (`resumeSession`)
+    /// by the two-step rule of `pressPlay`, ending the pause when it held no
+    /// other session.
     func playSession(_ provider: AIProviderType, session sessionID: String) {
         guard let held = pausedSessions(provider).first(where: { $0.sessionID == sessionID }) else { return }
-        resumeSession(held)
+        pressPlay(held)
     }
 
     // MARK: - Moving by hand

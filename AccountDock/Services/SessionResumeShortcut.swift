@@ -94,7 +94,10 @@ enum SessionResumeMenu {
         @objc func pick(_ item: NSMenuItem) { choose(sessions[item.tag]) }
     }
 
-    static func show(_ sessions: [WaitingSession], returningTo app: NSRunningApplication?,
+    /// `notes` are the notes of first presses that found no room, by
+    /// session (`AppState.playNotes`), shown beside each such session so
+    /// choosing it again runs it anyway.
+    static func show(_ sessions: [WaitingSession], notes: [String: String] = [:], returningTo app: NSRunningApplication?,
                      choose: @escaping (WaitingSession) -> Void) {
         let target = Target(sessions, choose: choose)
         let menu = NSMenu(title: "Resume a paused session")
@@ -102,7 +105,8 @@ enum SessionResumeMenu {
         heading.isEnabled = false
         menu.addItem(heading)
         for (index, session) in sessions.enumerated() {
-            let item = NSMenuItem(title: session.label, action: #selector(Target.pick(_:)), keyEquivalent: "")
+            let title = notes[session.sessionID].map { "\(session.label) — \($0)" } ?? session.label
+            let item = NSMenuItem(title: title, action: #selector(Target.pick(_:)), keyEquivalent: "")
             item.target = target
             item.tag = index
             menu.addItem(item)

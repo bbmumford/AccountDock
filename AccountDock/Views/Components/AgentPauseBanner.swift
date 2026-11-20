@@ -5,7 +5,8 @@ import SwiftUI
 /// the user paused all of them or some one at a time. One line says how many
 /// are held and when they are expected to continue; the Sessions tab lists
 /// each one (`AppState.pausedSessions`), and the icons resume every session
-/// or open that tab.
+/// or open that tab. Under it, for a few seconds, the reason a play found no
+/// account with room (`AppState.playNotes`).
 struct AgentPauseBanner: View {
     @EnvironmentObject private var appState: AppState
     let provider: AIProviderType
@@ -15,10 +16,21 @@ struct AgentPauseBanner: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: "pause.circle.fill")
                 .foregroundStyle(.orange)
-            Text(summary)
-                .font(.caption)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(summary)
+                    .font(.caption)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                // A play pressed while no account had room, until its note
+                // clears (`AppState.playNotes`).
+                ForEach(notes, id: \.session) { note in
+                    Text("\(note.label): \(note.text)")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Spacer(minLength: 4)
             HStack(spacing: 8) {
                 Button {
@@ -42,6 +54,11 @@ struct AgentPauseBanner: View {
         .padding(.vertical, 6)
         .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
         .sectionPadding()
+    }
+
+    /// The provider's notes of first presses that found no room.
+    private var notes: [AppState.PlayNote] {
+        appState.playNotes.values.filter { $0.provider == provider }.sorted { $0.label < $1.label }
     }
 
     /// "9 sessions paused · resumes about 8:40 pm", or "held until you play

@@ -249,7 +249,10 @@ extension AppState {
     /// the account it was played on while it stays there. A later pause
     /// holds it again too. When it was the last session the pause held, the
     /// pause ends (`AgentPauseGate.playOne`), as "Resume all" would end it.
-    func resumeSession(_ session: WaitingSession) {
+    /// `anyway` when the user pressed play a second time although no
+    /// account has room (`pressPlay`): the event says it will be refused.
+    /// The user's controls reach it through `pressPlay`.
+    func resumeSession(_ session: WaitingSession, anyway: Bool = false) {
         let provider = session.provider
         let chosenOnly = AgentPauseGate.read(provider)?.holdsOnlyChosenSessions == true
         let running = Set((liveSessions[provider] ?? []).map(\.sessionID))
@@ -269,7 +272,9 @@ extension AppState {
                 suspensionContexts[provider] = nil
                 notePauseOverride(provider)
             }
-            failoverEvents.record(provider, "Resumed the \(session.label) at the user's request; no session is paused any more, so the pause is over.")
+            failoverEvents.record(provider, anyway
+                ? Self.playAnywayEvent(session.label) + " No session is paused any more, so the pause is over."
+                : "Resumed the \(session.label) at the user's request; no session is paused any more, so the pause is over.")
             objectWillChange.send()
             return
         }
@@ -279,15 +284,18 @@ extension AppState {
             userResumes[provider, default: [:]][session.sessionID] = UserResume(playedOn: account.id, spent: spent)
         }
         refreshPauseStatus(provider)
-        failoverEvents.record(provider, "Resumed the \(session.label) at the user's request; other sessions stay paused.")
+        failoverEvents.record(provider, anyway ? Self.playAnywayEvent(session.label)
+                                  : "Resumed the \(session.label) at the user's request; other sessions stay paused.")
         // The pause file changed though the pause's counts may not have.
         objectWillChange.send()
     }
 
-    /// The resume shortcut: resumes the one waiting session shown by the
-    /// frontmost app, found through the gate process's ancestors. When that
-    /// app shows several, or none, a menu lists the candidates instead, so
-    /// a session in another window is never resumed unasked.
+    /// The resume shortcut: plays the one waiting session shown by the
+    /// frontmost app, found through the gate process's ancestors, by the
+    /// same two-step rule as the play buttons (`pressPlay`). When that app
+    /// shows several, or none, a menu lists the candidates instead, so a
+    /// session in another window is never resumed unasked; a candidate
+    /// whose first press found no room shows why there.
     func resumeFrontmostSession() {
         let waiting = waitingSessions()
         guard !waiting.isEmpty else {
@@ -301,11 +309,16 @@ extension AppState {
                 session.gateProcess.map { ProcessAncestry.isDescendant($0, of: front.processIdentifier) } ?? false
             }
             if shown.count == 1 {
-                resumeSession(shown[0])
+                pressPlayFromShortcut(shown[0])
                 return
             }
             if !shown.isEmpty { candidates = shown }
         }
-        SessionResumeMenu.show(candidates, returningTo: front) { [weak self] in self?.resumeSession($0) }
+        let notes = candidates.reduce(into: [String: String]()) { notes, session in
+            if let note = playNotes[session.sessionID] { notes[session.sessionID] = note.text }
+        }
+        SessionResumeMenu.show(candidates, notes: notes, returningTo: front) { [weak self] in
+            self?.pressPlayFromShortcut($0)
+        }
     }
 }
