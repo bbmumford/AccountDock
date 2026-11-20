@@ -1118,7 +1118,16 @@ per million took a Max 20x account trusted at 0.18% to 2.37%, over twice the
 1.06% a Max 5x account at 4.25% makes of a window four times its size, and
 the cost is then blended toward
 the plan-size expectation again, as after a plan change, until
-`trustedReadings` readings agree. Each measured cost is kept with the
+`trustedReadings` readings agree. A measured cost more than `strayReading`
+(4) times off an expectation at least `outlierPeers` (2) other accounts make
+never weighs more than `outlierWeight` (half, in log terms) against it,
+however many readings it has (`RatioSource.heldTowardPlanSize`): accounts of
+one size whose costs agree say what a percent of that size holds, and one
+several times off them is counting use the router does not see, which its
+readings' burn already carries. hexorda's 8.87% per million beside voltrix's
+1.19, fluxon's 1.55, bytrix's 1.72 and cybrio's 2.12, all Max 5x, counts at
+3.8%. A seed is made from each reference's cost as these rules leave it, so
+one stray account does not inflate the accounts with none. Each measured cost is kept with the
 plan it was measured on (`TurnCostModel.accountPlans`, the plan and the
 rate-limit tier): once the account is on another plan, as an upgrade from
 Pro to Max, which makes each percent five times the work, that cost is not

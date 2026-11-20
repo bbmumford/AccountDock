@@ -78,6 +78,18 @@ struct TurnCostModel: Codable, Equatable {
     /// again (`recordReading`): the square of `sizeDisagreement`, wider
     /// than the spread of honest readings of one plan.
     static let strayReading = sizeDisagreement * sizeDisagreement
+    /// How many other measured accounts must make an account's plan-size
+    /// expectation before a ratio more than `strayReading` from it is held
+    /// toward it however many readings it has: with one other, either of
+    /// the two could be the stray.
+    static let outlierPeers = 2
+    /// The most such a ratio weighs, in log terms, against that
+    /// expectation: half. Accounts of one size whose ratios agree with each
+    /// other say what a percent of that size holds; one several times off
+    /// them is counting use the router does not see (another machine, the
+    /// web), which its readings' burn rate already carries, so its own
+    /// measurement never stands alone.
+    static let outlierWeight = 0.5
 
     /// Where an account's ratio came from (`ratio(for:sizes:plans:)`).
     enum RatioSource: Equatable {
@@ -88,6 +100,11 @@ struct TurnCostModel: Codable, Equatable {
         /// accounts' measured ratios, and from fewer than `trustedReadings`:
         /// blended toward that expectation by how many readings it has.
         case blendedWithPlanSize
+        /// Measured on the account itself, but more than `strayReading`
+        /// from what its plan size makes of at least `outlierPeers` other
+        /// accounts' ratios: blended toward that expectation with its own
+        /// weight at most `outlierWeight`, however many readings it has.
+        case heldTowardPlanSize
         /// From the accounts with a measured ratio and a known plan size,
         /// scaled by the account's plan size.
         case seededFromLearned
@@ -114,9 +131,14 @@ struct TurnCostModel: Codable, Equatable {
     /// that expectation, in proportion to how many of `trustedReadings` it
     /// has learned from: a few readings taken while other accounts' use
     /// moved the window can read a Max 5x account as a Max 20x one, which
-    /// would send it four times the work it holds. `plans` holds each
-    /// account's plan now (`LearnedPlan`); a ratio learned on another plan
-    /// is not used, for the account or as a reference.
+    /// would send it four times the work it holds. One more than
+    /// `strayReading` from an expectation `outlierPeers` other accounts
+    /// make is held toward it however many readings it has
+    /// (`heldTowardPlanSize`). `plans` holds each account's plan now
+    /// (`LearnedPlan`); a ratio learned on another plan is not used, for
+    /// the account or as a reference. A seed is made from each reference's
+    /// ratio as these rules leave it, so one stray account does not inflate
+    /// the seeds of the accounts with none.
     func ratio(for account: UUID, sizes: [UUID: Double],
                plans: [UUID: LearnedPlan] = [:]) -> (ratio: Double, source: RatioSource) {
         func measured(_ id: UUID) -> Double? {
@@ -124,26 +146,33 @@ struct TurnCostModel: Codable, Equatable {
             if let learnedOn = accountPlans?[id], let current = plans[id], learnedOn.differs(from: current) { return nil }
             return value
         }
-        let size = sizes[account].flatMap { $0 > 0 ? $0 : nil }
-        if let own = measured(account) {
-            guard let size else { return (own, .learned) }
-            let expected = sizes.compactMap { id, other -> Double? in
-                guard id != account, other > 0, let ratio = measured(id) else { return nil }
-                return ratio * other / size
+        // `id`'s own ratio, checked against what its size makes of the
+        // other measured accounts' (their median, so one stray account sets
+        // no expectation); nil when it has none.
+        func checked(_ id: UUID) -> (ratio: Double, source: RatioSource)? {
+            guard let own = measured(id) else { return nil }
+            guard let size = sizes[id].flatMap({ $0 > 0 ? $0 : nil }) else { return (own, .learned) }
+            let expected = sizes.compactMap { other, otherSize -> Double? in
+                guard other != id, otherSize > 0, let ratio = measured(other) else { return nil }
+                return ratio * otherSize / size
             }.sorted()
             guard !expected.isEmpty else { return (own, .learned) }
             let middle = expected.count / 2
             let reference = expected.count % 2 == 1 ? expected[middle] : sqrt(expected[middle - 1] * expected[middle])
-            let readings = accountReadings?[account] ?? 0
-            guard max(own / reference, reference / own) > Self.sizeDisagreement, readings < Self.trustedReadings else {
-                return (own, .learned)
-            }
+            let readings = accountReadings?[id] ?? 0
             let weight = Double(readings) / Double(Self.trustedReadings)
+            let off = max(own / reference, reference / own)
+            if off > Self.strayReading, expected.count >= Self.outlierPeers, weight > Self.outlierWeight {
+                return (exp(Self.outlierWeight * log(own) + (1 - Self.outlierWeight) * log(reference)), .heldTowardPlanSize)
+            }
+            guard off > Self.sizeDisagreement, readings < Self.trustedReadings else { return (own, .learned) }
             return (exp(weight * log(own) + (1 - weight) * log(reference)), .blendedWithPlanSize)
         }
+        if let own = checked(account) { return own }
+        let size = sizes[account].flatMap { $0 > 0 ? $0 : nil }
         guard let size else { return (ratio, .planWide) }
         let references = sizes.compactMap { id, referenceSize -> Double? in
-            guard referenceSize > 0, let learned = measured(id) else { return nil }
+            guard referenceSize > 0, let learned = checked(id)?.ratio else { return nil }
             return log(learned * referenceSize / size)
         }
         if !references.isEmpty {

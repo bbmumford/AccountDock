@@ -324,7 +324,12 @@ provider's failover order when it should take work.
   new account starts from its plan's size (Pro, Max 5x, Max 20x) until they
   take over. A learned cost more than twice off what the plan's size and the
   other accounts' costs suggest counts only in part until ten readings back
-  it, and a plan change starts the account's learning again, so a small plan
+  it; one more than four times off what two or more other accounts suggest
+  never counts for more than half, however many readings it has (a Max 5x
+  account at 8.87% of its window per million tokens beside others at 1.2–2.1%
+  counts at about 3.8%). An account with no cost of its own is seeded from
+  the others' costs as these rules leave them, so one stray account does not
+  inflate it. A plan change starts the account's learning again, so a small plan
   never receives a running session that would
   empty its window within the hour. New sessions, whose use is not known yet,
   still start on a small plan whose 5-hour window would otherwise reset with

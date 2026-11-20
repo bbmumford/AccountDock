@@ -122,16 +122,23 @@ extension AppState {
         let (ratio, source) = turnCostModel.ratio(for: id, sizes: sizes, plans: plans)
         if ratioSources[id] != source {
             ratioSources[id] = source
-            let origin = switch source {
-            case .learned: "learned from its readings"
-            case .blendedWithPlanSize: "learned from few readings that disagree with its plan size, so blended toward it"
-            case .seededFromLearned: "seeded from its plan size and the accounts with a learned cost"
-            case .seededFromPlanWide: "seeded from its plan size and the plan-wide cost"
-            case .planWide: "the plan-wide cost, its plan size unknown"
-            }
-            learningLog.info("\(messageName(account)): \(String(format: "%.3f", ratio))% of a session per million weighted tokens, \(origin)")
+            learningLog.info("\(messageName(account)): \(String(format: "%.3f", ratio))% of a session per million weighted tokens, \(Self.ratioOrigin(source))")
         }
         return ratio
+    }
+
+    /// Where an account's token cost comes from, in words, for the Learning
+    /// log and the inputs pacing to the resets logs (`logPacingInputs`).
+    nonisolated static func ratioOrigin(_ source: TurnCostModel.RatioSource) -> String {
+        switch source {
+        case .learned: "learned from its readings"
+        case .blendedWithPlanSize: "learned from few readings that disagree with its plan size, so blended toward it"
+        case .heldTowardPlanSize:
+            "learned far from what its plan size makes of the other accounts' costs, so blended halfway toward that"
+        case .seededFromLearned: "seeded from its plan size and the accounts with a learned cost"
+        case .seededFromPlanWide: "seeded from its plan size and the plan-wide cost"
+        case .planWide: "the plan-wide cost, its plan size unknown"
+        }
     }
 
     /// Whether the provider's per-request cost is learned: the router reports
