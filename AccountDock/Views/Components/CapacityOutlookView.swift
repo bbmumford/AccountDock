@@ -7,9 +7,10 @@ import SwiftUI
 /// accounts running out, what comes back, the biggest users and what pausing
 /// the heaviest alone would change; whether it is open is kept per provider.
 /// On the usage tab (`expandable` false) it is the line alone, and a click
-/// opens the Sessions tab (`accountdockShowSessions`). `pacing`, when given,
-/// is the switch of "Pace sessions to the resets", shown in the opened
-/// panel.
+/// opens the Sessions tab (`accountdockShowSessions`). While pacing to the
+/// resets holds sessions (`CapacityOutlook.paced`), the line is the paced
+/// one beside the flat-out pause, and the opened panel leads with what
+/// pacing runs; `pacing`, when given, is the policy's switch, shown there.
 struct CapacityOutlookView: View {
     let outlook: CapacityOutlook
     var expandable = true
@@ -22,6 +23,9 @@ struct CapacityOutlookView: View {
         self.pacing = pacing
         _expanded = AppStorage(wrappedValue: false, "capacityOutlookExpanded.\(provider.rawValue)")
     }
+
+    /// The collapsed line: the paced one while pacing holds sessions.
+    private var line: String { outlook.paced?.line(now: outlook.now) ?? outlook.line }
 
     /// What "Pace sessions to the resets" does, for its switch here and in
     /// Settings.
@@ -39,7 +43,7 @@ struct CapacityOutlookView: View {
                 }
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Label(isOpen ? "Outlook at the current rate (\(outlook.rateLine))" : outlook.line,
+                    Label(isOpen ? "Outlook at the current rate (\(outlook.rateLine))" : line,
                           systemImage: "hourglass")
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
@@ -55,7 +59,7 @@ struct CapacityOutlookView: View {
             .help(expandable
                   ? "Projected at each session's use over its last hour, with every account's 5-hour window, weekly allowance and resets. Click to \(isOpen ? "close" : "open") the outlook."
                   : "Projected at each session's use over its last hour, with every account's 5-hour window, weekly allowance and resets. Click to open the Sessions page.")
-            .accessibilityLabel(outlook.line)
+            .accessibilityLabel(line)
             if isOpen {
                 CapacityOutlookPanel(outlook: outlook, pacing: pacing)
                     .padding(.leading, 18)
@@ -63,15 +67,18 @@ struct CapacityOutlookView: View {
         }
     }
 
-    /// Orange once every session is paused or will be within two hours.
+    /// Orange once every session is paused or will be within two hours;
+    /// pacing that holds sessions keeps them from that.
     private var tint: Color {
-        guard let paused = outlook.allPausedAt, paused.timeIntervalSince(outlook.now) < 2 * 3600 else { return .textSecondary }
+        guard outlook.paced == nil, let paused = outlook.allPausedAt,
+              paused.timeIntervalSince(outlook.now) < 2 * 3600 else { return .textSecondary }
         return .orange
     }
 }
 
-/// The opened Outlook: pacing's switch, then the timeline, its legend,
-/// the three lists, the biggest users and the what-if.
+/// The opened Outlook: pacing's switch and what pacing runs, then the
+/// flat-out timeline, its legend, the three lists, the biggest users and
+/// the what-if.
 private struct CapacityOutlookPanel: View {
     let outlook: CapacityOutlook
     var pacing: Binding<Bool>?
@@ -85,6 +92,14 @@ private struct CapacityOutlookPanel: View {
                 Toggle("Pace sessions to the resets", isOn: pacing)
                     .toggleStyle(.checkbox)
                     .help(CapacityOutlookView.pacingHelp)
+            }
+            if let paced = outlook.paced {
+                ForEach(Array(paced.details(now: outlook.now).enumerated()), id: \.offset) { _, line in
+                    Text(verbatim: line)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("Without pacing, at the current rate:")
+                    .font(.caption2.weight(.semibold))
             }
             if outlook.allPausedAt == nil || outlook.alreadyPaused {
                 Text(outlook.line)

@@ -210,6 +210,18 @@ extension AppState {
         if !sessionPriorities.prune(provider, recorded: Set(open.keys), now: now).isEmpty { sessionPriorities.save() }
     }
 
+    /// What pacing does now, for the Outlook: nil while it holds nothing.
+    /// The running and held sessions are named from `sessions`, the
+    /// Outlook's own (`capacityOutlookSessions`), and `resume` is the
+    /// flat-out projection's resume.
+    func pacedSummary(_ provider: AIProviderType, sessions: [CapacityOutlook.Session],
+                      resume: Date?) -> SustainablePace.Summary? {
+        guard failoverConfig.policy(for: provider).paceToResets, let decision = pacedDecisions[provider],
+              !decision.held.isEmpty else { return nil }
+        let candidates = sessions.map { SustainablePace.Candidate(id: $0.id, label: $0.label, tokensPerHour: $0.tokensPerHour) }
+        return SustainablePace.summary(candidates, held: decision.held, target: decision.target, flatOutResume: resume)
+    }
+
     /// The row note of a session pacing holds: "runs as room allows, about
     /// Mon 8:00 am at the latest"; nil for any other session.
     func pacedNote(_ provider: AIProviderType, session: String, now: Date) -> String? {

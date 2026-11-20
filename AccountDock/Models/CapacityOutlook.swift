@@ -123,6 +123,11 @@ struct CapacityOutlook: Equatable {
     /// The three sessions using the most, heaviest first.
     var biggest: [Session] = []
     var whatIf: WhatIf?
+    /// With "Pace sessions to the resets" on and pacing holding sessions,
+    /// what pacing runs and until when (`SustainablePace.Summary`), set by
+    /// `AppState.projectCapacityOutlook`; the rest of the outlook stays the
+    /// flat-out projection it is compared with.
+    var paced: SustainablePace.Summary?
 
     /// A running stretch after every session paused that lasts at least this
     /// long is where they resume; a shorter one is a burst on a window's last

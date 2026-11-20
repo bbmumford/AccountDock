@@ -257,4 +257,35 @@ final class SustainablePaceTests: XCTestCase {
         XCTAssertEqual(decision.decidedAt, soon)
         XCTAssertEqual(SustainablePace.playLasts, 3600)
     }
+
+    // MARK: - The Outlook
+
+    func testTheOutlookShowsThePacedProjectionBesideTheFlatOutOne() throws {
+        let target = try target()
+        let decision = SustainablePace.decide(previous: nil, candidates: candidates(), target: target, now: now)
+        let summary = SustainablePace.summary(candidates(), held: decision.held, target: target, flatOutResume: hours(monday8am))
+        XCTAssertEqual(summary.running, ["lint", "scout", "sync", "watch", "tidy", "idle"])
+        XCTAssertEqual(summary.held.first, "cf-builder")
+        XCTAssertEqual(summary.runningTokensPerHour, 21_000_000)
+        XCTAssertEqual(summary.sessionCount, 14)
+        XCTAssertEqual(summary.line(now: now),
+                       "Paced: 6 of 14 sessions run until \(UsageFormat.clock(hours(monday8am), now: now)) (bytrix's new week)"
+                       + " · without pacing all paused \(UsageFormat.clock(target.flatOutPausedAt, now: now))")
+        let details = summary.details(now: now)
+        XCTAssertEqual(details.count, 3)
+        XCTAssertTrue(details[0].hasPrefix("Paced to the resets: 6 of 14 sessions run at about 21M tokens/h, within the "))
+        XCTAssertTrue(details[1].hasPrefix("Waiting for room: cf-builder, platform-engineer, cf-designer, reviewer, docs, router and 2 more"))
+        XCTAssertEqual(details[2], "Without pacing (302M tokens/h): all paused \(UsageFormat.clock(target.flatOutPausedAt, now: now))"
+                       + " until about \(UsageFormat.clock(hours(monday8am), now: now)).")
+
+        // The paced projection, the running sessions until Monday and every
+        // session from then, pauses nothing before Monday; flat out,
+        // everything pauses about 12:24 pm.
+        let paced = CapacityOutlook.run(
+            november21(), demand: .init(tokensPerHour: summary.runningTokensPerHour,
+                                        changes: [.init(from: hours(monday8am), tokensPerHour: flatOut)]),
+            now: now, horizon: 7 * 86_400, reach: .firstPause)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(paced.allPausedAt), hours(monday8am))
+        XCTAssertLessThan(target.flatOutPausedAt, hours(5))
+    }
 }

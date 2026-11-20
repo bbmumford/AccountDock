@@ -46,9 +46,11 @@ extension AppState {
     /// lets it go.
     func projectCapacityOutlook(_ provider: AIProviderType, now: Date) -> CapacityOutlook? {
         guard let sessions = capacityOutlookSessions(provider, now: now) else { return nil }
-        return CapacityOutlook.project(accounts: capacityOutlookAccounts(provider, now: now), sessions: sessions,
-                                       now: now,
-                                       pacer: SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor))
+        var outlook = CapacityOutlook.project(accounts: capacityOutlookAccounts(provider, now: now), sessions: sessions,
+                                              now: now,
+                                              pacer: SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor))
+        outlook.paced = pacedSummary(provider, sessions: sessions, resume: outlook.resume?.at)
+        return outlook
     }
 
     /// Every live session of the provider as the Outlook and pacing to the

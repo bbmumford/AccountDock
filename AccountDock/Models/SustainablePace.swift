@@ -10,7 +10,7 @@ import Foundation
 /// (`CapacityOutlook.run`); `rank` and `choose` pick the sessions that run
 /// within it; `decide` keeps the running set steady between changes.
 /// `AppState.paceSessionsToResets` applies each decision through the pause
-/// gate every quota cycle.
+/// gate every quota cycle, and the Outlook shows it (`Summary`).
 ///
 /// Assumptions, those of the Outlook: each session keeps the rate it is
 /// expected to use (`AppState.capacityOutlookSessions`), use the router
@@ -238,6 +238,66 @@ enum SustainablePace {
         previous.held.intersection(candidates.filter { $0.fixed == nil }.map(\.id))
     }
 
+    // MARK: - Words
+
+    /// What pacing does now, for the Outlook (`CapacityOutlook.paced`) and
+    /// the events.
+    struct Summary: Equatable {
+        var target: Target
+        /// The sessions running and held, by label, heaviest first.
+        var running: [String]
+        var held: [String]
+        /// The running sessions' total, weighted tokens per hour.
+        var runningTokensPerHour: Double
+        /// When everything pauses without pacing, and when it would run
+        /// again then (`CapacityOutlook.resume`).
+        var flatOutResume: Date?
+
+        var sessionCount: Int { running.count + held.count }
+    }
+
+    /// The summary of `held` among `candidates` under `target`.
+    static func summary(_ candidates: [Candidate], held: Set<String>, target: Target, flatOutResume: Date?) -> Summary {
+        let heaviest = candidates.sorted { $0.tokensPerHour == $1.tokensPerHour ? $0.id < $1.id : $0.tokensPerHour > $1.tokensPerHour }
+        let running = heaviest.filter { !held.contains($0.id) }
+        return Summary(target: target, running: running.map(\.label), held: heaviest.filter { held.contains($0.id) }.map(\.label),
+                       runningTokensPerHour: running.reduce(0) { $0 + max(0, $1.tokensPerHour) },
+                       flatOutResume: flatOutResume)
+    }
+
+    /// "cf-builder, platform-engineer and 3 more".
+    static func names(_ labels: [String], shown: Int = 3) -> String {
+        guard labels.count > shown else { return ListFormatter.localizedString(byJoining: labels) }
+        return labels.prefix(shown).joined(separator: ", ") + " and \(labels.count - shown) more"
+    }
+
     /// The pause gate's reason for a pause pacing starts.
     static let holdReason = "paced: waiting for room so the others can run until the resets"
+}
+
+extension SustainablePace.Summary {
+    /// "Paced: 9 of 14 sessions run until Mon 8:00 am (bytrix's new week) ·
+    /// without pacing all paused 12:21 pm".
+    func line(now: Date) -> String {
+        "Paced: \(running.count) of \(sessionCount) sessions run until \(SustainablePace.until(target, now: now))"
+            + " · without pacing all paused \(UsageFormat.clock(target.flatOutPausedAt, now: now))"
+    }
+
+    /// The opened Outlook's lines: what runs at what rate, when the held
+    /// sessions start, and the flat-out projection beside it.
+    func details(now: Date) -> [String] {
+        var lines = ["Paced to the resets: \(running.count) of \(sessionCount) sessions run at about "
+            + "\(CapacityOutlook.millions(runningTokensPerHour)) tokens/h, within the "
+            + "\(CapacityOutlook.millions(target.tokensPerHour)) tokens/h the accounts carry until "
+            + "\(SustainablePace.until(target, now: now))."]
+        if !held.isEmpty {
+            lines.append("Waiting for room: " + SustainablePace.names(held, shown: 6)
+                         + "; they start as room allows: as running sessions go quiet, or when capacity returns about "
+                         + "\(UsageFormat.clock(target.until, now: now)).")
+        }
+        let back = flatOutResume.map { " until about \(UsageFormat.clock($0, now: now))" } ?? ""
+        lines.append("Without pacing (\(CapacityOutlook.millions(target.flatOutTokensPerHour)) tokens/h): all paused "
+                     + "\(UsageFormat.clock(target.flatOutPausedAt, now: now))\(back).")
+        return lines
+    }
 }
