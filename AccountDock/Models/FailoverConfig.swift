@@ -108,6 +108,13 @@ struct ProviderFailoverPolicy: Codable, Equatable {
     /// there with its cache (`AppState.holdSessionsForImminentReset`).
     /// Needs `suspendAgentsWhenExhausted`, since the gate is what holds it.
     var waitForResetWithinCache = true
+    /// "Pace sessions to the resets": keeps the provider's total use at
+    /// what its accounts carry until capacity materially returns
+    /// (`SustainablePace`), holding the lowest-ranked sessions at their next
+    /// step and releasing them as room allows
+    /// (`AppState.paceSessionsToResets`). Off by default. Needs
+    /// `suspendAgentsWhenExhausted`, since the gate is what holds them.
+    var paceToResets = false
     var switchMethod = FailoverSwitchMethod.safeRestart
     var accountOrder: [UUID] = []
     var excludedAccountIDs: Set<UUID> = []
@@ -149,7 +156,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         case switchMethod, accountOrder, excludedAccountIDs, activeAccountLocked
         case codexSwitchMode
         case noRoomModelFallback, rebalanceAutomatically, restartStuckBackgroundSessions, resumeSessionsLeftWaiting
-        case waitForResetWithinCache
+        case waitForResetWithinCache, paceToResets
     }
 
     init() {}
@@ -188,6 +195,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         try values.encode(restartStuckBackgroundSessions, forKey: .restartStuckBackgroundSessions)
         try values.encode(resumeSessionsLeftWaiting, forKey: .resumeSessionsLeftWaiting)
         try values.encode(waitForResetWithinCache, forKey: .waitForResetWithinCache)
+        try values.encode(paceToResets, forKey: .paceToResets)
         try values.encode(switchMethod, forKey: .switchMethod)
         try values.encode(accountOrder, forKey: .accountOrder)
         try values.encode(excludedAccountIDs, forKey: .excludedAccountIDs)
@@ -227,6 +235,7 @@ struct ProviderFailoverPolicy: Codable, Equatable {
         restartStuckBackgroundSessions = try values.decodeIfPresent(Bool.self, forKey: .restartStuckBackgroundSessions) ?? false
         resumeSessionsLeftWaiting = try values.decodeIfPresent(Bool.self, forKey: .resumeSessionsLeftWaiting) ?? true
         waitForResetWithinCache = try values.decodeIfPresent(Bool.self, forKey: .waitForResetWithinCache) ?? true
+        paceToResets = try values.decodeIfPresent(Bool.self, forKey: .paceToResets) ?? false
 
         // Settings saved when routing could only target Kimi.
         if routeTarget == nil, try values.decodeIfPresent(Bool.self, forKey: .routeToKimiWhenExhausted) == true {

@@ -7,17 +7,25 @@ import SwiftUI
 /// accounts running out, what comes back, the biggest users and what pausing
 /// the heaviest alone would change; whether it is open is kept per provider.
 /// On the usage tab (`expandable` false) it is the line alone, and a click
-/// opens the Sessions tab (`accountdockShowSessions`).
+/// opens the Sessions tab (`accountdockShowSessions`). `pacing`, when given,
+/// is the switch of "Pace sessions to the resets", shown in the opened
+/// panel.
 struct CapacityOutlookView: View {
     let outlook: CapacityOutlook
     var expandable = true
+    var pacing: Binding<Bool>?
     @AppStorage private var expanded: Bool
 
-    init(provider: AIProviderType, outlook: CapacityOutlook, expandable: Bool = true) {
+    init(provider: AIProviderType, outlook: CapacityOutlook, expandable: Bool = true, pacing: Binding<Bool>? = nil) {
         self.outlook = outlook
         self.expandable = expandable
+        self.pacing = pacing
         _expanded = AppStorage(wrappedValue: false, "capacityOutlookExpanded.\(provider.rawValue)")
     }
+
+    /// What "Pace sessions to the resets" does, for its switch here and in
+    /// Settings.
+    static let pacingHelp = "Keeps total use at what the accounts can carry until their allowances return, by holding the lowest-ranked sessions at their next step and releasing them as room allows, instead of every session running flat out and all of them stopping together. Pinned and starred sessions run first, then those you typed into within the hour, then lighter ones before heavier. Playing a held session runs it now, and the others are chosen around it. Needs pausing at the limit, since the pause gate holds the sessions that wait."
 
     private var isOpen: Bool { expandable && expanded }
 
@@ -49,7 +57,7 @@ struct CapacityOutlookView: View {
                   : "Projected at each session's use over its last hour, with every account's 5-hour window, weekly allowance and resets. Click to open the Sessions page.")
             .accessibilityLabel(outlook.line)
             if isOpen {
-                CapacityOutlookPanel(outlook: outlook)
+                CapacityOutlookPanel(outlook: outlook, pacing: pacing)
                     .padding(.leading, 18)
             }
         }
@@ -62,16 +70,22 @@ struct CapacityOutlookView: View {
     }
 }
 
-/// The opened Outlook: the timeline, its legend, the three lists, the
-/// biggest users and the what-if.
+/// The opened Outlook: pacing's switch, then the timeline, its legend,
+/// the three lists, the biggest users and the what-if.
 private struct CapacityOutlookPanel: View {
     let outlook: CapacityOutlook
+    var pacing: Binding<Bool>?
 
     /// The most rows a list shows; the rest are counted.
     private let listLimit = 6
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let pacing {
+                Toggle("Pace sessions to the resets", isOn: pacing)
+                    .toggleStyle(.checkbox)
+                    .help(CapacityOutlookView.pacingHelp)
+            }
             if outlook.allPausedAt == nil || outlook.alreadyPaused {
                 Text(outlook.line)
             }

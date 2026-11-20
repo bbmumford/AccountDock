@@ -97,7 +97,14 @@ struct SessionsView: View {
             if outlook != nil || !notes.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     if let outlook {
-                        CapacityOutlookView(provider: provider, outlook: outlook)
+                        CapacityOutlookView(provider: provider, outlook: outlook,
+                                            pacing: provider.capabilities.pauseGate == nil ? nil : Binding(
+                                                get: { appState.failoverConfig.policy(for: provider).paceToResets },
+                                                set: { on in
+                                                    appState.failoverConfig.update(provider) { $0.paceToResets = on }
+                                                    appState.capacityOutlooks[provider] = nil
+                                                }
+                                            ))
                     }
                     ForEach(notes, id: \.self) { note in
                         Label(note, systemImage: "info.circle")

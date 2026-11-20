@@ -45,9 +45,19 @@ extension AppState {
     /// forecasts it; one the user paused at nothing, since only the user
     /// lets it go.
     func projectCapacityOutlook(_ provider: AIProviderType, now: Date) -> CapacityOutlook? {
+        guard let sessions = capacityOutlookSessions(provider, now: now) else { return nil }
+        return CapacityOutlook.project(accounts: capacityOutlookAccounts(provider, now: now), sessions: sessions,
+                                       now: now,
+                                       pacer: SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor))
+    }
+
+    /// Every live session of the provider as the Outlook and pacing to the
+    /// resets count it, at the rate described under
+    /// `projectCapacityOutlook`; nil while none has a rate the router or
+    /// its transcripts measured.
+    func capacityOutlookSessions(_ provider: AIProviderType, now: Date) -> [CapacityOutlook.Session]? {
         let live = liveSessions[provider] ?? []
         guard live.contains(where: { sessionRates.entries[$0.sessionID] != nil }) else { return nil }
-        let outlookAccounts = capacityOutlookAccounts(provider, now: now)
         let pause = AgentPauseGate.read(provider)
         let userHeld = pause?.userHeld(running: Set(live.map(\.sessionID))) ?? []
         let pacing = pacerSessions(provider, now: now).reduce(into: [String: SessionPacer.Session]()) { $0[$1.id] = $1 }
@@ -56,7 +66,7 @@ extension AppState {
         // once released.
         let held = Set(pause?.sessions ?? []).subtracting(AgentPauseGate.resumedSessions(provider))
             .union(waitingSessions(provider).keys)
-        let sessions = live.map { session -> CapacityOutlook.Session in
+        return live.map { session -> CapacityOutlook.Session in
             let id = session.sessionID
             let rate: Double
             if userHeld.contains(id) {
@@ -77,14 +87,13 @@ extension AppState {
                 tokensPerHour: rate
             )
         }
-        return CapacityOutlook.project(accounts: outlookAccounts, sessions: sessions, now: now,
-                                       pacer: SessionPacer(moveCostFactor: provider.capabilities.sessionMoveCostFactor))
     }
 
     /// Every account of the provider as `CapacityOutlook` takes it: as the
     /// pacer sees it (`pacerAccount`), named, with the weekly allowance a new
     /// week brings, and whether it takes part. Read by
-    /// `projectCapacityOutlook` and `planHeldSessions`.
+    /// `projectCapacityOutlook`, `planHeldSessions` and
+    /// `paceSessionsToResets`.
     func capacityOutlookAccounts(_ provider: AIProviderType, now: Date) -> [CapacityOutlook.Account] {
         let policy = failoverConfig.policy(for: provider)
         let planner = FailoverPlanner(settings: plannerSettings(provider))

@@ -149,15 +149,16 @@ struct CapacityOutlook: Equatable {
                         step: TimeInterval = CapacityOutlook.defaultStep,
                         horizon: TimeInterval = CapacityOutlook.defaultHorizon) -> CapacityOutlook {
         let rate = sessions.reduce(0) { $0 + max(0, $1.tokensPerHour) }
-        let run = simulate(accounts, rate: rate, now: now, pacer: pacer, step: step, horizon: horizon)
+        let run = simulate(accounts, demand: Demand(tokensPerHour: rate), now: now, pacer: pacer, step: step,
+                           horizon: horizon)
         let ranked = sessions.filter { $0.tokensPerHour > 0 }
             .sorted { $0.tokensPerHour == $1.tokensPerHour ? $0.id < $1.id : $0.tokensPerHour > $1.tokensPerHour }
         var outlook = CapacityOutlook(now: now, horizon: horizon, segments: run.segments, allPausedAt: run.allPausedAt,
                                       resume: run.resume, events: run.events, tokensPerHour: rate,
                                       sessionCount: sessions.count, biggest: Array(ranked.prefix(3)))
         if let heaviest = ranked.first, ranked.count > 1, let paused = run.allPausedAt, paused > now {
-            let without = simulate(accounts, rate: rate - heaviest.tokensPerHour, now: now, pacer: pacer, step: step,
-                                   horizon: horizon)
+            let without = simulate(accounts, demand: Demand(tokensPerHour: rate - heaviest.tokensPerHour), now: now,
+                                   pacer: pacer, step: step, horizon: horizon)
             outlook.whatIf = WhatIf(session: heaviest, allPausedAt: without.allPausedAt)
         }
         return outlook
@@ -165,11 +166,56 @@ struct CapacityOutlook: Equatable {
 
     // MARK: - Simulation
 
-    private struct Run {
+    /// The sessions' total rate over a projection: `tokensPerHour` from
+    /// the start, and each of `changes` from its own start on. Pacing to
+    /// the resets (`SustainablePace`) projects the sessions it runs at their
+    /// rate until the sessions it holds start.
+    struct Demand: Equatable {
+        struct Change: Equatable {
+            var from: Date
+            var tokensPerHour: Double
+        }
+
+        var tokensPerHour: Double
+        var changes: [Change] = []
+
+        func rate(at time: Date) -> Double {
+            changes.filter { $0.from <= time }.max { $0.from < $1.from }?.tokensPerHour ?? tokensPerHour
+        }
+
+        /// The first change after `time`, where a step of the projection
+        /// ends.
+        func nextChange(after time: Date) -> Date? {
+            changes.map(\.from).filter { $0 > time }.min()
+        }
+    }
+
+    /// How far `simulate` goes: the whole outlook (to a little past the
+    /// resume, or the horizon); only until every session pauses, which is
+    /// all pacing's search for a rate needs; or past that pause until the
+    /// first new week that renews an allowance, the horizon pacing paces to.
+    enum Reach: Equatable {
+        case outlook
+        case firstPause
+        case newWeekAfterPause
+    }
+
+    struct Run {
         var segments: [Segment] = []
         var events: [Event] = []
         var allPausedAt: Date?
         var resume: Event?
+        /// With `Reach.newWeekAfterPause`, the first new week at or after
+        /// `allPausedAt`; nil when none comes within the horizon.
+        var newWeekAfterPause: Event?
+    }
+
+    /// The simulation behind the outlook, for `demand` and `reach`. Read
+    /// by `SustainablePace.target`.
+    static func run(_ accounts: [Account], demand: Demand, now: Date, pacer: SessionPacer = SessionPacer(),
+                    step: TimeInterval = CapacityOutlook.defaultStep,
+                    horizon: TimeInterval = CapacityOutlook.defaultHorizon, reach: Reach) -> Run {
+        simulate(accounts, demand: demand, now: now, pacer: pacer, step: step, horizon: horizon, reach: reach)
     }
 
     /// An account as the simulation spends it.
@@ -180,8 +226,8 @@ struct CapacityOutlook: Equatable {
         var id: UUID { account.id }
     }
 
-    private static func simulate(_ accounts: [Account], rate: Double, now: Date, pacer: SessionPacer,
-                                 step: TimeInterval, horizon: TimeInterval) -> Run {
+    private static func simulate(_ accounts: [Account], demand: Demand, now: Date, pacer: SessionPacer,
+                                 step: TimeInterval, horizon: TimeInterval, reach: Reach = .outlook) -> Run {
         var states = accounts.compactMap { account -> State? in
             switch account.availability {
             case .serves: return State(account: account, blockedUntil: nil)
@@ -214,13 +260,21 @@ struct CapacityOutlook: Equatable {
                 run.events.append(Event(at: time, kind: renewed ? .newWeek : .windowRefill, account: states[index].id,
                                         name: states[index].account.name))
                 refills.append((run.events.count - 1, pacer.millions(gained, on: states[index].account.pacer)))
+                if reach == .newWeekAfterPause, renewed, run.newWeekAfterPause == nil,
+                   let paused = run.allPausedAt, time >= paused {
+                    run.newWeekAfterPause = run.events[run.events.count - 1]
+                }
             }
-            // The step ends at the next reset when one comes sooner.
+            if reach == .newWeekAfterPause, run.newWeekAfterPause != nil { break }
+            // The step ends at the next reset, or where the demand changes,
+            // when one comes sooner.
             var next = min(time.addingTimeInterval(step), end)
             for state in states {
                 let resets = [state.account.pacer.resetsAt, state.account.pacer.weeklyResetsAt, state.blockedUntil]
                 for reset in resets.compactMap({ $0 }) where reset > time && reset < next { next = reset }
             }
+            if let change = demand.nextChange(after: time), change < next { next = change }
+            let rate = demand.rate(at: time)
             let wanted = rate * next.timeIntervalSince(time) / 3600
             var served = 0.0
             if wanted > 0 {
@@ -262,8 +316,9 @@ struct CapacityOutlook: Equatable {
                 if short {
                     run.allPausedAt = runEnd
                     run.events.append(Event(at: runEnd, kind: .allPaused))
+                    if reach == .firstPause { break }
                 }
-            } else if run.resume == nil {
+            } else if reach == .outlook, run.resume == nil {
                 if stretch == nil, runEnd > time {
                     // What the sessions run on: the refill freeing the most
                     // tokens now, a new week on a tie.

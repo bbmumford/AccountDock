@@ -164,6 +164,17 @@ struct FailoverSettingsView: View {
                 if provider.capabilities.requestRouter == nil, provider.capabilities.sessionIsolation != nil {
                     slotControls(provider, policy: policy)
                 }
+                if provider.capabilities.pauseGate != nil {
+                    Toggle("Pace sessions to the resets", isOn: binding(provider, \.paceToResets))
+                        .disabled(!policy.suspendAgentsWhenExhausted)
+                        .help(CapacityOutlookView.pacingHelp)
+                    if !policy.suspendAgentsWhenExhausted {
+                        Text("Needs “Pause sessions when all accounts are exhausted” below: the pause gate holds the sessions that wait for room.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, 20)
+                    }
+                }
 
             } header: {
                 Text("\(provider.rawValue): Sessions")
