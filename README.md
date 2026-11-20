@@ -176,8 +176,34 @@ The notes on single accounts (an account whose week would expire unused, a
 small plan's window that takes no session) follow it. The usage tab shows the
 same line under each provider heading; clicking it opens the Sessions tab.
 
-Each row has three icons:
+**Pace sessions to the resets** (off by default; a checkbox in the opened
+Outlook and in Settings → Failover → Sessions, needing **Pause sessions when
+all accounts are exhausted**) keeps the provider's total use at what its
+accounts can carry until capacity materially returns, instead of letting every
+session run flat out and stop together. The target is the highest steady total
+rate at which the Outlook's projection never has every session paused before
+the first new week of an account after the moment everything would pause flat
+out: each account's weekly room, capped by what its 5-hour windows deliver
+before its weekly reset, spread over that time. Pinned and starred sessions
+run first, then those you typed into within the last hour (a message the CLI
+sends itself, such as a background task's report, does not count), the most
+recent first, then the rest, lighter before heavier so more keep moving. The
+rest are held at their next tool call or turn, shown as **paused (paced:
+waiting for room so the others can run until the resets)**, and go on as room
+allows. The running set changes at most every 15 minutes, sooner only when the
+running sessions use over 1.25 times the target or you play a held one, which
+then runs for an hour and the others are chosen around it. The events say
+"Pacing to the resets: 6 of 14 sessions run (≈ 26M tokens/h, what the accounts
+carry until Mon 8:00 am (bytrix's new week)); cf-builder, platform-engineer,
+cf-designer and 5 more wait for room." when the set changes, and the Outlook
+shows the paced line beside the flat-out one ("Paced: 6 of 14 sessions run
+until Mon 8:00 am (bytrix's new week) · without pacing all paused 12:24 pm").
 
+Each row has four icons:
+
+- **Star.** Marks the session as priority: pacing to the resets runs it first,
+  beside pinned sessions, and never holds it. The mark is kept by session ID,
+  like a pin.
 - **Lock.** Pins the session to its subscription, so failover, pacing,
   rebalancing and the model fallback leave it there. With **Pause sessions**
   chosen for the provider, a pinned session pauses when its subscription
@@ -334,7 +360,12 @@ provider's failover order when it should take work.
   new account starts from its plan's size (Pro, Max 5x, Max 20x) until they
   take over. A learned cost more than twice off what the plan's size and the
   other accounts' costs suggest counts only in part until ten readings back
-  it, and a plan change starts the account's learning again, so a small plan
+  it; one more than four times off what two or more other accounts suggest
+  never counts for more than half, however many readings it has (a Max 5x
+  account at 8.87% of its window per million tokens beside others at 1.2–2.1%
+  counts at about 3.8%). An account with no cost of its own is seeded from
+  the others' costs as these rules leave them, so one stray account does not
+  inflate it. A plan change starts the account's learning again, so a small plan
   never receives a running session that would
   empty its window within the hour. New sessions, whose use is not known yet,
   still start on a small plan whose 5-hour window would otherwise reset with

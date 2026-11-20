@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// The icon controls of one running session, on the Sessions page and in an
-/// account card's session list: a lock pinning it to its subscription (for
-/// a session on the shared sign-in, its restart into a slot of its own
+/// account card's session list: a star marking it priority for pacing to
+/// the resets (`SessionPriorities`), a lock pinning it to its subscription
+/// (for a session on the shared sign-in, its restart into a slot of its own
 /// instead), pause or play, and a menu moving it to another account.
 struct SessionControlButtons: View {
     @EnvironmentObject private var appState: AppState
@@ -23,11 +24,26 @@ struct SessionControlButtons: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            if gated { priorityControl }
             pinControl
             pauseControl
             moveControl
         }
         .buttonStyle(.borderless)
+    }
+
+    /// The star: a priority session runs first, beside pinned ones, when
+    /// pacing to the resets holds sessions. Shown for a session a pause can
+    /// hold, the only kind pacing can pace.
+    private var priorityControl: some View {
+        let priority = appState.sessionPriorities.isPriority(session)
+        return iconButton(priority ? "star.fill" : "star", label: priority ? "Unmark priority" : "Mark priority",
+                          help: priority
+                              ? "Priority: pacing to the resets runs it first, beside pinned sessions, and never holds it. Click to rank it with the others again."
+                              : "Mark as priority: pacing to the resets runs it first, beside pinned sessions, and never holds it.") {
+            appState.setSessionPriority(session, !priority)
+        }
+        .foregroundStyle(priority ? Color.yellow : Color.secondary)
     }
 
     private func iconButton(_ symbol: String, label: String, help: String,

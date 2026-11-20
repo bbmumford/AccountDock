@@ -22,6 +22,12 @@ extension AppState {
             /// session (`SessionPacer.admitToLanes`): it waits on its own
             /// account until that serves again or a lane admits it.
             case awaitingLane
+            /// "Pace sessions to the resets" holds it so the sessions it
+            /// ranks above it run until capacity materially returns
+            /// (`paceSessionsToResets`); its account may well have room.
+            /// Only pacing ends it: `currentWaits` keeps it whatever the
+            /// account's room, and `limitPauseScope` holds it.
+            case paced
         }
 
         var account: UUID
@@ -296,6 +302,14 @@ extension AppState {
         }
     }
 
+    /// The provider's sessions pacing holds now (`SessionWait.Reason.paced`),
+    /// played ones left out. Read by `limitPauseScope`, which keeps them
+    /// held, `releaseStepsWithinHeadroom`, which lets them take no step, the
+    /// Sessions page and `paceSessionsToResets`.
+    func pacedSessions(_ provider: AIProviderType) -> Set<String> {
+        Set((sessionWaits[provider] ?? [:]).filter { $0.value.reason == .paced && !$0.value.played }.keys)
+    }
+
     /// The provider's waits that still stand: the session runs, on the
     /// account it waits on (its slot's, the router's for a pooled one, the
     /// active account for one on the shared sign-in), which cannot serve it
@@ -307,6 +321,8 @@ extension AppState {
         let live = Set((liveSessions[provider] ?? []).map(\.sessionID))
         let active = activeAccount(for: provider)?.id
         return (sessionWaits[provider] ?? [:]).filter { id, wait in
+            // Pacing's own rule ends a paced hold (`paceSessionsToResets`).
+            if wait.reason == .paced { return live.contains(id) }
             guard live.contains(id), wait.until.addingTimeInterval(Self.accountHoldGrace) > now,
                   !servesAgain(wait.account, planner: planner, now: now) else { return false }
             if wait.shared { return !slotted.contains(id) && wait.account == active }

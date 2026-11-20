@@ -1129,7 +1129,16 @@ per million took a Max 20x account trusted at 0.18% to 2.37%, over twice the
 1.06% a Max 5x account at 4.25% makes of a window four times its size, and
 the cost is then blended toward
 the plan-size expectation again, as after a plan change, until
-`trustedReadings` readings agree. Each measured cost is kept with the
+`trustedReadings` readings agree. A measured cost more than `strayReading`
+(4) times off an expectation at least `outlierPeers` (2) other accounts make
+never weighs more than `outlierWeight` (half, in log terms) against it,
+however many readings it has (`RatioSource.heldTowardPlanSize`): accounts of
+one size whose costs agree say what a percent of that size holds, and one
+several times off them is counting use the router does not see, which its
+readings' burn already carries. hexorda's 8.87% per million beside voltrix's
+1.19, fluxon's 1.55, bytrix's 1.72 and cybrio's 2.12, all Max 5x, counts at
+3.8%. A seed is made from each reference's cost as these rules leave it, so
+one stray account does not inflate the accounts with none. Each measured cost is kept with the
 plan it was measured on (`TurnCostModel.accountPlans`, the plan and the
 rate-limit tier): once the account is on another plan, as an upgrade from
 Pro to Max, which makes each percent five times the work, that cost is not
@@ -1162,7 +1171,9 @@ The Sessions tab (`SessionsView`, rows from `AppState.sessionRows`) lists every
 running session of each provider with a pause gate or one-session slots, with
 the account serving it, its state (`SessionRowState`, derived from the pause
 files) and icon controls (`SessionControlButtons`, also in the account cards'
-session lists): pin, pause or play, and move.
+session lists): a priority star for pacing to the resets (`SessionPriorities`,
+kept by session ID under `app.accountdock.failover.priorities` like pins),
+pin, pause or play, and move.
 
 - **Pausing one session** (`AppState.pauseSession`, `AgentPauseGate.pauseOne`)
   with no pause in effect writes a pause of the user's that lists only that
@@ -2319,6 +2330,102 @@ tokens at its start, and shorter ones are bursts. It stops shortly after the
 resume, or after seven days. The what-if runs it again without the heaviest
 session. Moves' cache rewrites and use the router does not see are not
 counted.
+
+The simulation takes a demand that may change over time
+(`CapacityOutlook.Demand`: a rate from now and later changes, each step
+ending where it changes) and goes as far as its caller needs
+(`CapacityOutlook.Reach`): the whole outlook, only until every session
+pauses, or past that pause to the first new week of an account
+(`CapacityOutlook.run`, read by pacing to the resets below).
+
+### Pacing to the resets
+
+With the policy's `paceToResets` ("Pace sessions to the resets", off by
+default, in Settings' Sessions group and the opened Outlook; it needs
+`suspendAgentsWhenExhausted`, since the gate is what holds a session),
+`AppState.paceSessionsToResets` keeps the provider's total use at what its
+accounts carry until capacity materially returns, every quota cycle after
+the waits are settled and before the ledger charges them:
+
+- **The target** (`SustainablePace.target`) is found with the Outlook's own
+  inputs (`capacityOutlookAccounts`, `capacityOutlookSessions`). The
+  sessions' total flat out is projected past the moment everything pauses
+  to the first new week of an account after it (`Reach.newWeekAfterPause`):
+  that is when capacity materially returns, since a 5-hour window refilling
+  earlier brings room the weekly allowances behind it may not hold. The
+  target is the highest uniform rate at which the projection
+  (`Reach.firstPause`, 15-minute steps, resets splitting them exactly) has
+  no stretch with every session paused before then, found in twelve
+  halvings between nothing and the flat-out rate. Each account's room
+  counts as the Outlook counts it: its weekly allowance, capped by what its
+  5-hour windows deliver before its weekly reset, at its token cost
+  (`accountRatio`, so the plan-size blend below shapes it). No target, and
+  nothing paced, while the sessions use nothing, run through the horizon
+  flat out, or already all wait (no account has room, which the limit
+  pauses handle).
+- **The sessions that run** (`SustainablePace.rank`, `choose`): fixed ones
+  first (pinned, marked priority in `SessionPriorities`, played within
+  `playLasts`, or started before the gate was installed); then those the
+  user prompted within `interactionWindow` (an hour), most recent first, by
+  `AgentSession.humanPromptAt`, which the lifecycle recorder sets on a
+  `UserPromptSubmit` whose prompt does not open with a tag (the messages a
+  CLI sends itself, as a background task's report, do) and carries through
+  later events, keeping the time alone; then the rest. Within each, lighter
+  before heavier. Each fits while the total stays within the target, one
+  that does not being passed over for lighter ones; a session using nothing
+  always runs, and pacing never holds every session. Sessions another rule
+  holds (the user's pause, a pause at a limit, a wait for a reset or a lane)
+  are not weighed. Rates are the Outlook's: `SessionPacer.lightRate` for a
+  running session, `SessionRates.heldDemand` from when it was held for a
+  held one.
+- **Holding steady** (`SustainablePace.decide`): the held set changes at most
+  every `changeInterval` (15 minutes), sooner when a held session becomes
+  fixed (a play or a star) or the running sessions use over `overshoot`
+  (1.25) times the target. A fresh target is computed only then
+  (`needsTarget`); a check that found nothing to pace runs again after
+  `pacingRecheck` (5 minutes). A session that started since runs until the
+  next change.
+- **Holding** (`applyPacing`): each held session is a wait
+  (`SessionWait.Reason.paced`) on the account it runs on, listed in the
+  pause by `holdAtLimit` (`pinnedHoldPause`, reason
+  `SustainablePace.holdReason`), so the gate holds it at its next tool call
+  and new turn while every other session runs. Only pacing ends it:
+  `currentWaits` keeps it whatever its account's room, `limitPauseScope`
+  holds it, `releaseStepsWithinHeadroom` lets it no step, the ledger does
+  not charge it (`chargeHeldWaits`), and like every wait it keeps its slot
+  and is moved by no rule. A released one leaves the pause
+  (`releasePacedHolds`), which ends when it lists nothing else. Turning
+  pacing off, pausing at the limit off, a route target serving, the user's
+  "Resume all" (`pauseOverrideUntil`) or no target lets every paced session
+  go, with one event saying why.
+- **A play** of a paced session (`resumeSession`) records it in
+  `pacedPlays`: it runs as a fixed session for `playLasts` (an hour), the
+  play counts as the user's latest prompt to it, the next decision chooses
+  the others around it at once, and, unlike other plays that end a pause,
+  it sets no `pauseOverrideUntil`.
+- **Words**: the Sessions page shows such a session as "paused (paced:
+  waiting for room so the others can run until the resets)" with when
+  capacity returns (`SessionRowState.paced`, `pacedNote`); the event, only
+  when the held set changes, reads "Pacing to the resets: 6 of 14 sessions
+  run (≈ 26M tokens/h, what the accounts carry until Mon 8:00 am (bytrix's
+  new week)); cf-builder, platform-engineer, cf-designer and 5 more wait for
+  room." (`SustainablePace.event`); the Outlook's line becomes the paced one
+  beside the flat-out pause, and its panel leads with what runs, at what
+  rate, what waits and the flat-out projection (`CapacityOutlook.paced`,
+  `SustainablePace.Summary`). Each new target logs its inputs under
+  "Pacing" (`logPacingInputs`): the flat-out rate and pause, the target and
+  until when, each account's availability, window, weekly room,
+  weekly-to-window ratio, token cost and where it comes from
+  (`ratioOrigin`), and its room until then in tokens, and every session's
+  rate, whether it is fixed and its last prompt.
+
+On the tests' fixture (`SustainablePaceTests`), a Saturday at 8:22 am with
+Personal (Max 20x) 13% into its week, hexorda (Max 5x) 4% into its and six
+accounts at 99-100% renewing from Monday 8 am, the fourteen sessions' 302M
+tokens an hour flat out pause everything at about 12:24 pm until bytrix's
+new week on Monday at 8 am; the target spreads Personal's and hexorda's
+weeks over those 47 hours, about 26M tokens an hour, and the six lightest
+sessions run while the eight heaviest wait.
 
 ### Lifecycle
 

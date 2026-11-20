@@ -97,7 +97,14 @@ struct SessionsView: View {
             if outlook != nil || !notes.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     if let outlook {
-                        CapacityOutlookView(provider: provider, outlook: outlook)
+                        CapacityOutlookView(provider: provider, outlook: outlook,
+                                            pacing: provider.capabilities.pauseGate == nil ? nil : Binding(
+                                                get: { appState.failoverConfig.policy(for: provider).paceToResets },
+                                                set: { on in
+                                                    appState.failoverConfig.update(provider) { $0.paceToResets = on }
+                                                    appState.capacityOutlooks[provider] = nil
+                                                }
+                                            ))
                     }
                     ForEach(notes, id: \.self) { note in
                         Label(note, systemImage: "info.circle")
@@ -166,17 +173,28 @@ struct SessionsView: View {
                     Text(verbatim: row.account)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                    Text(verbatim: "·")
-                    Text(verbatim: row.state.label)
-                        .foregroundStyle(stateColor(row.state))
-                        .lineLimit(1)
-                    if row.state.isPaused, let when = pauseNote(row) {
-                        Text(verbatim: "· " + when)
+                    // A paced session's state is a sentence: it gets a line
+                    // of its own below.
+                    if row.state != .paced {
+                        Text(verbatim: "·")
+                        Text(verbatim: row.state.label)
+                            .foregroundStyle(stateColor(row.state))
                             .lineLimit(1)
+                        if row.state.isPaused, let when = pauseNote(row) {
+                            Text(verbatim: "· " + when)
+                                .lineLimit(1)
+                        }
                     }
                 }
                 .font(.caption2)
                 .foregroundStyle(.textSecondary)
+                if row.state == .paced {
+                    (Text(verbatim: row.state.label).foregroundColor(stateColor(row.state))
+                        + Text(verbatim: pauseNote(row).map { " · " + $0 } ?? ""))
+                        .font(.caption2)
+                        .foregroundStyle(.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let drift = row.pinDrift {
                     pinDriftLine(row, drift: drift)
                 }
@@ -224,6 +242,7 @@ struct SessionsView: View {
     private func stateColor(_ state: SessionRowState) -> Color {
         switch state {
         case .waiting, .stopsAtNextStep: .orange
+        case .paced: .blue
         case .refusedAtLimit: .red
         case .running, .resumedWhileOthersPaused, .notIsolated: .secondary
         }

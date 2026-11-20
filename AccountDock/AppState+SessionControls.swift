@@ -89,10 +89,11 @@ extension AppState {
         let slotAccounts = sessions.reduce(into: [String: UUID]()) { result, session in
             result[session.sessionID] = slotAccount(ofSession: session.sessionID, provider: provider)
         }
+        let paced = pacedSessions(provider)
         let states = SessionRowState.derive(
             provider, sessions: sessions.map(\.sessionID),
             refused: Set(sessions.map(\.sessionID).filter { sessionRefusals[$0] != nil }),
-            isolated: slotsInUse ? Set(slotAccounts.keys) : nil
+            isolated: slotsInUse ? Set(slotAccounts.keys) : nil, paced: paced
         )
         let ungated = Set(sessionsWithoutGate(provider).map(\.sessionID))
         let active = activeAccount(for: provider)
@@ -120,8 +121,9 @@ extension AppState {
                 inSlot: slotAccounts[id] != nil,
                 gated: provider.capabilities.pauseGate != nil && !ungated.contains(id),
                 pausedByYou: chosen.contains(id),
-                resumeAt: chosen.contains(id) ? nil : held[id]?.resumeAt,
-                waitPlan: chosen.contains(id) ? nil : heldSessionNote(provider, session: id, now: now),
+                resumeAt: chosen.contains(id) || paced.contains(id) ? nil : held[id]?.resumeAt,
+                waitPlan: chosen.contains(id) ? nil
+                    : pacedNote(provider, session: id, now: now) ?? heldSessionNote(provider, session: id, now: now),
                 pinDrift: slotsInUse ? pinDrift(provider, session: session) : nil
             )
         }
@@ -135,7 +137,7 @@ extension AppState {
             ? (slotAccount(ofSession: session, provider: provider) != nil ? [session] : []) : nil
         return SessionRowState.derive(provider, sessions: [session],
                                       refused: sessionRefusals[session] != nil ? [session] : [],
-                                      isolated: isolated)[session] ?? .running
+                                      isolated: isolated, paced: pacedSessions(provider))[session] ?? .running
     }
 
     /// The Sessions page's part for `provider` (`SessionsSection`).

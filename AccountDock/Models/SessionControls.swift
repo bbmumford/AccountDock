@@ -11,6 +11,9 @@ enum SessionRowState: Equatable {
     case waiting
     /// The pause holds it; it stops at its next tool call or new turn.
     case stopsAtNextStep
+    /// Pacing to the resets holds it (`AppState.pacedSessions`), waiting
+    /// or about to, so the sessions ranked above it run until the resets.
+    case paced
     /// The user let it go on while the pause holds other sessions.
     case resumedWhileOthersPaused
     /// The provider refused its last request at a usage limit, and nothing
@@ -22,13 +25,14 @@ enum SessionRowState: Equatable {
 
     /// Whether a pause holds it, so its control plays it rather than
     /// pausing it.
-    var isPaused: Bool { self == .waiting || self == .stopsAtNextStep }
+    var isPaused: Bool { self == .waiting || self == .stopsAtNextStep || self == .paced }
 
     var label: String {
         switch self {
         case .running: "running"
         case .waiting: "paused (waiting)"
         case .stopsAtNextStep: "paused (stops at its next step)"
+        case .paced: "paused (paced: waiting for room so the others can run until the resets)"
         case .resumedWhileOthersPaused: "resumed while others paused"
         case .refusedAtLimit: "refused at a limit"
         case .notIsolated: "not isolated"
@@ -39,9 +43,12 @@ enum SessionRowState: Equatable {
     /// from its pause files in `directory`. `refused` are those
     /// `AppState.sessionRefusals` holds; `isolated` those reading a slot of
     /// their own, nil for a provider whose sessions run in no slots (none
-    /// of them then counts as not isolated). A held session shows as
-    /// paused whatever else applies, then a resumed one, then a refusal.
+    /// of them then counts as not isolated); `paced` those pacing to the
+    /// resets holds, which show as paced while the pause holds them. A
+    /// held session shows as paused whatever else applies, then a resumed
+    /// one, then a refusal.
     static func derive(_ provider: AIProviderType, sessions: [String], refused: Set<String>, isolated: Set<String>?,
+                       paced: Set<String> = [],
                        directory: URL = AgentPauseGate.pauseDirectory) -> [String: SessionRowState] {
         let pause = AgentPauseGate.read(provider, directory: directory)
         let held = AgentPauseGate.heldSessions(provider, running: Set(sessions), directory: directory)
@@ -49,7 +56,7 @@ enum SessionRowState: Equatable {
         let resumed = pause == nil ? [] : AgentPauseGate.resumedSessions(provider, directory: directory)
         return sessions.reduce(into: [:]) { states, id in
             let state: SessionRowState = if held.contains(id) {
-                waiting.contains(id) ? .waiting : .stopsAtNextStep
+                paced.contains(id) ? .paced : waiting.contains(id) ? .waiting : .stopsAtNextStep
             } else if resumed.contains(id) {
                 .resumedWhileOthersPaused
             } else if refused.contains(id) {

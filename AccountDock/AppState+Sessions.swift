@@ -263,12 +263,17 @@ extension AppState {
            pinnedHold(account, planner: FailoverPlanner(settings: plannerSettings(provider)), now: Date()) != nil {
             pinnedHoldsPlayed[session.sessionID] = account
         }
+        // A session pacing to the resets held runs now as a fixed session,
+        // and pacing chooses the others around it (`settlePacedPlays`); it
+        // lifts no limit, so pausing stays in force for the rest.
+        let pacedPlay = pacedSessions(provider).contains(session.sessionID)
+        if pacedPlay { pacedPlays[session.sessionID] = Date() }
         notePlayedWait(provider, session: session.sessionID)
         let ended = AgentPauseGate.playOne(provider, session: session.sessionID, running: running,
                                            continuation: continuationDescription(provider))
         if ended {
             endPause(provider, keepingChosen: false)
-            if !chosenOnly {
+            if !chosenOnly && !pacedPlay {
                 suspensionContexts[provider] = nil
                 notePauseOverride(provider)
             }

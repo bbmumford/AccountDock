@@ -25,6 +25,7 @@ screenshots, release), `RELEASE_NOTES.md`.
   - `FailoverPlanner.swift`: pure account-selection logic; `QuotaSimulator.swift`, `QuotaTrend.swift`, `UsageLearning.swift` feed it.
   - `FailoverConfig.swift`: per-provider policy and its store.
   - `CapacityOutlook.swift`: the Sessions page's Outlook, projecting the sessions' rates over the accounts' windows (`AppState+CapacityOutlook.swift` builds it, `Components/CapacityOutlookView.swift` draws it).
+  - `SustainablePace.swift`: "Pace sessions to the resets", the total rate the accounts carry until capacity returns and which sessions run within it (`AppState+SustainablePace.swift` holds the rest through the pause gate); `SessionPriorities.swift`: the sessions starred as priority.
   - `RouteTarget.swift`: services Claude Code requests can be routed to.
   - `Account.swift`, `*Data.swift`: accounts, usage, costs, activity.
 - **Services**:
