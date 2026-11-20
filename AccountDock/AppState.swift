@@ -505,6 +505,11 @@ final class AppState: ObservableObject {
     /// account's limit (`UserResume`). Each is held again once the account
     /// it runs on is at or near its limit and the play does not cover it.
     var userResumes: [AIProviderType: [String: UserResume]] = [:]
+    /// Why a play pressed while no account had room left the session held,
+    /// by session, shown for `playNoteLifetime` in place of its play icon,
+    /// in the pause banner and in the resume shortcut's menu; a second
+    /// press while it shows runs the session anyway (`pressPlay`).
+    @Published var playNotes: [String: PlayNote] = [:]
     /// Pinned sessions the user played while a pause held them for their
     /// account's threshold or limit, with that account. `limitPauseScope`
     /// and `holdPinnedSessionsAtLimit` leave each running until the account

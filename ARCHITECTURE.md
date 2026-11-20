@@ -1181,7 +1181,21 @@ session lists): pin, pause or play, and move.
 - **Playing one session** is `AppState.resumeSession`
   (`AgentPauseGate.playOne`): the session goes on while the pause holds the
   others. When it was the last session held, the pause ends, as **Resume
-  all** would end it.
+  all** would end it. Every play button (the Sessions page row, the
+  account card's session list) and the resume shortcut press through
+  `AppState.pressPlay`: with an account that can carry the session (its own
+  neither at nor near its limit, or, for a slot session not pinned, another
+  with room by a fresh reading that carries it beside the cycle's ledger,
+  `playCarried`), one press releases it. With none, the first press leaves
+  it held and, for `playNoteLifetime` (6 seconds), the play control, the
+  pause banner and the shortcut's menu show why (`AppState.playNotes`):
+  "No account has room; it resumes about Mon 9:00 pm (cybrio's new week).
+  Press again to run it anyway.", from its held-session plan or its
+  account's reset; the shortcut beeps and posts it as a notification. A
+  second press while it shows runs the session anyway and records
+  "Resumed cf-designer at your request although no account has room; it
+  will be refused at the limit and wait there."; a press after it clears
+  is a first press again.
 - **Moving one session by hand** (`AppState.moveSession`, the same path as the
   requests interface's `moveSession`) moves a slot session with its slot, at
   once or by restarting, and restarts a session on the shared sign-in in a

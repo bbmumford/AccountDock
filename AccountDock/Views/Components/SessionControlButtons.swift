@@ -69,11 +69,32 @@ struct SessionControlButtons: View {
 
     @ViewBuilder
     private var pauseControl: some View {
-        if state.isPaused {
+        if state.isPaused, let note = appState.playNotes[session] {
+            // A first press found no account with room: the control says
+            // why until the note clears, and pressing it again runs the
+            // session anyway (`AppState.pressPlay`).
+            Button {
+                appState.playSession(provider, session: session)
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Image(systemName: "play.fill")
+                    Text(note.text)
+                        .font(.caption)
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: 280, alignment: .leading)
+            }
+            .help(note.text)
+            .accessibilityLabel("Run session anyway")
+            .foregroundStyle(.orange)
+        } else if state.isPaused {
             iconButton("play.fill", label: "Play session",
-                       help: state == .waiting
+                       help: (state == .waiting
                            ? "It is waiting at the pause. Let it continue while the others stay paused."
-                           : "The pause stops it at its next tool call or turn. Let it keep running while the others stay paused.") {
+                           : "The pause stops it at its next tool call or turn. Let it keep running while the others stay paused.")
+                           + " With no account having room, the first press says why and a second runs it anyway.") {
                 appState.playSession(provider, session: session)
             }
             .foregroundStyle(.orange)
