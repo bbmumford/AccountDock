@@ -744,7 +744,14 @@ one would plan from a half-switched state.
 A plan that every account is at its limit (wait for a reset, or no capacity)
 is not acted on during the first ten minutes after launch while an account
 that can be read has neither a reading from this launch nor a stored one
-still fresh (`AppState.awaitsFirstReadings`). The status the plan's standing
+still fresh (`AppState.awaitsFirstReadings`). In the same window an
+automatic switch of the active account waits until both the active
+account and the destination have such a reading, or the active account
+has been refused at its limit since (`AppState.switchAwaitsReadings`): a
+reading stored before launch can show room, or a limit, that is no longer
+there, and a switch made on it is undone once the readings arrive. The
+sign-in AccountDock finds in use when it starts still decides the active
+account (`adoptRenewedCredentials`), since that is no reading. The status the plan's standing
 state shows ("Using … up to its limit", "All accounts exhausted …") is
 restated every cycle; it is recorded as an event only once it has differed
 from the provider's last recorded status for two minutes, the longest quota

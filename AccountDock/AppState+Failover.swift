@@ -1212,6 +1212,17 @@ extension AppState {
         case .switchTo(let targetID, let reason):
             guard let target = accounts.first(where: { $0.id == targetID }) else { return }
             if case .balance = reason, !policy.intelligentBalancingEnabled { return }
+            // Just after launch the switch waits for readings of both
+            // accounts; a refusal at the limit since is reading enough of
+            // the active one.
+            func reading(_ account: Account) -> (readAt: Date?, fresh: Bool) {
+                let state = quotaState(for: account, now: now)
+                return (accountUsageUpdatedAt[account.id], state.refusedAtLimit || planner.isFresh(state, now: now))
+            }
+            if Self.switchAwaitsReadings(current: reading(current), target: reading(target), launchedAt: launchedAt, now: now) {
+                updateStatus(provider, "Waiting for fresh readings of \(messageName(current)) and \(messageName(target)) before moving the active account.", settles: true)
+                return
+            }
             // Switching at a threshold or at the limit is failover's alone.
             // With failover off the active account stays, so the sessions on
             // the shared sign-in wait on it; the pause is scoped per account
@@ -1344,6 +1355,19 @@ extension AppState {
             return (accountUsageUpdatedAt[account.id], planner.isFresh(quotaState(for: account, now: now), now: now))
         }
         return Self.awaitsFirstReadings(readings, launchedAt: launchedAt, now: now)
+    }
+
+    /// Whether an automatic switch of the active account from the account
+    /// read as `current` to the one read as `target` waits: within
+    /// `FailoverPlanner.liveFreshness` of launch, either reading is neither
+    /// from this launch nor still fresh (`awaitsFirstReadings`). A reading
+    /// stored before launch and since grown stale can show room, or a
+    /// limit, that is no longer there, and a switch made on it is undone as
+    /// soon as the fresh readings arrive, with the sessions on the shared
+    /// sign-in moved twice. Read by `evaluate`.
+    nonisolated static func switchAwaitsReadings(current: (readAt: Date?, fresh: Bool), target: (readAt: Date?, fresh: Bool),
+                                                 launchedAt: Date, now: Date) -> Bool {
+        awaitsFirstReadings([current, target], launchedAt: launchedAt, now: now)
     }
 
     nonisolated static func awaitsFirstReadings(_ readings: [(readAt: Date?, fresh: Bool)], launchedAt: Date, now: Date) -> Bool {

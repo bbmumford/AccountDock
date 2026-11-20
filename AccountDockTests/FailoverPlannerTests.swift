@@ -183,6 +183,20 @@ final class FailoverPlannerTests: XCTestCase {
                                                     now: now), "not for longer than a reading's freshness after launch")
     }
 
+    func testAnAutomaticSwitchAfterLaunchWaitsForReadingsOfBothAccounts() {
+        let launched = now.addingTimeInterval(-60)
+        let stale = (readAt: Optional(now.addingTimeInterval(-3 * 3600)), fresh: false)
+        let read = (readAt: Optional(now.addingTimeInterval(-10)), fresh: true)
+        XCTAssertTrue(AppState.switchAwaitsReadings(current: read, target: stale, launchedAt: launched, now: now),
+                      "a destination read before launch may no longer have the room it showed")
+        XCTAssertTrue(AppState.switchAwaitsReadings(current: stale, target: read, launchedAt: launched, now: now),
+                      "an active account read before launch may no longer be at the limit it showed")
+        XCTAssertFalse(AppState.switchAwaitsReadings(current: read, target: read, launchedAt: launched, now: now))
+        XCTAssertFalse(AppState.switchAwaitsReadings(current: stale, target: stale,
+                                                     launchedAt: now.addingTimeInterval(-FailoverPlanner.liveFreshness), now: now),
+                       "not for longer than a reading's freshness after launch")
+    }
+
     func testARecordedRefusalStandsUntilAReadingAnswersIt() {
         let refused = now.addingTimeInterval(-60)
         let before = now.addingTimeInterval(-600)
