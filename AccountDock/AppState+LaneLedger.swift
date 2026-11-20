@@ -27,7 +27,8 @@ extension AppState {
 
     /// Charges each session a wait keeps on its account (`sessionWaits`,
     /// played ones and lane admission's own left out, which
-    /// `strandedPlacements` weighs again) to that account from the reset it
+    /// `strandedPlacements` weighs again, and pacing's, which wait for room
+    /// on no account in particular) to that account from the reset it
     /// waits for, at the rate it used before it was held
     /// (`SessionRates.heldDemand`): that account's fresh window is theirs
     /// first. Run every quota cycle after the waits are settled
@@ -35,7 +36,8 @@ extension AppState {
     /// and before the slots are served.
     func chargeHeldWaits(_ provider: AIProviderType, now: Date) {
         var ledger = laneLedger(provider, now: now)
-        for (id, wait) in sessionWaits[provider] ?? [:] where !wait.played && wait.reason != .awaitingLane {
+        for (id, wait) in sessionWaits[provider] ?? [:]
+        where !wait.played && wait.reason != .awaitingLane && wait.reason != .paced {
             let rate = sessionRates.heldDemand(id, pausedAt: wait.since)
                 ?? sessionRates.tokensPerHour(id, now: now)
             ledger.charge(LaneLedger.Charge(session: id, lane: wait.account, tokensPerHour: rate,

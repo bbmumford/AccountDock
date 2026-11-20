@@ -60,6 +60,14 @@ final class SustainablePaceTests: XCTestCase {
                                      ("docs", 22), ("router", 14), ("tests", 12), ("notes", 10), ("lint", 7),
                                      ("scout", 5), ("sync", 4), ("watch", 3), ("tidy", 2), ("idle", 0)]
 
+    func candidates(_ change: (inout SustainablePace.Candidate) -> Void = { _ in }) -> [SustainablePace.Candidate] {
+        rates.map { name, rate in
+            var candidate = SustainablePace.Candidate(id: name, label: name, tokensPerHour: rate * 1_000_000)
+            change(&candidate)
+            return candidate
+        }
+    }
+
     var flatOut: Double { rates.reduce(0) { $0 + $1.1 } * 1_000_000 }
 
     func target(_ accounts: [CapacityOutlook.Account]? = nil) throws -> SustainablePace.Target {
@@ -138,5 +146,115 @@ final class SustainablePaceTests: XCTestCase {
                                       now: now, step: 60, horizon: 6 * 3600, reach: .firstPause)
         let paused = run.allPausedAt?.timeIntervalSince(now) ?? 0
         XCTAssertEqual(paused / 3600, 3, accuracy: 0.02)
+    }
+
+    // MARK: - Which sessions run
+
+    func testTheLightestSessionsRunWithinTheTargetAndTheHeavyOnesWaitForRoom() throws {
+        let target = try target()
+        let decision = SustainablePace.decide(previous: nil, candidates: candidates(), target: target, now: now)
+        XCTAssertEqual(decision.held, ["cf-builder", "platform-engineer", "cf-designer", "reviewer", "docs", "router",
+                                       "tests", "notes"])
+        XCTAssertEqual(decision.decidedAt, now)
+        // The six that run use 21M an hour, within the target's 26M; notes,
+        // the next lightest at 10M, would pass it.
+        let running = candidates().filter { !decision.held.contains($0.id) }.reduce(0) { $0 + $1.tokensPerHour }
+        XCTAssertEqual(running, 21_000_000)
+        XCTAssertLessThanOrEqual(running, target.tokensPerHour)
+        XCTAssertGreaterThan(running + 10_000_000, target.tokensPerHour)
+    }
+
+    func testPinnedAndPrioritySessionsRunFirstThenThoseTheUserPromptedThenLighterOnes() throws {
+        let target = try target()
+        let ranked = SustainablePace.rank(candidates { candidate in
+            switch candidate.id {
+            case "cf-builder": candidate.fixed = .priority
+            case "router": candidate.fixed = .pinned
+            case "docs": candidate.lastPrompt = self.now.addingTimeInterval(-5 * 60)
+            case "reviewer": candidate.lastPrompt = self.now.addingTimeInterval(-40 * 60)
+            // A prompt two hours ago is no longer the user working in it.
+            case "tests": candidate.lastPrompt = self.now.addingTimeInterval(-2 * 3600)
+            default: break
+            }
+        }, now: now).map(\.id)
+        XCTAssertEqual(Array(ranked.prefix(4)), ["router", "cf-builder", "docs", "reviewer"])
+        XCTAssertEqual(Array(ranked.dropFirst(4)), ["idle", "tidy", "watch", "sync", "scout", "lint", "notes", "tests",
+                                                    "cf-designer", "platform-engineer"],
+                       "then the rest, lighter first; the heaviest session no one prompted ranks last")
+
+        // A prompted session runs before lighter autonomous ones: the user
+        // typing into docs a minute ago runs it, and the lightest fill the
+        // rest of the target.
+        let prompted = candidates { if $0.id == "docs" { $0.lastPrompt = self.now.addingTimeInterval(-60) } }
+        let running = SustainablePace.choose(SustainablePace.rank(prompted, now: now), target: target.tokensPerHour)
+        XCTAssertEqual(running, ["docs", "idle", "tidy"], "22M + 2M; a third, 3M, would pass the target")
+
+        // A priority session runs whatever the target; only sessions using
+        // nothing join it then.
+        let starred = candidates { if $0.id == "cf-builder" { $0.fixed = .priority } }
+        XCTAssertEqual(SustainablePace.choose(SustainablePace.rank(starred, now: now), target: target.tokensPerHour),
+                       ["cf-builder", "idle"])
+        // Pacing never holds every session.
+        XCTAssertEqual(SustainablePace.choose(SustainablePace.rank([SustainablePace.Candidate(
+            id: "solo", label: "solo", tokensPerHour: 117_000_000)], now: now), target: target.tokensPerHour), ["solo"])
+    }
+
+    // MARK: - Keeping the set steady
+
+    func testTheRunningSetChangesAtMostEveryFifteenMinutesUnlessTheRunningSessionsOvershoot() throws {
+        let target = try target()
+        let first = SustainablePace.decide(previous: nil, candidates: candidates(), target: target, now: now)
+        // Five minutes on, notes uses less and would fit, but the set
+        // stays until the interval has passed.
+        let lighter = candidates { if $0.id == "notes" { $0.tokensPerHour = 2_000_000 } }
+        let soon = now.addingTimeInterval(5 * 60)
+        XCTAssertFalse(SustainablePace.needsTarget(previous: first, candidates: lighter, now: soon))
+        let kept = SustainablePace.decide(previous: first, candidates: lighter, target: target, now: soon)
+        XCTAssertEqual(kept.held, first.held)
+        XCTAssertEqual(kept.decidedAt, now)
+        // Fifteen minutes on, it runs.
+        let later = now.addingTimeInterval(SustainablePace.changeInterval)
+        XCTAssertTrue(SustainablePace.needsTarget(previous: first, candidates: lighter, now: later))
+        let changed = SustainablePace.decide(previous: first, candidates: lighter, target: target, now: later)
+        XCTAssertFalse(changed.held.contains("notes"))
+        XCTAssertEqual(changed.decidedAt, later)
+
+        // A running session working six times harder takes the running set
+        // past 1.25 times the target: it is held at once.
+        let busier = candidates { if $0.id == "scout" { $0.tokensPerHour = 30_000_000 } }
+        XCTAssertTrue(SustainablePace.needsTarget(previous: first, candidates: busier, now: soon))
+        let reined = SustainablePace.decide(previous: first, candidates: busier, target: target, now: soon)
+        XCTAssertTrue(reined.held.contains("scout"))
+        XCTAssertEqual(reined.decidedAt, soon)
+
+        // A session that started since runs until the next change, and one
+        // that ended leaves the held set.
+        let changedSessions = candidates().filter { $0.id != "router" }
+            + [SustainablePace.Candidate(id: "fresh", label: "fresh", tokensPerHour: 3_000_000)]
+        let steady = SustainablePace.decide(previous: first, candidates: changedSessions, target: target, now: soon)
+        XCTAssertFalse(steady.held.contains("fresh"))
+        XCTAssertFalse(steady.held.contains("router"))
+    }
+
+    func testPlayingAPacedSessionRunsItNowAndTheOthersAreChosenAroundIt() throws {
+        let target = try target()
+        let first = SustainablePace.decide(previous: nil, candidates: candidates(), target: target, now: now)
+        XCTAssertTrue(first.held.contains("cf-designer"))
+        // The user plays cf-designer two minutes later: it is fixed while
+        // the play lasts, the set changes at once, and the light sessions
+        // that ran make room for its 28M an hour.
+        let played = candidates { candidate in
+            if candidate.id == "cf-designer" {
+                candidate.fixed = .played
+                candidate.lastPrompt = self.now.addingTimeInterval(120)
+            }
+        }
+        let soon = now.addingTimeInterval(120)
+        XCTAssertTrue(SustainablePace.needsTarget(previous: first, candidates: played, now: soon))
+        let decision = SustainablePace.decide(previous: first, candidates: played, target: target, now: soon)
+        XCTAssertFalse(decision.held.contains("cf-designer"))
+        XCTAssertEqual(Set(candidates().map(\.id)).subtracting(decision.held), ["cf-designer", "idle"])
+        XCTAssertEqual(decision.decidedAt, soon)
+        XCTAssertEqual(SustainablePace.playLasts, 3600)
     }
 }

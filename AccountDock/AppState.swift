@@ -521,6 +521,20 @@ final class AppState: ObservableObject {
     /// `serveSessionSlots`, the pacer, the rebalance, `limitPauseScope` and
     /// failover's plan, which all leave such a session where it is.
     var sessionWaits: [AIProviderType: [String: SessionWait]] = [:]
+    /// What "Pace sessions to the resets" holds, by provider
+    /// (`SustainablePace.Decision`); written by `paceSessionsToResets`
+    /// every quota cycle, read by the Outlook and the Sessions page.
+    var pacedDecisions: [AIProviderType: SustainablePace.Decision] = [:]
+    /// When the user last played each session pacing held
+    /// (`resumeSession`): it runs as a fixed session for
+    /// `SustainablePace.playLasts`, and the play counts as the user's
+    /// latest prompt to it.
+    var pacedPlays: [String: Date] = [:]
+    /// When pacing last looked for a target and found nothing to pace, so
+    /// it looks again only after `pacingRecheck`.
+    var pacingCheckedAt: [AIProviderType: Date] = [:]
+    /// Sessions the user marked as priority (`SessionPriorities`).
+    @Published var sessionPriorities = SessionPriorities.load()
 
     struct SessionAdmission: Equatable {
         let session: String

@@ -114,6 +114,7 @@ extension AppState {
         for provider in AgentPauseGate.providers {
             await holdSessionsForImminentReset(provider)
             await holdSharedSessionsOnStayingAccount(provider)
+            paceSessionsToResets(provider)
             chargeHeldWaits(provider, now: Date())
             shedSessionsShortOfRunway(provider, now: Date())
         }
@@ -1683,6 +1684,9 @@ extension AppState {
             return value
         }
         let pinned = pinnedSessionAccounts(provider)
+        // A session pacing holds waits whatever its account's room, until
+        // pacing lets it go (`paceSessionsToResets`).
+        let paced = pacedSessions(provider)
         var pinnedLimits: [UUID: PinnedHold?] = [:]
         defer { if holding != nil { laneLedgers[provider] = releasing } }
         // An account outside the failover order that a slot session is on
@@ -1700,6 +1704,7 @@ extension AppState {
         return Self.pauseScope(sessions: sessions, active: current.id, atOrNearLimit: atOrNearLimit,
                                anyRoom: anyRoom, destination: { placements[$0] },
                                pinnedHeld: { session in
+            if pinned[session] == nil, paced.contains(session) { return true }
             if pinned[session] == nil, let account = waiting[session] {
                 return !self.servesAgain(account, planner: planner, now: now) || !goesOn(session, account)
             }
@@ -1950,8 +1955,10 @@ extension AppState {
         // A session pinned to another account spends that account, not the
         // active one's headroom; one the user paused waits for the user.
         let pinned = pinnedSessionAccounts(provider).merging(waitingSessions(provider)) { pin, _ in pin }
+        // A session pacing holds waits for pacing, not for headroom.
         let waiting = Self.automaticallyReleasable(AgentPauseGate.waitingSessions(provider), pause: pause)
             .filter { pinned[$0].map { $0 == current.id } ?? true }
+            .subtracting(pacedSessions(provider))
         let order = pause.sessions.filter(waiting.contains) + waiting.subtracting(pause.sessions).sorted()
         for session in order {
             if AgentPauseGate.hasPendingStep(provider, session: session) { continue }

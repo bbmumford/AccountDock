@@ -59,8 +59,33 @@ function run() {
             || (environmentValue("TERM_PROGRAM") === "vscode" ? "vscode" : "cli"),
         observedAt: (new Date()).toISOString()
     };
-    const data = $(JSON.stringify(record, null, 2)).dataUsingEncoding($.NSUTF8StringEncoding);
     const provider = record.provider.replace(/[^A-Za-z0-9_-]/g, "");
     const target = `${directory}/${provider}-${sessionID}.json`;
+    const humanPromptAt = lastHumanPrompt(target, event, payload, record.observedAt);
+    if (humanPromptAt) {
+        record.humanPromptAt = humanPromptAt;
+    }
+    const data = $(JSON.stringify(record, null, 2)).dataUsingEncoding($.NSUTF8StringEncoding);
     data.writeToFileAtomically(target, true);
+}
+
+// When a person last typed a prompt into the session: now, for a
+// UserPromptSubmit whose prompt does not open with a tag (the messages a CLI
+// sends itself, such as a background task's report, do), else the time the
+// session's previous record carried. Only the time is kept, never the
+// prompt. AccountDock's pacing runs the sessions the user works in first.
+function lastHumanPrompt(target, event, payload, now) {
+    if (event === "UserPromptSubmit") {
+        const prompt = safeString(payload.prompt).trim();
+        if (prompt && !/^<[A-Za-z][\w:-]*[\s>\/]/.test(prompt)) {
+            return now;
+        }
+    }
+    try {
+        const text = ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError(target, $.NSUTF8StringEncoding, null));
+        const previous = JSON.parse(text || "{}");
+        return safeString(previous.humanPromptAt) || null;
+    } catch (_) {
+        return null;
+    }
 }

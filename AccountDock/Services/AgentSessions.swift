@@ -17,6 +17,14 @@ struct AgentSession: Decodable, Equatable, Sendable {
     let processID: Int32?
     let host: String?
     let observedAt: Date?
+    /// When a person last typed a prompt into it: the recorder sets it on a
+    /// `UserPromptSubmit` whose prompt does not open with a tag, as the
+    /// messages a CLI sends itself do (a background task's report, a
+    /// scheduled wake-up), and carries it through the session's later
+    /// events. Nil when no such prompt was recorded. Read by pacing to the
+    /// resets (`AppState.pacingCandidates`), which runs the sessions the
+    /// user works in first.
+    var humanPromptAt: Date? = nil
 
     /// Whether a turn is under way: the last event was a prompt.
     var isWorking: Bool { event == "UserPromptSubmit" }
