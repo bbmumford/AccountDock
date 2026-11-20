@@ -728,10 +728,14 @@ once the active account is at or near its limit
 `holdSharedSessionsOnStayingAccount` restarts the shared sessions that can
 restart in a slot of their own and holds the rest
 (`SessionWait.Reason.activeAccountStays`) until it serves again, the user
-moves them or the switch is on again. The menu footer's switches
-(`FooterSwitches`, `AppState+MenuToggles`) set it, and `distributeSessions`
-for session balancing, for every provider at once; `ProviderFailoverSwitch`
-sets it for one.
+moves them or the switch is on again. The menu footer's Failover switch
+(`FooterSwitches`, `AppState+MenuToggles`) sets it and the provider's
+`enabled` ("Failover: switch at a threshold or the limit") together
+(`AppState.withFailover`), and shows on only while both are
+(`failoverIsOn`), so failover on always means the active account moves to an
+account with room; its Balancing switch sets `distributeSessions` for
+session balancing, each for every provider at once; `ProviderFailoverSwitch`
+sets both of failover's for one.
 
 ## Failover planning
 

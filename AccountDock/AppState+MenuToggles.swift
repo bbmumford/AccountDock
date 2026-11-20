@@ -2,9 +2,11 @@ import Foundation
 
 /// Two switches outside Settings: **Failover**, the providers' "Move the
 /// active account automatically" (`ProviderFailoverPolicy.activeAccountLocked`,
-/// inverted), which lets failover and weekly balancing move the active
-/// account; and **Balancing**, session balancing, which is "Serve sessions
-/// from several accounts at once" (`distributeSessions`). Session balancing's
+/// inverted) and "Failover: switch at a threshold or the limit"
+/// (`enabled`) together (`withFailover`), so failover on means the active
+/// account moves to an account with room; and **Balancing**, session
+/// balancing, which is "Serve sessions from several accounts at once"
+/// (`distributeSessions`). Session balancing's
 /// other settings (pacing, rebalancing automatically, resuming sessions left
 /// waiting) act only while `distributeSessions` is on, and the switch leaves
 /// them as they are, so turning it on again restores what the provider had.
@@ -72,15 +74,32 @@ extension AppState {
         failoverToggleProviders.filter { $0.capabilities.sessionIsolation != nil || $0.capabilities.requestRouter != nil }
     }
 
-    /// Lets failover and weekly balancing move the active account of each
-    /// of `providers`, or keeps it where it is, as Settings' "Move the
-    /// active account automatically" does, and records it once for each
-    /// provider changed.
+    /// `policy` with failover on or off as the Failover switches set it:
+    /// "Move the active account automatically" and "Failover: switch at a
+    /// threshold or the limit" (`enabled`) together, so failover on means
+    /// the active account moves to an account with room.
+    nonisolated static func withFailover(_ policy: ProviderFailoverPolicy, on: Bool) -> ProviderFailoverPolicy {
+        var next = policy
+        next.movesActiveAccountAutomatically = on
+        next.enabled = on
+        return next
+    }
+
+    /// Whether the Failover switches show `policy` on: both settings
+    /// `withFailover` sets are on.
+    nonisolated static func failoverIsOn(_ policy: ProviderFailoverPolicy) -> Bool {
+        policy.movesActiveAccountAutomatically && policy.enabled
+    }
+
+    /// Turns failover on or off for each of `providers` (`withFailover`),
+    /// as the Settings toggles "Move the active account automatically" and
+    /// "Failover: switch at a threshold or the limit" do together, and
+    /// records it once for each provider changed.
     func setActiveAccountMovement(_ on: Bool, for providers: [AIProviderType], from place: String) {
-        let changed = providers.filter { failoverConfig.policy(for: $0).movesActiveAccountAutomatically != on }
+        let changed = providers.filter { Self.withFailover(failoverConfig.policy(for: $0), on: on) != failoverConfig.policy(for: $0) }
         guard !changed.isEmpty else { return }
         for provider in changed {
-            failoverConfig.update(provider) { $0.movesActiveAccountAutomatically = on }
+            failoverConfig.update(provider) { $0 = Self.withFailover($0, on: on) }
         }
         let event = Self.toggleEvent("Failover", on: on, providers: changed.map(\.capabilities.displayName), from: place)
         for provider in changed { failoverEvents.record(provider, event) }

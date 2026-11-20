@@ -295,7 +295,10 @@ Three separate things move work, and every event names which one acted.
 
 **Move the active account automatically** (Settings → Failover, the footer's
 Failover switch, or the provider headings' switch) decides whether failover
-and weekly balancing may move the active account at all. Off, it stays where
+and weekly balancing may move the active account at all. The footer's and the
+headings' Failover switches set it and **Failover: switch at a threshold or
+the limit** together, so Failover on always means the active account moves to
+an account with room; Settings keeps the two apart. Off, it stays where
 you put it: when it reaches its limit, the sessions on the shared sign-in are
 not moved together; those that can restart in a slot of their own do, so
 session balancing can place them, and the rest are paused until it resets or
@@ -395,8 +398,9 @@ provider's failover order when it should take work.
   reset or for you to move them. Sessions in slots of their own keep moving.
   The lock beside the active account on the Accounts tab is the same switch.
 - **Switches in the menu.** Left of Refresh, Settings and Quit at the bottom
-  of the menu, **Failover** turns Move the active account automatically on or
-  off for every provider at once, and **Balancing** turns session balancing
+  of the menu, **Failover** turns Move the active account automatically and
+  Failover: switch at a threshold or the limit on or off together for every
+  provider at once (it shows on only while both are), and **Balancing** turns session balancing
   (Serve sessions from several accounts at once) on or off for every provider
   whose sessions can use it. Each shows on, off, or mixed when providers
   differ (a mixed one turns them all on), its tooltip lists each provider
