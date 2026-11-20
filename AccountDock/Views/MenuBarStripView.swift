@@ -24,6 +24,7 @@ struct MenuBarStripView: View {
     let config: MenuBarConfig
     let onWidth: (CGFloat) -> Void
     @AppStorage("accentPalette") private var accentPalette = "softWhite"
+    @AppStorage(ProviderVisibility.storageKey) private var hiddenProviders = ""
     @State private var tick = Date()
     // Polled refresh. ObservableObject change delivery is unreliable for a
     // SwiftUI view hosted in an NSStatusItem, so we re-read AppState/config on
@@ -34,17 +35,26 @@ struct MenuBarStripView: View {
     private let tickTimer = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
 
     var body: some View {
+        let providers = visibleProviderOrder
+        let modules = globalModules
         HStack(spacing: 13) {
-            ForEach(visibleProviderOrder) { provider in
+            ForEach(providers) { provider in
                 providerGroup(provider)
             }
 
-            ForEach(globalModules) { module in
+            ForEach(modules) { module in
                 MenuBarModuleView(
                     module: module,
                     appState: appState,
                     tick: tick
                 )
+            }
+
+            // With every group hidden and no global module, the mark keeps
+            // the status item wide enough to click, since its popover is
+            // the only way into AccountDock and its Settings.
+            if providers.isEmpty && modules.isEmpty {
+                AccountDockMenuBarMark()
             }
         }
         .padding(.horizontal, 6)
@@ -64,10 +74,16 @@ struct MenuBarStripView: View {
         }
     }
 
+    /// The provider groups the strip shows (`MenuBarPresence`): re-read on
+    /// every tick, so a group leaves and returns as accounts change.
     private var visibleProviderOrder: [AIProviderType] {
-        config.providerOrder.filter { provider in
-            config.modules.contains { $0.provider == provider }
-        }
+        MenuBarPresence.shownProviders(
+            order: config.providerOrder,
+            modules: config.modules,
+            hidden: ProviderVisibility.hidden(in: hiddenProviders),
+            accounts: appState.accounts,
+            needsSignIn: { appState.needsSignIn($0) }
+        )
     }
 
     private var globalModules: [MenuBarModule] {

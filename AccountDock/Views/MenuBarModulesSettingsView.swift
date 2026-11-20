@@ -7,6 +7,7 @@ struct MenuBarModulesSettingsView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var config: MenuBarConfig
 
+    @AppStorage(ProviderVisibility.storageKey) private var hiddenProviders = ""
     @State private var rows: [Row] = []
     @State private var tick: Date = Date()
     private let previewTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
@@ -69,6 +70,12 @@ struct MenuBarModulesSettingsView: View {
                 previewBar
             }
             .padding(.top, 2)
+
+            ForEach(hiddenNotices, id: \.self) { notice in
+                Label(notice, systemImage: "eye.slash")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .onAppear(perform: load)
         .onReceive(previewTimer) { tick = $0 }
@@ -107,9 +114,32 @@ struct MenuBarModulesSettingsView: View {
         )
     }
 
+    /// The provider groups the menu bar shows for the enabled rows, by the
+    /// strip's own rule (`MenuBarPresence.shownProviders`).
     private var previewProviders: [AIProviderType] {
-        config.providerOrder.filter { provider in
-            rows.contains { $0.isEnabled && $0.module.provider == provider }
+        MenuBarPresence.shownProviders(
+            order: config.providerOrder,
+            modules: enabledModules,
+            hidden: ProviderVisibility.hidden(in: hiddenProviders),
+            accounts: appState.accounts,
+            needsSignIn: { appState.needsSignIn($0) }
+        )
+    }
+
+    private var enabledModules: [MenuBarModule] {
+        rows.filter(\.isEnabled).map(\.module)
+    }
+
+    /// Why each provider with enabled rows is missing from the preview: the
+    /// user turned it off, or no account can run its CLI.
+    private var hiddenNotices: [String] {
+        let hidden = ProviderVisibility.hidden(in: hiddenProviders)
+        let modules = enabledModules
+        return config.providerOrder.compactMap { provider in
+            guard modules.contains(where: { $0.provider == provider }) else { return nil }
+            if hidden.contains(provider) { return MenuBarPresence.turnedOffNotice(for: provider) }
+            return MenuBarPresence.notice(for: provider, modules: modules, hidden: hidden,
+                                          accounts: appState.accounts, needsSignIn: { appState.needsSignIn($0) })
         }
     }
 

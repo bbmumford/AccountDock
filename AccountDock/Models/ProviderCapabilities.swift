@@ -14,7 +14,10 @@ struct ProviderCapabilities: Sendable {
     let sessionQuotaLabel: String
     let supportsWeeklyQuota: Bool
     let weeklyQuotaLabel: String
-    let unavailableLabel: String
+    /// What a plan must include for an account to run the provider's CLI
+    /// ("Kimi Code"), as the account cards and the menu bar's Settings
+    /// notice (`MenuBarPresence.notice`) name it.
+    let workloadName: String
     let supportsSelectableSwitchMode: Bool
     let pricingPrefixes: [String]
     /// Model names the CLI reports that differ from the published model id
@@ -143,6 +146,8 @@ struct ProviderCapabilities: Sendable {
     var cliSettings: CLISettings? = nil
 
     var supportsSessionQuota: Bool { sessionQuotaMode != .unsupported }
+    /// The account card's label for a plan without `workloadName`.
+    var unavailableLabel: String { "\(workloadName) unavailable" }
     /// How the CLI runs sessions in the background under a supervisor of
     /// its own, which `SessionSlots`' launcher never starts; nil when it
     /// has no such service.
@@ -398,7 +403,7 @@ extension AIProviderType {
                 sessionQuotaLabel: "Session",
                 supportsWeeklyQuota: true,
                 weeklyQuotaLabel: "Weekly limit",
-                unavailableLabel: "Claude Code unavailable",
+                workloadName: "Claude Code",
                 supportsSelectableSwitchMode: false,
                 pricingPrefixes: ["anthropic/", "anthropic."],
                 pauseGate: PauseGateSupport(key: "claude", hookFile: ".claude/settings.json", format: .jsonHooks,
@@ -456,7 +461,7 @@ extension AIProviderType {
                 sessionQuotaLabel: "Session",
                 supportsWeeklyQuota: true,
                 weeklyQuotaLabel: "Quota limit",
-                unavailableLabel: "Codex unavailable",
+                workloadName: "Codex",
                 supportsSelectableSwitchMode: true,
                 pricingPrefixes: ["openai/"],
                 pauseGate: PauseGateSupport(key: "codex", hookFile: ".codex/hooks.json", format: .jsonHooks,
@@ -506,7 +511,7 @@ extension AIProviderType {
                 sessionQuotaLabel: "5-hour",
                 supportsWeeklyQuota: true,
                 weeklyQuotaLabel: "Monthly limit",
-                unavailableLabel: "Kimi Code unavailable",
+                workloadName: "Kimi Code",
                 supportsSelectableSwitchMode: false,
                 pricingPrefixes: ["moonshot/", "kimi/"],
                 // Kimi Code reports subscription model aliases. Its K2.8
@@ -561,7 +566,7 @@ extension AIProviderType {
                 sessionQuotaLabel: "Session",
                 supportsWeeklyQuota: false,
                 weeklyQuotaLabel: "Quota limit",
-                unavailableLabel: "Gemini unavailable",
+                workloadName: "Gemini",
                 supportsSelectableSwitchMode: false,
                 pricingPrefixes: ["gemini/", "google/"],
                 storageKey: "gemini",

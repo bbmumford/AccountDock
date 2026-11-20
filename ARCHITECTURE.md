@@ -80,7 +80,7 @@ feature its capabilities declare, and its settings appear with it:
 | Capability | Drives |
 | --- | --- |
 | Quota windows, labels, `longWindowReportsLength` | Usage cards, menu-bar modules (one set of metrics per provider), the widget, failover thresholds |
-| `requiresPaidPlanForWorkloads`, `unavailableLabel` | Whether a plan can carry work |
+| `requiresPaidPlanForWorkloads`, `workloadName` | Whether a plan can carry work; whether the provider's group shows in the menu bar (`MenuBarPresence`) |
 | `usageRequestBudget` | The provider's `UsageRequestBudget` |
 | `supportsWindowWarming` | Window warming and its setting |
 | `supportsSelectableSwitchMode`, `switchReachesRunningSessions` | The switch method setting; whether a switch waits for a reset and restarts paused sessions to reach them |
@@ -2705,6 +2705,41 @@ separate Git operation.
 The application group is `$(DEVELOPMENT_TEAM).app.accountdock`, resolved from
 the signing team at build time. This prevents a release from inheriting the
 upstream project's Team ID.
+
+## Menu bar
+
+`StatusItemController` hosts `MenuBarStripView` in one `NSStatusItem`: a
+group per provider (its icon and its enabled modules, in
+`MenuBarConfig.providerOrder`), then the modules that belong to no
+provider. The strip re-reads AppState every 15 seconds.
+
+A provider's group shows when it has an enabled module, the user keeps the
+provider on (`ProviderVisibility`), and at least one of its accounts can run
+its CLI (`MenuBarPresence`): the plan includes the workload and the
+organisation allows it (`Account.workloadAvailability`, which also covers a
+refused CLI and a missing seat), and the provider has not rejected the
+sign-in even after renewal (`AppState.needsSignIn`). These are the reasons a
+session move refuses an account for. Otherwise the group is left out of the
+menu bar, not drawn dimmed, and returns on the next tick once an account
+qualifies: a plan upgraded, an account added or signed in again.
+
+- Usage never hides a group: an account whose windows are full runs the CLI
+  again once they reset, and the group stays to show that.
+- Only stored state decides, so a failed reading never hides a group: the
+  plan changes when a plan authority names another, and the sign-in state
+  only after renewal is refused too.
+- An account failover excludes counts as able to run the CLI: exclusion
+  keeps failover from choosing it, but the user can switch to it or move a
+  session onto it.
+- A plan nothing has named yet counts as able to run the CLI.
+
+Settings keeps the user's switch as it is. While a provider with enabled
+modules is left out for want of an account, General → Providers says so under
+its switch (`MenuBarPresence.notice`, "Hidden from the menu bar: no Kimi
+account's plan includes Kimi Code. It shows again when one does."), and the
+Menu Bar tab's preview, which applies the same rule, says so under it. With
+nothing left to show, the strip shows the AccountDock mark, so the popover
+stays reachable.
 
 ## Settings window for a menu-bar app
 
