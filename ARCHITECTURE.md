@@ -415,7 +415,7 @@ finds the server's model list changed writes its own spelling and
 credential name into `config.toml`, which would point sessions outside
 slots at the slot's credential; every slot pass puts `base_url` and `key`
 back (`restoreSharedState`), unless the file that spelling names holds a
-refresh token (see [provider-cli-facts.md](docs/provider-cli-facts.md)).
+refresh token (see [Provider CLI facts for credential slots](#provider-cli-facts-for-credential-slots)).
 
 `CodexSessionIsolation` is Codex's one-session slot. Every slot runs in
 `~/.codex` itself, so rollouts, history, settings and hooks stay shared. The
@@ -2681,7 +2681,7 @@ found in several homes is counted once, the longest copy standing
 (`UsageIndex.codexRollouts`). Claude Code turns the router served from a route target name the target's
 model in the transcript; they count as the target provider's usage, priced as
 its model, and are left out of Claude's totals.
-Claude totals must match `ccusage`; see [COST_VERIFICATION.md](COST_VERIFICATION.md).
+Claude totals must match `ccusage`; see [Cost verification against ccusage](#cost-verification-against-ccusage).
 A small index of per-file token totals avoids re-reading unchanged history and
 stores no prompt or response content.
 
@@ -2751,3 +2751,713 @@ To circumvent this macOS limitation, AccountDock uses the **Lifecycle Keepalive*
 2. **True Invisibility:** The `HiddenWindowView` intercepts its own NSWindow on appearance and sets it to be `[.borderless]`, `alphaValue = 0`, positioned far off-screen (`x: -5000, y: -5000`), and configured to ignore all mouse events.
 3. **Triggering Settings:** `HiddenWindowView` listens for a custom `Notification.Name.accountdockOpenSettings` via Combine. When received, it invokes the native SwiftUI `@Environment(\.openSettings)` action.
 4. **Invocation:** In `MainMenuView`, when the user clicks the Settings gear icon, we post this notification. The hidden window (which SwiftUI recognizes as a valid, active scene) catches it and smoothly opens the native Settings window with proper focus.
+
+## Cost verification against ccusage
+
+AccountDock computes today's API spend from the JSONL session logs in
+`~/.claude/projects/`. The math has to stay aligned with [ccusage], the
+canonical community tool — if our numbers drift from ccusage, users will
+notice and lose trust in everything else in the menu bar.
+
+This document describes how to verify alignment and what to do if it fails.
+
+### The contract
+
+For any window of recent days, the totals reported by our parser
+(`AccountDock/Services/SessionParseCacheV2.swift` → `costSummary()`) must
+match `npx ccusage@latest daily --since YYYYMMDD --json` exactly, on:
+
+- `inputTokens`, `outputTokens`, `cacheCreationTokens`, `cacheReadTokens`
+  for every `(date, model)` pair, AND
+- `cost` per `(date, model)`, within $0.01 per row (float-rounding slack).
+
+`<synthetic>` rows are filtered from the comparison — ccusage excludes
+them from breakdowns; we display them as zero-token rows but never sum
+them into anything visible.
+
+### Required before every release
+
+Run this before tagging a new app version:
+
+```bash
+Tools/verify_cost.sh 30
+```
+
+The script:
+
+1. Runs `Tools/recalc_cost.swift` over the last 30 days of your local data.
+2. Runs `npx -y ccusage@latest daily --since … --json` (always pulling the
+   latest published ccusage, so you can't silently drift on a stale cache).
+3. Compares every `(date, model)` row and every daily total.
+4. Exits `0` if everything matches, `1` if not, `2` on setup failure.
+
+**Required**: PASS before `git tag` / before invoking the `release` skill.
+If it fails, **do not release.** Find and fix the divergence first.
+
+### What "fails" means and how to react
+
+`verify_cost.sh` fails on any of:
+
+1. **A `(date, model)` key exists on one side but not the other.**
+   Usually means we either dropped a row ccusage kept, or kept one
+   ccusage filtered. Inspect `/tmp/accountdock-verify-cost/ours.json`
+   vs `ccusage.json`, find the missing row, trace it back to JSONL.
+
+2. **Token counts disagree.**
+   Almost always a dedup-logic or file-ordering issue. ccusage's
+   `(messageId, requestId)` dedup is sensitive to the order files are
+   visited and the order of lines within them. See
+   "Surprising things we learned" below.
+
+3. **Cost disagrees but tokens match.**
+   Pricing-table drift. Either ccusage changed its LiteLLM snapshot or
+   we changed our pricing source. Check
+   `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`
+   for tier or per-token-cost changes; `/tmp/litellm-pricing.json` is
+   our local cache.
+
+#### When ccusage changes its algorithm
+
+This has happened: ccusage 18.0.11's published bundle uses "first-wins"
+dedup, but the git HEAD source uses a "max-tokenTotal-wins" rule.
+Whichever version is on npm becomes our target — `Tools/verify_cost.sh`
+runs `npx -y ccusage@latest`, so it'll detect the change automatically.
+
+Fix order when ccusage changes:
+
+1. **Update `Tools/recalc_cost.swift` first** to mirror the new
+   algorithm. Iterate until `verify_cost.sh` passes again.
+2. **Then port the change into `AccountDock/Services/SessionParseCacheV2.swift`.**
+3. Re-run `verify_cost.sh` and run the app to confirm the UI shows
+   matching numbers.
+4. Then release.
+
+Never port to the app without going through `recalc_cost.swift` first —
+that script is the single place where our algorithm is tested against
+ccusage in isolation.
+
+### What lives where
+
+| Path | Purpose |
+|---|---|
+| `Tools/verify_cost.sh` | One-shot verification — what you run before releasing. |
+| `Tools/recalc_cost.swift` | Standalone reparser that mirrors ccusage's algorithm. Single source of truth for "what's the right answer." |
+| `AccountDock/Services/SessionParseCacheV2.swift` | The in-app version that the UI consumes. Must match the recalc script's outputs. |
+| `AccountDock/Models/CostData.swift` → `ModelPricing` | App's pricing table. Should track LiteLLM. |
+| `/tmp/litellm-pricing.json` | Cached LiteLLM pricing snapshot (auto-refreshed by `recalc_cost.swift` once per hour). |
+| `/tmp/accountdock-verify-cost/` | Raw JSON outputs from the last verification run — keep around for debugging. |
+
+### Surprising things we learned
+
+These are the non-obvious facts the algorithm depends on. Future-you
+will rediscover all of these the hard way if they aren't written down.
+
+1. **`costUSD` in the JSONL is essentially dead.** Out of ~4,669 assistant
+   rows in a recent 5-day window, exactly 1 had a `costUSD` field.
+   Claude Code stopped writing it years ago. We compute cost from tokens.
+
+2. **Pricing comes from LiteLLM, not Anthropic.** Anthropic doesn't
+   publish a structured pricing JSON; LiteLLM's `model_prices_and_context_window.json`
+   is the community standard. ccusage fetches it at runtime (with a
+   build-time prefetched fallback). We do the same.
+
+3. **Dedup is *global*, by `(message.id, requestId)`.** Not per-file.
+   Across all `~/.claude/projects/` data, ~70 `requestIds` appear in
+   multiple JSONL files (session resume/fork). Without global dedup
+   they'd be summed twice. Rows missing either id are *not* deduped —
+   they're all kept.
+
+4. **Files must be visited in earliest-timestamp order.** ccusage sorts
+   files by the oldest timestamp inside each file, not by filename.
+   Because dedup is first-wins, file order changes the outcome when the
+   same `(messageId, requestId)` straddles files.
+
+5. **Within a file, dedup is also first-wins.** A streaming assistant
+   message produces multiple rows with the same `(messageId, requestId)`
+   and growing `output_tokens`. ccusage 18.0.11 keeps the **first** row
+   (smallest), not the last (largest). The newer ccusage source has a
+   `max-tokenTotal-wins` tiebreaker, but that hasn't shipped to npm.
+
+6. **Subagent JSONLs live in `<project>/<sessionUUID>/subagents/` — two
+   directories deeper than the parent session.** Their `requestId`s do
+   NOT collide with the parent's (per-session intersection is zero on
+   real data), so summing both is safe under global dedup.
+
+7. **`<synthetic>` rows are real assistant rows with `model: "<synthetic>"`
+   and zero tokens.** ccusage strips them from `modelBreakdowns` but
+   still counts them in totals (zero contribution). We display them as
+   visible zero-token rows in `recalc_cost.swift` output for debugging,
+   and filter them in `verify_cost.sh` for comparison.
+
+8. **LiteLLM pricing has a 200k context-window tier** for Opus/Sonnet —
+   input/output/cache prices roughly double once a request crosses
+   200k tokens. The fields are named `*_above_200k_tokens`. Easy to miss.
+
+9. **There's also a "fast" speed multiplier** (`provider_specific_entry.fast`)
+   that scales cost when `usage.speed == "fast"`. We've seen zero `fast`
+   rows in real data so far, but the code path is wired up.
+
+10. **ccusage installed via `npx -y ccusage@latest` and ccusage cloned
+    from GitHub HEAD can disagree.** They're literally different
+    algorithms. Always verify against the published version — that's
+    what users compare us to.
+
+[ccusage]: https://github.com/ryoppippi/ccusage
+
+## Provider CLI facts for credential slots
+
+What the installed Codex and Kimi Code CLIs do with their home directory and
+their OAuth credential, as far as a per-session slot (one isolated home per CLI
+run, whose credential AccountDock writes) depends on it.
+
+Every statement is marked:
+
+- **Verified**: read in the installed program. Kimi Code ships its JavaScript
+  bundle inside the executable, so its source is quoted by the line number of
+  `strings -t d -n 4 ~/.kimi-code/bin/kimi` output (`kimi.txt:N`) together with
+  the byte offset strings printed and the bundle's own module path comment.
+  Codex is a Rust binary; it is quoted by the exact string found in
+  `strings -t d -n 4` output (`codex.txt:N`) and by the `--help` text.
+- **Inferred**: concluded from verified strings plus the published upstream
+  source of the same program, not seen in this build's code.
+
+Nothing here came from running either CLI against a real home. The runs
+were `--help`, `resume --help` and `--version`, with `HOME` and the home
+variable pointed at empty directories under `$TMPDIR`, and the Kimi Code
+runs of section (c4), in such a directory, under a sandbox that allowed
+connections to localhost only, with fake credentials.
+
+### Installed versions
+
+| CLI | Executable | Version |
+|---|---|---|
+| Codex | `~/.local/bin/codex` → `~/.codex/packages/standalone/current/bin/codex` | `codex --version` prints `codex-cli 0.0.0`; `codex-package.json` says `"version": "0.145.0"`. The package's `releases/` folder holds locally built `custom-…` releases and `bin/` keeps `codex.upstream-0.145.0…backup`, so this is a custom build on top of upstream 0.145.0. Facts below hold for this build; a stock build may differ where marked inferred. |
+| Kimi Code | `~/.kimi-code/bin/kimi` (Bun single-file executable, npm package `@moonshot-ai/kimi-code`) | `2.6.1` (`kimi --version`; `KIMI_BUILD_INFO = { version: optionalBuildString("2.6.1") … }`, kimi.txt:389487-389488) |
+
+### Kimi Code
+
+#### (a) Home variable and files
+
+- **Verified.** `KIMI_CODE_HOME` selects the home; unset or empty falls back to
+  `~/.kimi-code`:
+  - `packages/oauth/src/toolkit.ts` `defaultKimiHome()`:
+    `const override = process.env["KIMI_CODE_HOME"];` (kimi.txt:403877)
+  - `packages/oauth/src/region.ts` `defaultHomeDir(env)`:
+    `if (override !== void 0 && override.length > 0) return override;`
+    `return (0, node_path.join)((0, node_os.homedir)(), ".kimi-code");`
+    (kimi.txt:402673-402675)
+  - `resolveKimiHome`: `return homeDir ?? env["KIMI_CODE_HOME"] ?? join$106(osHomeDir, ".kimi-code");`
+    (kimi.txt:438748); config path `join$106(resolveKimiHome(input.homeDir), "config.toml")`
+    (kimi.txt:438750).
+- **Verified.** Credential file: `<home>/credentials/<name>.json`, name
+  `kimi-code` for the default OAuth key:
+  - `const credentialsDir = options.credentialsDir ?? (0, node_path.join)(this.homeDir, "credentials");`
+    (kimi.txt:403915)
+  - `resolveKimiTokenStorageName`: `"oauth/kimi-code"` → `"kimi-code"` (kimi.txt:403871-403872)
+  - `FileTokenStorage.pathFor(name)` → `join(this.dir, \`${safe}.json\`)` (kimi.txt:400355)
+- **Verified.** JSON shape (`packages/oauth/src/types.ts` `tokenToWire`,
+  kimi.txt:400304-400311), snake_case:
+  ```json
+  { "access_token": "...", "refresh_token": "...", "expires_at": 1730000000,
+    "scope": "...", "token_type": "Bearer", "expires_in": 900 }
+  ```
+  Reading (`tokenFromWire`, kimi.txt:400312-400319) defaults every missing
+  field: missing `refresh_token` reads as `""`, missing `expires_at` as `0`.
+  Writes go to `<name>.json.tmp.<pid>.<rand>`, fsync, chmod 0600, rename
+  (kimi.txt:400364-400384); a corrupt or missing file reads as "no token".
+- **Verified.** Other files under the home: `config.toml` (providers, models,
+  permission, **hooks**; kimi.txt:448214 and the migration writer keeps
+  `migratedTop["hooks"]`, kimi.txt:640670), `tui.toml`, `mcp.json`
+  (kimi.txt:438916), `sessions/` (`this.sessionsDir = join$106(options.homeDir, "sessions")`,
+  kimi.txt:499842), `session_index.jsonl` (kimi.txt:495789), `logs/kimi-code.log`
+  (kimi.txt:454742), `locks/sessions` (kimi.txt:596224), `device_id`
+  (read and created at kimi.txt:401895, 401910), `region` marker
+  (`KIMI_REGION_MARKER_FILENAME = "region"`, kimi.txt:402762), `oauth/` (the
+  refresh lock, below).
+- **Verified.** Resume: `-S, --session [id]  Resume a session` and
+  `-c, --continue` (`kimi --help`). The commands are `export`, `fork`,
+  `provider`, `session`, `acp`, `web`, `server`, `rc|remote`, `login`,
+  `doctor`, `vis`, `install-desktop`, `app`, `migrate`, `import-sessions`,
+  `upgrade|update`; there is no `logout` command (`kimi --help`, `kimi logout
+  --help` prints the top-level help). Sessions live under the home, so a slot home
+  that does not share `sessions/` and `session_index.jsonl` cannot resume a
+  session started in another home (**inferred** from the paths above).
+
+#### (b) When it renews, where, and what a failure does
+
+- **Verified.** Lazy renewal only, no background loop
+  (`packages/oauth/src/oauth-manager.ts` header: "Lazy refresh on
+  `ensureFresh()` … no background loop", kimi.txt:401682-401685).
+- **Verified.** Threshold: renew when
+  `expires_at - now < max(300, expires_in * 0.5)` seconds
+  (`shouldRefreshToken`, kimi.txt:401881-401885; `MIN_REFRESH_THRESHOLD_SECONDS = 300`,
+  `REFRESH_THRESHOLD_RATIO = .5`, kimi.txt:401701-401702). `expires_at == 0`
+  never renews proactively (`if (token.expiresAt === 0) return false;`).
+- **Verified.** On an HTTP 401 from the model API the request is retried once
+  after a forced renewal: `canRecover: (error) => errorStatusCode(error) === 401`,
+  `invalidate: () => { refreshed ??= getToken({ force: true }); }`
+  (`createOAuthCredentialProvider`, kimi.txt:564886-564897), driven by
+  `runWithCredentialRecovery` / `streamWithCredentialRecovery`
+  (kimi.txt:623885-623900).
+- **Verified.** Endpoint: `POST {oauthHost}/api/oauth/token` with
+  `grant_type=refresh_token` (kimi.txt:400555-400563: `/api/oauth/token`,
+  `grant_type: "refresh_token"`, `refresh_token: refreshToken`).
+  `oauthHost` is `KIMI_CODE_OAUTH_HOST` ?? `KIMI_OAUTH_HOST` ?? `https://auth.kimi.com`,
+  client id `17e5f671-d194-4dfb-9706-5516cb48c098` (kimi.txt:402008-402012).
+  A refresh reply without a refresh token is rejected:
+  `"OAuth response missing refresh_token"` (kimi.txt:400458; rotation on every renewal).
+- **Verified.** Failure handling inside the lock (kimi.txt:401816-401857, tombstone write at 401845):
+  401, 403 or `invalid_grant` raise `OAuthUnauthorizedError`
+  (kimi.txt:400575). Kimi then sleeps 100 ms, re-reads the file, and if
+  the stored refresh token changed (another process renewed) uses that token;
+  otherwise it **writes a revoked tombstone** —
+  `{access_token:"", refresh_token:"", expires_at:0, …}` (`revokedTombstone`,
+  `packages/oauth/src/token-state.ts`, kimi.txt:401672-401679) — and every later
+  read classifies the file as `revoked` ("Stored token … was rejected; re-login
+  required"). Network and other errors leave the file untouched.
+
+#### (c) Re-reads during a running session
+
+- **Verified.** Every `ensureFresh()` starts with `loadState()` →
+  `this.storage.load(...)` → `readFileSync` of the credential file
+  (kimi.txt:401744-401745, 401810, 400360); there is no in-memory token
+  cache. The model endpoint resolves its credential through
+  `credentials.resolve` → `credentialProvider.resolve()` → `getToken()`
+  (kimi.txt:564592-564595, 564889-564893).
+- **Verified.** The resolver runs for every model request attempt:
+  `packages/agent-core-v2/src/human/llm/generate.ts` awaits
+  `resolveEndpoint(request.endpoint)` before each attempt is sent
+  (`onEvent?.({ type: "attempt.sending" })`, kimi.txt:511172-511176), and
+  `resolveEndpoint` (`…/llm/endpoint.ts`) begins with
+  `await endpoint?.credentials?.resolve()` (kimi.txt:511005). A credential
+  written into a slot is therefore used from the slot's next request on.
+
+#### (c2) Where the rest of the home lives
+
+- **Verified.** Nothing moves the session history away from the home. The
+  bootstrap derives every data directory from the one home:
+  `this.sessionsDir = join$106(options.homeDir, "sessions")`, likewise
+  `blobs`, `store`, `cache`, `logs` (kimi.txt:499842-499846);
+  `session_index.jsonl` is written at the root of the same store
+  (kimi.txt:495789); input history is `<KIMI_CODE_HOME>/user-history/`
+  (`getDataDir()`, "Priority: `KIMI_CODE_HOME` env var > `~/.kimi-code`",
+  kimi.txt:655420-655474). `sessionsDir` appears in the client contract only
+  as a value read back (`envContract`, kimi.txt:630982). The only other
+  directory variable, `KIMI_SHARE_DIR`, names the legacy kimi-cli home a
+  migration reads (kimi.txt:642102-642131).
+- **Verified.** The installed home also holds shared state that is not
+  configuration: `projects.json` (with `.projects-write-lock`),
+  `workspaces.json`, `workspace-trust/`, `file-history/`, `plugins/`,
+  `hooks/`, `telemetry/`, `updates/` (directory listing of `~/.kimi-code`).
+- **Verified.** A per-process credential in the same home exists only
+  through the environment overrides: with `KIMI_CODE_BASE_URL` or
+  `KIMI_CODE_OAUTH_HOST`/`KIMI_OAUTH_HOST` set, the runtime ignores the
+  configured OAuth key and reads
+  `oauth/kimi-code-env-<first 16 hex of sha256({oauthHost, baseUrl})>`
+  (`resolveKimiCodeRuntimeAuth`, `resolveKimiCodeOAuthKey`,
+  kimi.txt:402267-402275, 402290-402310). Section (c4) has the details and
+  a test of it.
+
+#### (c4) A per-session credential name inside the shared home
+
+- **Verified.** The name. `resolveKimiCodeOAuthKey` (kimi.txt:402267-402275)
+  hashes `JSON.stringify({ oauthHost, baseUrl })` with SHA-256 and keeps the
+  first 16 hex digits, after `oauthHost = normalizeEndpoint(host ?? "https://auth.kimi.com")`
+  (`value.trim().replace(/\/+$/, "")`, kimi.txt:402242-402243) and
+  `baseUrl = (baseUrl ?? kimiCodeBaseUrl()).replace(/\/+$/, "")`
+  (`defaultBaseUrl`, kimi.txt:402238-402239). Nothing else is normalised:
+  letter case, an explicit port and dot segments all change the hash. The
+  pair `https://auth.kimi.com` + `https://api.kimi.com/coding/v1`
+  (`SHARED_DEFAULT_BASE_URLS`, kimi.txt:402612) keeps the plain
+  `oauth/kimi-code`; every other pair, the global region's
+  `https://auth.kimi.ai` + `https://api.kimi.ai/coding/v1` included, gets
+  `oauth/kimi-code-env-<16 hex>` (`KIMI_CODE_SCOPED_OAUTH_KEY_PREFIX`,
+  kimi.txt:402603), stored as `credentials/kimi-code-env-<16 hex>.json`
+  (`resolveKimiTokenStorageName`, kimi.txt:403870-403875) and locked as
+  `oauth/kimi-code-env-<16 hex>.lock` (the manager's `name` is the storage
+  name, kimi.txt:404062-404068).
+- **Verified.** Which inputs. `resolveKimiCodeRuntimeAuth`
+  (kimi.txt:402288-402309): with `KIMI_CODE_BASE_URL` or
+  `KIMI_CODE_OAUTH_HOST`/`KIMI_OAUTH_HOST` set, `baseUrl` is the variable
+  (trailing slashes removed) or else `base_url` from `config.toml`, and
+  `oauthHost` is the variable or else the default host — the configured
+  `oauth_host` is not used. Without either variable the name comes from the
+  configured `oauth_host` and `base_url`, and the configured `key` is used
+  only when it equals that computed name (kimi.txt:402304-402309): a
+  `config.toml` whose `key` disagrees with its `base_url` reads the
+  computed name's file. Every token request of the managed provider goes
+  through this (`resolveRuntimeOAuthRef`, kimi.txt:608477-608483, used by
+  `ModelOAuthTokenAdapter.getAccessToken`, kimi.txt:565905-565910).
+- **Verified.** Where requests go. Model requests (`chat/completions`) use
+  the managed provider's `base_url` from `config.toml`
+  (`resolveEndpointBaseUrl`, kimi.txt:526735-526741), not
+  `KIMI_CODE_BASE_URL`. The variable's value is the base of `GET /models`
+  (`fetchManagedKimiCodeModels`, kimi.txt:402410-402418), `/me`, usage,
+  chat titles, `client_configs`, `resource_configs`, the plugin marketplace
+  and banners (kimi.txt:402015-402018, 535537, 570057-570063, 635761,
+  693433, 796665). The region follows `KIMI_CODE_OAUTH_HOST` only when it
+  equals a profile host exactly (`regionForOAuthHost`, kimi.txt:402659-402663,
+  402683-402688; profiles kimi.txt:402747-402761); an unknown spelling
+  falls back to `mainland-cn`.
+- **Verified (scratch home, sandboxed).** Test set-up: `HOME` and
+  `KIMI_CODE_HOME` in an empty directory under `$TMPDIR`; `sandbox-exec`
+  denying every outbound connection except to localhost and every read or
+  write of the real `~/.kimi-code` other than `bin/`; `KIMI_DISABLE_TELEMETRY=1`;
+  `config.toml` with the managed provider's `base_url` at a local HTTP
+  listener (`http://127.0.0.1:18765/coding/v1`) that records each request's
+  path, `Host` and `Authorization` and refuses everything but `/models` with
+  401; one obviously fake credential (empty refresh token) under each
+  computed name, so the bearer token the listener sees names the file Kimi
+  read. `kimi -p "say ok"` (2.6.1) gave:
+
+  | `KIMI_CODE_BASE_URL` | `KIMI_CODE_OAUTH_HOST` | file read | chat request went to |
+  |---|---|---|---|
+  | unset (`key = "oauth/kimi-code"` in config) | unset | `kimi-code-env-cd7f2a44eee9aa1a` (computed from `base_url`; the configured key was ignored) | `127.0.0.1:18765` |
+  | `http://127.0.0.1:18765/coding/v1` | unset | `kimi-code-env-cd7f2a44eee9aa1a` | `127.0.0.1:18765` |
+  | `http://127.0.0.1:18765/coding/v1/` | unset | same file (trailing slash removed) | `127.0.0.1:18765` |
+  | `http://localhost:18765/coding/v1` | unset | `kimi-code-env-e832eec9b1666386` | `127.0.0.1:18765` (config) |
+  | `http://LocalHost:18765/coding/v1` | unset | `kimi-code-env-4c985a707aed11eb` | `127.0.0.1:18765` (config) |
+  | `http://127.0.0.1:18765/coding/v1/.` | unset | `kimi-code-env-3a988e81d38cac41` | `127.0.0.1:18765` |
+  | `http://127.0.0.1:18765/coding/v1` | `https://auth.kimi.ai` | `kimi-code-env-9c9194c0a0f81494` | `127.0.0.1:18765` |
+
+  Each 401 was retried once after a forced renewal, which stopped at the
+  empty refresh token without contacting any OAuth host. Started as the
+  interactive TUI, the variable's spelling reached the listener normalised:
+  `LocalHost` and `LOCALHOST` arrived as `Host: localhost:18765`, and
+  `/coding/v1/.` as `/coding/v1/models`, `/me`, `/client_configs`, each
+  carrying the variable's own credential.
+- **Inferred** from the above and WHATWG URL parsing (host lower-cased,
+  dot segments removed, default port dropped): a slot can be told apart by
+  `KIMI_CODE_BASE_URL` set to the real base URL with some host letters in
+  upper case, such as `https://API.kimi.ai/coding/v1`, with
+  `KIMI_CODE_OAUTH_HOST` set to the real OAuth host exactly, so the region
+  and the renewal host stay right. Model requests keep using `config.toml`'s
+  `base_url`; the other requests reach the same server. Not tried against
+  the real service.
+- **Verified (scratch home).** The interactive TUI refreshes the managed
+  model list at start (`refreshProviderModelsInBackground`,
+  kimi.txt:808651-808653, 808728; also the model picker and a timer,
+  kimi.txt:786746, 710781). When the server's list differs from
+  `config.toml`'s models (`providerModelsEqual`, kimi.txt:404166-404182,
+  608421), it rewrites the managed provider with `baseUrl: auth.baseUrl`,
+  `oauthKey: auth.oauthRef.key`, `oauthHost: auth.oauthRef.oauthHost`
+  (`applyManagedKimiCodeConfig`, kimi.txt:402448-402464, 608410-608427;
+  `refreshProviderModels`, kimi.txt:404269-404300): in a session started
+  with the variables, that is the session's spelling, its credential name
+  and its OAuth host (or `https://auth.kimi.com` when only the base URL was
+  set). Observed: `base_url = "http://LOCALHOST:18765/coding/v1"`,
+  `key = "oauth/kimi-code-env-da9ed4f6e0787ac0"`, `oauth_host = "https://auth.kimi.ai"`
+  written into the shared `config.toml`; a following run without either
+  variable then sent that slot's token. With an unchanged list nothing was
+  written. Restoring `base_url` alone (leaving the slot's `key`) made the
+  next run without variables read the default file again.
+- **Conclusion.** A per-session credential name in the shared home works
+  for selecting the credential and keeps every request on the real server,
+  but whichever session first sees a changed model list writes its own
+  spelling into the shared `config.toml`, after which sessions without the
+  variables, and anything reading the configured `key`, use that slot's
+  credential until `base_url` (and `key`) are put back. Whoever runs slots
+  this way has to restore them; Kimi Code offers no switch that stops the
+  refresh from writing.
+
+#### (c3) Running work on screen
+
+- **Verified.** The footer shows `[N task running]`/`[N tasks running]` for
+  background commands and `[N agent running]`/`[N agents running]` for
+  background subagents, and nothing when the count is zero
+  (`src/tui/components/chrome/footer.ts`, kimi.txt:789112-789115). No
+  question about running work is asked on exit (no such prompt string; the
+  only "Leave running processes untouched." picker belongs to plugin
+  removal, kimi.txt:791887).
+
+#### (d) An empty or placeholder refresh token
+
+- **Verified.** A file is `valid` when `access_token` is non-empty, whatever
+  the refresh token (`classifyToken`, kimi.txt:401663-401671). Until the
+  renewal threshold, an empty refresh token is never looked at.
+- **Verified.** At the threshold (or on a 401) an **empty** refresh token
+  throws before any network call and before the tombstone code:
+  `if (activeToken.refreshToken.length === 0) throw new OAuthUnauthorizedError(\`Token for "${this.config.name}" has no refresh_token; re-login required.\`);`
+  (kimi.txt:401832). The file is left as it was.
+- **Inferred.** A **non-empty placeholder** would be sent to the token
+  endpoint, be refused (401/`invalid_grant`), and make Kimi overwrite the slot
+  with the revoked tombstone. A slot must therefore hold an empty refresh token,
+  never a placeholder.
+- **Verified.** A forced renewal re-reads the file after taking the lock and
+  returns the stored access token without renewing if any of
+  `refresh_token`, `access_token`, `expires_at`, `expires_in` changed since the
+  call began (kimi.txt:401829). A write that lands between the 401 and the lock
+  is picked up; a write that landed before the 401-triggered call began is not
+  (the forced call then hits the empty-refresh-token throw and that request
+  fails; the next request reads the new token).
+
+#### (e) Lock file
+
+- **Verified.** `proper-lockfile` around the renewal critical section
+  (`import_proper_lockfile$2 = … require_proper_lockfile()`, kimi.txt:401697).
+  Target `{configDir}/oauth/{name}` with `configDir: this.homeDir`
+  (kimi.txt:404068), so the lock is the **directory**
+  `<home>/oauth/kimi-code.lock` ("the real lockfile on disk ends up at
+  `{configDir}/oauth/{providerName}.lock`", kimi.txt:401741-401746). The empty
+  target file `<home>/oauth/kimi-code` is created first (`writeFile(target, "", { flag: "a" })`).
+- **Verified.** Options: `retries: 120, factor: 1, minTimeout: 500, maxTimeout: 1e3`,
+  `stale: 5e3`, `realpath: false` (kimi.txt:401776-401781). If the lock cannot be
+  taken, renewal fails closed (`Unable to acquire OAuth refresh lock`). Disabled
+  on Windows or with `KIMI_DISABLE_OAUTH_LOCK=1` (kimi.txt:401757-401758).
+- **Inferred** (proper-lockfile semantics): the lock is an atomic `mkdir`,
+  its mtime is refreshed every `stale/2`, and a lock older than 5 s is taken
+  over. AccountDock writing a slot's credential can take the same lock to stay
+  out of a renewal in progress.
+
+#### (f) Rewrites of config.toml
+
+- **Verified.** Login and logout provisioning rewrite the whole file:
+  `KimiAuthFacade` → `writeConfigFile(options.configPath, config)` →
+  `atomicWrite$1(filePath, \`${stringify$2(configToTomlData(validated))}\n\`)`
+  (kimi.txt:630215-630221, 629958-629963): re-serialised TOML, written by
+  atomic replace, so comments and layout are not kept. The migration from an
+  older home also writes `config.toml` by `atomicWrite` (kimi.txt:640688-640694).
+- **Inferred.** Other settings commands go through the same writer; the
+  bundled config skill tells the model to edit a `config-new.toml` copy, not
+  the live file (kimi.txt:448234).
+
+#### (g) Transcripts
+
+- **Verified.** Each agent's event log is
+  `<home>/<handler scope>/<session>/agents/<agent>/wire.jsonl`
+  (`agentScopeOf`, kimi.txt:494263-494264; `main` is the session's own
+  agent, kimi.txt:637645); in the installed home that is
+  `sessions/<workspace>/<session>/agents/main/wire.jsonl`, whose first line is
+  `{"type":"metadata","protocol_version",…}` (`createWireMetadataRecord`,
+  kimi.txt:493937). An event serialises as its fields plus `type` and `time`
+  in milliseconds (`Event2.serialize`, kimi.txt:444590-444620).
+- **Verified.** `usage.record` (durable): `agentId`, `model`, `usage`
+  `{inputOther, output, inputCacheRead, inputCacheCreation}`, `usageScope`
+  (kimi.txt:583910-583945, 496600-496630), one per model request
+  (kimi.txt:527833). `turn.prompt` (durable) starts a turn
+  (kimi.txt:492115). `turn.ended` (durable) carries `reason` and, when
+  `failed`, `error` = `{code, message, name, details, retryable}`
+  (kimi.txt:492152-492170, 533726-533735, 399558-399585). A usage limit is
+  `APIProviderQuotaExhaustedError` (code `provider.api_error`, from
+  `exceeded_current_quota_error`/`insufficient_quota`) or
+  `APIProviderRateLimitError` (code `provider.rate_limit`, HTTP 429)
+  (kimi.txt:395183-395190, 518614-518632).
+- **Verified.** A session's title is `title` in `<session>/state.json`
+  (`encodeSessionMeta`, kimi.txt:496049); `New Session` means untitled.
+
+### Codex
+
+#### (a) Home variable and files
+
+- **Verified.** `CODEX_HOME` selects the home: strings
+  `"failed to resolve CODEX_HOME: "` (codex.txt:6924), `"CODEX_HOME points to "`
+  (codex.txt:13766), `"failed to canonicalize CODEX_HOME "` (codex.txt:13771);
+  `--help`: `-p, --profile … Layer $CODEX_HOME/<name>.config.toml on top of the base user config`.
+  **Inferred** default `~/.codex` (upstream; `resume --help` names `~/.codex/config.toml`).
+- **Verified.** `auth.json` in the home: `". Failed to remove auth.json: "`
+  (codex.txt:10155). Record fields `auth_mode`, `tokens`, `last_refresh`,
+  `agent_identity`, `personal_access_token`, `bedrock_api_key`
+  (codex.txt:55653, `login/src/auth/storage.rs`) and token fields
+  `id_token`, `refresh_token`, `account_id` (codex.txt:55648). Upstream shape
+  (**inferred** for this build beyond those names):
+  ```json
+  { "auth_mode": "chatgpt", "OPENAI_API_KEY": null,
+    "tokens": { "id_token": "...", "access_token": "...", "refresh_token": "...", "account_id": "..." },
+    "last_refresh": "2026-11-14T00:00:00.000000Z" }
+  ```
+- **Verified.** Storage backends `FileAuthStorage`, `keyring_storage`,
+  `AutoAuthStorage`, `EphemeralAuthStorage` selected by
+  `auth_credentials_store_mode` / config key `cli_auth_credentials_store`
+  (codex.txt:55655-55656); the keyring entry is named with `"cli|"`
+  (codex.txt:10156). **Inferred**: `file` is the default; AccountDock already
+  passes `--config cli_auth_credentials_store="file"` to its own Codex runs
+  (`CodexService.swift:500`). A slot must force `file` too, or a keyring
+  setting would put the slot's credential in the Keychain keyed by the home.
+- **Verified.** Hooks come from `hooks.json` (codex.txt strings
+  `hooks.json`, `failed to serialize hooks.json`) and from `config.toml`.
+  Rollouts: strings `sessions/`, `rollout-`, `history.jsonl` present;
+  **inferred** layout `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-…-<uuid>.jsonl`.
+- **Verified.** Resume: `codex resume [SESSION_ID] [PROMPT]`, `--last`, and
+  `codex fork` (`codex resume --help`). **Inferred**: resume finds the rollout
+  under the current `CODEX_HOME`, so a slot home that does not share
+  `sessions/` cannot resume a session started elsewhere.
+- **Verified.** `codex login --with-access-token` reads an access token from
+  stdin (`printenv CODEX_ACCESS_TOKEN | codex login --with-access-token`,
+  codex.txt:47650, 50320) — a separate personal-access-token mode, not the
+  ChatGPT OAuth record.
+
+#### (b) When it renews, where, and what a failure does
+
+- **Verified.** Endpoint `https://auth.openai.com/oauth/token`, overridable by
+  `CODEX_REFRESH_TOKEN_URL_OVERRIDE` (codex.txt:55651).
+- **Verified.** Failure messages (codex.txt:55652):
+  "Your access token could not be refreshed because your refresh token has
+  expired." / "…was already used." / "…was revoked." / "…Please log out and
+  sign in again.", plus "Encountered unknown response while refreshing token".
+  **Inferred** (upstream classifier; the 20-byte codes may be compiled into
+  integer compares and so do not appear in `strings`): server codes
+  `refresh_token_expired`, `refresh_token_reused`, `refresh_token_invalidated`
+  map to those three permanent failures.
+- **Verified.** `AuthManager` keeps a `permanent_refresh_failure` field
+  (codex.txt:55655). **Inferred**: after a permanent failure the running
+  process stops trying to renew until its auth reloads to a different record.
+- **Verified.** 401 recovery steps, in order of the strings
+  (codex.txt:47091): "Reloading auth" / "Skipping auth reload because no
+  account id is available." → "Skipping token refresh because auth changed
+  after guarded reload." / "Your access token could not be refreshed because
+  you have since logged out or signed in to another account." → "No more
+  recovery steps available."; log line `"Reloaded auth, changed: "`
+  (codex.txt:10151). **Inferred** meaning: on a 401 Codex first re-reads
+  `auth.json`, but only accepts it when its `account_id` matches the account
+  it started with; if the file changed it uses the new token without renewing;
+  if the account differs it refuses and the request fails.
+- **Inferred** (upstream): proactive renewal when `last_refresh` is older than
+  eight days or the access token's JWT `exp` has passed; renewal at request
+  time, no background loop. Not visible in this build's strings.
+- **Verified.** No file lock on `auth.json` (no `auth.json.lock` string; the
+  only lock string is the in-process `"failed to lock auth state"`).
+
+#### (c) Re-reads during a running session
+
+- **Inferred.** Codex loads `auth.json` at start and keeps it in memory; it
+  re-reads only during 401 recovery ("Reloading auth"), guarded by account id.
+  A credential written into a slot is therefore picked up at the next 401, not
+  at the next request, and only for the same account.
+
+#### (d) An empty or placeholder refresh token
+
+- **Inferred.** With `last_refresh` set to the write time and a fresh access
+  token, Codex has no reason to renew until the access token is refused, so an
+  empty refresh token is tolerated until then. At that 401, the guarded reload
+  picks up a newer same-account token if AccountDock has written one;
+  otherwise renewal with an empty token fails and that request fails. A
+  placeholder would reach the token endpoint and be refused, which may set the
+  permanent failure; keep it empty.
+
+#### (e) Lock file
+
+- **Verified.** None for `auth.json` (see (b)). Writes into a slot must be
+  atomic renames so Codex never reads a half-written file.
+
+#### (f) Rewrites of config.toml
+
+- **Verified.** Codex writes `config.toml` itself: `core/src/config/edit.rs`,
+  `config/src/mcp_edit.rs`, `plugin_edit.rs`, `marketplace_edit.rs`, messages
+  `"failed to persist config at "`, `"failed to persist model selection"`,
+  `"failed to persist feature flags"`, `"failed to persist keymap binding"`;
+  `toml_edit` is linked. **Inferred** (upstream): edits go through `toml_edit`
+  so comments and layout are kept, written by temp file and rename.
+
+#### (g) A per-session credential inside the shared home
+
+- **Verified (strings, installed build).** The keyring entry is
+  `cli|<first 16 hex of sha256(canonical CODEX_HOME)>` (`compute_store_key`;
+  `cli|`, codex.txt:10156): only `CODEX_HOME` varies it, and that moves the
+  sessions too. `CODEX_ACCESS_TOKEN` is read at run time but classified as a
+  personal access token (by prefix) or an Agent Identity JWT; a ChatGPT
+  access token is neither. The config keys (`ConfigToml` field list,
+  codex.txt:48508) hold no auth-file or sessions path (`sqlite_home`,
+  `log_dir` only), and `experimental_thread_store` has no path
+  (`ThreadStoreToml::Local` is a unit variant).
+- **Verified (strings).** A model provider can take its bearer token from a
+  command: `ModelProviderAuthInfo` with `command`, `args`, `timeout_ms`,
+  `refresh_interval_ms`, `cwd` (codex.txt:48021, 48518); messages
+  `provider auth command …`. Built-in provider IDs are reserved
+  (`Built-in providers cannot be overridden`), but Codex's OpenAI features
+  key on the provider's `name` being `OpenAI`.
+- **Verified (scratch home, sandboxed).** `HOME` in an empty directory under
+  `$TMPDIR`, `~/.codex` there holding a decoy `auth.json`, `sandbox-exec`
+  allowing outbound connections to localhost only and denying the real
+  `~/.codex` (but `packages/`), `~/.kimi-code`, `~/.accountdock` and the
+  Keychain; `CODEX_REFRESH_TOKEN_URL_OVERRIDE` at the listener. With the
+  overrides `CodexSessionIsolation.slotArguments` names (base URL at a local
+  listener), `codex exec` and the TUI (driven on a pseudo-terminal):
+  - every request (`GET …/models`, `POST …/responses`) carried
+    `Authorization: Bearer <slot token>` and `ChatGPT-Account-ID: <slot
+    account>`; the `/models` request shows the provider is treated as
+    OpenAI;
+  - the decoy `auth.json` was unchanged and its token never sent; a run with
+    `auth.json` unreadable under the sandbox worked the same; no request
+    reached the refresh endpoint; the TUI asked for no sign-in (only the
+    directory-trust question);
+  - the rollout went to the shared `~/.codex/sessions/YYYY/MM/DD/`;
+    `codex resume <id>` started with another slot account resumed the same
+    rollout file with the new token and header;
+  - a 401 made Codex run the token command again and retry with the token
+    the slot then held;
+  - with the slot's `account_id` differing from
+    `ACCOUNTDOCK_CODEX_ACCOUNT_ID`, the command failed and the request went
+    without an `Authorization` header;
+  - `/exit` + Enter ended the TUI with status 0, printing
+    `To continue this session, run codex resume <id>`.
+- **Verified (scratch home).** A refused turn at the usage limit (429 with
+  `usage_limit_reached`) was written to the rollout as
+  `event_msg` `task_complete` with
+  `error: {"message": "You've hit your usage limit. …", "codex_error_info": "usage_limit_exceeded"}`,
+  after a `token_count` with `info: null` carrying the rate limits.
+- **Verified (scratch home).** A rollout row is `{timestamp, type, payload}`:
+  `session_meta` (`id`, `model_provider`, `parent_thread_id`, `source`, …),
+  `turn_context` (`model`, …), `event_msg` `user_message`, and after each
+  response `token_count` with `info.last_token_usage`
+  `{input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens, total_tokens}`,
+  `info.total_token_usage` and `rate_limits`. Thread names are appended to
+  `<home>/session_index.jsonl` as `{id, thread_name, updated_at}`
+  (`rollout/src/session_index.rs`, `session_index.jsonl`, codex.txt:1435,
+  60993).
+- **Verified (strings).** The TUI shows `N background terminal(s) running ·
+  /ps to view · /stop to close` and `esc to interrupt` while a turn runs;
+  there is no exit question about running work.
+
+### What this means for Codex and Kimi slots
+
+Neither CLI ended up with a home of its own per slot: Kimi Code reads a
+per-slot credential name in the shared home (Kimi (c4)), and Codex a
+command-given token of a provider passed on its command line (Codex (g)).
+What follows is the analysis of home-per-slot that led there.
+
+A slot is one home directory per CLI run, selected by the home variable
+(`CODEX_HOME`, `KIMI_CODE_HOME`). Unlike Claude, where
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` moves only the credential, both variables
+move **everything**: config, hooks, sessions, logs. So a slot must contain:
+
+- The credential: Codex `auth.json` (`auth_mode`, `tokens` with the account's
+  `id_token`, `access_token`, `account_id`, an **empty** `refresh_token`,
+  `last_refresh` = write time); Kimi `credentials/kimi-code.json` with
+  `access_token`, real `expires_at`/`expires_in`, an **empty** `refresh_token`.
+  Mode 0600, written by atomic rename.
+- The shared configuration the CLI needs, copied or shared from the real home:
+  `config.toml` (with AccountDock's hooks), Codex `hooks.json`, Kimi
+  `tui.toml`, `mcp.json`, `device_id`, `region`. Codex must be forced to file
+  storage (`cli_auth_credentials_store="file"`).
+- Shared history: `sessions/` (and Kimi `session_index.jsonl`, Codex
+  `history.jsonl`) must be the real home's, or resume and AccountDock's
+  transcript learning would see each slot as a separate world.
+
+Renewal must stay with AccountDock: it renews the real account (holding the
+real refresh token) and writes only the new access token into each slot.
+
+- **Kimi**: write before `expires_at - max(300, expires_in/2)`, because at
+  that point Kimi checks the refresh token, finds it empty and fails that
+  request. Kimi reads the file per request, so a swap to another account takes
+  effect on the next request. Take `<slot>/oauth/kimi-code.lock` while writing.
+- **Codex**: Codex reads the file only on a 401 and only for the same
+  `account_id`. Renewing the same account works by writing before the old
+  token is refused; **swapping a running Codex session to a different account
+  is refused** by the guarded reload. Rebalancing Codex therefore means
+  restarting the session in a slot written for the new account (or a Codex
+  change), not rewriting the slot under it.
+
+Risks:
+
+- A placeholder refresh token makes Kimi write a revoked tombstone into the
+  slot and may set Codex's permanent refresh failure. Use empty.
+- If AccountDock is not running when a Kimi token reaches its threshold, or a
+  Codex token is refused, the session's requests fail until AccountDock writes
+  a new access token (Kimi recovers on the next request; Codex on the next 401).
+- Kimi and Codex both rewrite `config.toml`; a slot that copies it diverges
+  from the real home, and a shared one is rewritten by every slot. Login inside
+  a slot would also rewrite it and store a real refresh token there.
+- Kimi's 401 path forces a renewal that ignores a token written before the 401
+  call began; that one request fails even though a good token is on disk.
+- The installed Codex is a custom build; the inferred items hold for upstream
+  0.145.0 and should be rechecked against the build that runs in slots.

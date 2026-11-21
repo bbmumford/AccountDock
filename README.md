@@ -117,7 +117,7 @@ next, idle accounts every half hour. An account is read as soon as it is
 signed in, and **Refresh** reads every account that has no reading yet. Costs
 are computed from local session logs and Claude totals match
 [ccusage](https://github.com/ryoppippi/ccusage); see
-[COST_VERIFICATION.md](COST_VERIFICATION.md).
+[Cost verification against ccusage](ARCHITECTURE.md#cost-verification-against-ccusage).
 
 ## Sessions
 
@@ -942,16 +942,12 @@ needs no change.
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): components, credentials, the credential
   audit, failover planning, pausing, session slots, the request router, hooks
-  and files.
+  and files; keeping costs aligned with ccusage; and what the Codex and Kimi
+  Code CLIs do with their home and credential, as their session slots rely on
+  it.
 - [BUILD_GUIDE.md](BUILD_GUIDE.md): building, versioning, screenshots, CI and
   releases.
 - [RELEASE_NOTES.md](RELEASE_NOTES.md): what changed in each version.
-- [COST_VERIFICATION.md](COST_VERIFICATION.md): keeping costs aligned with ccusage.
-- [docs/KIMI_PROVIDER_ASSESSMENT.md](docs/KIMI_PROVIDER_ASSESSMENT.md): the Kimi
-  provider design.
-- [docs/provider-cli-facts.md](docs/provider-cli-facts.md): what the Codex and
-  Kimi Code CLIs do with their home and credential, as their session slots rely
-  on it.
 
 ## License
 
@@ -964,5 +960,4 @@ AccountDock began as a hard fork of
 informed by the account-isolation and telemetry approaches in
 [steipete/CodexBar](https://github.com/steipete/CodexBar). Both are published
 under the MIT License; their notices are in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Archived upstream
-documentation is kept under `docs/upstream/`.
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
